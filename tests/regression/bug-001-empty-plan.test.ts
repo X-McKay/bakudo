@@ -17,7 +17,7 @@ const mockPolicy = {
 test("Regression Bug #001: AgentHarness should handle empty streams gracefully", async () => {
   const config = defaultHarnessConfig();
   const harness = new AgentHarness(mockRuntime as any, mockPolicy as any, config);
-  
+
   // Executing with empty streams should result in no notes
   const memory = await harness.executeGoal("test goal", []);
 

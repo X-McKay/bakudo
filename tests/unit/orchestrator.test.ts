@@ -18,13 +18,13 @@ const mockPolicy = {
 test("AgentHarness: initializes and can plan steps", async () => {
   const config = defaultHarnessConfig();
   config.mode = Mode.Plan;
-  
+
   const harness = new AgentHarness(mockRuntime as any, mockPolicy as any, config);
   const memory = await harness.executeGoal("test goal", ["s1"]);
 
   assert.ok(memory instanceof MemoryStore);
   assert.strictEqual(memory.state.goal, "test goal");
-  
+
   // Verify traces are logged via streamNotes (2 steps planned per stream)
   const notes = memory.state.streamNotes["s1"];
   if (!notes) {
@@ -38,7 +38,7 @@ test("AgentHarness: initializes and can plan steps", async () => {
 test("AgentHarness: respects maxTotalSteps budget", async () => {
   const config = defaultHarnessConfig();
   config.budget.maxTotalSteps = 1;
-  
+
   const harness = new AgentHarness(mockRuntime as any, mockPolicy as any, config);
   const memory = await harness.executeGoal("test goal", ["s1"]);
 

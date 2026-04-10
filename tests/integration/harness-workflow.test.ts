@@ -25,7 +25,7 @@ test("Integration: end-to-end planning to execution workflow", async () => {
   const policy = new PolicyEngine(policyConfig);
   // We need to mock the adapter since ToolRuntime requires it
   const mockAdapter = {
-    runInStream: async () => ({ ok: true, output: "mock output" })
+    runInStream: async () => ({ ok: true, output: "mock output" }),
   };
   const runtime = new ToolRuntime(mockAdapter as any);
   const harness = new AgentHarness(runtime, policy, config);
@@ -40,11 +40,11 @@ test("Integration: end-to-end planning to execution workflow", async () => {
     throw new Error("Notes should be defined for stream s1");
   }
   assert.strictEqual(notes.length, 2);
-  
+
   // First step should be git_status
   assert.match(notes[0]!, /tool=git_status/);
   assert.match(notes[0]!, new RegExp(`decision=${Decision.Allow}`));
-  
+
   // Second step should be shell_write
   assert.match(notes[1]!, /tool=shell_write/);
   assert.match(notes[1]!, new RegExp(`decision=${Decision.Allow}`));
