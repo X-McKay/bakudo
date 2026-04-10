@@ -9,7 +9,14 @@ export class ToolRuntime {
 
   public constructor(private readonly adapter: ABoxAdapter) {
     this.specs = new Map<string, ToolSpec>([
-      ["shell", { name: "shell", description: "Run read-only shell command in abox stream", risk: RiskLevel.Read }],
+      [
+        "shell",
+        {
+          name: "shell",
+          description: "Run read-only shell command in abox stream",
+          risk: RiskLevel.Read,
+        },
+      ],
       [
         "shell_write",
         {
@@ -19,7 +26,10 @@ export class ToolRuntime {
           requiresWrite: true,
         },
       ],
-      ["git_status", { name: "git_status", description: "Inspect git status in stream", risk: RiskLevel.Read }],
+      [
+        "git_status",
+        { name: "git_status", description: "Inspect git status in stream", risk: RiskLevel.Read },
+      ],
       [
         "fetch_url",
         {
@@ -46,7 +56,11 @@ export class ToolRuntime {
   public async execute(call: ToolCall): Promise<ToolResult> {
     const handler = this.handlers.get(call.tool);
     if (!handler) {
-      return { ok: false, output: `validation_error: unknown tool: ${call.tool}`, metadata: { errorType: "validation_error" } };
+      return {
+        ok: false,
+        output: `validation_error: unknown tool: ${call.tool}`,
+        metadata: { errorType: "validation_error" },
+      };
     }
 
     try {
@@ -60,7 +74,11 @@ export class ToolRuntime {
   private async runShell(call: ToolCall): Promise<ToolResult> {
     const command = String(call.args.command ?? "").trim();
     if (command.length === 0) {
-      return { ok: false, output: "validation_error: missing required arg: command", metadata: { errorType: "validation_error" } };
+      return {
+        ok: false,
+        output: "validation_error: missing required arg: command",
+        metadata: { errorType: "validation_error" },
+      };
     }
     const timeout = this.spec(call.tool)?.timeoutSeconds ?? 120;
     return this.adapter.runInStream(call.streamId, command, timeout);
@@ -73,7 +91,11 @@ export class ToolRuntime {
   private async fetchUrl(call: ToolCall): Promise<ToolResult> {
     const url = String(call.args.url ?? "").trim();
     if (url.length === 0) {
-      return { ok: false, output: "validation_error: missing required arg: url", metadata: { errorType: "validation_error" } };
+      return {
+        ok: false,
+        output: "validation_error: missing required arg: url",
+        metadata: { errorType: "validation_error" },
+      };
     }
 
     const command = [

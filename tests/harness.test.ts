@@ -68,7 +68,9 @@ test("write budget denies excess operations", async () => {
   const harness = new AgentHarness(
     runtime,
     policy,
-    harnessConfig({ budget: { maxTotalSteps: 10, maxWriteOps: 1, maxNetworkOps: 2, maxDestructiveOps: 0 } }),
+    harnessConfig({
+      budget: { maxTotalSteps: 10, maxWriteOps: 1, maxNetworkOps: 2, maxDestructiveOps: 0 },
+    }),
   );
 
   const memory = await harness.executeGoal("echo write", ["s1", "s2"]);

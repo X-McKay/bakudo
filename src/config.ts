@@ -36,7 +36,8 @@ export const buildRuntimeConfig = (fileConfig: RuntimeFileConfig): HarnessConfig
     autoEscalate: fileConfig.runtime?.autoEscalate ?? defaults.autoEscalate,
     assumeDangerousSkipPermissions:
       fileConfig.runtime?.assumeDangerousSkipPermissions ?? defaults.assumeDangerousSkipPermissions,
-    checkpointEveryNSteps: fileConfig.runtime?.checkpointEveryNSteps ?? defaults.checkpointEveryNSteps,
+    checkpointEveryNSteps:
+      fileConfig.runtime?.checkpointEveryNSteps ?? defaults.checkpointEveryNSteps,
     budget: {
       maxTotalSteps: fileConfig.budget?.maxTotalSteps ?? defaults.budget.maxTotalSteps,
       maxWriteOps: fileConfig.budget?.maxWriteOps ?? defaults.budget.maxWriteOps,
@@ -46,9 +47,15 @@ export const buildRuntimeConfig = (fileConfig: RuntimeFileConfig): HarnessConfig
   };
 };
 
-export const buildPolicyConfig = (fileConfig: RuntimeFileConfig, mode: Mode, assumeDangerous: boolean): PolicyConfig => ({
+export const buildPolicyConfig = (
+  fileConfig: RuntimeFileConfig,
+  mode: Mode,
+  assumeDangerous: boolean,
+): PolicyConfig => ({
   mode,
-  allowedTools: new Set(fileConfig.policy?.allowedTools ?? ["shell", "shell_write", "git_status", "fetch_url"]),
+  allowedTools: new Set(
+    fileConfig.policy?.allowedTools ?? ["shell", "shell_write", "git_status", "fetch_url"],
+  ),
   writeTools: new Set(fileConfig.policy?.writeTools ?? ["shell_write"]),
   networkTools: new Set(fileConfig.policy?.networkTools ?? ["fetch_url"]),
   destructiveTools: new Set(fileConfig.policy?.destructiveTools ?? []),

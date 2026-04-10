@@ -27,7 +27,9 @@ export class MemoryStore {
 
   public summarize(): string {
     const parts: string[] = ["Goal: " + this.state.goal];
-    for (const [streamId, notes] of Object.entries(this.state.streamNotes).sort(([a], [b]) => a.localeCompare(b))) {
+    for (const [streamId, notes] of Object.entries(this.state.streamNotes).sort(([a], [b]) =>
+      a.localeCompare(b),
+    )) {
       parts.push(`[${streamId}] ${notes.length} events`);
       if (notes.length > 0) {
         parts.push(`  last: ${notes.at(-1)}`);

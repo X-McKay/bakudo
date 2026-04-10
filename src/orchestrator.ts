@@ -48,23 +48,28 @@ export class AgentHarness {
     const done = new Set<string>();
 
     while (done.size < steps.length) {
-      const ready = steps.filter((step) => !done.has(step.id) && step.dependsOn.every((dep) => done.has(dep)));
+      const ready = steps.filter(
+        (step) => !done.has(step.id) && step.dependsOn.every((dep) => done.has(dep)),
+      );
       if (ready.length === 0) {
         memory.checkpoint("blocked_by_dependencies");
         break;
       }
 
       const queue = [...ready];
-      const workers = Array.from({ length: Math.min(this.config.maxParallelStreams, queue.length) }, async () => {
-        while (queue.length > 0) {
-          const next = queue.shift();
-          if (!next) {
-            return;
+      const workers = Array.from(
+        { length: Math.min(this.config.maxParallelStreams, queue.length) },
+        async () => {
+          while (queue.length > 0) {
+            const next = queue.shift();
+            if (!next) {
+              return;
+            }
+            await this.executeStep(next, memory);
+            done.add(next.id);
           }
-          await this.executeStep(next, memory);
-          done.add(next.id);
-        }
-      });
+        },
+      );
 
       await Promise.all(workers);
     }

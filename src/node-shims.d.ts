@@ -8,7 +8,9 @@ declare module "node:child_process" {
 }
 
 declare module "node:util" {
-  export function promisify<T extends (...args: any[]) => any>(fn: T): (...args: any[]) => Promise<any>;
+  export function promisify<T extends (...args: any[]) => any>(
+    fn: T,
+  ): (...args: any[]) => Promise<any>;
 }
 
 declare module "node:fs/promises" {

@@ -16,7 +16,10 @@ export class PolicyEngine {
 
   public evaluate(tool: ToolSpec): PolicyResult {
     if (!this.config.allowedTools.has(tool.name)) {
-      return { decision: Decision.Deny, reason: `tool '${tool.name}' is not allowed in mode=${this.config.mode}` };
+      return {
+        decision: Decision.Deny,
+        reason: `tool '${tool.name}' is not allowed in mode=${this.config.mode}`,
+      };
     }
 
     if (tool.destructive && !this.config.destructiveTools.has(tool.name)) {
