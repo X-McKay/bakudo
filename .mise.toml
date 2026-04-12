@@ -4,3 +4,29 @@ pnpm = "latest"
 
 [env]
 NODE_ENV = "development"
+
+[tasks.lint]
+run = "pnpm lint"
+description = "Run ESLint"
+
+[tasks.test]
+run = "pnpm build && node --test dist/tests/**/*.test.js"
+description = "Build and run all tests"
+
+[tasks.check]
+depends = ["lint", "test"]
+description = "Run lint and tests (used by pre-commit hook)"
+
+[tasks."hooks:install"]
+run = """
+mkdir -p .git/hooks
+cat > .git/hooks/pre-commit << 'HOOK'
+#!/bin/bash
+# Managed by mise — do not edit manually.
+# Reinstall with: mise run hooks:install
+exec mise run check
+HOOK
+chmod +x .git/hooks/pre-commit
+echo "pre-commit hook installed"
+"""
+description = "Install git pre-commit hook that runs through mise"

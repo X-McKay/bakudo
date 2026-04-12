@@ -13,10 +13,6 @@
     "lint": "eslint .",
     "format": "prettier --write ."
   },
-  "pre-commit": [
-    "lint",
-    "test"
-  ],
   "devDependencies": {
     "@types/node": "^25.6.0",
     "@typescript-eslint/eslint-plugin": "^8.58.1",
@@ -24,7 +20,6 @@
     "eslint": "^10.2.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
-    "pre-commit": "^1.2.2",
     "prettier": "^3.8.2",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"

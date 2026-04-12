@@ -8,12 +8,13 @@ type CliArgs = {
   config: string;
   streams: string[];
   aboxBin: string;
+  repo?: string;
 };
 
-const parseArgs = (argv: string[]): CliArgs => {
+export const parseArgs = (argv: string[]): CliArgs => {
   const result: CliArgs = {
     goal: "",
-    config: "harness/config/default.json",
+    config: "config/default.json",
     streams: ["default"],
     aboxBin: "abox",
   };
@@ -33,6 +34,10 @@ const parseArgs = (argv: string[]): CliArgs => {
     } else if (arg === "--abox-bin") {
       result.aboxBin = argv[i + 1] ?? result.aboxBin;
       i += 1;
+    } else if (arg === "--repo") {
+      const val = argv[i + 1];
+      if (val !== undefined) result.repo = val;
+      i += 1;
     }
   }
 
@@ -48,7 +53,7 @@ export const runCli = async (argv: string[]): Promise<number> => {
   const fileConfig = await loadConfig(args.config);
   const runtimeConfig = buildRuntimeConfig(fileConfig);
 
-  const runtime = new ToolRuntime(new ABoxAdapter(args.aboxBin));
+  const runtime = new ToolRuntime(new ABoxAdapter(args.aboxBin, args.repo));
   const policy = buildPolicy(
     buildPolicyConfig(fileConfig, runtimeConfig.mode, runtimeConfig.assumeDangerousSkipPermissions),
   );

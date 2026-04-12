@@ -6,7 +6,7 @@
 
 - **Planner → Executor Contract**: Explicit step contracts with dependencies and acceptance metadata to ensure predictable execution.
 - **Mode-Aware Policy Engine**: Deterministic policy evaluation for `plan`, `build`, and `review` modes with configurable tool allowlists and autonomy budgets.
-- **Parallel Workstreams**: Efficient management of concurrent workstreams over `abox run --task-id`.
+- **Parallel Workstreams**: Efficient management of concurrent workstreams over ephemeral `abox run --task` sandboxes.
 - **Durable Traces**: Detailed step-by-step traces and periodic checkpoint summaries for auditability and debugging.
 - **TypeScript First**: Aligns with modern agent ecosystems (MCP-first integrations, server/CLI UX) while maintaining a lightweight core with zero runtime dependencies.
 
@@ -42,13 +42,13 @@ pnpm install
 Run the harness with a specific goal and configuration:
 
 ```bash
-pnpm start -- --goal "your goal here" --streams stream1,stream2
+pnpm start -- --goal "your goal here" --streams stream1,stream2 --repo /path/to/repo
 ```
 
 Or run directly via Node:
 
 ```bash
-node dist/src/cli.js --goal "your goal here" --config config/default.json --streams s1,s2
+node dist/src/cli.js --goal "your goal here" --config config/default.json --streams s1,s2 --repo /path/to/repo
 ```
 
 ## Development and Testing

@@ -1,0 +1,23 @@
+{
+  "runtime": {
+    "mode": "plan",
+    "maxParallelStreams": 2,
+    "autoEscalate": true,
+    "assumeDangerousSkipPermissions": true,
+    "checkpointEveryNSteps": 4
+  },
+  "policy": {
+    "allowedTools": ["shell", "git_status"],
+    "writeTools": [],
+    "networkTools": [],
+    "destructiveTools": [],
+    "requireEscalationForWrite": false,
+    "requireEscalationForNetwork": false
+  },
+  "budget": {
+    "maxTotalSteps": 20,
+    "maxWriteOps": 0,
+    "maxNetworkOps": 2,
+    "maxDestructiveOps": 0
+  }
+}

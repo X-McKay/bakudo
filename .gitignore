@@ -3,3 +3,4 @@ node_modules/
 .DS_Store
 *.log
 .mise.local.toml
+package-lock.json
