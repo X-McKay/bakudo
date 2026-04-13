@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "bakudo": "dist/src/cli.js",
+    "bakudo-worker": "dist/src/workerCli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "pnpm build && node --test dist/tests/**/*.test.js",
@@ -10,6 +14,8 @@
     "test:integration": "pnpm build && node --test dist/tests/integration/*.test.js",
     "test:regression": "pnpm build && node --test dist/tests/regression/*.test.js",
     "start": "pnpm build && node dist/src/cli.js",
+    "start:host": "pnpm build && node dist/src/hostCli.js",
+    "start:worker": "pnpm build && node dist/src/workerCli.js",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

@@ -2,6 +2,8 @@
 
 `Bakudo` is a lightweight, robust custom agent harness designed for high-autonomy operation within `abox` sandboxing environments. Built with TypeScript and a focus on functional programming, it provides a secure and scalable foundation for building autonomous agents.
 
+> Current status: the host/worker split is now being introduced, and the CLI is starting to move toward a more assistant-like terminal UX. The host CLI now supports an interactive shell, persisted sessions, and a structured sandbox worker through `abox`, while legacy `--goal` mode still exists as a compatibility path.
+
 ## Core Features
 
 - **Planner → Executor Contract**: Explicit step contracts with dependencies and acceptance metadata to ensure predictable execution.
@@ -39,7 +41,60 @@ pnpm install
 
 ### Usage
 
-Run the harness with a specific goal and configuration:
+Run the new host CLI with explicit host intent:
+
+```bash
+pnpm start -- plan "inspect why the harness exited 0 on failure" --repo /path/to/repo
+pnpm start -- build "add a richer review screen for sandbox results" --repo /path/to/repo --yes
+```
+
+Start the interactive shell:
+
+```bash
+pnpm start --
+```
+
+Inside the interactive shell you can use assistant-style commands such as:
+
+```text
+/build <goal>
+/plan <goal>
+/run <goal>
+/mode build
+/mode plan
+/approve auto
+/status [session-id]
+/sessions
+/tasks <session-id>
+/sandbox <session-id> [task-id]
+/review <session-id> [task-id]
+/logs <session-id> [task-id]
+/resume <session-id> [task-id]
+/init
+```
+
+Inspect a saved session:
+
+```bash
+node dist/src/cli.js sessions
+node dist/src/cli.js status
+node dist/src/cli.js status <session-id>
+node dist/src/cli.js tasks <session-id>
+node dist/src/cli.js sandbox <session-id>
+node dist/src/cli.js review <session-id>
+node dist/src/cli.js logs <session-id>
+node dist/src/cli.js resume <session-id>
+node dist/src/cli.js init --repo /path/to/repo --yes
+```
+
+`Bakudo` now tries to make the host/worker split explicit in the terminal UX:
+
+- `plan` is for discovery, review, and exploration.
+- `build` is for code-changing work dispatched into an ephemeral `abox` sandbox.
+- `status`, `review`, `logs`, and `sandbox` are separate views so the host can show progress, judgment, and sandbox provenance independently.
+- The interactive shell keeps track of the most recent session so follow-up commands can stay session-oriented instead of feeling like a thin command wrapper.
+
+Legacy compatibility mode is still available:
 
 ```bash
 pnpm start -- --goal "your goal here" --streams stream1,stream2 --repo /path/to/repo

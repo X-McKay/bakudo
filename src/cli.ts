@@ -1,5 +1,8 @@
+#!/usr/bin/env node
+
 import { ABoxAdapter } from "./aboxAdapter.js";
 import { loadConfig, buildPolicyConfig, buildRuntimeConfig } from "./config.js";
+import { runHostCli, shouldUseHostCli } from "./hostCli.js";
 import { AgentHarness, buildPolicy } from "./orchestrator.js";
 import { ToolRuntime } from "./tools.js";
 
@@ -49,6 +52,10 @@ export const parseArgs = (argv: string[]): CliArgs => {
 };
 
 export const runCli = async (argv: string[]): Promise<number> => {
+  if (shouldUseHostCli(argv)) {
+    return runHostCli(argv);
+  }
+
   const args = parseArgs(argv);
   const fileConfig = await loadConfig(args.config);
   const runtimeConfig = buildRuntimeConfig(fileConfig);
