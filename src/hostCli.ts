@@ -10,6 +10,7 @@ import { ABoxAdapter } from "./aboxAdapter.js";
 import { ABoxTaskRunner } from "./aboxTaskRunner.js";
 import { ArtifactStore } from "./artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "./config.js";
+import { isMainModule } from "./mainModule.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskMode, type TaskRequest } from "./protocol.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "./reviewer.js";
 import { SessionStore, sanitizePathSegment } from "./sessionStore.js";
@@ -35,6 +36,10 @@ type HostIo = {
   stdin?: Readable;
   stdout?: Writable;
   stderr?: Writable;
+};
+
+type TextWriter = {
+  write(data: string | Uint8Array): unknown;
 };
 
 export type HostCliArgs = {
@@ -82,6 +87,7 @@ const INTERACTIVE_COMMANDS: readonly SlashCommandSpec[] = [
   { usage: "/build <goal>", description: "Run a code-changing task in an abox sandbox." },
   { usage: "/plan <goal>", description: "Run a planning or discovery task in a safer host intent mode." },
   { usage: "/run <goal>", description: "Run a task using the current shell mode." },
+  { usage: "/clear", description: "Clear the terminal and redraw the shell header." },
   { usage: "/mode <build|plan>", description: "Change the default mode for plain-text prompts." },
   { usage: "/approve <auto|prompt>", description: "Toggle automatic approval for build dispatches." },
   { usage: "/status [session]", description: "Show all sessions or task status for a specific session." },
@@ -93,9 +99,150 @@ const INTERACTIVE_COMMANDS: readonly SlashCommandSpec[] = [
   { usage: "/resume <session> [task]", description: "Retry the latest resumable task in a session." },
   { usage: "/init", description: "Write a repo-local AGENTS.md template for bakudo." },
   { usage: "/help", description: "Show command help." },
-  { usage: "/quit", description: "Exit the interactive shell." },
+  { usage: "/exit", description: "Exit the interactive shell." },
 ] as const;
 const runtimeIo = process as unknown as HostIo;
+const runtimeProcess = (globalThis as unknown as {
+  process?: {
+    stdout?: { isTTY?: boolean; columns?: number };
+    env?: Record<string, string | undefined>;
+  };
+}).process;
+
+const ANSI = {
+  reset: "\u001B[0m",
+  bold: "\u001B[1m",
+  dim: "\u001B[2m",
+  blue: "\u001B[34m",
+  cyan: "\u001B[36m",
+  green: "\u001B[32m",
+  yellow: "\u001B[33m",
+  red: "\u001B[31m",
+  magenta: "\u001B[35m",
+  gray: "\u001B[90m",
+} as const;
+
+const supportsAnsi = (): boolean =>
+  runtimeProcess?.stdout?.isTTY === true && runtimeProcess?.env?.NO_COLOR === undefined;
+
+const paint = (text: string, ...codes: string[]): string =>
+  supportsAnsi() ? `${codes.join("")}${text}${ANSI.reset}` : text;
+
+const bold = (text: string): string => paint(text, ANSI.bold);
+const dim = (text: string): string => paint(text, ANSI.dim);
+const cyan = (text: string): string => paint(text, ANSI.cyan);
+const blue = (text: string): string => paint(text, ANSI.blue);
+const green = (text: string): string => paint(text, ANSI.green);
+const yellow = (text: string): string => paint(text, ANSI.yellow);
+const red = (text: string): string => paint(text, ANSI.red);
+const magenta = (text: string): string => paint(text, ANSI.magenta);
+const gray = (text: string): string => paint(text, ANSI.gray);
+
+const renderTitle = (title: string, subtitle?: string): string[] => [
+  bold(blue(title)),
+  ...(subtitle ? [dim(subtitle)] : []),
+];
+
+const renderSection = (title: string): string => bold(cyan(title));
+
+const renderKeyValue = (label: string, value: string): string => `${dim(label.padEnd(8))} ${value}`;
+
+const renderCommandHint = (command: string, description: string): string =>
+  `${paint(command.padEnd(28), ANSI.bold, ANSI.magenta)} ${dim(description)}`;
+
+const renderModeChip = (mode: TaskMode): string =>
+  mode === "build" ? paint("BUILD", ANSI.bold, ANSI.yellow) : paint("PLAN", ANSI.bold, ANSI.cyan);
+
+const renderApprovalChip = (autoApprove: boolean): string =>
+  autoApprove ? paint("AUTO", ANSI.bold, ANSI.green) : paint("PROMPT", ANSI.bold, ANSI.magenta);
+
+const overviewPanelLines = (): string[] => [
+  dim("Enter a goal to run with the current mode."),
+  dim("Use /status to inspect sessions, /review for the host verdict, /exit to leave."),
+];
+
+const ANSI_PATTERN = /\u001B\[[0-9;]*m/g;
+
+const stripAnsi = (value: string): string => value.replace(ANSI_PATTERN, "");
+
+const displayWidth = (value: string): number => stripAnsi(value).length;
+
+const fitDisplay = (value: string, width: number): string => {
+  if (width <= 0) {
+    return "";
+  }
+  const plain = stripAnsi(value);
+  if (plain.length <= width) {
+    return `${value}${" ".repeat(width - plain.length)}`;
+  }
+  if (width <= 3) {
+    return plain.slice(0, width);
+  }
+  return `${plain.slice(0, width - 3)}...`;
+};
+
+const wrapPlain = (value: string, width: number): string[] => {
+  const plain = stripAnsi(value);
+  if (width <= 0) {
+    return [plain];
+  }
+  const wrapped: string[] = [];
+  let remaining = plain;
+  while (remaining.length > width) {
+    wrapped.push(remaining.slice(0, width));
+    remaining = remaining.slice(width);
+  }
+  wrapped.push(remaining);
+  return wrapped;
+};
+
+const renderBox = (title: string, lines: string[], width: number, height?: number): string[] => {
+  const innerWidth = Math.max(8, width - 4);
+  const top = `+${"-".repeat(Math.max(0, width - 2))}+`;
+  const heading = `| ${fitDisplay(title, innerWidth)} |`;
+  const content = lines.flatMap((line) => wrapPlain(line, innerWidth).map((part) => `| ${fitDisplay(part, innerWidth)} |`));
+  const targetHeight = height === undefined ? content.length : Math.max(content.length, height);
+  const padded = [...content];
+  while (padded.length < targetHeight) {
+    padded.push(`| ${" ".repeat(innerWidth)} |`);
+  }
+  return [top, heading, top, ...padded, top];
+};
+
+const mergeColumns = (left: string[], right: string[], gap = "  "): string[] => {
+  const height = Math.max(left.length, right.length);
+  const leftWidth = Math.max(...left.map((line) => displayWidth(line)), 0);
+  const rows: string[] = [];
+  for (let index = 0; index < height; index += 1) {
+    const leftLine = left[index] ?? " ".repeat(leftWidth);
+    const rightLine = right[index] ?? "";
+    rows.push(`${fitDisplay(leftLine, leftWidth)}${gap}${rightLine}`);
+  }
+  return rows;
+};
+
+let activeStdoutWriter: TextWriter | undefined;
+
+const baseStdout = (): TextWriter => (runtimeIo.stdout as TextWriter | undefined) ?? (process.stdout as TextWriter);
+const stdoutWrite = (text: string): void => {
+  void (activeStdoutWriter ?? baseStdout()).write(text);
+};
+const stderrWrite = (text: string): void => {
+  void (runtimeIo.stderr ?? process.stderr).write(text);
+};
+
+const withCapturedStdout = async <T>(
+  writer: TextWriter,
+  fn: () => Promise<T>,
+): Promise<T> => {
+  const prior = activeStdoutWriter;
+  activeStdoutWriter = writer;
+  try {
+    return await fn();
+  } finally {
+    activeStdoutWriter = prior;
+  }
+};
 
 const parsePositiveInteger = (value: string | undefined, name: string, fallback: number): number => {
   if (value === undefined) {
@@ -324,6 +471,8 @@ export const shouldUseHostCli = (argv: string[]): boolean => {
   const first = argv[0];
   return (
     first === undefined ||
+    first === "--help" ||
+    first === "-h" ||
     HOST_COMMANDS.has(first as HostCommand) ||
     (!first.startsWith("--") && !first.includes("=")) ||
     argv.includes("--session-id") ||
@@ -331,53 +480,59 @@ export const shouldUseHostCli = (argv: string[]): boolean => {
   );
 };
 
+const buildUsageLines = (): string[] => {
+  const interactiveLines = INTERACTIVE_COMMANDS.map((command) =>
+    renderCommandHint(command.usage, command.description),
+  );
+  return [
+    ...renderTitle("Bakudo", "Host control plane for abox sandboxes."),
+    dim("Plan on the host, execute in isolated workers, then review with provenance."),
+    "",
+    renderSection("Usage"),
+    "  bakudo build <goal> [--repo PATH] [--config PATH]",
+    "  bakudo plan <goal> [--repo PATH] [--config PATH]",
+    "  bakudo run <goal> [--repo PATH] [--config PATH]",
+    "  bakudo resume <session-id> [task-id]",
+    "  bakudo status [session-id]",
+    "  bakudo sessions",
+    "  bakudo sandbox <session-id> [task-id]",
+    "  bakudo init",
+    "  bakudo tasks <session-id>",
+    "  bakudo review <session-id> [task-id]",
+    "  bakudo logs <session-id> [task-id]",
+    "  bakudo",
+    "    Starts the interactive shell.",
+    "",
+    renderSection("Quick Start"),
+    "  bakudo",
+    "  bakudo plan \"inspect credential forwarding flow\"",
+    "  bakudo build \"add a failing test for sandbox review output\" --yes",
+    "",
+    renderSection("Interactive Commands"),
+    ...interactiveLines,
+    "",
+    renderSection("Common Options"),
+    "  --abox-bin PATH         Override the abox binary",
+    "  --storage-root PATH     Persist sessions under this directory",
+    "  --mode MODE            Host intent mode: build or plan",
+    "  --yes                  Auto-approve sandbox execution in build mode",
+    "  --shell SHELL           Shell used by the sandbox worker",
+    "  --timeout-seconds N     Worker timeout",
+    "  --max-output-bytes N    Captured worker output limit",
+    "  --heartbeat-ms N        Worker heartbeat interval",
+    "  --kill-grace-ms N       Grace period before SIGKILL on timeout",
+    "",
+    renderSection("Install"),
+    "  pnpm install:cli",
+    "  bakudo",
+    "",
+    dim("Legacy mode remains available with: bakudo --goal <command>"),
+  ];
+};
+
 const printUsage = (): void => {
-  const interactiveLines = INTERACTIVE_COMMANDS.map(
-    (command) => `  ${command.usage.padEnd(28)} ${command.description}`,
-  );
-  process.stdout.write(
-    [
-      "Bakudo",
-      "  Sandbox-first coding harness with a host control plane and a sandbox worker.",
-      "",
-      "Usage:",
-      "  bakudo build <goal> [--repo PATH] [--config PATH]",
-      "  bakudo plan <goal> [--repo PATH] [--config PATH]",
-      "  bakudo run <goal> [--repo PATH] [--config PATH]",
-      "  bakudo resume <session-id> [task-id]",
-      "  bakudo status [session-id]",
-      "  bakudo sessions",
-      "  bakudo sandbox <session-id> [task-id]",
-      "  bakudo init",
-      "  bakudo tasks <session-id>",
-      "  bakudo review <session-id> [task-id]",
-      "  bakudo logs <session-id> [task-id]",
-      "  bakudo",
-      "    Starts the interactive shell.",
-      "",
-      "Interactive commands:",
-      ...interactiveLines,
-      "",
-      "Common options:",
-      "  --abox-bin PATH         Override the abox binary",
-      "  --storage-root PATH     Persist sessions under this directory",
-      "  --mode MODE            Host intent mode: build or plan",
-      "  --yes                  Auto-approve sandbox execution in build mode",
-      "  --shell SHELL           Shell used by the sandbox worker",
-      "  --timeout-seconds N     Worker timeout",
-      "  --max-output-bytes N    Captured worker output limit",
-      "  --heartbeat-ms N        Worker heartbeat interval",
-      "  --kill-grace-ms N       Grace period before SIGKILL on timeout",
-      "",
-      "Examples:",
-      "  bakudo plan \"inspect failing auth tests\"",
-      "  bakudo build \"add retry handling for credential forwarding\" --yes",
-      "  bakudo status",
-      "  bakudo review <session-id>",
-      "",
-      "Legacy mode remains available with: bakudo --goal <command>",
-    ].join("\n") + "\n",
-  );
+  const lines = buildUsageLines();
+  stdoutWrite(lines.join("\n") + "\n");
 };
 
 const storageRootFor = (repo: string | undefined, explicitRoot: string | undefined): string =>
@@ -455,7 +610,8 @@ const promptForApproval = async (message: string): Promise<boolean> => {
 
   const rl = createInterface({ input, output });
   try {
-    const answer = (await rl.question(`${message} [y/N] `)).trim().toLowerCase();
+    const prompt = `${renderSection("Approval")} ${message} ${dim("[y/N]")} `;
+    const answer = (await rl.question(prompt)).trim().toLowerCase();
     return answer === "y" || answer === "yes";
   } finally {
     rl.close();
@@ -521,18 +677,18 @@ const printRunSummary = (session: SessionRecord, reviewed: ReviewedTaskResult): 
   const task = session.tasks.find((entry) => entry.taskId === reviewed.taskId);
   const sandboxTaskId =
     typeof task?.metadata?.sandboxTaskId === "string" ? task.metadata.sandboxTaskId : "n/a";
-  process.stdout.write(
+  stdoutWrite(
     [
       "",
-      "Run Summary",
-      `Session : ${session.sessionId}`,
-      `Status  : ${session.status}`,
-      `Task    : ${reviewed.taskId}`,
-      `Sandbox : ${sandboxTaskId}`,
-      `Outcome : ${reviewed.outcome}`,
-      `Action  : ${reviewed.action}`,
-      `Reason  : ${reviewed.reason}`,
-      `Summary : ${reviewed.result.summary}`,
+      renderSection("Summary"),
+      renderKeyValue("Session", session.sessionId),
+      renderKeyValue("Status", `${statusBadge(session.status)} ${session.status}`),
+      renderKeyValue("Task", reviewed.taskId),
+      renderKeyValue("Sandbox", sandboxTaskId),
+      renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`),
+      renderKeyValue("Action", reviewed.action),
+      renderKeyValue("Reason", reviewed.reason),
+      renderKeyValue("Summary", reviewed.result.summary),
     ].join("\n") + "\n",
   );
 };
@@ -542,23 +698,23 @@ const statusBadge = (status: string): string => {
     case "completed":
     case "succeeded":
     case "success":
-      return "[ok]";
+      return green("[OK]");
     case "running":
     case "reviewing":
-      return "[..]";
+      return blue("[RUN]");
     case "planned":
     case "queued":
-      return "[>]";
+      return cyan("[QUE]");
     case "awaiting_user":
     case "blocked":
     case "blocked_needs_user":
-      return "[?]";
+      return yellow("[ASK]");
     case "failed":
     case "retryable_failure":
     case "policy_denied":
-      return "[!!]";
+      return red("[ERR]");
     default:
-      return "[ ]";
+      return gray("[---]");
   }
 };
 
@@ -610,14 +766,15 @@ const executeTask = async (
   args: HostCliArgs,
 ): Promise<ReviewedTaskResult> => {
   await sessionStore.upsertTask(sessionId, recordTask(request, "queued", "queued for sandbox execution"));
-  process.stdout.write(
+  stdoutWrite(
     [
       "",
-      `${statusBadge("queued")} Dispatching ${request.mode ?? args.mode} task`,
-      `  Session : ${sessionId}`,
-      `  Task    : ${request.taskId}`,
-      `  Goal    : ${request.goal}`,
-      "  Sandbox : ephemeral abox worker",
+      renderSection("Dispatch"),
+      `${statusBadge("queued")} ${renderModeChip(request.mode ?? args.mode)} ${dim("sending task to abox worker")}`,
+      renderKeyValue("Session", sessionId),
+      renderKeyValue("Task", request.taskId),
+      renderKeyValue("Goal", request.goal),
+      renderKeyValue("Sandbox", "ephemeral abox worker"),
       "",
     ].join("\n"),
   );
@@ -640,13 +797,13 @@ const executeTask = async (
         .filter(Boolean)
         .join(" ");
       const detail = event.message ? ` ${event.message}` : "";
-      process.stdout.write(
-        `[${stamp}] ${statusBadge(event.status)} ${event.kind}${detail}${metrics ? ` (${metrics})` : ""}\n`,
+      stdoutWrite(
+        `${dim(`[${stamp}]`)} ${statusBadge(event.status)} ${bold(event.kind)}${detail}${metrics ? ` ${dim(`(${metrics})`)}` : ""}\n`,
       );
     },
     onWorkerError: (error) => {
       const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
-      process.stdout.write(`[worker-error] ${message}\n`);
+      stdoutWrite(`[worker-error] ${message}\n`);
     },
   });
 
@@ -724,7 +881,7 @@ const runNewSession = async (args: HostCliArgs): Promise<number> => {
       `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
-      process.stdout.write("Dispatch cancelled.\n");
+      stdoutWrite("Dispatch cancelled.\n");
       return 2;
     }
   }
@@ -784,7 +941,7 @@ const resumeSession = async (args: HostCliArgs): Promise<number> => {
       `Re-dispatch task ${task.taskId} into an ephemeral abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
-      process.stdout.write("Resume cancelled.\n");
+      stdoutWrite("Resume cancelled.\n");
       return 2;
     }
   }
@@ -817,10 +974,11 @@ const printTasks = async (args: HostCliArgs): Promise<number> => {
   }
 
   const lines = [
-    `Session : ${session.sessionId}`,
-    `Status  : ${session.status}`,
-    `Goal    : ${session.goal}`,
-    "Tasks",
+    renderSection("Tasks"),
+    renderKeyValue("Session", session.sessionId),
+    renderKeyValue("Status", `${statusBadge(session.status)} ${session.status}`),
+    renderKeyValue("Goal", session.goal),
+    "",
   ];
   for (const task of session.tasks) {
     const reviewed = task.result === undefined ? null : reviewTaskResult(task.result);
@@ -830,7 +988,7 @@ const printTasks = async (args: HostCliArgs): Promise<number> => {
       `- ${statusBadge(task.status)} ${task.taskId} mode=${taskModeLabel(task)} status=${task.status} sandbox=${sandboxTaskId}${reviewed ? ` outcome=${reviewed.outcome} action=${reviewed.action}` : ""}${task.lastMessage ? ` message=${task.lastMessage}` : ""}`,
     );
   }
-  process.stdout.write(lines.join("\n") + "\n");
+  stdoutWrite(lines.join("\n") + "\n");
   return 0;
 };
 
@@ -838,11 +996,17 @@ const printSessions = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const sessions = await new SessionStore(rootDir).listSessions();
   if (sessions.length === 0) {
-    process.stdout.write("No sessions found.\n");
+    stdoutWrite(
+      [
+        renderSection("Sessions"),
+        "  No sessions found yet.",
+        dim("  Try `bakudo plan \"inspect the repo\"` or start the shell with `bakudo`."),
+      ].join("\n") + "\n",
+    );
     return 0;
   }
 
-  const lines = ["Sessions"];
+  const lines = [renderSection("Sessions")];
   for (const session of sessions) {
     const latestTask = session.tasks.at(-1);
     const reviewed = latestTask?.result ? reviewTaskResult(latestTask.result) : null;
@@ -850,13 +1014,13 @@ const printSessions = async (args: HostCliArgs): Promise<number> => {
       `- ${statusBadge(session.status)} ${session.sessionId} status=${session.status} tasks=${session.tasks.length} updated=${session.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} goal=${session.goal}`,
     );
   }
-  process.stdout.write(lines.join("\n") + "\n");
+  stdoutWrite(lines.join("\n") + "\n");
   return 0;
 };
 
 const printStatus = async (args: HostCliArgs): Promise<number> => {
   if (!args.sessionId) {
-    process.stdout.write("Host Status\n");
+    stdoutWrite(`${renderSection("Host Status")}\n`);
     return printSessions(args);
   }
 
@@ -869,25 +1033,25 @@ const printStatus = async (args: HostCliArgs): Promise<number> => {
   const latestTask = session.tasks.at(-1);
   const reviewed = latestTask?.result ? reviewTaskResult(latestTask.result) : null;
   const lines = [
-    "Status",
-    `Session : ${session.sessionId}`,
-    `Goal    : ${session.goal}`,
-    `State   : ${statusBadge(session.status)} ${session.status}`,
-    `Updated : ${formatUtcTimestamp(session.updatedAt)}`,
-    `Tasks   : ${session.tasks.length}`,
+    renderSection("Status"),
+    renderKeyValue("Session", session.sessionId),
+    renderKeyValue("Goal", session.goal),
+    renderKeyValue("State", `${statusBadge(session.status)} ${session.status}`),
+    renderKeyValue("Updated", formatUtcTimestamp(session.updatedAt)),
+    renderKeyValue("Tasks", String(session.tasks.length)),
   ];
   if (latestTask) {
     const sandboxTaskId =
       typeof latestTask.metadata?.sandboxTaskId === "string" ? latestTask.metadata.sandboxTaskId : "n/a";
-    lines.push(`Latest  : ${latestTask.taskId} mode=${taskModeLabel(latestTask)} status=${latestTask.status}`);
-    lines.push(`Sandbox : ${sandboxTaskId}`);
+    lines.push(renderKeyValue("Latest", `${latestTask.taskId} mode=${taskModeLabel(latestTask)} status=${latestTask.status}`));
+    lines.push(renderKeyValue("Sandbox", sandboxTaskId));
     if (reviewed) {
-      lines.push(`Outcome : ${statusBadge(reviewed.outcome)} ${reviewed.outcome}`);
-      lines.push(`Action  : ${reviewed.action}`);
-      lines.push(`Next    : ${nextActionHint(reviewed)}`);
+      lines.push(renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`));
+      lines.push(renderKeyValue("Action", reviewed.action));
+      lines.push(renderKeyValue("Next", nextActionHint(reviewed)));
     }
   }
-  process.stdout.write(lines.join("\n") + "\n");
+  stdoutWrite(lines.join("\n") + "\n");
   return 0;
 };
 
@@ -905,13 +1069,13 @@ const runInit = async (args: HostCliArgs): Promise<number> => {
   if (exists && !args.yes) {
     const approved = await promptForApproval(`Overwrite ${target}?`);
     if (!approved) {
-      process.stdout.write("Init cancelled.\n");
+      stdoutWrite("Init cancelled.\n");
       return 2;
     }
   }
 
   await writeFile(target, buildAgentsTemplate(repoRoot), "utf8");
-  process.stdout.write(`Wrote ${target}\n`);
+  stdoutWrite(`Wrote ${target}\n`);
   return 0;
 };
 
@@ -933,19 +1097,24 @@ const printSandbox = async (args: HostCliArgs): Promise<number> => {
     ? (task.metadata?.aboxCommand as unknown[]).map(String).join(" ")
     : "n/a";
   const artifacts = await new ArtifactStore(rootDir).listTaskArtifacts(session.sessionId, task.taskId);
-  process.stdout.write(
+  stdoutWrite(
     [
-      "Sandbox",
-      `Session : ${session.sessionId}`,
-      `Task    : ${task.taskId}`,
-      `Mode    : ${taskModeLabel(task)}`,
-      `Status  : ${statusBadge(task.status)} ${task.status}`,
-      `Sandbox : ${sandboxTaskId}`,
-      `ABox    : ${aboxCommand}`,
-      `Safety  : ${task.request?.assumeDangerousSkipPermissions ? "dangerous-skip-permissions enabled in sandbox worker" : "host requested safer planning mode"}`,
+      renderSection("Sandbox"),
+      renderKeyValue("Session", session.sessionId),
+      renderKeyValue("Task", task.taskId),
+      renderKeyValue("Mode", taskModeLabel(task)),
+      renderKeyValue("Status", `${statusBadge(task.status)} ${task.status}`),
+      renderKeyValue("Sandbox", sandboxTaskId),
+      renderKeyValue("ABox", aboxCommand),
+      renderKeyValue(
+        "Safety",
+        task.request?.assumeDangerousSkipPermissions
+          ? "dangerous-skip-permissions enabled in sandbox worker"
+          : "host requested safer planning mode",
+      ),
       ...(artifacts.length > 0 ? ["Artifacts:", ...formatArtifacts(artifacts)] : []),
-      ...(task.result?.summary ? [`Summary : ${task.result.summary}`] : []),
-      "Next    : Use `bakudo review` for the host verdict or `bakudo logs` for the event stream.",
+      ...(task.result?.summary ? [renderKeyValue("Summary", task.result.summary)] : []),
+      renderKeyValue("Next", "Use `bakudo review` for the host verdict or `bakudo logs` for the event stream."),
     ].join("\n") + "\n",
   );
   return 0;
@@ -969,24 +1138,26 @@ const printReview = async (args: HostCliArgs): Promise<number> => {
   const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, task.taskId);
   const dispatchArtifact = artifacts.find((artifact) => artifact.kind === "dispatch");
   const workerLog = artifacts.find((artifact) => artifact.kind === "log");
-  process.stdout.write(
+  stdoutWrite(
     [
-      "Review",
-      `Session : ${session.sessionId}`,
-      `Task    : ${task.taskId}`,
-      `Status  : ${statusBadge(task.status)} ${task.status}`,
-      `Outcome : ${statusBadge(reviewed.outcome)} ${reviewed.outcome}`,
-      `Action  : ${reviewed.action}`,
-      `Reason  : ${reviewed.reason}`,
-      `Summary : ${task.result.summary}`,
-      ...(typeof task.metadata?.sandboxTaskId === "string" ? [`Sandbox : ${task.metadata.sandboxTaskId}`] : []),
-      ...(task.result.exitCode === undefined ? [] : [`Exit code: ${task.result.exitCode}`]),
-      ...(task.result.startedAt ? [`Started : ${formatUtcTimestamp(task.result.startedAt)}`] : []),
-      `Finished: ${formatUtcTimestamp(task.result.finishedAt)}`,
-      ...(dispatchArtifact ? [`Dispatch: ${dispatchArtifact.path}`] : []),
-      ...(workerLog ? [`Worker  : ${workerLog.path}`] : []),
+      renderSection("Review"),
+      renderKeyValue("Session", session.sessionId),
+      renderKeyValue("Task", task.taskId),
+      renderKeyValue("Status", `${statusBadge(task.status)} ${task.status}`),
+      renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`),
+      renderKeyValue("Action", reviewed.action),
+      renderKeyValue("Reason", reviewed.reason),
+      renderKeyValue("Summary", task.result.summary),
+      ...(typeof task.metadata?.sandboxTaskId === "string"
+        ? [renderKeyValue("Sandbox", task.metadata.sandboxTaskId)]
+        : []),
+      ...(task.result.exitCode === undefined ? [] : [renderKeyValue("Exit", String(task.result.exitCode))]),
+      ...(task.result.startedAt ? [renderKeyValue("Started", formatUtcTimestamp(task.result.startedAt))] : []),
+      renderKeyValue("Finished", formatUtcTimestamp(task.result.finishedAt)),
+      ...(dispatchArtifact ? [renderKeyValue("Dispatch", dispatchArtifact.path)] : []),
+      ...(workerLog ? [renderKeyValue("Worker", workerLog.path)] : []),
       ...(artifacts.length > 0 ? ["Artifacts:", ...formatArtifacts(artifacts)] : []),
-      `Next    : ${nextActionHint(reviewed)}`,
+      renderKeyValue("Next", nextActionHint(reviewed)),
     ].join("\n") + "\n",
   );
   return reviewedOutcomeExitCode(reviewed);
@@ -1008,23 +1179,11 @@ const printLogs = async (args: HostCliArgs): Promise<number> => {
         `${event.timestamp} ${statusBadge(event.status)} ${event.taskId} ${event.kind} ${event.status}${event.message ? ` ${event.message}` : ""}`,
     );
   if (lines.length === 0) {
-    process.stdout.write("No task events found.\n");
+    stdoutWrite("No task events found.\n");
     return 0;
   }
-  process.stdout.write(`Logs\n${lines.join("\n")}\n`);
+  stdoutWrite(`${renderSection("Logs")}\n${lines.join("\n")}\n`);
   return 0;
-};
-
-const printInteractiveBanner = (): void => {
-  process.stdout.write(
-    [
-      "Bakudo Interactive",
-      "  Type a goal to dispatch a sandbox task with the current mode.",
-      "  Use `/build <goal>` or `/plan <goal>` for one-off mode overrides.",
-      "  Use `/status` to browse sessions and `/sandbox` to inspect abox dispatch metadata.",
-      "",
-    ].join("\n"),
-  );
 };
 
 const tokenizeCommand = (input: string): string[] => input.trim().split(/\s+/).filter(Boolean);
@@ -1040,6 +1199,137 @@ type InteractiveResolution = {
   argv: string[];
   sessionId?: string;
   taskId?: string;
+};
+
+class InteractiveDashboard {
+  public constructor(private readonly getState: () => InteractiveShellState) {}
+
+  private panelTitle = "Overview";
+  private panelLines: string[] = overviewPanelLines();
+  private activityLines: string[] = [];
+
+  public setPanel(title: string, lines: string[]): void {
+    this.panelTitle = title;
+    this.panelLines = lines.length > 0 ? lines : [dim("No details available.")];
+  }
+
+  public appendActivity(line: string): void {
+    const trimmed = line.replace(/\r/g, "").trimEnd();
+    if (trimmed.length === 0) {
+      return;
+    }
+    this.activityLines.push(trimmed);
+    this.activityLines = this.activityLines.slice(-12);
+  }
+
+  public note(line: string): void {
+    this.appendActivity(line);
+  }
+
+  public snapshotActivity(): string[] {
+    return [...this.activityLines];
+  }
+
+  public restoreActivity(lines: string[]): void {
+    this.activityLines = [...lines].slice(-12);
+  }
+
+  public render(): void {
+    if (runtimeProcess?.stdout?.isTTY !== true) {
+      return;
+    }
+
+    const state = this.getState();
+    const focusSession = state.lastSessionId ?? "no session";
+    const focusTask = state.lastTaskId ?? "no task";
+    const terminalWidth = runtimeProcess?.stdout?.columns ?? 100;
+    const panelContent = this.panelLines.length > 0 ? this.panelLines : [dim("No panel content.")];
+    const activityContent = this.activityLines.length > 0 ? this.activityLines : [dim("No recent activity yet.")];
+    const summaryLines = [
+      `Mode: ${stripAnsi(renderModeChip(state.currentMode))}`,
+      `Approval: ${stripAnsi(renderApprovalChip(state.autoApprove))}`,
+      `Session: ${focusSession}`,
+      `Task: ${focusTask}`,
+    ];
+
+    let body: string[];
+    if (terminalWidth >= 110) {
+      const leftWidth = Math.max(42, Math.floor((terminalWidth - 2) * 0.42));
+      const rightWidth = Math.max(42, terminalWidth - leftWidth - 2);
+      const leftBox = renderBox(this.panelTitle, [...summaryLines, "", ...panelContent], leftWidth);
+      const rightBox = renderBox("Recent Activity", activityContent, rightWidth);
+      body = mergeColumns(leftBox, rightBox);
+    } else {
+      body = [
+        ...renderBox(this.panelTitle, [...summaryLines, "", ...panelContent], Math.max(40, terminalWidth)),
+        "",
+        ...renderBox("Recent Activity", activityContent, Math.max(40, terminalWidth)),
+      ];
+    }
+
+    const lines = [
+      bold(blue("Bakudo")),
+      dim("abox host control plane"),
+      `${renderModeChip(state.currentMode)} ${renderApprovalChip(state.autoApprove)} ${gray(focusSession)}`,
+      "",
+      ...body,
+      "",
+      dim("Commands: /plan /build /status /review /sandbox /clear /exit"),
+      "",
+    ];
+    void baseStdout().write("\x1Bc");
+    void baseStdout().write(`${lines.join("\n")}\n`);
+  }
+}
+
+const createDashboardCapture = (
+  dashboard: InteractiveDashboard,
+  options: { live?: boolean; recordActivity?: boolean } = {},
+): { writer: TextWriter; lines: string[]; flush: () => void } => {
+  const live = options.live ?? false;
+  const recordActivity = options.recordActivity ?? true;
+  const lines: string[] = [];
+  let pending = "";
+  const flush = (): void => {
+    if (pending.length === 0) {
+      return;
+    }
+    const clean = pending.replace(/\r/g, "").trimEnd();
+    pending = "";
+    if (clean.length === 0) {
+      return;
+    }
+    lines.push(clean);
+    if (recordActivity) {
+      dashboard.appendActivity(clean);
+    }
+  };
+  return {
+    flush,
+    lines,
+    writer: {
+      write: (chunk: string | Uint8Array) => {
+        const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        pending += text;
+        const split = pending.split(/\r?\n/);
+        pending = split.pop() ?? "";
+        for (const line of split) {
+          const clean = line.replace(/\r/g, "").trimEnd();
+          if (clean.length === 0) {
+            continue;
+          }
+          lines.push(clean);
+          if (recordActivity) {
+            dashboard.appendActivity(clean);
+          }
+        }
+        if (live) {
+          dashboard.render();
+        }
+        return true;
+      },
+    },
+  };
 };
 
 const createInteractiveSessionIdentity = (): { sessionId: string; taskId: string } => {
@@ -1142,6 +1432,20 @@ const rememberInteractiveContext = (
   }
 };
 
+const sessionPromptLabel = (sessionId: string | undefined): string => {
+  if (!sessionId) {
+    return "no-session";
+  }
+
+  const parts = sessionId.split("-");
+  return parts.at(-1) ?? sessionId;
+};
+
+const renderPrompt = (state: InteractiveShellState): string => {
+  const session = paint(sessionPromptLabel(state.lastSessionId), ANSI.bold, ANSI.gray);
+  return `${bold(blue("bakudo"))} ${renderModeChip(state.currentMode)} ${renderApprovalChip(state.autoApprove)} ${session}> `;
+};
+
 const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
   if (args.command === "help") {
     printUsage();
@@ -1187,15 +1491,13 @@ const runInteractiveShell = async (): Promise<number> => {
     currentMode: "build",
     autoApprove: false,
   };
-  printInteractiveBanner();
+  const dashboard = new InteractiveDashboard(() => state);
+  dashboard.render();
   try {
     while (true) {
       let answer: string;
       try {
-        const focus = state.lastSessionId ? ` ${state.lastSessionId}` : "";
-        answer = await rl.question(
-          `bakudo[${state.currentMode}${state.autoApprove ? ":auto" : ":prompt"}${focus}]> `,
-        );
+        answer = await rl.question(renderPrompt(state));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.toLowerCase().includes("readline was closed")) {
@@ -1211,40 +1513,73 @@ const runInteractiveShell = async (): Promise<number> => {
         return 0;
       }
       if (line === "/help") {
-        printUsage();
+        dashboard.setPanel("Help", buildUsageLines().slice(0, 18));
+        dashboard.render();
+        continue;
+      }
+      if (line === "/clear") {
+        dashboard.setPanel("Overview", overviewPanelLines());
+        dashboard.render();
         continue;
       }
       if (line.startsWith("/mode ")) {
         const nextMode = line.slice("/mode ".length).trim();
         if (nextMode !== "build" && nextMode !== "plan") {
-          process.stderr.write("interactive_error: mode must be build or plan\n");
+          stderrWrite("interactive_error: mode must be build or plan\n");
           continue;
         }
         state.currentMode = nextMode;
-        process.stdout.write(`Mode set to ${state.currentMode}.\n`);
+        dashboard.setPanel("Mode", [renderKeyValue("Mode", `${renderModeChip(state.currentMode)} selected`)]);
+        dashboard.note(`Mode changed to ${state.currentMode}.`);
+        dashboard.render();
         continue;
       }
       if (line.startsWith("/approve ")) {
         const policy = line.slice("/approve ".length).trim();
         if (policy !== "auto" && policy !== "prompt") {
-          process.stderr.write("interactive_error: approve must be auto or prompt\n");
+          stderrWrite("interactive_error: approve must be auto or prompt\n");
           continue;
         }
         state.autoApprove = policy === "auto";
-        process.stdout.write(`Approval policy set to ${policy}.\n`);
+        dashboard.setPanel("Approval", [
+          renderKeyValue("Policy", `${renderApprovalChip(state.autoApprove)} selected`),
+        ]);
+        dashboard.note(`Approval policy changed to ${policy}.`);
+        dashboard.render();
         continue;
       }
 
       try {
         const resolution = resolveInteractiveInput(line, state);
         const parsed = parseHostArgs(resolution.argv);
-        const code = await dispatchHostCommand(parsed);
+        const activitySnapshot = dashboard.snapshotActivity();
+        dashboard.note(`Command: ${line}`);
+        const liveCapture =
+          parsed.command === "run" ||
+          parsed.command === "build" ||
+          parsed.command === "plan" ||
+          parsed.command === "resume";
+        const recordActivity = liveCapture;
+        const capture = createDashboardCapture(dashboard, { live: liveCapture, recordActivity });
+        const code = await withCapturedStdout(capture.writer, async () => dispatchHostCommand(parsed));
+        capture.flush();
+        const panelTitle =
+          parsed.command === "run" || parsed.command === "build" || parsed.command === "plan"
+            ? "Command Result"
+            : parsed.command.charAt(0).toUpperCase() + parsed.command.slice(1);
+        dashboard.setPanel(panelTitle, capture.lines.slice(-18));
+        if (!recordActivity) {
+          dashboard.restoreActivity([...activitySnapshot, `Command: ${line}`]);
+        }
         if (code !== 1) {
           rememberInteractiveContext(state, parsed, resolution);
         }
+        dashboard.render();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`interactive_error: ${message}\n`);
+        stderrWrite(`interactive_error: ${message}\n`);
+        dashboard.note(`Error: ${message}`);
+        dashboard.render();
       }
     }
   } finally {
@@ -1261,14 +1596,14 @@ export const runHostCli = async (argv: string[]): Promise<number> => {
   return dispatchHostCommand(args);
 };
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   runHostCli(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;
     })
     .catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`host_cli_error: ${message}\n`);
+      stderrWrite(`host_cli_error: ${message}\n`);
       process.exitCode = 1;
     });
 }

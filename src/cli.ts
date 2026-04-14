@@ -3,6 +3,7 @@
 import { ABoxAdapter } from "./aboxAdapter.js";
 import { loadConfig, buildPolicyConfig, buildRuntimeConfig } from "./config.js";
 import { runHostCli, shouldUseHostCli } from "./hostCli.js";
+import { isMainModule } from "./mainModule.js";
 import { AgentHarness, buildPolicy } from "./orchestrator.js";
 import { ToolRuntime } from "./tools.js";
 
@@ -71,7 +72,7 @@ export const runCli = async (argv: string[]): Promise<number> => {
   return 0;
 };
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   runCli(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;

@@ -39,6 +39,14 @@
 pnpm install
 ```
 
+Install the CLI into your local environment so you can launch it as `bakudo`:
+
+```bash
+pnpm install:cli
+bakudo
+bakudo --help
+```
+
 ### Usage
 
 Run the new host CLI with explicit host intent:
@@ -51,7 +59,7 @@ pnpm start -- build "add a richer review screen for sandbox results" --repo /pat
 Start the interactive shell:
 
 ```bash
-pnpm start --
+bakudo
 ```
 
 Inside the interactive shell you can use assistant-style commands such as:
@@ -60,6 +68,7 @@ Inside the interactive shell you can use assistant-style commands such as:
 /build <goal>
 /plan <goal>
 /run <goal>
+/clear
 /mode build
 /mode plan
 /approve auto
@@ -71,6 +80,7 @@ Inside the interactive shell you can use assistant-style commands such as:
 /logs <session-id> [task-id]
 /resume <session-id> [task-id]
 /init
+/exit
 ```
 
 Inspect a saved session:
@@ -93,6 +103,8 @@ node dist/src/cli.js init --repo /path/to/repo --yes
 - `build` is for code-changing work dispatched into an ephemeral `abox` sandbox.
 - `status`, `review`, `logs`, and `sandbox` are separate views so the host can show progress, judgment, and sandbox provenance independently.
 - The interactive shell keeps track of the most recent session so follow-up commands can stay session-oriented instead of feeling like a thin command wrapper.
+- The default shell exit command is `/exit`.
+- On a real TTY, the interactive shell now renders a lightweight dashboard with a focused panel and recent activity feed, closer to tools like OpenCode and Copilot CLI while still staying dependency-light.
 
 Legacy compatibility mode is still available:
 

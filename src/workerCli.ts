@@ -7,6 +7,7 @@ import {
   serializeWorkerEvent,
   serializeWorkerResult,
 } from "./workerRuntime.js";
+import { isMainModule } from "./mainModule.js";
 
 export type WorkerCliArgs = {
   taskSpecB64: string;
@@ -165,7 +166,7 @@ const printWorkerError = (message: string, details?: Record<string, unknown>): v
   process.stdout.write(`${serializeWorkerError(message, details)}\n`);
 };
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   runWorkerCli(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;
