@@ -76,7 +76,13 @@ const HOST_COMMANDS = new Set<HostCommand>([
 ]);
 
 const RUN_COMMANDS = new Set<HostCommand>(["run", "build", "plan"]);
-const SESSION_REQUIRED_COMMANDS = new Set<HostCommand>(["resume", "tasks", "review", "logs", "sandbox"]);
+const SESSION_REQUIRED_COMMANDS = new Set<HostCommand>([
+  "resume",
+  "tasks",
+  "review",
+  "logs",
+  "sandbox",
+]);
 
 type SlashCommandSpec = {
   usage: string;
@@ -85,29 +91,46 @@ type SlashCommandSpec = {
 
 const INTERACTIVE_COMMANDS: readonly SlashCommandSpec[] = [
   { usage: "/build <goal>", description: "Run a code-changing task in an abox sandbox." },
-  { usage: "/plan <goal>", description: "Run a planning or discovery task in a safer host intent mode." },
+  {
+    usage: "/plan <goal>",
+    description: "Run a planning or discovery task in a safer host intent mode.",
+  },
   { usage: "/run <goal>", description: "Run a task using the current shell mode." },
   { usage: "/clear", description: "Clear the terminal and redraw the shell header." },
   { usage: "/mode <build|plan>", description: "Change the default mode for plain-text prompts." },
-  { usage: "/approve <auto|prompt>", description: "Toggle automatic approval for build dispatches." },
-  { usage: "/status [session]", description: "Show all sessions or task status for a specific session." },
+  {
+    usage: "/approve <auto|prompt>",
+    description: "Toggle automatic approval for build dispatches.",
+  },
+  {
+    usage: "/status [session]",
+    description: "Show all sessions or task status for a specific session.",
+  },
   { usage: "/sessions", description: "List saved sessions." },
   { usage: "/tasks <session>", description: "List tasks for a session." },
   { usage: "/sandbox <session> [task]", description: "Show abox dispatch metadata and artifacts." },
-  { usage: "/review <session> [task]", description: "Show the host-reviewed outcome and suggested next action." },
+  {
+    usage: "/review <session> [task]",
+    description: "Show the host-reviewed outcome and suggested next action.",
+  },
   { usage: "/logs <session> [task]", description: "Print the structured worker event stream." },
-  { usage: "/resume <session> [task]", description: "Retry the latest resumable task in a session." },
+  {
+    usage: "/resume <session> [task]",
+    description: "Retry the latest resumable task in a session.",
+  },
   { usage: "/init", description: "Write a repo-local AGENTS.md template for bakudo." },
   { usage: "/help", description: "Show command help." },
   { usage: "/exit", description: "Exit the interactive shell." },
 ] as const;
 const runtimeIo = process as unknown as HostIo;
-const runtimeProcess = (globalThis as unknown as {
-  process?: {
-    stdout?: { isTTY?: boolean; columns?: number };
-    env?: Record<string, string | undefined>;
-  };
-}).process;
+const runtimeProcess = (
+  globalThis as unknown as {
+    process?: {
+      stdout?: { isTTY?: boolean; columns?: number };
+      env?: Record<string, string | undefined>;
+    };
+  }
+).process;
 
 const ANSI = {
   reset: "\u001B[0m",
@@ -135,7 +158,6 @@ const blue = (text: string): string => paint(text, ANSI.blue);
 const green = (text: string): string => paint(text, ANSI.green);
 const yellow = (text: string): string => paint(text, ANSI.yellow);
 const red = (text: string): string => paint(text, ANSI.red);
-const magenta = (text: string): string => paint(text, ANSI.magenta);
 const gray = (text: string): string => paint(text, ANSI.gray);
 
 const renderTitle = (title: string, subtitle?: string): string[] => [
@@ -200,7 +222,9 @@ const renderBox = (title: string, lines: string[], width: number, height?: numbe
   const innerWidth = Math.max(8, width - 4);
   const top = `+${"-".repeat(Math.max(0, width - 2))}+`;
   const heading = `| ${fitDisplay(title, innerWidth)} |`;
-  const content = lines.flatMap((line) => wrapPlain(line, innerWidth).map((part) => `| ${fitDisplay(part, innerWidth)} |`));
+  const content = lines.flatMap((line) =>
+    wrapPlain(line, innerWidth).map((part) => `| ${fitDisplay(part, innerWidth)} |`),
+  );
   const targetHeight = height === undefined ? content.length : Math.max(content.length, height);
   const padded = [...content];
   while (padded.length < targetHeight) {
@@ -223,7 +247,8 @@ const mergeColumns = (left: string[], right: string[], gap = "  "): string[] => 
 
 let activeStdoutWriter: TextWriter | undefined;
 
-const baseStdout = (): TextWriter => (runtimeIo.stdout as TextWriter | undefined) ?? (process.stdout as TextWriter);
+const baseStdout = (): TextWriter =>
+  (runtimeIo.stdout as TextWriter | undefined) ?? (process.stdout as TextWriter);
 const stdoutWrite = (text: string): void => {
   void (activeStdoutWriter ?? baseStdout()).write(text);
 };
@@ -231,10 +256,7 @@ const stderrWrite = (text: string): void => {
   void (runtimeIo.stderr ?? process.stderr).write(text);
 };
 
-const withCapturedStdout = async <T>(
-  writer: TextWriter,
-  fn: () => Promise<T>,
-): Promise<T> => {
+const withCapturedStdout = async <T>(writer: TextWriter, fn: () => Promise<T>): Promise<T> => {
   const prior = activeStdoutWriter;
   activeStdoutWriter = writer;
   try {
@@ -244,7 +266,11 @@ const withCapturedStdout = async <T>(
   }
 };
 
-const parsePositiveInteger = (value: string | undefined, name: string, fallback: number): number => {
+const parsePositiveInteger = (
+  value: string | undefined,
+  name: string,
+  fallback: number,
+): number => {
   if (value === undefined) {
     return fallback;
   }
@@ -256,7 +282,11 @@ const parsePositiveInteger = (value: string | undefined, name: string, fallback:
   return parsed;
 };
 
-const readLongFlag = (argv: string[], index: number, flag: string): { value: string; consumed: number } => {
+const readLongFlag = (
+  argv: string[],
+  index: number,
+  flag: string,
+): { value: string; consumed: number } => {
   const arg = argv[index];
   if (arg === undefined) {
     throw new Error(`missing argument for ${flag}`);
@@ -382,19 +412,31 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     }
     if (arg === "--timeout-seconds" || arg.startsWith("--timeout-seconds=")) {
       const { value, consumed } = readLongFlag(argv, i, "--timeout-seconds");
-      result.timeoutSeconds = parsePositiveInteger(value, "--timeout-seconds", result.timeoutSeconds);
+      result.timeoutSeconds = parsePositiveInteger(
+        value,
+        "--timeout-seconds",
+        result.timeoutSeconds,
+      );
       i += consumed - 1;
       continue;
     }
     if (arg === "--max-output-bytes" || arg.startsWith("--max-output-bytes=")) {
       const { value, consumed } = readLongFlag(argv, i, "--max-output-bytes");
-      result.maxOutputBytes = parsePositiveInteger(value, "--max-output-bytes", result.maxOutputBytes);
+      result.maxOutputBytes = parsePositiveInteger(
+        value,
+        "--max-output-bytes",
+        result.maxOutputBytes,
+      );
       i += consumed - 1;
       continue;
     }
     if (arg === "--heartbeat-ms" || arg.startsWith("--heartbeat-ms=")) {
       const { value, consumed } = readLongFlag(argv, i, "--heartbeat-ms");
-      result.heartbeatIntervalMs = parsePositiveInteger(value, "--heartbeat-ms", result.heartbeatIntervalMs);
+      result.heartbeatIntervalMs = parsePositiveInteger(
+        value,
+        "--heartbeat-ms",
+        result.heartbeatIntervalMs,
+      );
       i += consumed - 1;
       continue;
     }
@@ -413,7 +455,11 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
   }
 
   if (RUN_COMMANDS.has(result.command)) {
-    if ((result.command === "build" || result.command === "plan") && explicitMode && result.mode !== result.command) {
+    if (
+      (result.command === "build" || result.command === "plan") &&
+      explicitMode &&
+      result.mode !== result.command
+    ) {
       throw new Error(`command ${result.command} cannot be combined with --mode ${result.mode}`);
     }
     if (result.command === "build" || result.command === "plan") {
@@ -505,8 +551,8 @@ const buildUsageLines = (): string[] => {
     "",
     renderSection("Quick Start"),
     "  bakudo",
-    "  bakudo plan \"inspect credential forwarding flow\"",
-    "  bakudo build \"add a failing test for sandbox review output\" --yes",
+    '  bakudo plan "inspect credential forwarding flow"',
+    '  bakudo build "add a failing test for sandbox review output" --yes',
     "",
     renderSection("Interactive Commands"),
     ...interactiveLines,
@@ -724,7 +770,9 @@ const formatUtcTimestamp = (value: string | undefined): string => {
   }
 
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toISOString().replace("T", " ").replace(".000Z", "Z");
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toISOString().replace("T", " ").replace(".000Z", "Z");
 };
 
 const nextActionHint = (reviewed: ReviewedTaskResult): string => {
@@ -744,13 +792,18 @@ const nextActionHint = (reviewed: ReviewedTaskResult): string => {
   }
 };
 
-const formatArtifacts = (artifacts: Awaited<ReturnType<ArtifactStore["listTaskArtifacts"]>>): string[] =>
+const formatArtifacts = (
+  artifacts: Awaited<ReturnType<ArtifactStore["listTaskArtifacts"]>>,
+): string[] =>
   artifacts.map((artifact) => `  - ${artifact.name} (${artifact.kind}) -> ${artifact.path}`);
 
 const taskModeLabel = (task: SessionTaskRecord): string =>
   task.request?.mode ?? (task.request?.assumeDangerousSkipPermissions ? "build" : "plan");
 
-const latestTaskRecord = (session: SessionRecord, taskId?: string): SessionTaskRecord | undefined => {
+const latestTaskRecord = (
+  session: SessionRecord,
+  taskId?: string,
+): SessionTaskRecord | undefined => {
   if (taskId !== undefined) {
     return session.tasks.find((task) => task.taskId === taskId);
   }
@@ -765,7 +818,10 @@ const executeTask = async (
   request: WorkerTaskSpec,
   args: HostCliArgs,
 ): Promise<ReviewedTaskResult> => {
-  await sessionStore.upsertTask(sessionId, recordTask(request, "queued", "queued for sandbox execution"));
+  await sessionStore.upsertTask(
+    sessionId,
+    recordTask(request, "queued", "queued for sandbox execution"),
+  );
   stdoutWrite(
     [
       "",
@@ -778,34 +834,38 @@ const executeTask = async (
       "",
     ].join("\n"),
   );
-  const execution = await runner.runTask(request, {
-    shell: args.shell,
-    timeoutSeconds: args.timeoutSeconds,
-    maxOutputBytes: args.maxOutputBytes,
-    heartbeatIntervalMs: args.heartbeatIntervalMs,
-    killGraceMs: args.killGraceMs,
-  }, {
-    onEvent: (event) => {
-      const stamp = event.timestamp.slice(11, 19);
-      const metrics = [
-        event.elapsedMs !== undefined ? `elapsed=${event.elapsedMs}ms` : "",
-        event.stdoutBytes !== undefined ? `stdout=${event.stdoutBytes}B` : "",
-        event.stderrBytes !== undefined ? `stderr=${event.stderrBytes}B` : "",
-        event.exitCode !== undefined && event.exitCode !== null ? `exit=${event.exitCode}` : "",
-        event.timedOut ? "timed_out=true" : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-      const detail = event.message ? ` ${event.message}` : "";
-      stdoutWrite(
-        `${dim(`[${stamp}]`)} ${statusBadge(event.status)} ${bold(event.kind)}${detail}${metrics ? ` ${dim(`(${metrics})`)}` : ""}\n`,
-      );
+  const execution = await runner.runTask(
+    request,
+    {
+      shell: args.shell,
+      timeoutSeconds: args.timeoutSeconds,
+      maxOutputBytes: args.maxOutputBytes,
+      heartbeatIntervalMs: args.heartbeatIntervalMs,
+      killGraceMs: args.killGraceMs,
     },
-    onWorkerError: (error) => {
-      const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
-      stdoutWrite(`[worker-error] ${message}\n`);
+    {
+      onEvent: (event) => {
+        const stamp = event.timestamp.slice(11, 19);
+        const metrics = [
+          event.elapsedMs !== undefined ? `elapsed=${event.elapsedMs}ms` : "",
+          event.stdoutBytes !== undefined ? `stdout=${event.stdoutBytes}B` : "",
+          event.stderrBytes !== undefined ? `stderr=${event.stderrBytes}B` : "",
+          event.exitCode !== undefined && event.exitCode !== null ? `exit=${event.exitCode}` : "",
+          event.timedOut ? "timed_out=true" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const detail = event.message ? ` ${event.message}` : "";
+        stdoutWrite(
+          `${dim(`[${stamp}]`)} ${statusBadge(event.status)} ${bold(event.kind)}${detail}${metrics ? ` ${dim(`(${metrics})`)}` : ""}\n`,
+        );
+      },
+      onWorkerError: (error) => {
+        const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
+        stdoutWrite(`[worker-error] ${message}\n`);
+      },
     },
-  });
+  );
 
   for (const event of execution.events) {
     await sessionStore.appendTaskEvent(sessionId, event);
@@ -902,7 +962,14 @@ const runNewSession = async (args: HostCliArgs): Promise<number> => {
     args,
   );
   await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask(sessionStore, artifactStore, runner, session.sessionId, request, args);
+  const reviewed = await executeTask(
+    sessionStore,
+    artifactStore,
+    runner,
+    session.sessionId,
+    request,
+    args,
+  );
 
   const finalSession = await sessionStore.saveSession({
     ...(await sessionStore.loadSession(session.sessionId))!,
@@ -957,7 +1024,14 @@ const resumeSession = async (args: HostCliArgs): Promise<number> => {
   };
 
   await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask(sessionStore, artifactStore, runner, session.sessionId, request, args);
+  const reviewed = await executeTask(
+    sessionStore,
+    artifactStore,
+    runner,
+    session.sessionId,
+    request,
+    args,
+  );
   const updated = await sessionStore.saveSession({
     ...(await sessionStore.loadSession(session.sessionId))!,
     status: sessionStatusFromReview(reviewed),
@@ -1000,7 +1074,7 @@ const printSessions = async (args: HostCliArgs): Promise<number> => {
       [
         renderSection("Sessions"),
         "  No sessions found yet.",
-        dim("  Try `bakudo plan \"inspect the repo\"` or start the shell with `bakudo`."),
+        dim('  Try `bakudo plan "inspect the repo"` or start the shell with `bakudo`.'),
       ].join("\n") + "\n",
     );
     return 0;
@@ -1042,8 +1116,15 @@ const printStatus = async (args: HostCliArgs): Promise<number> => {
   ];
   if (latestTask) {
     const sandboxTaskId =
-      typeof latestTask.metadata?.sandboxTaskId === "string" ? latestTask.metadata.sandboxTaskId : "n/a";
-    lines.push(renderKeyValue("Latest", `${latestTask.taskId} mode=${taskModeLabel(latestTask)} status=${latestTask.status}`));
+      typeof latestTask.metadata?.sandboxTaskId === "string"
+        ? latestTask.metadata.sandboxTaskId
+        : "n/a";
+    lines.push(
+      renderKeyValue(
+        "Latest",
+        `${latestTask.taskId} mode=${taskModeLabel(latestTask)} status=${latestTask.status}`,
+      ),
+    );
     lines.push(renderKeyValue("Sandbox", sandboxTaskId));
     if (reviewed) {
       lines.push(renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`));
@@ -1096,7 +1177,10 @@ const printSandbox = async (args: HostCliArgs): Promise<number> => {
   const aboxCommand = Array.isArray(task.metadata?.aboxCommand)
     ? (task.metadata?.aboxCommand as unknown[]).map(String).join(" ")
     : "n/a";
-  const artifacts = await new ArtifactStore(rootDir).listTaskArtifacts(session.sessionId, task.taskId);
+  const artifacts = await new ArtifactStore(rootDir).listTaskArtifacts(
+    session.sessionId,
+    task.taskId,
+  );
   stdoutWrite(
     [
       renderSection("Sandbox"),
@@ -1114,7 +1198,10 @@ const printSandbox = async (args: HostCliArgs): Promise<number> => {
       ),
       ...(artifacts.length > 0 ? ["Artifacts:", ...formatArtifacts(artifacts)] : []),
       ...(task.result?.summary ? [renderKeyValue("Summary", task.result.summary)] : []),
-      renderKeyValue("Next", "Use `bakudo review` for the host verdict or `bakudo logs` for the event stream."),
+      renderKeyValue(
+        "Next",
+        "Use `bakudo review` for the host verdict or `bakudo logs` for the event stream.",
+      ),
     ].join("\n") + "\n",
   );
   return 0;
@@ -1151,8 +1238,12 @@ const printReview = async (args: HostCliArgs): Promise<number> => {
       ...(typeof task.metadata?.sandboxTaskId === "string"
         ? [renderKeyValue("Sandbox", task.metadata.sandboxTaskId)]
         : []),
-      ...(task.result.exitCode === undefined ? [] : [renderKeyValue("Exit", String(task.result.exitCode))]),
-      ...(task.result.startedAt ? [renderKeyValue("Started", formatUtcTimestamp(task.result.startedAt))] : []),
+      ...(task.result.exitCode === undefined
+        ? []
+        : [renderKeyValue("Exit", String(task.result.exitCode))]),
+      ...(task.result.startedAt
+        ? [renderKeyValue("Started", formatUtcTimestamp(task.result.startedAt))]
+        : []),
       renderKeyValue("Finished", formatUtcTimestamp(task.result.finishedAt)),
       ...(dispatchArtifact ? [renderKeyValue("Dispatch", dispatchArtifact.path)] : []),
       ...(workerLog ? [renderKeyValue("Worker", workerLog.path)] : []),
@@ -1244,7 +1335,8 @@ class InteractiveDashboard {
     const focusTask = state.lastTaskId ?? "no task";
     const terminalWidth = runtimeProcess?.stdout?.columns ?? 100;
     const panelContent = this.panelLines.length > 0 ? this.panelLines : [dim("No panel content.")];
-    const activityContent = this.activityLines.length > 0 ? this.activityLines : [dim("No recent activity yet.")];
+    const activityContent =
+      this.activityLines.length > 0 ? this.activityLines : [dim("No recent activity yet.")];
     const summaryLines = [
       `Mode: ${stripAnsi(renderModeChip(state.currentMode))}`,
       `Approval: ${stripAnsi(renderApprovalChip(state.autoApprove))}`,
@@ -1261,7 +1353,11 @@ class InteractiveDashboard {
       body = mergeColumns(leftBox, rightBox);
     } else {
       body = [
-        ...renderBox(this.panelTitle, [...summaryLines, "", ...panelContent], Math.max(40, terminalWidth)),
+        ...renderBox(
+          this.panelTitle,
+          [...summaryLines, "", ...panelContent],
+          Math.max(40, terminalWidth),
+        ),
         "",
         ...renderBox("Recent Activity", activityContent, Math.max(40, terminalWidth)),
       ];
@@ -1381,7 +1477,10 @@ const resolveSessionScopedInteractiveCommand = (
   return { argv: [command, ...args] };
 };
 
-const resolveInteractiveInput = (line: string, state: InteractiveShellState): InteractiveResolution => {
+const resolveInteractiveInput = (
+  line: string,
+  state: InteractiveShellState,
+): InteractiveResolution => {
   if (!line.startsWith("/")) {
     return buildInteractiveRunResolution("run", line, state);
   }
@@ -1404,7 +1503,13 @@ const resolveInteractiveInput = (line: string, state: InteractiveShellState): In
           }
         : { argv: ["status"] };
   }
-  if (command === "tasks" || command === "review" || command === "logs" || command === "sandbox" || command === "resume") {
+  if (
+    command === "tasks" ||
+    command === "review" ||
+    command === "logs" ||
+    command === "sandbox" ||
+    command === "resume"
+  ) {
     return resolveSessionScopedInteractiveCommand(command, args, state);
   }
   if (command === "sessions" || command === "help" || command === "init") {
@@ -1529,7 +1634,9 @@ const runInteractiveShell = async (): Promise<number> => {
           continue;
         }
         state.currentMode = nextMode;
-        dashboard.setPanel("Mode", [renderKeyValue("Mode", `${renderModeChip(state.currentMode)} selected`)]);
+        dashboard.setPanel("Mode", [
+          renderKeyValue("Mode", `${renderModeChip(state.currentMode)} selected`),
+        ]);
         dashboard.note(`Mode changed to ${state.currentMode}.`);
         dashboard.render();
         continue;
@@ -1561,7 +1668,9 @@ const runInteractiveShell = async (): Promise<number> => {
           parsed.command === "resume";
         const recordActivity = liveCapture;
         const capture = createDashboardCapture(dashboard, { live: liveCapture, recordActivity });
-        const code = await withCapturedStdout(capture.writer, async () => dispatchHostCommand(parsed));
+        const code = await withCapturedStdout(capture.writer, async () =>
+          dispatchHostCommand(parsed),
+        );
         capture.flush();
         const panelTitle =
           parsed.command === "run" || parsed.command === "build" || parsed.command === "plan"

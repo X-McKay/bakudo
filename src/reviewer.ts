@@ -1,5 +1,9 @@
 import type { TaskResult } from "./protocol.js";
-import { classifyReviewedOutcome, type ReviewClassification, type ReviewClassifierHints } from "./resultClassifier.js";
+import {
+  classifyReviewedOutcome,
+  type ReviewClassification,
+  type ReviewClassifierHints,
+} from "./resultClassifier.js";
 
 export type ReviewedTaskResult = ReviewClassification & {
   taskId: string;

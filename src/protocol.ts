@@ -79,9 +79,8 @@ export const taskProgressEventKinds: readonly TaskProgressEventKind[] = [
 export const isTerminalTaskStatus = (status: TaskStatus): status is TerminalTaskStatus =>
   terminalTaskStatuses.includes(status as TerminalTaskStatus);
 
-export const isTaskProgressEventKind = (
-  kind: string,
-): kind is TaskProgressEventKind => taskProgressEventKinds.includes(kind as TaskProgressEventKind);
+export const isTaskProgressEventKind = (kind: string): kind is TaskProgressEventKind =>
+  taskProgressEventKinds.includes(kind as TaskProgressEventKind);
 
 export const createTaskSessionKey = (sessionId: string, taskId: string): string =>
   `${sessionId}:${taskId}`;

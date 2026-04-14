@@ -4,7 +4,12 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parseHostArgs, reviewedOutcomeExitCode, runHostCli, shouldUseHostCli } from "../../src/hostCli.js";
+import {
+  parseHostArgs,
+  reviewedOutcomeExitCode,
+  runHostCli,
+  shouldUseHostCli,
+} from "../../src/hostCli.js";
 
 test("host cli parses run commands and common overrides", () => {
   const args = parseHostArgs([

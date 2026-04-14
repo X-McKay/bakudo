@@ -137,12 +137,10 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
 
     const sessions = await store.listSessions();
 
-    assert.deepEqual(sessions.map((session) => session.sessionId), [
-      "session/latest",
-      "session/tie-a",
-      "session/tie-z",
-      "session/old",
-    ]);
+    assert.deepEqual(
+      sessions.map((session) => session.sessionId),
+      ["session/latest", "session/tie-a", "session/tie-z", "session/old"],
+    );
     assert.equal(sessions[0]?.updatedAt, "2026-04-13T12:30:00.000Z");
     assert.equal(sessions[1]?.updatedAt, "2026-04-13T11:00:00.000Z");
     assert.equal(sessions[2]?.updatedAt, "2026-04-13T11:00:00.000Z");

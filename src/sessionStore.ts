@@ -30,7 +30,8 @@ const EVENTS_FILE_NAME = "events.ndjson";
 const ARTIFACTS_DIR_NAME = "artifacts";
 const ARTIFACTS_FILE_NAME = "index.json";
 
-const toResolvedPath = (rootDir: string): string => (isAbsolute(rootDir) ? rootDir : resolve(rootDir));
+const toResolvedPath = (rootDir: string): string =>
+  isAbsolute(rootDir) ? rootDir : resolve(rootDir);
 
 export const sanitizePathSegment = (segment: string): string =>
   segment.replace(/[\\/:\u0000<>*?"|]/g, "_");
@@ -163,7 +164,9 @@ export class SessionStore {
         }),
     );
 
-    return sessions.filter((session): session is SessionRecord => session !== null).sort(compareSessionRecordsForListing);
+    return sessions
+      .filter((session): session is SessionRecord => session !== null)
+      .sort(compareSessionRecordsForListing);
   }
 
   public async saveSession(record: SessionRecord): Promise<SessionRecord> {
@@ -172,7 +175,10 @@ export class SessionStore {
     return normalized;
   }
 
-  public async upsertTask(sessionId: string, taskRecord: SessionTaskRecord): Promise<SessionRecord> {
+  public async upsertTask(
+    sessionId: string,
+    taskRecord: SessionTaskRecord,
+  ): Promise<SessionRecord> {
     const session = await this.loadSession(sessionId);
     if (session === null) {
       throw new Error(`cannot upsert task for missing session: ${sessionId}`);

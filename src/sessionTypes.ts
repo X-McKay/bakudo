@@ -44,9 +44,8 @@ export const sessionTerminalStatuses: readonly TerminalSessionStatus[] = [
   "cancelled",
 ] as const;
 
-export const isTerminalSessionStatus = (
-  status: SessionStatus,
-): status is TerminalSessionStatus => sessionTerminalStatuses.includes(status as TerminalSessionStatus);
+export const isTerminalSessionStatus = (status: SessionStatus): status is TerminalSessionStatus =>
+  sessionTerminalStatuses.includes(status as TerminalSessionStatus);
 
 export const createSessionTaskKey = (sessionId: string, taskId: string): string =>
   `${BAKUDO_PROTOCOL_SCHEMA_VERSION}:${sessionId}:${taskId}`;

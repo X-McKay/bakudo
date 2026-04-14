@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
 
-import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskProgressEvent, type TaskRequest } from "./protocol.js";
+import {
+  BAKUDO_PROTOCOL_SCHEMA_VERSION,
+  type TaskProgressEvent,
+  type TaskRequest,
+} from "./protocol.js";
 
 export const WORKER_EVENT_PREFIX = "BAKUDO_WORKER_EVENT";
 export const WORKER_RESULT_PREFIX = "BAKUDO_WORKER_RESULT";
@@ -106,7 +110,8 @@ const decodeJson = (encoded: string): unknown => {
 
 const makeCapture = (): ByteCapture => ({ chunks: [], bytes: 0, truncated: false });
 
-const captureToString = (capture: ByteCapture): string => Buffer.concat(capture.chunks, capture.bytes).toString("utf8");
+const captureToString = (capture: ByteCapture): string =>
+  Buffer.concat(capture.chunks, capture.bytes).toString("utf8");
 
 const formatMessage = (goal: string): string => {
   const trimmed = goal.trim().replace(/\s+/g, " ");
@@ -179,21 +184,28 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
     assumeDangerousSkipPermissions,
     ...(typeof streamId === "string" && streamId.trim().length > 0 ? { streamId } : {}),
     ...(typeof cwd === "string" && cwd.trim().length > 0 ? { cwd } : {}),
-    ...(typeof timeoutSeconds === "number" && Number.isFinite(timeoutSeconds) ? { timeoutSeconds } : {}),
-    ...(typeof maxOutputBytes === "number" && Number.isFinite(maxOutputBytes) ? { maxOutputBytes } : {}),
+    ...(typeof timeoutSeconds === "number" && Number.isFinite(timeoutSeconds)
+      ? { timeoutSeconds }
+      : {}),
+    ...(typeof maxOutputBytes === "number" && Number.isFinite(maxOutputBytes)
+      ? { maxOutputBytes }
+      : {}),
     ...(typeof heartbeatIntervalMs === "number" && Number.isFinite(heartbeatIntervalMs)
       ? { heartbeatIntervalMs }
       : {}),
   };
 };
 
-export const decodeWorkerTaskSpec = (encoded: string): WorkerTaskSpec => validateTaskSpec(decodeJson(encoded));
+export const decodeWorkerTaskSpec = (encoded: string): WorkerTaskSpec =>
+  validateTaskSpec(decodeJson(encoded));
 
 export const encodeWorkerEnvelope = (prefix: string, payload: unknown): string =>
   `${prefix} ${JSON.stringify(payload)}`;
 
 export const parseWorkerTaskSpec = (argv: string[]): WorkerTaskSpec => {
-  const specArg = argv.find((arg) => arg === "--task-spec-b64" || arg.startsWith("--task-spec-b64="));
+  const specArg = argv.find(
+    (arg) => arg === "--task-spec-b64" || arg.startsWith("--task-spec-b64="),
+  );
   if (!specArg) {
     throw new Error("missing required argument --task-spec-b64");
   }
@@ -212,8 +224,10 @@ export const parseWorkerTaskSpec = (argv: string[]): WorkerTaskSpec => {
   return decodeWorkerTaskSpec(encoded);
 };
 
-export const workerResultStatusFromExitCode = (exitCode: number | null, timedOut: boolean): WorkerTaskResult["status"] =>
-  exitCode === 0 && !timedOut ? "succeeded" : "failed";
+export const workerResultStatusFromExitCode = (
+  exitCode: number | null,
+  timedOut: boolean,
+): WorkerTaskResult["status"] => (exitCode === 0 && !timedOut ? "succeeded" : "failed");
 
 export const runWorkerTask = async (
   spec: WorkerTaskSpec,
@@ -237,7 +251,10 @@ export const runWorkerTask = async (
     options.heartbeatIntervalMs ?? spec.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
     DEFAULT_HEARTBEAT_INTERVAL_MS,
   );
-  const killGraceMs = clampPositiveInteger(options.killGraceMs ?? DEFAULT_KILL_GRACE_MS, DEFAULT_KILL_GRACE_MS);
+  const killGraceMs = clampPositiveInteger(
+    options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+    DEFAULT_KILL_GRACE_MS,
+  );
   const cwd = spec.cwd ?? runtimeProcess.cwd?.() ?? ".";
   const startedAt = nowIso(options.now);
 
@@ -261,19 +278,33 @@ export const runWorkerTask = async (
 
   const heartbeat = setInterval(() => {
     const elapsedMs = Date.now() - Date.parse(startedAt);
-    emitProgress(emit, spec, "task.progress", "running", `running for ${Math.max(0, elapsedMs)}ms`, {
-      elapsedMs: Math.max(0, elapsedMs),
-      stdoutBytes: stdoutCapture.bytes,
-      stderrBytes: stderrCapture.bytes,
-    });
+    emitProgress(
+      emit,
+      spec,
+      "task.progress",
+      "running",
+      `running for ${Math.max(0, elapsedMs)}ms`,
+      {
+        elapsedMs: Math.max(0, elapsedMs),
+        stdoutBytes: stdoutCapture.bytes,
+        stderrBytes: stderrCapture.bytes,
+      },
+    );
   }, heartbeatIntervalMs);
   heartbeat.unref?.();
 
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
-    emitProgress(emit, spec, "task.progress", "running", `timeout after ${timeoutSeconds}s, stopping command`, {
-      timedOut: true,
-    });
+    emitProgress(
+      emit,
+      spec,
+      "task.progress",
+      "running",
+      `timeout after ${timeoutSeconds}s, stopping command`,
+      {
+        timedOut: true,
+      },
+    );
     child.kill("SIGTERM");
     const forceKill = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) {
