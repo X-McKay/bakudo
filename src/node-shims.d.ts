@@ -34,4 +34,5 @@ declare const process: {
   stdout: { write(data: string): void };
   stderr: { write(data: string): void };
   exitCode: number;
+  env: Record<string, string | undefined>;
 };
