@@ -38,7 +38,7 @@ for (const [label, render] of renderers) {
   test(`${label} renderer: header line includes Bakudo and mode chip`, () => {
     const lines = render(buildFrame()).map(stripAnsi);
     assert.ok(lines[0]?.includes("Bakudo"), `expected Bakudo in: ${lines[0]}`);
-    assert.ok(lines[0]?.includes("BUILD"), `expected BUILD in: ${lines[0]}`);
+    assert.ok(lines[0]?.includes("STANDARD"), `expected STANDARD in: ${lines[0]}`);
   });
 
   test(`${label} renderer: each transcript item kind renders identifying text`, () => {

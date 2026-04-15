@@ -1,4 +1,5 @@
 import type { TaskMode } from "../protocol.js";
+import type { ComposerMode } from "./appState.js";
 
 const runtimeProcess = (
   globalThis as unknown as {
@@ -50,8 +51,19 @@ export const renderKeyValue = (label: string, value: string): string =>
 export const renderCommandHint = (command: string, description: string): string =>
   `${paint(command.padEnd(28), ANSI.bold, ANSI.magenta)} ${dim(description)}`;
 
-export const renderModeChip = (mode: TaskMode): string =>
-  mode === "build" ? paint("BUILD", ANSI.bold, ANSI.yellow) : paint("PLAN", ANSI.bold, ANSI.cyan);
+export const renderModeChip = (mode: TaskMode | ComposerMode): string => {
+  if (mode === "plan") {
+    return paint("PLAN", ANSI.bold, ANSI.cyan);
+  }
+  if (mode === "autopilot") {
+    return paint("AUTOPILOT", ANSI.bold, ANSI.green);
+  }
+  if (mode === "standard") {
+    return paint("STANDARD", ANSI.bold, ANSI.yellow);
+  }
+  // legacy TaskMode "build"
+  return paint("BUILD", ANSI.bold, ANSI.yellow);
+};
 
 export const renderApprovalChip = (autoApprove: boolean): string =>
   autoApprove ? paint("AUTO", ANSI.bold, ANSI.green) : paint("PROMPT", ANSI.bold, ANSI.magenta);

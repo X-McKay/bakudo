@@ -68,15 +68,33 @@ test("saveHostState omits absent optional fields", async () => {
   try {
     await saveHostState(repoRoot, {
       schemaVersion: HOST_STATE_SCHEMA_VERSION,
-      lastUsedMode: "build",
+      lastUsedMode: "standard",
       autoApprove: false,
     });
     const loaded = await loadHostState(repoRoot);
     assert.ok(loaded);
     assert.equal(loaded.lastActiveSessionId, undefined);
     assert.equal(loaded.lastActiveTurnId, undefined);
-    assert.equal(loaded.lastUsedMode, "build");
+    assert.equal(loaded.lastUsedMode, "standard");
     assert.equal(loaded.autoApprove, false);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadHostState migrates legacy 'build' mode to 'standard'", async () => {
+  const repoRoot = await createTempRepo();
+  try {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(join(repoRoot, ".bakudo"), { recursive: true });
+    await writeFile(
+      join(repoRoot, ".bakudo", "host-state.json"),
+      JSON.stringify({ schemaVersion: 1, lastUsedMode: "build", autoApprove: false }),
+      "utf8",
+    );
+    const loaded = await loadHostState(repoRoot);
+    assert.ok(loaded);
+    assert.equal(loaded.lastUsedMode, "standard");
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }

@@ -15,14 +15,36 @@ test("reducer: set_mode updates composer.mode and preserves rest of state", () =
 
 test("reducer: set_mode returns same reference when mode already matches", () => {
   const state = initialHostAppState();
-  const next = reduceHost(state, { type: "set_mode", mode: "build" });
+  const next = reduceHost(state, { type: "set_mode", mode: "standard" });
   assert.strictEqual(next, state);
 });
 
-test("reducer: set_auto_approve toggles flag", () => {
+test("reducer: set_mode autopilot derives autoApprove=true", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, { type: "set_mode", mode: "autopilot" });
+  assert.equal(next.composer.mode, "autopilot");
+  assert.equal(next.composer.autoApprove, true);
+});
+
+test("reducer: cycle_mode cycles standard -> plan -> autopilot -> standard", () => {
+  const s0 = initialHostAppState();
+  assert.equal(s0.composer.mode, "standard");
+  const s1 = reduceHost(s0, { type: "cycle_mode" });
+  assert.equal(s1.composer.mode, "plan");
+  const s2 = reduceHost(s1, { type: "cycle_mode" });
+  assert.equal(s2.composer.mode, "autopilot");
+  assert.equal(s2.composer.autoApprove, true);
+  const s3 = reduceHost(s2, { type: "cycle_mode" });
+  assert.equal(s3.composer.mode, "standard");
+  assert.equal(s3.composer.autoApprove, false);
+});
+
+test("reducer: set_auto_approve is a no-op (derived from mode) but emits a notice", () => {
   const state = initialHostAppState();
   const next = reduceHost(state, { type: "set_auto_approve", value: true });
-  assert.equal(next.composer.autoApprove, true);
+  assert.equal(next.composer.autoApprove, false);
+  assert.equal(next.notices.length, 1);
+  assert.match(next.notices[0]!, /set_auto_approve ignored/);
 });
 
 test("reducer: set_composer_text and clear_composer_text mutate only composer.text", () => {
@@ -31,7 +53,7 @@ test("reducer: set_composer_text and clear_composer_text mutate only composer.te
   assert.equal(typed.composer.text, "hello");
   const cleared = reduceHost(typed, { type: "clear_composer_text" });
   assert.equal(cleared.composer.text, "");
-  assert.equal(cleared.composer.mode, "build");
+  assert.equal(cleared.composer.mode, "standard");
 });
 
 test("reducer: set_active_session assigns id and turn", () => {
@@ -109,7 +131,7 @@ test("reducer: does not mutate a frozen input state", () => {
   Object.freeze(state.inspect);
   Object.freeze(state.notices);
   const next = reduceHost(state, { type: "set_mode", mode: "plan" });
-  assert.equal(state.composer.mode, "build");
+  assert.equal(state.composer.mode, "standard");
   assert.equal(next.composer.mode, "plan");
 });
 

@@ -1,13 +1,15 @@
-import type {
-  ComposerMode,
-  HostAppState,
-  HostOverlay,
-  HostScreen,
-  InspectTab,
+import {
+  deriveAutoApprove,
+  type ComposerMode,
+  type HostAppState,
+  type HostOverlay,
+  type HostScreen,
+  type InspectTab,
 } from "./appState.js";
 
 export type HostAction =
   | { type: "set_mode"; mode: ComposerMode }
+  | { type: "cycle_mode" }
   | { type: "set_auto_approve"; value: boolean }
   | { type: "set_composer_text"; text: string }
   | { type: "clear_composer_text" }
@@ -75,18 +77,36 @@ const updateInspect = (
   return { ...state, inspect };
 };
 
+const COMPOSER_MODE_CYCLE: readonly ComposerMode[] = ["standard", "plan", "autopilot"];
+
+const nextComposerMode = (current: ComposerMode): ComposerMode => {
+  const index = COMPOSER_MODE_CYCLE.indexOf(current);
+  const nextIndex = index === -1 ? 0 : (index + 1) % COMPOSER_MODE_CYCLE.length;
+  return COMPOSER_MODE_CYCLE[nextIndex]!;
+};
+
+const setMode = (state: HostAppState, mode: ComposerMode): HostAppState => {
+  const autoApprove = deriveAutoApprove(mode);
+  if (state.composer.mode === mode && state.composer.autoApprove === autoApprove) {
+    return state;
+  }
+  return { ...state, composer: { ...state.composer, mode, autoApprove } };
+};
+
 export const reduceHost = (state: HostAppState, action: HostAction): HostAppState => {
   switch (action.type) {
     case "set_mode":
-      if (state.composer.mode === action.mode) {
-        return state;
-      }
-      return { ...state, composer: { ...state.composer, mode: action.mode } };
-    case "set_auto_approve":
-      if (state.composer.autoApprove === action.value) {
-        return state;
-      }
-      return { ...state, composer: { ...state.composer, autoApprove: action.value } };
+      return setMode(state, action.mode);
+    case "cycle_mode":
+      return setMode(state, nextComposerMode(state.composer.mode));
+    case "set_auto_approve": {
+      // autoApprove is derived from mode. Dispatching this action emits a notice
+      // so callers notice the change at debug time; state is unchanged.
+      const notice = `set_auto_approve ignored; derive from mode === "autopilot" (was ${state.composer.autoApprove}, requested ${action.value})`;
+      return state.composer.autoApprove === action.value
+        ? state
+        : { ...state, notices: [...state.notices, notice] };
+    }
     case "set_composer_text":
       if (state.composer.text === action.text) {
         return state;

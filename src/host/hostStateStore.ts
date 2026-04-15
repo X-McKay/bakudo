@@ -27,15 +27,17 @@ const ensureParentDir = async (filePath: string): Promise<void> => {
 };
 
 const isComposerMode = (value: unknown): value is ComposerMode =>
-  value === "build" || value === "plan";
+  value === "standard" || value === "plan" || value === "autopilot";
 
 const normalizeMode = (value: unknown): ComposerMode => {
   if (isComposerMode(value)) {
     return value;
   }
-  // Accept forward-compat strings (e.g. "standard"/"autopilot") without crashing;
-  // the reducer will translate them when the rename lands in commit 3.
-  return "build";
+  // Legacy TaskMode values from older host-state.json files.
+  if (value === "build") {
+    return "standard";
+  }
+  return "standard";
 };
 
 export const loadHostState = async (repoRoot: string): Promise<HostStateRecord | null> => {
@@ -72,7 +74,7 @@ export const loadHostState = async (repoRoot: string): Promise<HostStateRecord |
   const record: HostStateRecord = {
     schemaVersion: HOST_STATE_SCHEMA_VERSION,
     lastUsedMode: mode,
-    autoApprove: raw.autoApprove === true,
+    autoApprove: raw.autoApprove === true || mode === "autopilot",
   };
   if (typeof raw.lastActiveSessionId === "string" && raw.lastActiveSessionId.length > 0) {
     record.lastActiveSessionId = raw.lastActiveSessionId;

@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 
-import { createSessionTaskKey } from "../sessionTypes.js";
 import { initialHostAppState } from "./appState.js";
+import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
 import {
   HOST_STATE_SCHEMA_VERSION,
   loadHostState,
@@ -19,6 +18,15 @@ import {
   type InteractiveShellState,
   type TickDeps,
 } from "./interactiveRenderLoop.js";
+import {
+  buildInteractiveRunResolution,
+  createInteractiveSessionIdentity,
+  rememberInteractiveContext,
+  renderPrompt,
+  resolveInteractiveInput,
+  resolveSessionScopedInteractiveCommand,
+  sessionPromptLabel,
+} from "./interactiveResolvers.js";
 import { repoRootFor, runNewSession, resumeSession } from "./orchestration.js";
 import { type HostCliArgs, parseHostArgs, tokenizeCommand } from "./parsing.js";
 import {
@@ -39,130 +47,14 @@ import {
 import { printUsage } from "./usage.js";
 
 export type { InteractiveResolution, InteractiveShellState } from "./interactiveRenderLoop.js";
-
-export const createInteractiveSessionIdentity = (): { sessionId: string; taskId: string } => {
-  const sessionId = `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  return {
-    sessionId,
-    taskId: createSessionTaskKey(sessionId, "task-1"),
-  };
-};
-
-export const buildInteractiveRunResolution = (
-  command: "run" | "build" | "plan",
-  goal: string,
-  state: InteractiveShellState,
-): InteractiveResolution => {
-  const trimmedGoal = goal.trim();
-  const { sessionId, taskId } = createInteractiveSessionIdentity();
-  const argv: string[] = [command];
-  if (command === "run") {
-    argv.push("--mode", state.currentMode);
-  }
-  if (state.autoApprove) {
-    argv.push("--yes");
-  }
-  argv.push("--session-id", sessionId, trimmedGoal);
-  return { argv, sessionId, taskId };
-};
-
-export const resolveSessionScopedInteractiveCommand = (
-  command: "status" | "tasks" | "review" | "logs" | "sandbox" | "resume",
-  args: string[],
-  state: InteractiveShellState,
-): InteractiveResolution => {
-  if (args[0]) {
-    return {
-      argv: [command, ...args],
-      sessionId: args[0],
-      ...(args[1] ? { taskId: args[1] } : {}),
-    };
-  }
-  if (state.lastSessionId) {
-    const trailingTask = state.lastTaskId ? [state.lastTaskId] : [];
-    return {
-      argv: [command, state.lastSessionId, ...trailingTask],
-      sessionId: state.lastSessionId,
-      ...(state.lastTaskId ? { taskId: state.lastTaskId } : {}),
-    };
-  }
-  return { argv: [command, ...args] };
-};
-
-export const resolveInteractiveInput = (
-  line: string,
-  state: InteractiveShellState,
-): InteractiveResolution => {
-  if (!line.startsWith("/")) {
-    return buildInteractiveRunResolution("run", line, state);
-  }
-
-  const [command = "", ...args] = tokenizeCommand(line.slice(1));
-  if (command === "build" || command === "plan") {
-    return buildInteractiveRunResolution(command, args.join(" "), state);
-  }
-  if (command === "run") {
-    return buildInteractiveRunResolution("run", args.join(" "), state);
-  }
-  if (command === "status") {
-    return args[0]
-      ? { argv: ["status", args[0]], sessionId: args[0] }
-      : state.lastSessionId
-        ? {
-            argv: ["status", state.lastSessionId],
-            sessionId: state.lastSessionId,
-            ...(state.lastTaskId ? { taskId: state.lastTaskId } : {}),
-          }
-        : { argv: ["status"] };
-  }
-  if (
-    command === "tasks" ||
-    command === "review" ||
-    command === "logs" ||
-    command === "sandbox" ||
-    command === "resume"
-  ) {
-    return resolveSessionScopedInteractiveCommand(command, args, state);
-  }
-  if (command === "sessions" || command === "help" || command === "init") {
-    return { argv: [command, ...(state.autoApprove && command === "init" ? ["--yes"] : [])] };
-  }
-
-  return { argv: [command, ...args] };
-};
-
-export const rememberInteractiveContext = (
-  state: InteractiveShellState,
-  args: HostCliArgs,
-  resolution: InteractiveResolution,
-): void => {
-  if (resolution.sessionId) {
-    state.lastSessionId = resolution.sessionId;
-  } else if (args.sessionId) {
-    state.lastSessionId = args.sessionId;
-  }
-
-  if (resolution.taskId) {
-    state.lastTaskId = resolution.taskId;
-  } else if (args.taskId) {
-    state.lastTaskId = args.taskId;
-  }
-};
-
-export const sessionPromptLabel = (sessionId: string | undefined): string => {
-  if (!sessionId) {
-    return "no-session";
-  }
-
-  const parts = sessionId.split("-");
-  return parts.at(-1) ?? sessionId;
-};
-
-export const renderPrompt = (state: InteractiveShellState): string => {
-  const session = sessionPromptLabel(state.lastSessionId);
-  const mode = state.currentMode === "build" ? "BUILD" : "PLAN";
-  const approval = state.autoApprove ? "AUTO" : "PROMPT";
-  return `bakudo ${mode} ${approval} ${session}> `;
+export {
+  buildInteractiveRunResolution,
+  createInteractiveSessionIdentity,
+  rememberInteractiveContext,
+  renderPrompt,
+  resolveInteractiveInput,
+  resolveSessionScopedInteractiveCommand,
+  sessionPromptLabel,
 };
 
 export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
@@ -214,14 +106,7 @@ const applyHostStateToDeps = (deps: TickDeps, record: HostStateRecord): void => 
   if (record.lastActiveTurnId) {
     deps.shellState.lastTaskId = record.lastActiveTurnId;
   }
-  deps.appState = reduceHost(deps.appState, {
-    type: "set_mode",
-    mode: deps.shellState.currentMode,
-  });
-  deps.appState = reduceHost(deps.appState, {
-    type: "set_auto_approve",
-    value: deps.shellState.autoApprove,
-  });
+  deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: record.lastUsedMode });
   if (record.lastActiveSessionId) {
     deps.appState = reduceHost(deps.appState, {
       type: "set_active_session",
@@ -296,6 +181,23 @@ const applyDispatchResult = (result: SessionDispatchResult, deps: TickDeps): voi
   });
 };
 
+type ExecDeps = {
+  resolveInput: typeof resolveInteractiveInput;
+  parse: typeof parseHostArgs;
+  dispatch: typeof dispatchHostCommand;
+  remember: typeof rememberInteractiveContext;
+};
+
+const executePromptFromResolution = async (
+  resolution: InteractiveResolution,
+  line: string,
+  deps: TickDeps,
+  execDeps: ExecDeps,
+): Promise<void> => {
+  const wrapped: ExecDeps = { ...execDeps, resolveInput: () => resolution };
+  await executePrompt(line, deps, wrapped);
+};
+
 export const runInteractiveShell = async (): Promise<number> => {
   const input = runtimeIo.stdin;
   const output = runtimeIo.stdout;
@@ -306,28 +208,23 @@ export const runInteractiveShell = async (): Promise<number> => {
 
   const repoRoot = repoRootFor(undefined);
   const rl = createInterface({ input, output });
-  const shellState: InteractiveShellState = {
-    currentMode: "build",
-    autoApprove: false,
-  };
+  const shellState: InteractiveShellState = { currentMode: "build", autoApprove: false };
   const transcript: TranscriptItem[] = [];
-  const deps: TickDeps = {
-    shellState,
-    transcript,
-    appState: initialHostAppState(),
-  };
+  const deps: TickDeps = { shellState, transcript, appState: initialHostAppState() };
 
   const prior = await loadHostState(repoRoot);
   if (prior !== null) {
     applyHostStateToDeps(deps, prior);
   }
 
-  const execDeps = {
+  const execDeps: ExecDeps = {
     resolveInput: resolveInteractiveInput,
     parse: parseHostArgs,
     dispatch: dispatchHostCommand,
     remember: rememberInteractiveContext,
   };
+
+  const registry = buildDefaultCommandRegistry();
 
   const persistHostState = async (): Promise<void> => {
     await saveHostState(repoRoot, buildHostStateFromDeps(deps));
@@ -338,7 +235,7 @@ export const runInteractiveShell = async (): Promise<number> => {
     while (true) {
       let answer: string;
       try {
-        answer = await rl.question(renderPrompt(shellState));
+        answer = await rl.question("");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.toLowerCase().includes("readline was closed")) {
@@ -353,26 +250,42 @@ export const runInteractiveShell = async (): Promise<number> => {
       if (line === "/quit" || line === "/exit") {
         return 0;
       }
-      if (handleControlCommand(line, deps)) {
+
+      transcript.push({ kind: "user", text: line });
+      const dispatched = await registry.dispatch(line, deps);
+      if (dispatched.kind === "handled") {
         await persistHostState();
         tickRender(deps);
         continue;
       }
 
-      transcript.push({ kind: "user", text: line });
-      const controllerRoute = routePromptToController(line);
-      if (controllerRoute !== null) {
-        try {
-          const result = await dispatchThroughController(
-            controllerRoute.goal,
-            deps,
-            controllerRoute.overrideMode,
-          );
-          applyDispatchResult(result, deps);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
+      if (dispatched.kind === "unknown") {
+        const controllerRoute = routePromptToController(line);
+        if (controllerRoute !== null) {
+          try {
+            const result = await dispatchThroughController(
+              controllerRoute.goal,
+              deps,
+              controllerRoute.overrideMode,
+            );
+            applyDispatchResult(result, deps);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
+          }
+          await persistHostState();
+          tickRender(deps);
+          continue;
         }
+        if (handleControlCommand(line, deps)) {
+          await persistHostState();
+          tickRender(deps);
+          continue;
+        }
+      }
+
+      if (dispatched.kind === "fallthrough") {
+        await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
       } else {
         await executePrompt(line, deps, execDeps);
       }

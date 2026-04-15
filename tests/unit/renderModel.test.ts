@@ -54,15 +54,19 @@ test("selectRenderFrame: footer hints differ based on activeSessionId presence",
 });
 
 test("selectRenderFrame: composer fields mirror state", () => {
-  const state = reduceHost(reduceHost(initialHostAppState(), { type: "set_mode", mode: "plan" }), {
-    type: "set_auto_approve",
-    value: true,
-  });
-  const frame = selectRenderFrame({ state, transcript: [] });
+  const planned = reduceHost(initialHostAppState(), { type: "set_mode", mode: "plan" });
+  const frame = selectRenderFrame({ state: planned, transcript: [] });
   assert.equal(frame.composer.mode, "plan");
-  assert.equal(frame.composer.autoApprove, true);
+  assert.equal(frame.composer.autoApprove, false);
   assert.equal(frame.composer.placeholder, "");
   assert.equal(frame.header.mode, "plan");
+});
+
+test("selectRenderFrame: composer.autoApprove reflects autopilot mode", () => {
+  const auto = reduceHost(initialHostAppState(), { type: "set_mode", mode: "autopilot" });
+  const frame = selectRenderFrame({ state: auto, transcript: [] });
+  assert.equal(frame.composer.mode, "autopilot");
+  assert.equal(frame.composer.autoApprove, true);
 });
 
 test("selectRenderFrame: header includes repoLabel when provided", () => {

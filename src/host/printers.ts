@@ -13,6 +13,7 @@ import {
   renderSection,
   yellow,
 } from "./ansi.js";
+import { formatInspectReview, formatInspectSandbox } from "./inspectFormatter.js";
 import { stdoutWrite } from "./io.js";
 import { storageRootFor } from "./orchestration.js";
 import type { HostCliArgs } from "./parsing.js";
@@ -255,39 +256,15 @@ export const printSandbox = async (args: HostCliArgs): Promise<number> => {
   if (attempt === undefined) {
     throw new Error(`no attempt found for session ${session.sessionId}`);
   }
-
-  const sandboxTaskId =
-    typeof attempt.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
-  const aboxCommand = Array.isArray(attempt.metadata?.aboxCommand)
-    ? (attempt.metadata?.aboxCommand as unknown[]).map(String).join(" ")
-    : "n/a";
   const artifacts = await new ArtifactStore(rootDir).listTaskArtifacts(
     session.sessionId,
     attempt.attemptId,
   );
-  stdoutWrite(
-    [
-      renderSection("Sandbox"),
-      renderKeyValue("Session", session.sessionId),
-      renderKeyValue("Task", attempt.attemptId),
-      renderKeyValue("Mode", attemptModeLabel(attempt)),
-      renderKeyValue("Status", `${statusBadge(attempt.status)} ${attempt.status}`),
-      renderKeyValue("Sandbox", sandboxTaskId),
-      renderKeyValue("ABox", aboxCommand),
-      renderKeyValue(
-        "Safety",
-        attempt.request?.assumeDangerousSkipPermissions
-          ? "dangerous-skip-permissions enabled in sandbox worker"
-          : "host requested safer planning mode",
-      ),
-      ...(artifacts.length > 0 ? ["Artifacts:", ...formatArtifacts(artifacts)] : []),
-      ...(attempt.result?.summary ? [renderKeyValue("Summary", attempt.result.summary)] : []),
-      renderKeyValue(
-        "Next",
-        "Use `bakudo review` for the host verdict or `bakudo logs` for the event stream.",
-      ),
-    ].join("\n") + "\n",
+  const lines = formatInspectSandbox({ session, attempt, artifacts });
+  lines.push(
+    "Next       Use `bakudo review` for the host verdict or `bakudo logs` for the event stream.",
   );
+  stdoutWrite(`${renderSection("Sandbox")}\n${lines.slice(1).join("\n")}\n`);
   return 0;
 };
 
@@ -303,37 +280,14 @@ export const printReview = async (args: HostCliArgs): Promise<number> => {
   if (attempt?.result === undefined) {
     throw new Error(`no reviewed result found for session ${session.sessionId}`);
   }
-
   const reviewed = reviewTaskResult(attempt.result);
   const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, attempt.attemptId);
-  const dispatchArtifact = artifacts.find((artifact) => artifact.kind === "dispatch");
-  const workerLog = artifacts.find((artifact) => artifact.kind === "log");
-  stdoutWrite(
-    [
-      renderSection("Review"),
-      renderKeyValue("Session", session.sessionId),
-      renderKeyValue("Task", attempt.attemptId),
-      renderKeyValue("Status", `${statusBadge(attempt.status)} ${attempt.status}`),
-      renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`),
-      renderKeyValue("Action", reviewed.action),
-      renderKeyValue("Reason", reviewed.reason),
-      renderKeyValue("Summary", attempt.result.summary),
-      ...(typeof attempt.metadata?.sandboxTaskId === "string"
-        ? [renderKeyValue("Sandbox", attempt.metadata.sandboxTaskId)]
-        : []),
-      ...(attempt.result.exitCode === undefined
-        ? []
-        : [renderKeyValue("Exit", String(attempt.result.exitCode))]),
-      ...(attempt.result.startedAt
-        ? [renderKeyValue("Started", formatUtcTimestamp(attempt.result.startedAt))]
-        : []),
-      renderKeyValue("Finished", formatUtcTimestamp(attempt.result.finishedAt)),
-      ...(dispatchArtifact ? [renderKeyValue("Dispatch", dispatchArtifact.path)] : []),
-      ...(workerLog ? [renderKeyValue("Worker", workerLog.path)] : []),
-      ...(artifacts.length > 0 ? ["Artifacts:", ...formatArtifacts(artifacts)] : []),
-      renderKeyValue("Next", nextActionHint(reviewed)),
-    ].join("\n") + "\n",
-  );
+  const lines = formatInspectReview({ session, attempt, reviewed, artifacts });
+  if (artifacts.length > 0) {
+    lines.push("Artifacts:", ...formatArtifacts(artifacts));
+  }
+  lines.push(`Next       ${nextActionHint(reviewed)}`);
+  stdoutWrite(`${renderSection("Review")}\n${lines.slice(1).join("\n")}\n`);
   return reviewedOutcomeExitCode(reviewed);
 };
 

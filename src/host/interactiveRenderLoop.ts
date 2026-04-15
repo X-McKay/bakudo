@@ -107,8 +107,15 @@ const reduce = (deps: TickDeps, action: HostAction): void => {
 };
 
 const syncComposerFromShell = (deps: TickDeps): void => {
-  reduce(deps, { type: "set_mode", mode: deps.shellState.currentMode });
-  reduce(deps, { type: "set_auto_approve", value: deps.shellState.autoApprove });
+  // Legacy sync: translate worker TaskMode → ComposerMode. Scheduled for deletion
+  // in PR3 commit 4 once appState is the sole source of truth for composer state.
+  const composerMode =
+    deps.appState.composer.mode !== "standard" || deps.shellState.currentMode === "plan"
+      ? deps.shellState.currentMode === "plan"
+        ? "plan"
+        : deps.appState.composer.mode
+      : "standard";
+  reduce(deps, { type: "set_mode", mode: composerMode });
   if (deps.shellState.lastSessionId) {
     reduce(deps, {
       type: "set_active_session",

@@ -1,6 +1,16 @@
 import type { RenderFrame, TranscriptItem } from "../renderModel.js";
 
-const modeLabel = (mode: "build" | "plan"): string => (mode === "build" ? "BUILD" : "PLAN");
+import type { ComposerMode } from "../appState.js";
+
+const modeLabel = (mode: ComposerMode): string => {
+  if (mode === "plan") {
+    return "PLAN";
+  }
+  if (mode === "autopilot") {
+    return "AUTOPILOT";
+  }
+  return "STANDARD";
+};
 
 const renderItem = (item: TranscriptItem): string => {
   if (item.kind === "user") {
