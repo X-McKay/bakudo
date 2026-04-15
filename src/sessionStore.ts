@@ -149,22 +149,6 @@ const migrateV1ToV2 = (raw: {
   };
 };
 
-const isV2Shape = (record: unknown): boolean => {
-  if (typeof record !== "object" || record === null) {
-    return false;
-  }
-  const candidate = record as { schemaVersion?: unknown; turns?: unknown };
-  return candidate.schemaVersion === 2 && Array.isArray(candidate.turns);
-};
-
-const isV1Shape = (record: unknown): boolean => {
-  if (typeof record !== "object" || record === null) {
-    return false;
-  }
-  const candidate = record as { tasks?: unknown; goal?: unknown };
-  return Array.isArray(candidate.tasks) && typeof candidate.goal === "string";
-};
-
 const normalizeV2Record = (
   record: SessionRecord,
   overrides: Pick<CreateSessionInput, "createdAt" | "updatedAt"> = {},
@@ -175,30 +159,26 @@ const normalizeV2Record = (
   goal: record.goal,
   status: record.status,
   assumeDangerousSkipPermissions: record.assumeDangerousSkipPermissions,
-  turns: record.turns.map((turn) => ({
-    ...turn,
-    attempts: [...turn.attempts],
-  })),
+  turns: record.turns.map((turn) => ({ ...turn, attempts: [...turn.attempts] })),
   createdAt: overrides.createdAt ?? record.createdAt,
   updatedAt: overrides.updatedAt ?? record.updatedAt,
 });
 
 export const loadSessionRecord = (raw: unknown): SessionRecord => {
-  if (isV2Shape(raw)) {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("unrecognized session record shape");
+  }
+  const candidate = raw as {
+    schemaVersion?: unknown;
+    turns?: unknown;
+    tasks?: unknown;
+    goal?: unknown;
+  };
+  if (candidate.schemaVersion === 2 && Array.isArray(candidate.turns)) {
     return normalizeV2Record(raw as SessionRecord);
   }
-  if (isV1Shape(raw)) {
-    return migrateV1ToV2(
-      raw as {
-        sessionId: string;
-        goal: string;
-        status: SessionStatus;
-        assumeDangerousSkipPermissions: boolean;
-        tasks?: SessionTaskRecord[];
-        createdAt: string;
-        updatedAt: string;
-      },
-    );
+  if (Array.isArray(candidate.tasks) && typeof candidate.goal === "string") {
+    return migrateV1ToV2(raw as Parameters<typeof migrateV1ToV2>[0]);
   }
   throw new Error("unrecognized session record shape");
 };
