@@ -2,19 +2,17 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 
 import { createSessionTaskKey } from "../sessionTypes.js";
-import {
-  ANSI,
-  blue,
-  bold,
-  overviewPanelLines,
-  paint,
-  renderApprovalChip,
-  renderKeyValue,
-  renderModeChip,
-} from "./ansi.js";
-import { InteractiveDashboard, type InteractiveShellState } from "./dashboard.js";
-import { runtimeIo, stderrWrite, withCapturedStdout } from "./io.js";
+import { initialHostAppState } from "./appState.js";
+import { runtimeIo } from "./io.js";
 import { runInit } from "./init.js";
+import {
+  executePrompt,
+  handleControlCommand,
+  tickRender,
+  type InteractiveResolution,
+  type InteractiveShellState,
+  type TickDeps,
+} from "./interactiveRenderLoop.js";
 import { runNewSession, resumeSession } from "./orchestration.js";
 import { type HostCliArgs, parseHostArgs, tokenizeCommand } from "./parsing.js";
 import {
@@ -25,67 +23,10 @@ import {
   printStatus,
   printTasks,
 } from "./printers.js";
-import { buildUsageLines, printUsage } from "./usage.js";
-import type { TextWriter } from "./io.js";
+import type { TranscriptItem } from "./renderModel.js";
+import { printUsage } from "./usage.js";
 
-export { InteractiveDashboard } from "./dashboard.js";
-export type { InteractiveShellState } from "./dashboard.js";
-
-export type InteractiveResolution = {
-  argv: string[];
-  sessionId?: string;
-  taskId?: string;
-};
-
-export const createDashboardCapture = (
-  dashboard: InteractiveDashboard,
-  options: { live?: boolean; recordActivity?: boolean } = {},
-): { writer: TextWriter; lines: string[]; flush: () => void } => {
-  const live = options.live ?? false;
-  const recordActivity = options.recordActivity ?? true;
-  const lines: string[] = [];
-  let pending = "";
-  const flush = (): void => {
-    if (pending.length === 0) {
-      return;
-    }
-    const clean = pending.replace(/\r/g, "").trimEnd();
-    pending = "";
-    if (clean.length === 0) {
-      return;
-    }
-    lines.push(clean);
-    if (recordActivity) {
-      dashboard.appendActivity(clean);
-    }
-  };
-  return {
-    flush,
-    lines,
-    writer: {
-      write: (chunk: string | Uint8Array) => {
-        const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-        pending += text;
-        const split = pending.split(/\r?\n/);
-        pending = split.pop() ?? "";
-        for (const line of split) {
-          const clean = line.replace(/\r/g, "").trimEnd();
-          if (clean.length === 0) {
-            continue;
-          }
-          lines.push(clean);
-          if (recordActivity) {
-            dashboard.appendActivity(clean);
-          }
-        }
-        if (live) {
-          dashboard.render();
-        }
-        return true;
-      },
-    },
-  };
-};
+export type { InteractiveResolution, InteractiveShellState } from "./interactiveRenderLoop.js";
 
 export const createInteractiveSessionIdentity = (): { sessionId: string; taskId: string } => {
   const sessionId = `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -206,8 +147,10 @@ export const sessionPromptLabel = (sessionId: string | undefined): string => {
 };
 
 export const renderPrompt = (state: InteractiveShellState): string => {
-  const session = paint(sessionPromptLabel(state.lastSessionId), ANSI.bold, ANSI.gray);
-  return `${bold(blue("bakudo"))} ${renderModeChip(state.currentMode)} ${renderApprovalChip(state.autoApprove)} ${session}> `;
+  const session = sessionPromptLabel(state.lastSessionId);
+  const mode = state.currentMode === "build" ? "BUILD" : "PLAN";
+  const approval = state.autoApprove ? "AUTO" : "PROMPT";
+  return `bakudo ${mode} ${approval} ${session}> `;
 };
 
 export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
@@ -251,17 +194,29 @@ export const runInteractiveShell = async (): Promise<number> => {
   }
 
   const rl = createInterface({ input, output });
-  const state: InteractiveShellState = {
+  const shellState: InteractiveShellState = {
     currentMode: "build",
     autoApprove: false,
   };
-  const dashboard = new InteractiveDashboard(() => state);
-  dashboard.render();
+  const transcript: TranscriptItem[] = [];
+  const deps: TickDeps = {
+    shellState,
+    transcript,
+    appState: initialHostAppState(),
+  };
+  const execDeps = {
+    resolveInput: resolveInteractiveInput,
+    parse: parseHostArgs,
+    dispatch: dispatchHostCommand,
+    remember: rememberInteractiveContext,
+  };
+
+  tickRender(deps);
   try {
     while (true) {
       let answer: string;
       try {
-        answer = await rl.question(renderPrompt(state));
+        answer = await rl.question(renderPrompt(shellState));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.toLowerCase().includes("readline was closed")) {
@@ -276,79 +231,14 @@ export const runInteractiveShell = async (): Promise<number> => {
       if (line === "/quit" || line === "/exit") {
         return 0;
       }
-      if (line === "/help") {
-        dashboard.setPanel("Help", buildUsageLines().slice(0, 18));
-        dashboard.render();
-        continue;
-      }
-      if (line === "/clear") {
-        dashboard.setPanel("Overview", overviewPanelLines());
-        dashboard.render();
-        continue;
-      }
-      if (line.startsWith("/mode ")) {
-        const nextMode = line.slice("/mode ".length).trim();
-        if (nextMode !== "build" && nextMode !== "plan") {
-          stderrWrite("interactive_error: mode must be build or plan\n");
-          continue;
-        }
-        state.currentMode = nextMode;
-        dashboard.setPanel("Mode", [
-          renderKeyValue("Mode", `${renderModeChip(state.currentMode)} selected`),
-        ]);
-        dashboard.note(`Mode changed to ${state.currentMode}.`);
-        dashboard.render();
-        continue;
-      }
-      if (line.startsWith("/approve ")) {
-        const policy = line.slice("/approve ".length).trim();
-        if (policy !== "auto" && policy !== "prompt") {
-          stderrWrite("interactive_error: approve must be auto or prompt\n");
-          continue;
-        }
-        state.autoApprove = policy === "auto";
-        dashboard.setPanel("Approval", [
-          renderKeyValue("Policy", `${renderApprovalChip(state.autoApprove)} selected`),
-        ]);
-        dashboard.note(`Approval policy changed to ${policy}.`);
-        dashboard.render();
+      if (handleControlCommand(line, deps)) {
+        tickRender(deps);
         continue;
       }
 
-      try {
-        const resolution = resolveInteractiveInput(line, state);
-        const parsed = parseHostArgs(resolution.argv);
-        const activitySnapshot = dashboard.snapshotActivity();
-        dashboard.note(`Command: ${line}`);
-        const liveCapture =
-          parsed.command === "run" ||
-          parsed.command === "build" ||
-          parsed.command === "plan" ||
-          parsed.command === "resume";
-        const recordActivity = liveCapture;
-        const capture = createDashboardCapture(dashboard, { live: liveCapture, recordActivity });
-        const code = await withCapturedStdout(capture.writer, async () =>
-          dispatchHostCommand(parsed),
-        );
-        capture.flush();
-        const panelTitle =
-          parsed.command === "run" || parsed.command === "build" || parsed.command === "plan"
-            ? "Command Result"
-            : parsed.command.charAt(0).toUpperCase() + parsed.command.slice(1);
-        dashboard.setPanel(panelTitle, capture.lines.slice(-18));
-        if (!recordActivity) {
-          dashboard.restoreActivity([...activitySnapshot, `Command: ${line}`]);
-        }
-        if (code !== 1) {
-          rememberInteractiveContext(state, parsed, resolution);
-        }
-        dashboard.render();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        stderrWrite(`interactive_error: ${message}\n`);
-        dashboard.note(`Error: ${message}`);
-        dashboard.render();
-      }
+      transcript.push({ kind: "user", text: line });
+      await executePrompt(line, deps, execDeps);
+      tickRender(deps);
     }
   } finally {
     rl.close();

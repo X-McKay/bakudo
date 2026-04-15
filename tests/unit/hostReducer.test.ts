@@ -1,0 +1,133 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { initialHostAppState, type HostAppState } from "../../src/host/appState.js";
+import { reduceHost } from "../../src/host/reducer.js";
+
+test("reducer: set_mode updates composer.mode and preserves rest of state", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, { type: "set_mode", mode: "plan" });
+  assert.equal(next.composer.mode, "plan");
+  assert.equal(next.composer.autoApprove, false);
+  assert.equal(next.screen, "transcript");
+  assert.notStrictEqual(next, state);
+});
+
+test("reducer: set_mode returns same reference when mode already matches", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, { type: "set_mode", mode: "build" });
+  assert.strictEqual(next, state);
+});
+
+test("reducer: set_auto_approve toggles flag", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, { type: "set_auto_approve", value: true });
+  assert.equal(next.composer.autoApprove, true);
+});
+
+test("reducer: set_composer_text and clear_composer_text mutate only composer.text", () => {
+  const state = initialHostAppState();
+  const typed = reduceHost(state, { type: "set_composer_text", text: "hello" });
+  assert.equal(typed.composer.text, "hello");
+  const cleared = reduceHost(typed, { type: "clear_composer_text" });
+  assert.equal(cleared.composer.text, "");
+  assert.equal(cleared.composer.mode, "build");
+});
+
+test("reducer: set_active_session assigns id and turn", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, {
+    type: "set_active_session",
+    sessionId: "session-abc",
+    turnId: "turn-1",
+  });
+  assert.equal(next.activeSessionId, "session-abc");
+  assert.equal(next.activeTurnId, "turn-1");
+});
+
+test("reducer: set_active_session with undefined sessionId clears both id and turn", () => {
+  const seeded = reduceHost(initialHostAppState(), {
+    type: "set_active_session",
+    sessionId: "session-abc",
+    turnId: "turn-1",
+  });
+  const cleared = reduceHost(seeded, { type: "set_active_session", sessionId: undefined });
+  assert.equal(cleared.activeSessionId, undefined);
+  assert.equal(cleared.activeTurnId, undefined);
+});
+
+test("reducer: set_screen changes screen only", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, { type: "set_screen", screen: "inspect" });
+  assert.equal(next.screen, "inspect");
+  assert.equal(next.composer.mode, state.composer.mode);
+});
+
+test("reducer: set_inspect_target updates provided fields and preserves tab when omitted", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, {
+    type: "set_inspect_target",
+    sessionId: "s1",
+    turnId: "t1",
+    attemptId: "a1",
+  });
+  assert.equal(next.inspect.sessionId, "s1");
+  assert.equal(next.inspect.turnId, "t1");
+  assert.equal(next.inspect.attemptId, "a1");
+  assert.equal(next.inspect.tab, "summary");
+  const tabbed = reduceHost(next, { type: "set_inspect_target", tab: "logs" });
+  assert.equal(tabbed.inspect.tab, "logs");
+  assert.equal(tabbed.inspect.sessionId, "s1");
+});
+
+test("reducer: open_overlay and close_overlay set and clear overlay", () => {
+  const state = initialHostAppState();
+  const opened = reduceHost(state, {
+    type: "open_overlay",
+    overlay: { kind: "approval", message: "go?" },
+  });
+  assert.deepEqual(opened.overlay, { kind: "approval", message: "go?" });
+  const reopen = reduceHost(opened, { type: "open_overlay", overlay: { kind: "command_palette" } });
+  assert.deepEqual(reopen.overlay, { kind: "command_palette" });
+  const closed = reduceHost(reopen, { type: "close_overlay" });
+  assert.equal(closed.overlay, undefined);
+});
+
+test("reducer: push_notice appends and clear_notices empties", () => {
+  const state = initialHostAppState();
+  const a = reduceHost(state, { type: "push_notice", notice: "one" });
+  const b = reduceHost(a, { type: "push_notice", notice: "two" });
+  assert.deepEqual(b.notices, ["one", "two"]);
+  const cleared = reduceHost(b, { type: "clear_notices" });
+  assert.deepEqual(cleared.notices, []);
+});
+
+test("reducer: does not mutate a frozen input state", () => {
+  const state = initialHostAppState();
+  Object.freeze(state);
+  Object.freeze(state.composer);
+  Object.freeze(state.inspect);
+  Object.freeze(state.notices);
+  const next = reduceHost(state, { type: "set_mode", mode: "plan" });
+  assert.equal(state.composer.mode, "build");
+  assert.equal(next.composer.mode, "plan");
+});
+
+test("reducer: unrelated action leaves seeded session fields intact", () => {
+  const base = initialHostAppState();
+  const seeded: HostAppState = reduceHost(base, {
+    type: "set_active_session",
+    sessionId: "s42",
+    turnId: "t42",
+  });
+  const next = reduceHost(seeded, { type: "push_notice", notice: "hey" });
+  assert.equal(next.activeSessionId, "s42");
+  assert.equal(next.activeTurnId, "t42");
+  assert.deepEqual(next.notices, ["hey"]);
+});
+
+test("reducer: clear_notices on empty list returns same reference", () => {
+  const state = initialHostAppState();
+  const next = reduceHost(state, { type: "clear_notices" });
+  assert.strictEqual(next, state);
+});
