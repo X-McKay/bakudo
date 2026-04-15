@@ -8,6 +8,7 @@ import { type ReviewedTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
 import type { SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
+import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import {
   createTaskSpec,
   executeTask,
@@ -59,9 +60,14 @@ const resolveAssumeDangerous = async (args: HostCliArgs): Promise<boolean> => {
   return runtimeConfig.assumeDangerousSkipPermissions;
 };
 
+export type SessionDispatchOptions = {
+  onProgress?: (event: WorkerTaskProgressEvent) => void;
+};
+
 export const createAndRunFirstTurn = async (
   prompt: string,
   args: HostCliArgs,
+  options: SessionDispatchOptions = {},
 ): Promise<SessionDispatchResult> => {
   const { sessionStore, artifactStore, runner } = buildRunnerContext(args);
   const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -93,6 +99,7 @@ export const createAndRunFirstTurn = async (
     turnId,
     request,
     args,
+    ...(options.onProgress ? { onProgress: options.onProgress } : {}),
   });
 
   const updated = await sessionStore.saveSession({
@@ -107,6 +114,7 @@ export const appendTurnToActiveSession = async (
   sessionId: string,
   prompt: string,
   args: HostCliArgs,
+  options: SessionDispatchOptions = {},
 ): Promise<SessionDispatchResult> => {
   const { sessionStore, artifactStore, runner } = buildRunnerContext(args);
   const existing = await sessionStore.loadSession(sessionId);
@@ -148,6 +156,7 @@ export const appendTurnToActiveSession = async (
     turnId,
     request,
     args,
+    ...(options.onProgress ? { onProgress: options.onProgress } : {}),
   });
 
   const updated = await sessionStore.saveSession({

@@ -138,10 +138,18 @@ export type ExecuteTaskContext = {
   turnId: string;
   request: WorkerTaskSpec;
   args: HostCliArgs;
+  /**
+   * Optional hook invoked for every worker progress event. The interactive
+   * shell forwards these through the {@link createProgressCoalescer semantic
+   * progress coalescer} so the main transcript only sees narrations (not raw
+   * byte counters). The legacy log surface continues to use the in-module
+   * stdout writer below.
+   */
+  onProgress?: (event: import("../workerRuntime.js").WorkerTaskProgressEvent) => void;
 };
 
 export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTaskResult> => {
-  const { sessionStore, artifactStore, runner, sessionId, turnId, request, args } = ctx;
+  const { sessionStore, artifactStore, runner, sessionId, turnId, request, args, onProgress } = ctx;
   await sessionStore.upsertAttempt(
     sessionId,
     turnId,
@@ -170,6 +178,7 @@ export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTask
     },
     {
       onEvent: (event) => {
+        onProgress?.(event);
         const stamp = event.timestamp.slice(11, 19);
         const metrics = [
           event.elapsedMs !== undefined ? `elapsed=${event.elapsedMs}ms` : "",

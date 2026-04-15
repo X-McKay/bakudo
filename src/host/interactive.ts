@@ -46,6 +46,7 @@ import {
 } from "./promptResolvers.js";
 import { reduceHost } from "./reducer.js";
 import type { TranscriptItem } from "./renderModel.js";
+import { createProgressCoalescer } from "./progressCoalescer.js";
 import {
   appendTurnToActiveSession,
   createAndRunFirstTurn,
@@ -156,10 +157,18 @@ const dispatchThroughController = async (
   const shell: ShellContext = deriveShellContext(deps.appState);
   const mode = overrideMode ?? composerModeToTaskMode(deps.appState.composer.mode);
   const args = baseInteractiveArgs(mode, shell.autoApprove);
-  if (deps.appState.activeSessionId !== undefined) {
-    return appendTurnToActiveSession(deps.appState.activeSessionId, goal, args);
+  const coalesce = createProgressCoalescer((item) => {
+    deps.transcript.push(item);
+  });
+  const options = { onProgress: coalesce };
+  try {
+    if (deps.appState.activeSessionId !== undefined) {
+      return await appendTurnToActiveSession(deps.appState.activeSessionId, goal, args, options);
+    }
+    return await createAndRunFirstTurn(goal, args, options);
+  } finally {
+    coalesce.flushNow();
   }
-  return createAndRunFirstTurn(goal, args);
 };
 
 const applyDispatchResult = (result: SessionDispatchResult, deps: TickDeps): void => {
@@ -168,15 +177,9 @@ const applyDispatchResult = (result: SessionDispatchResult, deps: TickDeps): voi
     sessionId: result.sessionId,
     turnId: result.turnId,
   });
-  const outcome = result.reviewed.outcome;
-  deps.transcript.push({
-    kind: "assistant",
-    text: outcome === "success" ? "Worker completed." : "Worker completed with errors.",
-    tone: outcome === "success" ? "info" : "error",
-  });
   deps.transcript.push({
     kind: "review",
-    outcome,
+    outcome: result.reviewed.outcome,
     summary: result.reviewed.reason,
     nextAction: result.reviewed.action,
   });

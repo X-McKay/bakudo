@@ -1,7 +1,10 @@
+import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../protocol.js";
+import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import { supportsAnsi } from "./ansi.js";
 import type { ComposerMode, HostAppState } from "./appState.js";
 import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
+import { createProgressCoalescer } from "./progressCoalescer.js";
 import { reduceHost } from "./reducer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
 import { renderTranscriptFramePlain } from "./renderers/plainRenderer.js";
@@ -177,6 +180,20 @@ export type ExecuteDeps = {
   ) => void;
 };
 
+const syntheticProgressEvent = (
+  sessionId: string,
+  taskId: string,
+  kind: WorkerTaskProgressEvent["kind"],
+  status: WorkerTaskProgressEvent["status"],
+): WorkerTaskProgressEvent => ({
+  schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
+  kind,
+  taskId,
+  sessionId,
+  status,
+  timestamp: new Date().toISOString(),
+});
+
 export const executePrompt = async (
   line: string,
   deps: TickDeps,
@@ -187,13 +204,15 @@ export const executePrompt = async (
     const resolution = exec.resolveInput(line, shell);
     const parsed = exec.parse(resolution.argv);
     const isExec = isExecCommand(parsed.command);
+    const sessionId = resolution.sessionId ?? parsed.sessionId ?? "interactive";
+    const taskId = resolution.taskId ?? parsed.taskId ?? "task-1";
+
+    const coalesce = createProgressCoalescer((item) => {
+      deps.transcript.push(item);
+    });
 
     if (isExec) {
-      deps.transcript.push({
-        kind: "assistant",
-        text: "Dispatching sandbox attempt.",
-        tone: "info",
-      });
+      coalesce(syntheticProgressEvent(sessionId, taskId, "task.queued", "queued"));
     }
 
     const capture = createSilentCapture();
@@ -201,11 +220,12 @@ export const executePrompt = async (
     capture.flush();
 
     if (isExec) {
-      deps.transcript.push({
-        kind: "assistant",
-        text: code === 0 ? "Worker completed." : "Worker completed with errors.",
-        tone: code === 0 ? "info" : "error",
-      });
+      if (code === 0) {
+        coalesce(syntheticProgressEvent(sessionId, taskId, "task.completed", "succeeded"));
+      } else {
+        coalesce(syntheticProgressEvent(sessionId, taskId, "task.failed", "failed"));
+      }
+      coalesce.flushNow();
       deps.transcript.push(exitCodeToReviewItem(code));
     } else {
       const recent = capture.lines.slice(-6);
