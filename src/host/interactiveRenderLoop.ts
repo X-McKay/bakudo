@@ -5,7 +5,6 @@ import type { ComposerMode, HostAppState } from "./appState.js";
 import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
-import { reduceHost } from "./reducer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
 import { renderTranscriptFramePlain } from "./renderers/plainRenderer.js";
 import { renderTranscriptFrame } from "./renderers/transcriptRenderer.js";
@@ -47,10 +46,20 @@ export type InteractiveResolution = {
 export type TickDeps = {
   transcript: TranscriptItem[];
   appState: HostAppState;
+  /** Short repo basename displayed in the frame header (PR3 follow-up). */
+  repoLabel?: string;
 };
 
-const renderFrameLines = (state: HostAppState, transcript: TranscriptItem[]): string[] => {
-  const frame = selectRenderFrame({ state, transcript });
+const renderFrameLines = (
+  state: HostAppState,
+  transcript: TranscriptItem[],
+  repoLabel?: string,
+): string[] => {
+  const frame = selectRenderFrame({
+    state,
+    transcript,
+    ...(repoLabel !== undefined ? { repoLabel } : {}),
+  });
   return supportsAnsi() ? renderTranscriptFrame(frame) : renderTranscriptFramePlain(frame);
 };
 
@@ -125,48 +134,7 @@ const isExecCommand = (command: string): boolean =>
   command === "run" || command === "build" || command === "plan" || command === "resume";
 
 export const tickRender = (deps: TickDeps): void => {
-  writeFrame(renderFrameLines(deps.appState, deps.transcript));
-};
-
-export const handleControlCommand = (line: string, deps: TickDeps): boolean => {
-  if (line === "/help") {
-    deps.transcript.push({
-      kind: "event",
-      label: "help",
-      detail: "type a goal or /build, /plan, /status, /exit",
-    });
-    return true;
-  }
-  if (line === "/clear") {
-    deps.transcript.length = 0;
-    return true;
-  }
-  if (line.startsWith("/mode ")) {
-    const nextMode = line.slice("/mode ".length).trim();
-    if (nextMode !== "standard" && nextMode !== "plan" && nextMode !== "autopilot") {
-      stderrWrite("interactive_error: mode must be standard, plan, or autopilot\n");
-      return true;
-    }
-    deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: nextMode });
-    deps.transcript.push({ kind: "event", label: "mode", detail: nextMode });
-    return true;
-  }
-  if (line.startsWith("/approve ")) {
-    const policy = line.slice("/approve ".length).trim();
-    if (policy !== "auto" && policy !== "prompt") {
-      stderrWrite("interactive_error: approve must be auto or prompt\n");
-      return true;
-    }
-    // approve policy is now derived from composer mode (autopilot). We still
-    // accept the legacy /approve command and map it to /mode autopilot / standard.
-    deps.appState = reduceHost(deps.appState, {
-      type: "set_mode",
-      mode: policy === "auto" ? "autopilot" : "standard",
-    });
-    deps.transcript.push({ kind: "event", label: "approve", detail: policy });
-    return true;
-  }
-  return false;
+  writeFrame(renderFrameLines(deps.appState, deps.transcript, deps.repoLabel));
 };
 
 export type ExecuteDeps = {

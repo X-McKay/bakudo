@@ -1,11 +1,17 @@
 import { dim, renderCommandHint, renderSection, renderTitle } from "./ansi.js";
+import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
 import { stdoutWrite } from "./io.js";
-import { INTERACTIVE_COMMANDS } from "./parsing.js";
+
+const interactiveUsageLines = (): string[] => {
+  const registry = buildDefaultCommandRegistry();
+  return registry
+    .list()
+    .filter((spec) => spec.hidden !== true)
+    .map((spec) => renderCommandHint(`/${spec.name}`, spec.description));
+};
 
 export const buildUsageLines = (): string[] => {
-  const interactiveLines = INTERACTIVE_COMMANDS.map((command) =>
-    renderCommandHint(command.usage, command.description),
-  );
+  const interactiveLines = interactiveUsageLines();
   return [
     ...renderTitle("Bakudo", "Host control plane for abox sandboxes."),
     dim("Plan on the host, execute in isolated workers, then review with provenance."),

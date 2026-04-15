@@ -214,6 +214,125 @@ test("SessionStore upsertTurn appends and replaces turns", async () => {
   }
 });
 
+test("migration: all 6 TaskStatus values remap correctly to TurnStatus + AttemptStatus", () => {
+  const statuses: Array<
+    [
+      "queued" | "running" | "succeeded" | "failed" | "blocked" | "cancelled" | "needs_review",
+      /* attempt status == task status */ string,
+      /* turn status */ string,
+    ]
+  > = [
+    ["queued", "queued", "queued"],
+    ["running", "running", "running"],
+    ["succeeded", "succeeded", "completed"],
+    ["failed", "failed", "failed"],
+    ["blocked", "blocked", "awaiting_user"],
+    ["cancelled", "cancelled", "failed"],
+    ["needs_review", "needs_review", "reviewing"],
+  ];
+  for (const [taskStatus, expectedAttemptStatus, expectedTurnStatus] of statuses) {
+    const raw = {
+      schemaVersion: 1,
+      sessionId: `session-${taskStatus}`,
+      goal: "check mapping",
+      status: "planned",
+      assumeDangerousSkipPermissions: false,
+      tasks: [
+        {
+          taskId: "t-1",
+          status: taskStatus,
+          lastMessage: "x",
+        },
+      ],
+      createdAt: "2026-04-14T12:00:00.000Z",
+      updatedAt: "2026-04-14T12:00:00.000Z",
+    };
+    const loaded = loadSessionRecord(raw);
+    const attempt = loaded.turns[0]?.attempts[0];
+    assert.equal(attempt?.status, expectedAttemptStatus);
+    assert.equal(loaded.turns[0]?.status, expectedTurnStatus);
+  }
+});
+
+test("migration: metadata.sandboxTaskId survives v1->v2", () => {
+  const raw = {
+    schemaVersion: 1,
+    sessionId: "session-meta",
+    goal: "carry metadata",
+    status: "completed",
+    assumeDangerousSkipPermissions: false,
+    tasks: [
+      {
+        taskId: "task-1",
+        status: "succeeded",
+        metadata: { sandboxTaskId: "abox-9999", extra: "yes" },
+      },
+    ],
+    createdAt: "2026-04-14T12:00:00.000Z",
+    updatedAt: "2026-04-14T12:00:00.000Z",
+  };
+  const loaded = loadSessionRecord(raw);
+  const attempt = loaded.turns[0]?.attempts[0];
+  assert.equal(attempt?.metadata?.sandboxTaskId, "abox-9999");
+  assert.equal(attempt?.metadata?.extra, "yes");
+});
+
+test("migration: round-trip v1 -> load -> save -> reload keeps v2 shape", async () => {
+  const rootDir = await createTempRoot();
+  try {
+    const sessionDir = join(rootDir, "session-rt");
+    await mkdir(sessionDir, { recursive: true });
+    const v1 = {
+      schemaVersion: 1,
+      sessionId: "session-rt",
+      goal: "round trip",
+      status: "completed",
+      assumeDangerousSkipPermissions: true,
+      tasks: [
+        {
+          taskId: "task-1",
+          status: "succeeded",
+          request: {
+            schemaVersion: 1,
+            taskId: "task-1",
+            sessionId: "session-rt",
+            goal: "round trip",
+            mode: "build",
+            assumeDangerousSkipPermissions: true,
+          },
+          lastMessage: "ok",
+        },
+        {
+          taskId: "task-2",
+          status: "failed",
+          lastMessage: "boom",
+        },
+      ],
+      createdAt: "2026-04-14T12:00:00.000Z",
+      updatedAt: "2026-04-14T12:10:00.000Z",
+    };
+    await writeFile(join(sessionDir, "session.json"), JSON.stringify(v1, null, 2), "utf8");
+
+    const store = new SessionStore(rootDir);
+    const firstLoad = await store.loadSession("session-rt");
+    assert.ok(firstLoad);
+    const saved = await store.saveSession(firstLoad);
+    assert.equal(saved.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
+
+    const reloaded = await store.loadSession("session-rt");
+    assert.ok(reloaded);
+    assert.equal(reloaded.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
+    assert.equal(reloaded.goal, "round trip");
+    assert.equal(reloaded.turns.length, 1);
+    assert.equal(reloaded.turns[0]?.prompt, "round trip");
+    assert.equal(reloaded.turns[0]?.attempts.length, 2);
+    assert.equal(reloaded.turns[0]?.attempts[0]?.attemptId, "task-1");
+    assert.equal(reloaded.turns[0]?.attempts[1]?.attemptId, "task-2");
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("SessionStore upsertAttempt appends attempts under the named turn", async () => {
   const rootDir = await createTempRoot();
   try {

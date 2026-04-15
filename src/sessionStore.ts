@@ -174,7 +174,10 @@ export const loadSessionRecord = (raw: unknown): SessionRecord => {
     tasks?: unknown;
     goal?: unknown;
   };
-  if (candidate.schemaVersion === 2 && Array.isArray(candidate.turns)) {
+  if (
+    candidate.schemaVersion === CURRENT_SESSION_SCHEMA_VERSION &&
+    Array.isArray(candidate.turns)
+  ) {
     return normalizeV2Record(raw as SessionRecord);
   }
   if (Array.isArray(candidate.tasks) && typeof candidate.goal === "string") {

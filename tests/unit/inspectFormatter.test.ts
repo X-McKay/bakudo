@@ -70,6 +70,71 @@ test("formatInspectSummary: includes session, repo, turns, and outcome", () => {
   assert.match(joined, /success/);
 });
 
+test("formatInspectSummary: ordering puts Outcome before State/Updated/Turns", () => {
+  const session = buildSession();
+  const attempt = buildAttempt();
+  const turn = {
+    turnId: "turn-1",
+    prompt: "the goal",
+    mode: "build",
+    status: "completed" as const,
+    attempts: [attempt],
+    createdAt: "2026-04-14T12:00:00.000Z",
+    updatedAt: "2026-04-14T12:05:00.000Z",
+  };
+  const lines = formatInspectSummary({ session, turn, attempt });
+  const indexOf = (label: string): number => lines.findIndex((line) => line.startsWith(label));
+  assert.ok(indexOf("Session") < indexOf("Repo"));
+  assert.ok(indexOf("Repo") < indexOf("Goal"));
+  assert.ok(indexOf("Goal") < indexOf("Outcome"));
+  assert.ok(indexOf("Outcome") < indexOf("Action"));
+  assert.ok(indexOf("Action") < indexOf("Attempt"));
+  assert.ok(indexOf("Attempt") < indexOf("Sandbox"));
+  assert.ok(indexOf("Sandbox") < indexOf("State"));
+  assert.ok(indexOf("State") < indexOf("Updated"));
+  assert.ok(indexOf("Updated") < indexOf("Turns"));
+});
+
+test("formatInspectReview: Outcome appears before any raw log/dispatch line", () => {
+  const session = buildSession();
+  const attempt = buildAttempt();
+  const reviewed = reviewTaskResult(attempt.result!);
+  const lines = formatInspectReview({
+    session,
+    attempt,
+    reviewed,
+    artifacts: [
+      {
+        schemaVersion: 1,
+        artifactId: "a1",
+        sessionId: session.sessionId,
+        taskId: attempt.attemptId,
+        kind: "dispatch",
+        name: "dispatch.json",
+        path: "/tmp/dispatch.json",
+        createdAt: "2026-04-14T12:05:00.000Z",
+      },
+      {
+        schemaVersion: 1,
+        artifactId: "a2",
+        sessionId: session.sessionId,
+        taskId: attempt.attemptId,
+        kind: "log",
+        name: "worker-output.log",
+        path: "/tmp/worker.log",
+        createdAt: "2026-04-14T12:05:00.000Z",
+      },
+    ],
+  });
+  const joined = lines.join("\n");
+  const outcomeIndex = joined.indexOf("Outcome");
+  const dispatchIndex = joined.indexOf("Dispatch");
+  const workerIndex = joined.indexOf("Worker");
+  assert.ok(outcomeIndex >= 0);
+  assert.ok(dispatchIndex > outcomeIndex);
+  assert.ok(workerIndex > outcomeIndex);
+});
+
 test("formatInspectReview: projects reviewed outcome + artifact hints", () => {
   const session = buildSession();
   const attempt = buildAttempt();

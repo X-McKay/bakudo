@@ -56,45 +56,6 @@ export const SESSION_REQUIRED_COMMANDS = new Set<HostCommand>([
   "sandbox",
 ]);
 
-export type SlashCommandSpec = {
-  usage: string;
-  description: string;
-};
-
-export const INTERACTIVE_COMMANDS: readonly SlashCommandSpec[] = [
-  { usage: "/build <goal>", description: "Run a code-changing task in an abox sandbox." },
-  {
-    usage: "/plan <goal>",
-    description: "Run a planning or discovery task in a safer host intent mode.",
-  },
-  { usage: "/run <goal>", description: "Run a task using the current shell mode." },
-  { usage: "/clear", description: "Clear the terminal and redraw the shell header." },
-  { usage: "/mode <build|plan>", description: "Change the default mode for plain-text prompts." },
-  {
-    usage: "/approve <auto|prompt>",
-    description: "Toggle automatic approval for build dispatches.",
-  },
-  {
-    usage: "/status [session]",
-    description: "Show all sessions or task status for a specific session.",
-  },
-  { usage: "/sessions", description: "List saved sessions." },
-  { usage: "/tasks <session>", description: "List tasks for a session." },
-  { usage: "/sandbox <session> [task]", description: "Show abox dispatch metadata and artifacts." },
-  {
-    usage: "/review <session> [task]",
-    description: "Show the host-reviewed outcome and suggested next action.",
-  },
-  { usage: "/logs <session> [task]", description: "Print the structured worker event stream." },
-  {
-    usage: "/resume <session> [task]",
-    description: "Retry the latest resumable task in a session.",
-  },
-  { usage: "/init", description: "Write a repo-local AGENTS.md template for bakudo." },
-  { usage: "/help", description: "Show command help." },
-  { usage: "/exit", description: "Exit the interactive shell." },
-] as const;
-
 export const parsePositiveInteger = (
   value: string | undefined,
   name: string,

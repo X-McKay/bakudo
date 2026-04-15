@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline/promises";
+import { basename } from "node:path";
 
 import type { ComposerMode } from "./appState.js";
 import { initialHostAppState } from "./appState.js";
@@ -14,7 +15,6 @@ import { runInit } from "./init.js";
 import {
   deriveShellContext,
   executePrompt,
-  handleControlCommand,
   tickRender,
   type InteractiveResolution,
   type ShellContext,
@@ -220,9 +220,10 @@ export const runInteractiveShell = async (): Promise<number> => {
   }
 
   const repoRoot = repoRootFor(undefined);
+  const repoLabel = basename(repoRoot) || repoRoot;
   const rl = createInterface({ input, output });
   const transcript: TranscriptItem[] = [];
-  const deps: TickDeps = { transcript, appState: initialHostAppState() };
+  const deps: TickDeps = { transcript, appState: initialHostAppState(), repoLabel };
 
   resetPromptResolvers();
   const prior = await loadHostState(repoRoot);
@@ -282,12 +283,12 @@ export const runInteractiveShell = async (): Promise<number> => {
         continue;
       }
 
-      if (line === "/quit" || line === "/exit") {
-        return 0;
-      }
-
       transcript.push({ kind: "user", text: line });
       const dispatched = await registry.dispatch(line, deps);
+      if (dispatched.kind === "exit") {
+        await persistHostState();
+        return dispatched.code;
+      }
       if (dispatched.kind === "handled") {
         await persistHostState();
         tickRender(deps);
@@ -312,7 +313,13 @@ export const runInteractiveShell = async (): Promise<number> => {
           tickRender(deps);
           continue;
         }
-        if (handleControlCommand(line, deps)) {
+        // Unknown slash command: push a notice rather than silently dropping.
+        if (line.startsWith("/")) {
+          deps.transcript.push({
+            kind: "assistant",
+            text: `unknown command: ${line.split(/\s+/)[0] ?? line}. Try /help.`,
+            tone: "warning",
+          });
           await persistHostState();
           tickRender(deps);
           continue;

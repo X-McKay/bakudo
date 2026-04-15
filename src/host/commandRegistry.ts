@@ -2,18 +2,33 @@ import type { HostAppState } from "./appState.js";
 import type { InteractiveResolution, TickDeps } from "./interactiveRenderLoop.js";
 
 /**
+ * Sentinel returned by handlers that request shell termination. The shell
+ * loop recognizes this and cleanly exits with `code`.
+ */
+export type ExitResolution = { kind: "exit"; code: number };
+
+export const isExitResolution = (value: unknown): value is ExitResolution =>
+  typeof value === "object" &&
+  value !== null &&
+  (value as { kind?: unknown }).kind === "exit" &&
+  typeof (value as { code?: unknown }).code === "number";
+
+/**
  * A command handler can:
  *  - return null / undefined, signalling that the command was handled in-place
  *    (side effects already applied: transcript, appState, host state, etc.)
  *  - return an {@link InteractiveResolution}, signalling that the caller should
  *    fall through to the legacy exec path (parse + dispatch) with the provided argv.
+ *  - return an {@link ExitResolution}, signalling that the shell should
+ *    terminate with the supplied exit code (e.g. /exit, /quit).
  */
 export type HostCommandHandlerResult =
   | void
   | null
   | undefined
   | InteractiveResolution
-  | Promise<void | null | undefined | InteractiveResolution>;
+  | ExitResolution
+  | Promise<void | null | undefined | InteractiveResolution | ExitResolution>;
 
 export type HostCommandContext = {
   args: string[];
@@ -46,6 +61,7 @@ export type HostCommandRegistry = {
     | { kind: "handled" }
     | { kind: "fallthrough"; resolution: InteractiveResolution }
     | { kind: "unknown" }
+    | { kind: "exit"; code: number }
   >;
 };
 
@@ -105,6 +121,9 @@ export const createCommandRegistry = (): HostCommandRegistry => {
     const outcome = await spec.handler({ args, line, deps, state: deps.appState });
     if (outcome === undefined || outcome === null) {
       return { kind: "handled" };
+    }
+    if (isExitResolution(outcome)) {
+      return { kind: "exit", code: outcome.code };
     }
     return { kind: "fallthrough", resolution: outcome };
   };

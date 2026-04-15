@@ -282,10 +282,9 @@ export const printReview = async (args: HostCliArgs): Promise<number> => {
   }
   const reviewed = reviewTaskResult(attempt.result);
   const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, attempt.attemptId);
+  // formatInspectReview already emits Dispatch/Worker artifact paths as
+  // key/value rows. Avoid the previous duplicate `Artifacts:` block.
   const lines = formatInspectReview({ session, attempt, reviewed, artifacts });
-  if (artifacts.length > 0) {
-    lines.push("Artifacts:", ...formatArtifacts(artifacts));
-  }
   lines.push(`Next       ${nextActionHint(reviewed)}`);
   stdoutWrite(`${renderSection("Review")}\n${lines.slice(1).join("\n")}\n`);
   return reviewedOutcomeExitCode(reviewed);

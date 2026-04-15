@@ -34,15 +34,23 @@ export type InspectSummaryInput = {
 export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
   const { session, turn, attempt } = input;
   const reviewed = attempt?.result ? reviewTaskResult(attempt.result) : null;
+  // Required ordering (phase doc priorities, PR3 follow-up):
+  //   1. Session
+  //   2. Repo
+  //   3. Goal
+  //   4. Outcome / Action
+  //   5. Attempt / Sandbox (+ Turn)
+  //   6. State / Updated / Turns
   const lines = [
     "Summary",
     renderKv("Session", session.sessionId),
     renderKv("Repo", session.repoRoot),
     renderKv("Goal", session.goal),
-    renderKv("State", session.status),
-    renderKv("Updated", formatUtc(session.updatedAt)),
-    renderKv("Turns", String(session.turns.length)),
   ];
+  if (reviewed) {
+    lines.push(renderKv("Outcome", reviewed.outcome));
+    lines.push(renderKv("Action", reviewed.action));
+  }
   if (turn !== undefined) {
     lines.push(renderKv("Turn", `${turn.turnId} mode=${turn.mode} status=${turn.status}`));
   }
@@ -52,10 +60,9 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
     );
     lines.push(renderKv("Sandbox", sandboxOf(attempt)));
   }
-  if (reviewed) {
-    lines.push(renderKv("Outcome", reviewed.outcome));
-    lines.push(renderKv("Action", reviewed.action));
-  }
+  lines.push(renderKv("State", session.status));
+  lines.push(renderKv("Updated", formatUtc(session.updatedAt)));
+  lines.push(renderKv("Turns", String(session.turns.length)));
   return lines;
 };
 

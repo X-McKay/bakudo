@@ -118,6 +118,12 @@ export const sessionPromptLabel = (sessionId: string | undefined): string => {
   return parts.at(-1) ?? sessionId;
 };
 
+/**
+ * @deprecated No longer consumed — the interactive loop uses `rl.question("")`
+ * and the header is rendered from {@link HostAppState} via selectRenderFrame.
+ * Retained as a safety net for downstream scripts that import it; will be
+ * removed in Phase 2.
+ */
 export const renderPrompt = (shell: ShellContext): string => {
   const session = sessionPromptLabel(shell.lastSessionId);
   const mode = shell.currentMode === "build" ? "BUILD" : "PLAN";
