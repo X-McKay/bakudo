@@ -14,10 +14,22 @@ export type ComposerMode = "standard" | "plan" | "autopilot";
 
 export type InspectTab = "summary" | "review" | "artifacts" | "sandbox" | "logs";
 
+export type PromptKind = "approval" | "resume_confirm" | "command_palette" | "session_picker";
+
+export type PromptEntry = {
+  id: string;
+  kind: PromptKind;
+  payload: unknown;
+};
+
+/**
+ * Derived overlay view used by renderers. Always projected from `promptQueue[0]`.
+ */
 export type HostOverlay =
   | { kind: "command_palette" }
   | { kind: "session_picker" }
-  | { kind: "approval"; message: string };
+  | { kind: "approval"; message: string }
+  | { kind: "resume_confirm"; message: string };
 
 export type HostAppState = {
   screen: HostScreen;
@@ -34,7 +46,7 @@ export type HostAppState = {
     attemptId?: string;
     tab: InspectTab;
   };
-  overlay?: HostOverlay;
+  promptQueue: ReadonlyArray<PromptEntry>;
   notices: string[];
 };
 
@@ -44,5 +56,6 @@ export const initialHostAppState = (): HostAppState => ({
   screen: "transcript",
   composer: { mode: "standard", autoApprove: false, text: "" },
   inspect: { tab: "summary" },
+  promptQueue: [],
   notices: [],
 });

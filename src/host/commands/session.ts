@@ -1,7 +1,30 @@
-import { reduceHost } from "../reducer.js";
-import type { HostCommandSpec } from "../commandRegistry.js";
 import { SessionStore } from "../../sessionStore.js";
-import { repoRootFor, storageRootFor } from "../orchestration.js";
+import type { SessionRecord } from "../../sessionTypes.js";
+import type { HostCommandSpec } from "../commandRegistry.js";
+import { storageRootFor } from "../orchestration.js";
+import { awaitPrompt, newPromptId } from "../promptResolvers.js";
+import { reduceHost } from "../reducer.js";
+
+const setSessionAsActive = (
+  deps: Parameters<HostCommandSpec["handler"]>[0]["deps"],
+  session: SessionRecord,
+): void => {
+  const latestTurn = session.turns.at(-1);
+  deps.appState = reduceHost(deps.appState, {
+    type: "set_active_session",
+    sessionId: session.sessionId,
+    ...(latestTurn?.turnId ? { turnId: latestTurn.turnId } : {}),
+  });
+  deps.transcript.push({
+    kind: "assistant",
+    text: `Resumed session ${session.sessionId.slice(0, 8)}.`,
+    tone: "info",
+  });
+};
+
+const clearActiveFields = (deps: Parameters<HostCommandSpec["handler"]>[0]["deps"]): void => {
+  deps.appState = reduceHost(deps.appState, { type: "set_active_session", sessionId: undefined });
+};
 
 export const sessionCommands: readonly HostCommandSpec[] = [
   {
@@ -9,12 +32,7 @@ export const sessionCommands: readonly HostCommandSpec[] = [
     group: "session",
     description: "Start a fresh session; clears the active session binding.",
     handler: ({ deps }) => {
-      deps.appState = reduceHost(deps.appState, {
-        type: "set_active_session",
-        sessionId: undefined,
-      });
-      deps.shellState.lastSessionId = undefined as unknown as string;
-      deps.shellState.lastTaskId = undefined as unknown as string;
+      clearActiveFields(deps);
       deps.transcript.push({
         kind: "event",
         label: "session",
@@ -31,10 +49,11 @@ export const sessionCommands: readonly HostCommandSpec[] = [
       const requestedId = args[0];
       const rootDir = storageRootFor(undefined, undefined);
       const store = new SessionStore(rootDir);
+      let target: SessionRecord | null = null;
       if (requestedId === undefined) {
         const sessions = await store.listSessions();
-        const target = sessions[0];
-        if (target === undefined) {
+        target = sessions[0] ?? null;
+        if (target === null) {
           deps.transcript.push({
             kind: "assistant",
             text: "No saved session to resume.",
@@ -42,39 +61,49 @@ export const sessionCommands: readonly HostCommandSpec[] = [
           });
           return;
         }
+      } else {
+        target = await store.loadSession(requestedId);
+        if (target === null) {
+          deps.transcript.push({
+            kind: "assistant",
+            text: `No saved session matches "${requestedId}".`,
+            tone: "warning",
+          });
+          return;
+        }
+      }
+
+      // If an active session already exists and it differs from the requested
+      // one, queue a resume_confirm prompt and wait for the answer.
+      if (
+        deps.appState.activeSessionId !== undefined &&
+        deps.appState.activeSessionId !== target.sessionId
+      ) {
+        const id = newPromptId();
         deps.appState = reduceHost(deps.appState, {
-          type: "set_active_session",
-          sessionId: target.sessionId,
-          ...(target.turns.at(-1)?.turnId ? { turnId: target.turns.at(-1)!.turnId } : {}),
+          type: "enqueue_prompt",
+          prompt: {
+            id,
+            kind: "resume_confirm",
+            payload: {
+              message: `Resume ${target.sessionId.slice(0, 8)} and leave the current session behind?`,
+              requestedSessionId: target.sessionId,
+            },
+          },
         });
-        deps.shellState.lastSessionId = target.sessionId;
-        deps.transcript.push({
-          kind: "assistant",
-          text: `Resumed session ${target.sessionId.slice(0, 8)}.`,
-          tone: "info",
-        });
-        return;
+        const resolution = await awaitPrompt(id);
+        deps.appState = reduceHost(deps.appState, { type: "dequeue_prompt", id });
+        if (resolution.kind !== "answered" || !/^(y|yes)$/i.test(resolution.value.trim())) {
+          deps.transcript.push({
+            kind: "assistant",
+            text: "Resume cancelled.",
+            tone: "info",
+          });
+          return;
+        }
       }
-      const loaded = await store.loadSession(requestedId);
-      if (loaded === null) {
-        deps.transcript.push({
-          kind: "assistant",
-          text: `No saved session matches "${requestedId}".`,
-          tone: "warning",
-        });
-        return;
-      }
-      deps.appState = reduceHost(deps.appState, {
-        type: "set_active_session",
-        sessionId: loaded.sessionId,
-        ...(loaded.turns.at(-1)?.turnId ? { turnId: loaded.turns.at(-1)!.turnId } : {}),
-      });
-      deps.shellState.lastSessionId = loaded.sessionId;
-      deps.transcript.push({
-        kind: "assistant",
-        text: `Resumed session ${loaded.sessionId.slice(0, 8)}.`,
-        tone: "info",
-      });
+
+      setSessionAsActive(deps, target);
     },
   },
   {
@@ -84,6 +113,3 @@ export const sessionCommands: readonly HostCommandSpec[] = [
     handler: () => ({ argv: ["sessions"] }),
   },
 ];
-
-// Silence unused-import warning for repoRootFor (reserved for future /init wiring).
-void repoRootFor;

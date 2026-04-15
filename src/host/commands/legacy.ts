@@ -1,8 +1,9 @@
 import type { HostCommandSpec } from "../commandRegistry.js";
+import { deriveShellContext } from "../interactiveRenderLoop.js";
 import {
   buildInteractiveRunResolution,
   resolveSessionScopedInteractiveCommand,
-} from "../interactive.js";
+} from "../interactiveResolvers.js";
 
 const runLikeHandler =
   (command: "run" | "build" | "plan"): HostCommandSpec["handler"] =>
@@ -16,13 +17,13 @@ const runLikeHandler =
       });
       return;
     }
-    return buildInteractiveRunResolution(command, goal, deps.shellState);
+    return buildInteractiveRunResolution(command, goal, deriveShellContext(deps.appState));
   };
 
 const sessionScopedHandler =
   (command: "status" | "tasks" | "review" | "logs" | "sandbox"): HostCommandSpec["handler"] =>
   ({ args, deps }) =>
-    resolveSessionScopedInteractiveCommand(command, args, deps.shellState);
+    resolveSessionScopedInteractiveCommand(command, args, deriveShellContext(deps.appState));
 
 export const legacyCommands: readonly HostCommandSpec[] = [
   {
@@ -48,14 +49,15 @@ export const legacyCommands: readonly HostCommandSpec[] = [
     group: "legacy",
     description: "Show session status.",
     handler: ({ args, deps }) => {
+      const shell = deriveShellContext(deps.appState);
       if (args[0]) {
         return { argv: ["status", args[0]], sessionId: args[0] };
       }
-      if (deps.shellState.lastSessionId) {
+      if (shell.lastSessionId) {
         return {
-          argv: ["status", deps.shellState.lastSessionId],
-          sessionId: deps.shellState.lastSessionId,
-          ...(deps.shellState.lastTaskId ? { taskId: deps.shellState.lastTaskId } : {}),
+          argv: ["status", shell.lastSessionId],
+          sessionId: shell.lastSessionId,
+          ...(shell.lastTaskId ? { taskId: shell.lastTaskId } : {}),
         };
       }
       return { argv: ["status"] };

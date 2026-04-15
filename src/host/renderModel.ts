@@ -1,4 +1,4 @@
-import type { ComposerMode, HostAppState } from "./appState.js";
+import type { ComposerMode, HostAppState, HostOverlay, PromptEntry } from "./appState.js";
 
 export type FrameMode = "prompt" | "transcript";
 
@@ -25,6 +25,7 @@ export type RenderFrame = {
     mode: ComposerMode;
     autoApprove: boolean;
   };
+  overlay?: HostOverlay;
   inspectPane?: {
     title: string;
     lines: string[];
@@ -40,15 +41,37 @@ export type FrameInputs = {
 const sessionLabelFor = (activeSessionId: string | undefined): string =>
   activeSessionId ? `session ${activeSessionId.slice(0, 8)}` : "no active session";
 
+const deriveOverlay = (prompt: PromptEntry | undefined): HostOverlay | undefined => {
+  if (prompt === undefined) {
+    return undefined;
+  }
+  if (prompt.kind === "approval") {
+    const payload = prompt.payload as { message?: unknown } | null;
+    const message = typeof payload?.message === "string" ? payload.message : "";
+    return { kind: "approval", message };
+  }
+  if (prompt.kind === "resume_confirm") {
+    const payload = prompt.payload as { message?: unknown } | null;
+    const message = typeof payload?.message === "string" ? payload.message : "";
+    return { kind: "resume_confirm", message };
+  }
+  if (prompt.kind === "command_palette") {
+    return { kind: "command_palette" };
+  }
+  return { kind: "session_picker" };
+};
+
 export const selectRenderFrame = (inputs: FrameInputs): RenderFrame => {
   const { state, transcript, repoLabel } = inputs;
-  const hasOverlay = state.overlay !== undefined;
+  const head = state.promptQueue[0];
+  const overlay = deriveOverlay(head);
+  const hasOverlay = overlay !== undefined;
   const offTranscript = state.screen !== "transcript";
   const mode: FrameMode = hasOverlay || offTranscript ? "transcript" : "prompt";
 
   const hints = state.activeSessionId ? ["[inspect]", "[help]"] : ["[help]"];
 
-  return {
+  const frame: RenderFrame = {
     mode,
     header: {
       title: "Bakudo",
@@ -64,4 +87,8 @@ export const selectRenderFrame = (inputs: FrameInputs): RenderFrame => {
       autoApprove: state.composer.autoApprove,
     },
   };
+  if (overlay !== undefined) {
+    frame.overlay = overlay;
+  }
+  return frame;
 };

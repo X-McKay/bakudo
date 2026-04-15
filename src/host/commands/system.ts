@@ -30,8 +30,6 @@ export const systemCommands: readonly HostCommandSpec[] = [
     aliases: ["quit"] as const,
     group: "system",
     description: "Exit the interactive shell.",
-    // Actual exit is handled in runInteractiveShell; registry still returns
-    // handled so the fallthrough path isn't consulted.
     handler: () => {},
   },
   {

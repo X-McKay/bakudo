@@ -11,13 +11,14 @@ test("selectRenderFrame: frame.mode is prompt on transcript screen with no overl
   assert.equal(frame.mode, "prompt");
 });
 
-test("selectRenderFrame: frame.mode is transcript when overlay is set", () => {
+test("selectRenderFrame: frame.mode is transcript when promptQueue is non-empty", () => {
   const state = reduceHost(initialHostAppState(), {
-    type: "open_overlay",
-    overlay: { kind: "command_palette" },
+    type: "enqueue_prompt",
+    prompt: { id: "p1", kind: "command_palette", payload: null },
   });
   const frame = selectRenderFrame({ state, transcript: [] });
   assert.equal(frame.mode, "transcript");
+  assert.deepEqual(frame.overlay, { kind: "command_palette" });
 });
 
 test("selectRenderFrame: frame.mode is transcript when screen is inspect", () => {

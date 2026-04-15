@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import { createSessionTaskKey } from "../sessionTypes.js";
-import type { InteractiveResolution, InteractiveShellState } from "./interactiveRenderLoop.js";
+import type { HostAppState } from "./appState.js";
+import type { InteractiveResolution, ShellContext } from "./interactiveRenderLoop.js";
+import { reduceHost } from "./reducer.js";
 import { tokenizeCommand } from "./parsing.js";
 
 export const createInteractiveSessionIdentity = (): { sessionId: string; taskId: string } => {
@@ -12,15 +14,15 @@ export const createInteractiveSessionIdentity = (): { sessionId: string; taskId:
 export const buildInteractiveRunResolution = (
   command: "run" | "build" | "plan",
   goal: string,
-  state: InteractiveShellState,
+  shell: ShellContext,
 ): InteractiveResolution => {
   const trimmedGoal = goal.trim();
   const { sessionId, taskId } = createInteractiveSessionIdentity();
   const argv: string[] = [command];
   if (command === "run") {
-    argv.push("--mode", state.currentMode);
+    argv.push("--mode", shell.currentMode);
   }
-  if (state.autoApprove) {
+  if (shell.autoApprove) {
     argv.push("--yes");
   }
   argv.push("--session-id", sessionId, trimmedGoal);
@@ -30,7 +32,7 @@ export const buildInteractiveRunResolution = (
 export const resolveSessionScopedInteractiveCommand = (
   command: "status" | "tasks" | "review" | "logs" | "sandbox" | "resume",
   args: string[],
-  state: InteractiveShellState,
+  shell: ShellContext,
 ): InteractiveResolution => {
   if (args[0]) {
     return {
@@ -39,12 +41,12 @@ export const resolveSessionScopedInteractiveCommand = (
       ...(args[1] ? { taskId: args[1] } : {}),
     };
   }
-  if (state.lastSessionId) {
-    const trailingTask = state.lastTaskId ? [state.lastTaskId] : [];
+  if (shell.lastSessionId) {
+    const trailingTask = shell.lastTaskId ? [shell.lastTaskId] : [];
     return {
-      argv: [command, state.lastSessionId, ...trailingTask],
-      sessionId: state.lastSessionId,
-      ...(state.lastTaskId ? { taskId: state.lastTaskId } : {}),
+      argv: [command, shell.lastSessionId, ...trailingTask],
+      sessionId: shell.lastSessionId,
+      ...(shell.lastTaskId ? { taskId: shell.lastTaskId } : {}),
     };
   }
   return { argv: [command, ...args] };
@@ -52,27 +54,27 @@ export const resolveSessionScopedInteractiveCommand = (
 
 export const resolveInteractiveInput = (
   line: string,
-  state: InteractiveShellState,
+  shell: ShellContext,
 ): InteractiveResolution => {
   if (!line.startsWith("/")) {
-    return buildInteractiveRunResolution("run", line, state);
+    return buildInteractiveRunResolution("run", line, shell);
   }
 
   const [command = "", ...args] = tokenizeCommand(line.slice(1));
   if (command === "build" || command === "plan") {
-    return buildInteractiveRunResolution(command, args.join(" "), state);
+    return buildInteractiveRunResolution(command, args.join(" "), shell);
   }
   if (command === "run") {
-    return buildInteractiveRunResolution("run", args.join(" "), state);
+    return buildInteractiveRunResolution("run", args.join(" "), shell);
   }
   if (command === "status") {
     return args[0]
       ? { argv: ["status", args[0]], sessionId: args[0] }
-      : state.lastSessionId
+      : shell.lastSessionId
         ? {
-            argv: ["status", state.lastSessionId],
-            sessionId: state.lastSessionId,
-            ...(state.lastTaskId ? { taskId: state.lastTaskId } : {}),
+            argv: ["status", shell.lastSessionId],
+            sessionId: shell.lastSessionId,
+            ...(shell.lastTaskId ? { taskId: shell.lastTaskId } : {}),
           }
         : { argv: ["status"] };
   }
@@ -83,29 +85,28 @@ export const resolveInteractiveInput = (
     command === "sandbox" ||
     command === "resume"
   ) {
-    return resolveSessionScopedInteractiveCommand(command, args, state);
+    return resolveSessionScopedInteractiveCommand(command, args, shell);
   }
   if (command === "sessions" || command === "help" || command === "init") {
-    return { argv: [command, ...(state.autoApprove && command === "init" ? ["--yes"] : [])] };
+    return { argv: [command, ...(shell.autoApprove && command === "init" ? ["--yes"] : [])] };
   }
 
   return { argv: [command, ...args] };
 };
 
 export const rememberInteractiveContext = (
-  state: InteractiveShellState,
+  deps: { appState: HostAppState },
   args: { sessionId?: string; taskId?: string },
   resolution: InteractiveResolution,
 ): void => {
-  if (resolution.sessionId) {
-    state.lastSessionId = resolution.sessionId;
-  } else if (args.sessionId) {
-    state.lastSessionId = args.sessionId;
-  }
-  if (resolution.taskId) {
-    state.lastTaskId = resolution.taskId;
-  } else if (args.taskId) {
-    state.lastTaskId = args.taskId;
+  const nextSessionId = resolution.sessionId ?? args.sessionId;
+  const nextTaskId = resolution.taskId ?? args.taskId;
+  if (nextSessionId !== undefined) {
+    deps.appState = reduceHost(deps.appState, {
+      type: "set_active_session",
+      sessionId: nextSessionId,
+      ...(nextTaskId ? { turnId: nextTaskId } : {}),
+    });
   }
 };
 
@@ -117,9 +118,9 @@ export const sessionPromptLabel = (sessionId: string | undefined): string => {
   return parts.at(-1) ?? sessionId;
 };
 
-export const renderPrompt = (state: InteractiveShellState): string => {
-  const session = sessionPromptLabel(state.lastSessionId);
-  const mode = state.currentMode === "build" ? "BUILD" : "PLAN";
-  const approval = state.autoApprove ? "AUTO" : "PROMPT";
+export const renderPrompt = (shell: ShellContext): string => {
+  const session = sessionPromptLabel(shell.lastSessionId);
+  const mode = shell.currentMode === "build" ? "BUILD" : "PLAN";
+  const approval = shell.autoApprove ? "AUTO" : "PROMPT";
   return `bakudo ${mode} ${approval} ${session}> `;
 };

@@ -1,18 +1,38 @@
 import { supportsAnsi } from "./ansi.js";
-import type { HostAppState } from "./appState.js";
+import type { ComposerMode, HostAppState } from "./appState.js";
 import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
-import { reduceHost, type HostAction } from "./reducer.js";
+import { reduceHost } from "./reducer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
 import { renderTranscriptFramePlain } from "./renderers/plainRenderer.js";
 import { renderTranscriptFrame } from "./renderers/transcriptRenderer.js";
 import type { TextWriter } from "./io.js";
 
-export type InteractiveShellState = {
+/**
+ * Derived read-only view of composer/session state for resolvers.
+ * PR2 used a parallel `InteractiveShellState` object; now it is computed
+ * from {@link HostAppState} on demand so the reducer is the sole source.
+ */
+export type ShellContext = {
   currentMode: "build" | "plan";
   autoApprove: boolean;
   lastSessionId?: string;
   lastTaskId?: string;
+};
+
+export const deriveShellContext = (state: HostAppState): ShellContext => {
+  const composerMode: ComposerMode = state.composer.mode;
+  const ctx: ShellContext = {
+    currentMode: composerMode === "plan" ? "plan" : "build",
+    autoApprove: state.composer.autoApprove,
+  };
+  if (state.activeSessionId !== undefined) {
+    ctx.lastSessionId = state.activeSessionId;
+  }
+  if (state.activeTurnId !== undefined) {
+    ctx.lastTaskId = state.activeTurnId;
+  }
+  return ctx;
 };
 
 export type InteractiveResolution = {
@@ -22,7 +42,6 @@ export type InteractiveResolution = {
 };
 
 export type TickDeps = {
-  shellState: InteractiveShellState;
   transcript: TranscriptItem[];
   appState: HostAppState;
 };
@@ -102,31 +121,7 @@ const exitCodeToReviewItem = (code: number): TranscriptItem => {
 const isExecCommand = (command: string): boolean =>
   command === "run" || command === "build" || command === "plan" || command === "resume";
 
-const reduce = (deps: TickDeps, action: HostAction): void => {
-  deps.appState = reduceHost(deps.appState, action);
-};
-
-const syncComposerFromShell = (deps: TickDeps): void => {
-  // Legacy sync: translate worker TaskMode → ComposerMode. Scheduled for deletion
-  // in PR3 commit 4 once appState is the sole source of truth for composer state.
-  const composerMode =
-    deps.appState.composer.mode !== "standard" || deps.shellState.currentMode === "plan"
-      ? deps.shellState.currentMode === "plan"
-        ? "plan"
-        : deps.appState.composer.mode
-      : "standard";
-  reduce(deps, { type: "set_mode", mode: composerMode });
-  if (deps.shellState.lastSessionId) {
-    reduce(deps, {
-      type: "set_active_session",
-      sessionId: deps.shellState.lastSessionId,
-      ...(deps.shellState.lastTaskId ? { turnId: deps.shellState.lastTaskId } : {}),
-    });
-  }
-};
-
 export const tickRender = (deps: TickDeps): void => {
-  syncComposerFromShell(deps);
   writeFrame(renderFrameLines(deps.appState, deps.transcript));
 };
 
@@ -145,11 +140,11 @@ export const handleControlCommand = (line: string, deps: TickDeps): boolean => {
   }
   if (line.startsWith("/mode ")) {
     const nextMode = line.slice("/mode ".length).trim();
-    if (nextMode !== "build" && nextMode !== "plan") {
-      stderrWrite("interactive_error: mode must be build or plan\n");
+    if (nextMode !== "standard" && nextMode !== "plan" && nextMode !== "autopilot") {
+      stderrWrite("interactive_error: mode must be standard, plan, or autopilot\n");
       return true;
     }
-    deps.shellState.currentMode = nextMode;
+    deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: nextMode });
     deps.transcript.push({ kind: "event", label: "mode", detail: nextMode });
     return true;
   }
@@ -159,7 +154,12 @@ export const handleControlCommand = (line: string, deps: TickDeps): boolean => {
       stderrWrite("interactive_error: approve must be auto or prompt\n");
       return true;
     }
-    deps.shellState.autoApprove = policy === "auto";
+    // approve policy is now derived from composer mode (autopilot). We still
+    // accept the legacy /approve command and map it to /mode autopilot / standard.
+    deps.appState = reduceHost(deps.appState, {
+      type: "set_mode",
+      mode: policy === "auto" ? "autopilot" : "standard",
+    });
     deps.transcript.push({ kind: "event", label: "approve", detail: policy });
     return true;
   }
@@ -167,11 +167,11 @@ export const handleControlCommand = (line: string, deps: TickDeps): boolean => {
 };
 
 export type ExecuteDeps = {
-  resolveInput: (line: string, state: InteractiveShellState) => InteractiveResolution;
+  resolveInput: (line: string, shell: ShellContext) => InteractiveResolution;
   parse: (argv: string[]) => HostCliArgs;
   dispatch: (args: HostCliArgs) => Promise<number>;
   remember: (
-    state: InteractiveShellState,
+    state: { appState: HostAppState },
     args: HostCliArgs,
     resolution: InteractiveResolution,
   ) => void;
@@ -183,7 +183,8 @@ export const executePrompt = async (
   exec: ExecuteDeps,
 ): Promise<void> => {
   try {
-    const resolution = exec.resolveInput(line, deps.shellState);
+    const shell = deriveShellContext(deps.appState);
+    const resolution = exec.resolveInput(line, shell);
     const parsed = exec.parse(resolution.argv);
     const isExec = isExecCommand(parsed.command);
 
@@ -214,7 +215,7 @@ export const executePrompt = async (
     }
 
     if (code !== 1) {
-      exec.remember(deps.shellState, parsed, resolution);
+      exec.remember({ appState: deps.appState }, parsed, resolution);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

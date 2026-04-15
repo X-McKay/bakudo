@@ -16,8 +16,6 @@ export const composerCommands: readonly HostCommandSpec[] = [
       const requested = args[0];
       if (requested === undefined) {
         deps.appState = reduceHost(deps.appState, { type: "cycle_mode" });
-        deps.shellState.currentMode = deps.appState.composer.mode === "plan" ? "plan" : "build";
-        deps.shellState.autoApprove = deps.appState.composer.autoApprove;
         deps.transcript.push({
           kind: "event",
           label: "mode",
@@ -25,7 +23,6 @@ export const composerCommands: readonly HostCommandSpec[] = [
         });
         return;
       }
-      // Accept legacy "build" as an alias for "standard".
       const normalized: string = requested === "build" ? "standard" : requested;
       if (!isComposerMode(normalized)) {
         deps.transcript.push({
@@ -36,8 +33,6 @@ export const composerCommands: readonly HostCommandSpec[] = [
         return;
       }
       deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: normalized });
-      deps.shellState.currentMode = normalized === "plan" ? "plan" : "build";
-      deps.shellState.autoApprove = deps.appState.composer.autoApprove;
       deps.transcript.push({ kind: "event", label: "mode", detail: normalized });
     },
   },
@@ -48,8 +43,6 @@ export const composerCommands: readonly HostCommandSpec[] = [
     description: "Shortcut for /mode autopilot.",
     handler: ({ deps }) => {
       deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: "autopilot" });
-      deps.shellState.currentMode = "build";
-      deps.shellState.autoApprove = true;
       deps.transcript.push({ kind: "event", label: "mode", detail: "autopilot" });
     },
   },

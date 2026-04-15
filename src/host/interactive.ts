@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 
+import type { ComposerMode } from "./appState.js";
 import { initialHostAppState } from "./appState.js";
 import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
 import {
@@ -11,11 +12,12 @@ import {
 import { runtimeIo } from "./io.js";
 import { runInit } from "./init.js";
 import {
+  deriveShellContext,
   executePrompt,
   handleControlCommand,
   tickRender,
   type InteractiveResolution,
-  type InteractiveShellState,
+  type ShellContext,
   type TickDeps,
 } from "./interactiveRenderLoop.js";
 import {
@@ -37,6 +39,11 @@ import {
   printStatus,
   printTasks,
 } from "./printers.js";
+import {
+  answerPrompt,
+  cancelPrompt as cancelPendingPrompt,
+  resetPromptResolvers,
+} from "./promptResolvers.js";
 import { reduceHost } from "./reducer.js";
 import type { TranscriptItem } from "./renderModel.js";
 import {
@@ -46,7 +53,7 @@ import {
 } from "./sessionController.js";
 import { printUsage } from "./usage.js";
 
-export type { InteractiveResolution, InteractiveShellState } from "./interactiveRenderLoop.js";
+export type { InteractiveResolution } from "./interactiveRenderLoop.js";
 export {
   buildInteractiveRunResolution,
   createInteractiveSessionIdentity,
@@ -98,14 +105,6 @@ const buildHostStateFromDeps = (deps: TickDeps): HostStateRecord => ({
 });
 
 const applyHostStateToDeps = (deps: TickDeps, record: HostStateRecord): void => {
-  deps.shellState.currentMode = record.lastUsedMode === "plan" ? "plan" : "build";
-  deps.shellState.autoApprove = record.autoApprove;
-  if (record.lastActiveSessionId) {
-    deps.shellState.lastSessionId = record.lastActiveSessionId;
-  }
-  if (record.lastActiveTurnId) {
-    deps.shellState.lastTaskId = record.lastActiveTurnId;
-  }
   deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: record.lastUsedMode });
   if (record.lastActiveSessionId) {
     deps.appState = reduceHost(deps.appState, {
@@ -146,13 +145,17 @@ const routePromptToController = (line: string): ControllerRoute | null => {
   return command === "run" ? { goal } : { goal, overrideMode: command };
 };
 
+const composerModeToTaskMode = (mode: ComposerMode): "build" | "plan" =>
+  mode === "plan" ? "plan" : "build";
+
 const dispatchThroughController = async (
   goal: string,
   deps: TickDeps,
   overrideMode?: "build" | "plan",
 ): Promise<SessionDispatchResult> => {
-  const mode = overrideMode ?? deps.shellState.currentMode;
-  const args = baseInteractiveArgs(mode, deps.shellState.autoApprove);
+  const shell: ShellContext = deriveShellContext(deps.appState);
+  const mode = overrideMode ?? composerModeToTaskMode(deps.appState.composer.mode);
+  const args = baseInteractiveArgs(mode, shell.autoApprove);
   if (deps.appState.activeSessionId !== undefined) {
     return appendTurnToActiveSession(deps.appState.activeSessionId, goal, args);
   }
@@ -165,8 +168,6 @@ const applyDispatchResult = (result: SessionDispatchResult, deps: TickDeps): voi
     sessionId: result.sessionId,
     turnId: result.turnId,
   });
-  deps.shellState.lastSessionId = result.sessionId;
-  deps.shellState.lastTaskId = result.turnId;
   const outcome = result.reviewed.outcome;
   deps.transcript.push({
     kind: "assistant",
@@ -198,6 +199,15 @@ const executePromptFromResolution = async (
   await executePrompt(line, deps, wrapped);
 };
 
+const answerHeadPrompt = (line: string, deps: TickDeps): boolean => {
+  const head = deps.appState.promptQueue[0];
+  if (head === undefined) {
+    return false;
+  }
+  answerPrompt(head.id, line);
+  return true;
+};
+
 export const runInteractiveShell = async (): Promise<number> => {
   const input = runtimeIo.stdin;
   const output = runtimeIo.stdout;
@@ -208,10 +218,10 @@ export const runInteractiveShell = async (): Promise<number> => {
 
   const repoRoot = repoRootFor(undefined);
   const rl = createInterface({ input, output });
-  const shellState: InteractiveShellState = { currentMode: "build", autoApprove: false };
   const transcript: TranscriptItem[] = [];
-  const deps: TickDeps = { shellState, transcript, appState: initialHostAppState() };
+  const deps: TickDeps = { transcript, appState: initialHostAppState() };
 
+  resetPromptResolvers();
   const prior = await loadHostState(repoRoot);
   if (prior !== null) {
     applyHostStateToDeps(deps, prior);
@@ -230,6 +240,21 @@ export const runInteractiveShell = async (): Promise<number> => {
     await saveHostState(repoRoot, buildHostStateFromDeps(deps));
   };
 
+  const handleSigint = (): void => {
+    const head = deps.appState.promptQueue[0];
+    if (head === undefined) {
+      rl.close();
+      return;
+    }
+    cancelPendingPrompt(head.id);
+    deps.appState = reduceHost(deps.appState, { type: "cancel_prompt", id: head.id });
+    tickRender(deps);
+  };
+  type SignalHandler = (name: string, handler: () => void) => unknown;
+  const nodeProcess = (globalThis as { process?: { on?: SignalHandler; off?: SignalHandler } })
+    .process;
+  nodeProcess?.on?.("SIGINT", handleSigint);
+
   tickRender(deps);
   try {
     while (true) {
@@ -247,6 +272,13 @@ export const runInteractiveShell = async (): Promise<number> => {
       if (line.length === 0) {
         continue;
       }
+
+      // Route answers for active prompts first.
+      if (answerHeadPrompt(line, deps)) {
+        tickRender(deps);
+        continue;
+      }
+
       if (line === "/quit" || line === "/exit") {
         return 0;
       }
@@ -294,6 +326,8 @@ export const runInteractiveShell = async (): Promise<number> => {
       tickRender(deps);
     }
   } finally {
+    nodeProcess?.off?.("SIGINT", handleSigint);
+    resetPromptResolvers();
     rl.close();
   }
 };

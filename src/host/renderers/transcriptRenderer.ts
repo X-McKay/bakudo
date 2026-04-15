@@ -41,6 +41,23 @@ const renderHeader = (frame: RenderFrame): string => {
   return `${bold(frame.header.title)}  ${chip}  ${gray(frame.header.sessionLabel)}${repo}`;
 };
 
+const renderOverlay = (frame: RenderFrame): string[] => {
+  const overlay = frame.overlay;
+  if (overlay === undefined) {
+    return [];
+  }
+  if (overlay.kind === "approval") {
+    return [yellow(`[approval] ${overlay.message} [y/N]`)];
+  }
+  if (overlay.kind === "resume_confirm") {
+    return [yellow(`[resume?] ${overlay.message} [y/N]`)];
+  }
+  if (overlay.kind === "command_palette") {
+    return [cyan("[command palette]")];
+  }
+  return [cyan("[session picker]")];
+};
+
 export const renderTranscriptFrame = (frame: RenderFrame): string[] => {
   const lines: string[] = [];
   lines.push(renderHeader(frame));
@@ -49,6 +66,9 @@ export const renderTranscriptFrame = (frame: RenderFrame): string[] => {
     lines.push(renderItem(item));
   }
   lines.push("");
+  for (const overlayLine of renderOverlay(frame)) {
+    lines.push(overlayLine);
+  }
   lines.push(dim(frame.footer.hints.join("  ")));
   if (frame.mode === "prompt") {
     lines.push("> ");

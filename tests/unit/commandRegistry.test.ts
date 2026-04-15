@@ -7,7 +7,6 @@ import { buildDefaultCommandRegistry } from "../../src/host/commandRegistryDefau
 import type { TickDeps } from "../../src/host/interactiveRenderLoop.js";
 
 const buildDeps = (): TickDeps => ({
-  shellState: { currentMode: "build", autoApprove: false },
   transcript: [],
   appState: initialHostAppState(),
 });

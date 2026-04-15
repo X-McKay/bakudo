@@ -2,9 +2,9 @@ import {
   deriveAutoApprove,
   type ComposerMode,
   type HostAppState,
-  type HostOverlay,
   type HostScreen,
   type InspectTab,
+  type PromptEntry,
 } from "./appState.js";
 
 export type HostAction =
@@ -22,8 +22,9 @@ export type HostAction =
       attemptId?: string;
       tab?: InspectTab;
     }
-  | { type: "open_overlay"; overlay: HostOverlay }
-  | { type: "close_overlay" }
+  | { type: "enqueue_prompt"; prompt: PromptEntry }
+  | { type: "dequeue_prompt"; id: string }
+  | { type: "cancel_prompt"; id?: string }
   | { type: "push_notice"; notice: string }
   | { type: "clear_notices" };
 
@@ -100,8 +101,6 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
     case "cycle_mode":
       return setMode(state, nextComposerMode(state.composer.mode));
     case "set_auto_approve": {
-      // autoApprove is derived from mode. Dispatching this action emits a notice
-      // so callers notice the change at debug time; state is unchanged.
       const notice = `set_auto_approve ignored; derive from mode === "autopilot" (was ${state.composer.autoApprove}, requested ${action.value})`;
       return state.composer.autoApprove === action.value
         ? state
@@ -129,13 +128,29 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
       return { ...state, screen: action.screen };
     case "set_inspect_target":
       return updateInspect(state, action);
-    case "open_overlay":
-      return { ...state, overlay: action.overlay };
-    case "close_overlay":
-      if (state.overlay === undefined) {
+    case "enqueue_prompt":
+      return { ...state, promptQueue: [...state.promptQueue, action.prompt] };
+    case "dequeue_prompt": {
+      const filtered = state.promptQueue.filter((entry) => entry.id !== action.id);
+      if (filtered.length === state.promptQueue.length) {
         return state;
       }
-      return withoutOptional(state, "overlay");
+      return { ...state, promptQueue: filtered };
+    }
+    case "cancel_prompt": {
+      if (state.promptQueue.length === 0) {
+        return state;
+      }
+      if (action.id === undefined) {
+        // Cancel the head entry.
+        return { ...state, promptQueue: state.promptQueue.slice(1) };
+      }
+      const filtered = state.promptQueue.filter((entry) => entry.id !== action.id);
+      if (filtered.length === state.promptQueue.length) {
+        return state;
+      }
+      return { ...state, promptQueue: filtered };
+    }
     case "push_notice":
       return { ...state, notices: [...state.notices, action.notice] };
     case "clear_notices":

@@ -102,17 +102,27 @@ test("reducer: set_inspect_target updates provided fields and preserves tab when
   assert.equal(tabbed.inspect.sessionId, "s1");
 });
 
-test("reducer: open_overlay and close_overlay set and clear overlay", () => {
+test("reducer: enqueue_prompt / dequeue_prompt / cancel_prompt manage promptQueue", () => {
   const state = initialHostAppState();
-  const opened = reduceHost(state, {
-    type: "open_overlay",
-    overlay: { kind: "approval", message: "go?" },
+  const enqueued = reduceHost(state, {
+    type: "enqueue_prompt",
+    prompt: { id: "p1", kind: "approval", payload: { message: "go?" } },
   });
-  assert.deepEqual(opened.overlay, { kind: "approval", message: "go?" });
-  const reopen = reduceHost(opened, { type: "open_overlay", overlay: { kind: "command_palette" } });
-  assert.deepEqual(reopen.overlay, { kind: "command_palette" });
-  const closed = reduceHost(reopen, { type: "close_overlay" });
-  assert.equal(closed.overlay, undefined);
+  assert.equal(enqueued.promptQueue.length, 1);
+  assert.equal(enqueued.promptQueue[0]?.kind, "approval");
+
+  const second = reduceHost(enqueued, {
+    type: "enqueue_prompt",
+    prompt: { id: "p2", kind: "resume_confirm", payload: { message: "swap?" } },
+  });
+  assert.equal(second.promptQueue.length, 2);
+
+  const cancelled = reduceHost(second, { type: "cancel_prompt" });
+  assert.equal(cancelled.promptQueue.length, 1);
+  assert.equal(cancelled.promptQueue[0]?.id, "p2");
+
+  const dequeued = reduceHost(cancelled, { type: "dequeue_prompt", id: "p2" });
+  assert.equal(dequeued.promptQueue.length, 0);
 });
 
 test("reducer: push_notice appends and clear_notices empties", () => {
