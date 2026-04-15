@@ -1,7 +1,7 @@
 import { ArtifactStore } from "../artifactStore.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
-import type { SessionRecord, SessionTaskRecord } from "../sessionTypes.js";
+import type { SessionAttemptRecord, SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import {
   blue,
   cyan,
@@ -75,18 +75,37 @@ export const formatArtifacts = (
 ): string[] =>
   artifacts.map((artifact) => `  - ${artifact.name} (${artifact.kind}) -> ${artifact.path}`);
 
-export const taskModeLabel = (task: SessionTaskRecord): string =>
-  task.request?.mode ?? (task.request?.assumeDangerousSkipPermissions ? "build" : "plan");
+export const attemptModeLabel = (attempt: SessionAttemptRecord): string =>
+  attempt.request?.mode ?? (attempt.request?.assumeDangerousSkipPermissions ? "build" : "plan");
 
-export const latestTaskRecord = (
-  session: SessionRecord,
-  taskId?: string,
-): SessionTaskRecord | undefined => {
-  if (taskId !== undefined) {
-    return session.tasks.find((task) => task.taskId === taskId);
+export const latestTurn = (session: SessionRecord): SessionTurnRecord | undefined =>
+  session.turns.at(-1);
+
+export const latestAttempt = (
+  turn: SessionTurnRecord,
+  attemptId?: string,
+): SessionAttemptRecord | undefined => {
+  if (attemptId !== undefined) {
+    return turn.attempts.find((attempt) => attempt.attemptId === attemptId);
   }
-  return session.tasks.at(-1);
+  return turn.attempts.at(-1);
 };
+
+export const findAttemptById = (
+  session: SessionRecord,
+  attemptId: string,
+): { turn: SessionTurnRecord; attempt: SessionAttemptRecord } | undefined => {
+  for (const turn of session.turns) {
+    const attempt = turn.attempts.find((entry) => entry.attemptId === attemptId);
+    if (attempt !== undefined) {
+      return { turn, attempt };
+    }
+  }
+  return undefined;
+};
+
+export const countSessionAttempts = (session: SessionRecord): number =>
+  session.turns.reduce((total, turn) => total + turn.attempts.length, 0);
 
 export const reviewedOutcomeExitCode = (reviewed: ReviewedTaskResult): number => {
   if (reviewed.outcome === "success") {
@@ -102,9 +121,10 @@ export const reviewedOutcomeExitCode = (reviewed: ReviewedTaskResult): number =>
 };
 
 export const printRunSummary = (session: SessionRecord, reviewed: ReviewedTaskResult): void => {
-  const task = session.tasks.find((entry) => entry.taskId === reviewed.taskId);
+  const located = findAttemptById(session, reviewed.taskId);
+  const attempt = located?.attempt;
   const sandboxTaskId =
-    typeof task?.metadata?.sandboxTaskId === "string" ? task.metadata.sandboxTaskId : "n/a";
+    typeof attempt?.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
   stdoutWrite(
     [
       "",
@@ -121,12 +141,17 @@ export const printRunSummary = (session: SessionRecord, reviewed: ReviewedTaskRe
   );
 };
 
+const loadSessionOrThrow = async (rootDir: string, sessionId: string): Promise<SessionRecord> => {
+  const session = await new SessionStore(rootDir).loadSession(sessionId);
+  if (session === null) {
+    throw new Error(`unknown session: ${sessionId}`);
+  }
+  return session;
+};
+
 export const printTasks = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const session = await new SessionStore(rootDir).loadSession(args.sessionId ?? "");
-  if (session === null) {
-    throw new Error(`unknown session: ${args.sessionId}`);
-  }
+  const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
 
   const lines = [
     renderSection("Tasks"),
@@ -135,13 +160,17 @@ export const printTasks = async (args: HostCliArgs): Promise<number> => {
     renderKeyValue("Goal", session.goal),
     "",
   ];
-  for (const task of session.tasks) {
-    const reviewed = task.result === undefined ? null : reviewTaskResult(task.result);
-    const sandboxTaskId =
-      typeof task.metadata?.sandboxTaskId === "string" ? task.metadata.sandboxTaskId : "n/a";
-    lines.push(
-      `- ${statusBadge(task.status)} ${task.taskId} mode=${taskModeLabel(task)} status=${task.status} sandbox=${sandboxTaskId}${reviewed ? ` outcome=${reviewed.outcome} action=${reviewed.action}` : ""}${task.lastMessage ? ` message=${task.lastMessage}` : ""}`,
-    );
+  for (const turn of session.turns) {
+    for (const attempt of turn.attempts) {
+      const reviewed = attempt.result === undefined ? null : reviewTaskResult(attempt.result);
+      const sandboxTaskId =
+        typeof attempt.metadata?.sandboxTaskId === "string"
+          ? attempt.metadata.sandboxTaskId
+          : "n/a";
+      lines.push(
+        `- ${statusBadge(attempt.status)} ${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status} sandbox=${sandboxTaskId}${reviewed ? ` outcome=${reviewed.outcome} action=${reviewed.action}` : ""}${attempt.lastMessage ? ` message=${attempt.lastMessage}` : ""}`,
+      );
+    }
   }
   stdoutWrite(lines.join("\n") + "\n");
   return 0;
@@ -163,10 +192,11 @@ export const printSessions = async (args: HostCliArgs): Promise<number> => {
 
   const lines = [renderSection("Sessions")];
   for (const session of sessions) {
-    const latestTask = session.tasks.at(-1);
-    const reviewed = latestTask?.result ? reviewTaskResult(latestTask.result) : null;
+    const turn = latestTurn(session);
+    const attempt = turn === undefined ? undefined : latestAttempt(turn);
+    const reviewed = attempt?.result ? reviewTaskResult(attempt.result) : null;
     lines.push(
-      `- ${statusBadge(session.status)} ${session.sessionId} status=${session.status} tasks=${session.tasks.length} updated=${session.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} goal=${session.goal}`,
+      `- ${statusBadge(session.status)} ${session.sessionId} status=${session.status} turns=${session.turns.length} attempts=${countSessionAttempts(session)} updated=${session.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} goal=${session.goal}`,
     );
   }
   stdoutWrite(lines.join("\n") + "\n");
@@ -180,30 +210,27 @@ export const printStatus = async (args: HostCliArgs): Promise<number> => {
   }
 
   const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const session = await new SessionStore(rootDir).loadSession(args.sessionId);
-  if (session === null) {
-    throw new Error(`unknown session: ${args.sessionId}`);
-  }
+  const session = await loadSessionOrThrow(rootDir, args.sessionId);
 
-  const latestTask = session.tasks.at(-1);
-  const reviewed = latestTask?.result ? reviewTaskResult(latestTask.result) : null;
+  const turn = latestTurn(session);
+  const attempt = turn === undefined ? undefined : latestAttempt(turn);
+  const reviewed = attempt?.result ? reviewTaskResult(attempt.result) : null;
   const lines = [
     renderSection("Status"),
     renderKeyValue("Session", session.sessionId),
     renderKeyValue("Goal", session.goal),
     renderKeyValue("State", `${statusBadge(session.status)} ${session.status}`),
     renderKeyValue("Updated", formatUtcTimestamp(session.updatedAt)),
-    renderKeyValue("Tasks", String(session.tasks.length)),
+    renderKeyValue("Turns", String(session.turns.length)),
+    renderKeyValue("Attempts", String(countSessionAttempts(session))),
   ];
-  if (latestTask) {
+  if (attempt) {
     const sandboxTaskId =
-      typeof latestTask.metadata?.sandboxTaskId === "string"
-        ? latestTask.metadata.sandboxTaskId
-        : "n/a";
+      typeof attempt.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
     lines.push(
       renderKeyValue(
         "Latest",
-        `${latestTask.taskId} mode=${taskModeLabel(latestTask)} status=${latestTask.status}`,
+        `${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status}`,
       ),
     );
     lines.push(renderKeyValue("Sandbox", sandboxTaskId));
@@ -219,42 +246,42 @@ export const printStatus = async (args: HostCliArgs): Promise<number> => {
 
 export const printSandbox = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const session = await new SessionStore(rootDir).loadSession(args.sessionId ?? "");
-  if (session === null) {
-    throw new Error(`unknown session: ${args.sessionId}`);
+  const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
+  const turn = latestTurn(session);
+  if (turn === undefined) {
+    throw new Error(`no turn found for session ${session.sessionId}`);
   }
-
-  const task = latestTaskRecord(session, args.taskId);
-  if (task === undefined) {
-    throw new Error(`no task found for session ${session.sessionId}`);
+  const attempt = latestAttempt(turn, args.taskId);
+  if (attempt === undefined) {
+    throw new Error(`no attempt found for session ${session.sessionId}`);
   }
 
   const sandboxTaskId =
-    typeof task.metadata?.sandboxTaskId === "string" ? task.metadata.sandboxTaskId : "n/a";
-  const aboxCommand = Array.isArray(task.metadata?.aboxCommand)
-    ? (task.metadata?.aboxCommand as unknown[]).map(String).join(" ")
+    typeof attempt.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
+  const aboxCommand = Array.isArray(attempt.metadata?.aboxCommand)
+    ? (attempt.metadata?.aboxCommand as unknown[]).map(String).join(" ")
     : "n/a";
   const artifacts = await new ArtifactStore(rootDir).listTaskArtifacts(
     session.sessionId,
-    task.taskId,
+    attempt.attemptId,
   );
   stdoutWrite(
     [
       renderSection("Sandbox"),
       renderKeyValue("Session", session.sessionId),
-      renderKeyValue("Task", task.taskId),
-      renderKeyValue("Mode", taskModeLabel(task)),
-      renderKeyValue("Status", `${statusBadge(task.status)} ${task.status}`),
+      renderKeyValue("Task", attempt.attemptId),
+      renderKeyValue("Mode", attemptModeLabel(attempt)),
+      renderKeyValue("Status", `${statusBadge(attempt.status)} ${attempt.status}`),
       renderKeyValue("Sandbox", sandboxTaskId),
       renderKeyValue("ABox", aboxCommand),
       renderKeyValue(
         "Safety",
-        task.request?.assumeDangerousSkipPermissions
+        attempt.request?.assumeDangerousSkipPermissions
           ? "dangerous-skip-permissions enabled in sandbox worker"
           : "host requested safer planning mode",
       ),
       ...(artifacts.length > 0 ? ["Artifacts:", ...formatArtifacts(artifacts)] : []),
-      ...(task.result?.summary ? [renderKeyValue("Summary", task.result.summary)] : []),
+      ...(attempt.result?.summary ? [renderKeyValue("Summary", attempt.result.summary)] : []),
       renderKeyValue(
         "Next",
         "Use `bakudo review` for the host verdict or `bakudo logs` for the event stream.",
@@ -266,42 +293,41 @@ export const printSandbox = async (args: HostCliArgs): Promise<number> => {
 
 export const printReview = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const sessionStore = new SessionStore(rootDir);
   const artifactStore = new ArtifactStore(rootDir);
-  const session = await sessionStore.loadSession(args.sessionId ?? "");
-  if (session === null) {
-    throw new Error(`unknown session: ${args.sessionId}`);
+  const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
+  const turn = latestTurn(session);
+  if (turn === undefined) {
+    throw new Error(`no turn found for session ${session.sessionId}`);
   }
-
-  const task = latestTaskRecord(session, args.taskId);
-  if (task?.result === undefined) {
+  const attempt = latestAttempt(turn, args.taskId);
+  if (attempt?.result === undefined) {
     throw new Error(`no reviewed result found for session ${session.sessionId}`);
   }
 
-  const reviewed = reviewTaskResult(task.result);
-  const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, task.taskId);
+  const reviewed = reviewTaskResult(attempt.result);
+  const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, attempt.attemptId);
   const dispatchArtifact = artifacts.find((artifact) => artifact.kind === "dispatch");
   const workerLog = artifacts.find((artifact) => artifact.kind === "log");
   stdoutWrite(
     [
       renderSection("Review"),
       renderKeyValue("Session", session.sessionId),
-      renderKeyValue("Task", task.taskId),
-      renderKeyValue("Status", `${statusBadge(task.status)} ${task.status}`),
+      renderKeyValue("Task", attempt.attemptId),
+      renderKeyValue("Status", `${statusBadge(attempt.status)} ${attempt.status}`),
       renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`),
       renderKeyValue("Action", reviewed.action),
       renderKeyValue("Reason", reviewed.reason),
-      renderKeyValue("Summary", task.result.summary),
-      ...(typeof task.metadata?.sandboxTaskId === "string"
-        ? [renderKeyValue("Sandbox", task.metadata.sandboxTaskId)]
+      renderKeyValue("Summary", attempt.result.summary),
+      ...(typeof attempt.metadata?.sandboxTaskId === "string"
+        ? [renderKeyValue("Sandbox", attempt.metadata.sandboxTaskId)]
         : []),
-      ...(task.result.exitCode === undefined
+      ...(attempt.result.exitCode === undefined
         ? []
-        : [renderKeyValue("Exit", String(task.result.exitCode))]),
-      ...(task.result.startedAt
-        ? [renderKeyValue("Started", formatUtcTimestamp(task.result.startedAt))]
+        : [renderKeyValue("Exit", String(attempt.result.exitCode))]),
+      ...(attempt.result.startedAt
+        ? [renderKeyValue("Started", formatUtcTimestamp(attempt.result.startedAt))]
         : []),
-      renderKeyValue("Finished", formatUtcTimestamp(task.result.finishedAt)),
+      renderKeyValue("Finished", formatUtcTimestamp(attempt.result.finishedAt)),
       ...(dispatchArtifact ? [renderKeyValue("Dispatch", dispatchArtifact.path)] : []),
       ...(workerLog ? [renderKeyValue("Worker", workerLog.path)] : []),
       ...(artifacts.length > 0 ? ["Artifacts:", ...formatArtifacts(artifacts)] : []),
@@ -314,10 +340,7 @@ export const printReview = async (args: HostCliArgs): Promise<number> => {
 export const printLogs = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const sessionStore = new SessionStore(rootDir);
-  const session = await sessionStore.loadSession(args.sessionId ?? "");
-  if (session === null) {
-    throw new Error(`unknown session: ${args.sessionId}`);
-  }
+  const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
 
   const events = await sessionStore.readTaskEvents(session.sessionId);
   const lines = events

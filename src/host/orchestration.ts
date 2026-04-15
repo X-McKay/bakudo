@@ -7,17 +7,18 @@ import { ABoxAdapter } from "../aboxAdapter.js";
 import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "../config.js";
-import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskRequest } from "../protocol.js";
+import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskMode, type TaskRequest } from "../protocol.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
 import { SessionStore, sanitizePathSegment } from "../sessionStore.js";
-import type { SessionStatus, SessionTaskRecord } from "../sessionTypes.js";
+import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
 import { bold, dim, renderKeyValue, renderModeChip, renderSection } from "./ansi.js";
 import { runtimeIo, stdoutWrite } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import {
-  latestTaskRecord,
+  latestAttempt,
+  latestTurn,
   printRunSummary,
   reviewedOutcomeExitCode,
   statusBadge,
@@ -66,6 +67,14 @@ export const promptForApproval = async (message: string): Promise<boolean> => {
   }
 };
 
+export const composerModeToTaskMode = (mode: TaskMode | string): TaskMode => {
+  if (mode === "plan") {
+    return "plan";
+  }
+  // "standard" and "autopilot" (composer-level) and legacy "build" all map to build.
+  return "build";
+};
+
 export const createTaskSpec = (
   sessionId: string,
   taskId: string,
@@ -77,7 +86,7 @@ export const createTaskSpec = (
   taskId,
   sessionId,
   goal,
-  mode: args.mode,
+  mode: composerModeToTaskMode(args.mode),
   cwd: ".",
   timeoutSeconds: args.timeoutSeconds,
   maxOutputBytes: args.maxOutputBytes,
@@ -85,12 +94,12 @@ export const createTaskSpec = (
   assumeDangerousSkipPermissions,
 });
 
-export const recordTask = (
+export const recordAttempt = (
   request: TaskRequest,
-  status: SessionTaskRecord["status"],
+  status: SessionAttemptRecord["status"],
   lastMessage?: string,
-): SessionTaskRecord => ({
-  taskId: request.taskId,
+): SessionAttemptRecord => ({
+  attemptId: request.taskId,
   request,
   status,
   ...(lastMessage === undefined ? {} : { lastMessage }),
@@ -121,17 +130,22 @@ export const writeSessionArtifact = async (
   });
 };
 
-export const executeTask = async (
-  sessionStore: SessionStore,
-  artifactStore: ArtifactStore,
-  runner: ABoxTaskRunner,
-  sessionId: string,
-  request: WorkerTaskSpec,
-  args: HostCliArgs,
-): Promise<ReviewedTaskResult> => {
-  await sessionStore.upsertTask(
+export type ExecuteTaskContext = {
+  sessionStore: SessionStore;
+  artifactStore: ArtifactStore;
+  runner: ABoxTaskRunner;
+  sessionId: string;
+  turnId: string;
+  request: WorkerTaskSpec;
+  args: HostCliArgs;
+};
+
+export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTaskResult> => {
+  const { sessionStore, artifactStore, runner, sessionId, turnId, request, args } = ctx;
+  await sessionStore.upsertAttempt(
     sessionId,
-    recordTask(request, "queued", "queued for sandbox execution"),
+    turnId,
+    recordAttempt(request, "queued", "queued for sandbox execution"),
   );
   stdoutWrite(
     [
@@ -183,8 +197,8 @@ export const executeTask = async (
   }
 
   const reviewed = reviewTaskResult(execution.result);
-  await sessionStore.upsertTask(sessionId, {
-    taskId: request.taskId,
+  await sessionStore.upsertAttempt(sessionId, turnId, {
+    attemptId: request.taskId,
     request,
     status: execution.result.status,
     result: execution.result,
@@ -236,6 +250,22 @@ export const executeTask = async (
   return reviewed;
 };
 
+const nowIso = (): string => new Date().toISOString();
+
+export const makeInitialTurn = (
+  turnId: string,
+  prompt: string,
+  mode: string,
+): SessionTurnRecord => ({
+  turnId,
+  prompt,
+  mode,
+  status: "queued",
+  attempts: [],
+  createdAt: nowIso(),
+  updatedAt: nowIso(),
+});
+
 export const runNewSession = async (args: HostCliArgs): Promise<number> => {
   const fileConfig = await loadConfig(args.config);
   const runtimeConfig = buildRuntimeConfig(fileConfig);
@@ -257,11 +287,14 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
     }
   }
 
+  const turnId = "turn-1";
   const session = await sessionStore.createSession({
     sessionId,
     goal: args.goal ?? "",
+    repoRoot: repoRootFor(args.repo),
     assumeDangerousSkipPermissions,
     status: "planned",
+    turns: [makeInitialTurn(turnId, args.goal ?? "", args.mode)],
   });
 
   const taskId = createSessionTaskKey(session.sessionId, "task-1");
@@ -273,14 +306,15 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
     args,
   );
   await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask(
+  const reviewed = await executeTask({
     sessionStore,
     artifactStore,
     runner,
-    session.sessionId,
+    sessionId: session.sessionId,
+    turnId,
     request,
     args,
-  );
+  });
 
   const finalSession = await sessionStore.saveSession({
     ...(await sessionStore.loadSession(session.sessionId))!,
@@ -299,12 +333,16 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
     throw new Error(`unknown session: ${args.sessionId}`);
   }
 
-  const task = latestTaskRecord(session, args.taskId);
-  if (task === undefined || task.request === undefined) {
-    throw new Error(`no resumable task found for session ${session.sessionId}`);
+  const turn = latestTurn(session);
+  if (turn === undefined) {
+    throw new Error(`no resumable turn found for session ${session.sessionId}`);
+  }
+  const attempt = latestAttempt(turn, args.taskId);
+  if (attempt === undefined || attempt.request === undefined) {
+    throw new Error(`no resumable attempt found for session ${session.sessionId}`);
   }
 
-  const priorReview = task.result === undefined ? null : reviewTaskResult(task.result);
+  const priorReview = attempt.result === undefined ? null : reviewTaskResult(attempt.result);
   if (priorReview?.outcome === "success") {
     printRunSummary(session, priorReview);
     return 0;
@@ -316,7 +354,7 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
 
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
-      `Re-dispatch task ${task.taskId} into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+      `Re-dispatch task ${attempt.attemptId} into an ephemeral abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Resume cancelled.\n");
@@ -325,9 +363,9 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
   }
 
   const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo));
-  const retryId = createSessionTaskKey(session.sessionId, `retry-${session.tasks.length + 1}`);
+  const retryId = createSessionTaskKey(session.sessionId, `retry-${turn.attempts.length + 1}`);
   const request: WorkerTaskSpec = {
-    ...task.request,
+    ...attempt.request,
     taskId: retryId,
     timeoutSeconds: args.timeoutSeconds,
     maxOutputBytes: args.maxOutputBytes,
@@ -335,14 +373,15 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
   };
 
   await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask(
+  const reviewed = await executeTask({
     sessionStore,
     artifactStore,
     runner,
-    session.sessionId,
+    sessionId: session.sessionId,
+    turnId: turn.turnId,
     request,
     args,
-  );
+  });
   const updated = await sessionStore.saveSession({
     ...(await sessionStore.loadSession(session.sessionId))!,
     status: sessionStatusFromReview(reviewed),
