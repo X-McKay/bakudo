@@ -17,6 +17,14 @@ import {
   normalizeV2Record,
   taskStatusToTurnStatus,
 } from "./sessionMigration.js";
+import {
+  SESSION_INDEX_SCHEMA_VERSION,
+  buildIndexEntryFromSession,
+  loadSessionIndex,
+  sessionIndexPath,
+  sortIndexEntries,
+  type SessionIndexEntry,
+} from "./host/sessionIndex.js";
 
 export type SessionStorePaths = {
   sessionId: string;
@@ -94,6 +102,23 @@ const readJsonFile = async <T>(filePath: string): Promise<T | null> => {
 };
 
 export { loadSessionRecord };
+
+/**
+ * Atomic write of `.bakudo/sessions/index.json` with entries sorted newest
+ * first. Exposed for the scan-and-rebuild fallback in {@link SessionStore}
+ * and for tests that want to pre-seed an index.
+ */
+export const writeSessionIndex = async (
+  rootDir: string,
+  entries: ReadonlyArray<SessionIndexEntry>,
+): Promise<void> => {
+  const filePath = sessionIndexPath(rootDir);
+  const payload = {
+    schemaVersion: SESSION_INDEX_SCHEMA_VERSION,
+    entries: sortIndexEntries(entries),
+  };
+  await writeJsonAtomic(filePath, payload);
+};
 
 const compareSessionRecordsForListing = (left: SessionRecord, right: SessionRecord): number => {
   if (left.updatedAt !== right.updatedAt) {
@@ -188,7 +213,28 @@ export class SessionStore {
   public async saveSession(record: SessionRecord): Promise<SessionRecord> {
     const normalized = normalizeV2Record(record, { updatedAt: record.updatedAt ?? nowIso() });
     await writeJsonAtomic(this.paths(normalized.sessionId).sessionFile, normalized);
+    await this.upsertIndexEntry(normalized);
     return normalized;
+  }
+
+  /**
+   * Incremental upsert of the session summary index alongside a full-session
+   * save. Reads current `index.json` (empty list when missing/corrupt — the
+   * self-healing scan in {@link listSessions} rebuilds it on next read),
+   * replaces-or-appends the entry for `record.sessionId`, re-sorts by
+   * `updatedAt` descending, and atomic-writes the index.
+   */
+  private async upsertIndexEntry(record: SessionRecord): Promise<void> {
+    const entry = buildIndexEntryFromSession(record);
+    const existing = await loadSessionIndex(this.rootDir);
+    const entries = existing === null ? [] : [...existing.entries];
+    const index = entries.findIndex((candidate) => candidate.sessionId === entry.sessionId);
+    if (index === -1) {
+      entries.push(entry);
+    } else {
+      entries[index] = entry;
+    }
+    await writeSessionIndex(this.rootDir, entries);
   }
 
   public async upsertTurn(
