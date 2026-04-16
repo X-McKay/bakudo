@@ -10,7 +10,7 @@ import {
   saveHostState,
   type HostStateRecord,
 } from "./hostStateStore.js";
-import { runtimeIo } from "./io.js";
+import { runtimeIo, withCapturedStdout, type TextWriter } from "./io.js";
 import { runInit } from "./init.js";
 import {
   deriveShellContext,
@@ -181,6 +181,12 @@ const routePromptToController = (line: string): ControllerRoute | null => {
 const composerModeToTaskMode = (mode: ComposerMode): "build" | "plan" =>
   mode === "plan" ? "plan" : "build";
 
+// Discards bytes written to stdout during dispatch. The semantic narration
+// path (via createProgressCoalescer below) is the only writer that should
+// reach the transcript; raw per-event log lines from executeTask must not
+// surface in the interactive default. Logs remain available via /inspect logs.
+const sinkWriter: TextWriter = { write: () => true };
+
 const dispatchThroughController = async (
   goal: string,
   deps: TickDeps,
@@ -194,10 +200,12 @@ const dispatchThroughController = async (
   });
   const options = { onProgress: coalesce };
   try {
-    if (deps.appState.activeSessionId !== undefined) {
-      return await appendTurnToActiveSession(deps.appState.activeSessionId, goal, args, options);
-    }
-    return await createAndRunFirstTurn(goal, args, options);
+    return await withCapturedStdout(sinkWriter, async () => {
+      if (deps.appState.activeSessionId !== undefined) {
+        return appendTurnToActiveSession(deps.appState.activeSessionId, goal, args, options);
+      }
+      return createAndRunFirstTurn(goal, args, options);
+    });
   } finally {
     coalesce.flushNow();
   }
