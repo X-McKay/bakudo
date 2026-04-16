@@ -255,12 +255,33 @@ export const printSessions = async (args: HostCliArgs): Promise<number> => {
 };
 
 export const printStatus = async (args: HostCliArgs): Promise<number> => {
+  const rootDir = storageRootFor(args.repo, args.storageRoot);
   if (!args.sessionId) {
-    stdoutWrite(`${renderSection("Host Status")}\n`);
-    return printSessions(args);
+    // No specific session requested: render a compact host overview from
+    // the session index (fast path; no per-session file reads) rather than
+    // delegating to `printSessions` and emitting two section headers.
+    const summaries = await new SessionStore(rootDir).listSessions();
+    if (summaries.length === 0) {
+      stdoutWrite(
+        [
+          renderSection("Host Status"),
+          "  No sessions found yet.",
+          dim('  Try `bakudo plan "inspect the repo"` or start the shell with `bakudo`.'),
+        ].join("\n") + "\n",
+      );
+      return 0;
+    }
+    const overviewLines = [renderSection("Host Status")];
+    for (const summary of summaries) {
+      const reviewed = reviewViewForSummary(summary);
+      overviewLines.push(
+        `- ${statusBadge(summary.status)} ${summary.sessionId} status=${summary.status} updated=${summary.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} title=${summary.title}`,
+      );
+    }
+    stdoutWrite(overviewLines.join("\n") + "\n");
+    return 0;
   }
 
-  const rootDir = storageRootFor(args.repo, args.storageRoot);
   const session = await loadSessionOrThrow(rootDir, args.sessionId);
 
   const turn = latestTurn(session);
