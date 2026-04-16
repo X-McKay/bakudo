@@ -1,6 +1,11 @@
 import type { ArtifactStore } from "../artifactStore.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
-import type { SessionAttemptRecord, SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
+import type {
+  SessionAttemptRecord,
+  SessionRecord,
+  SessionReviewRecord,
+  SessionTurnRecord,
+} from "../sessionTypes.js";
 
 type ArtifactRow = Awaited<ReturnType<ArtifactStore["listTaskArtifacts"]>>[number];
 
@@ -22,6 +27,40 @@ const modeOf = (attempt: SessionAttemptRecord): string =>
 const sandboxOf = (attempt: SessionAttemptRecord): string =>
   typeof attempt.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
 
+const dispatchCommandOf = (attempt: SessionAttemptRecord): string[] | undefined => {
+  if (Array.isArray(attempt.dispatchCommand) && attempt.dispatchCommand.length > 0) {
+    return attempt.dispatchCommand;
+  }
+  if (Array.isArray(attempt.metadata?.aboxCommand)) {
+    return (attempt.metadata.aboxCommand as unknown[]).map((entry) => String(entry));
+  }
+  return undefined;
+};
+
+type ReviewLike = Pick<ReviewedTaskResult, "outcome" | "action"> & { reason?: string };
+
+const reviewFromTurn = (turn: SessionTurnRecord | undefined): SessionReviewRecord | undefined =>
+  turn?.latestReview;
+
+const selectReviewView = (
+  turn: SessionTurnRecord | undefined,
+  attempt: SessionAttemptRecord | undefined,
+): ReviewLike | null => {
+  const fromTurn = reviewFromTurn(turn);
+  if (fromTurn !== undefined) {
+    return {
+      outcome: fromTurn.outcome,
+      action: fromTurn.action,
+      ...(fromTurn.reason === undefined ? {} : { reason: fromTurn.reason }),
+    };
+  }
+  if (attempt?.result !== undefined) {
+    const reviewed = reviewTaskResult(attempt.result);
+    return { outcome: reviewed.outcome, action: reviewed.action, reason: reviewed.reason };
+  }
+  return null;
+};
+
 const formatArtifactRows = (artifacts: ArtifactRow[]): string[] =>
   artifacts.map((artifact) => `  - ${artifact.name} (${artifact.kind}) -> ${artifact.path}`);
 
@@ -33,7 +72,7 @@ export type InspectSummaryInput = {
 
 export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
   const { session, turn, attempt } = input;
-  const reviewed = attempt?.result ? reviewTaskResult(attempt.result) : null;
+  const reviewed = selectReviewView(turn, attempt);
   // Required ordering (phase doc priorities, PR3 follow-up):
   //   1. Session
   //   2. Repo
@@ -117,9 +156,8 @@ export type InspectSandboxInput = {
 
 export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
   const { session, attempt, artifacts } = input;
-  const aboxCommand = Array.isArray(attempt.metadata?.aboxCommand)
-    ? (attempt.metadata?.aboxCommand as unknown[]).map(String).join(" ")
-    : "n/a";
+  const dispatchCommand = dispatchCommandOf(attempt);
+  const aboxCommand = dispatchCommand === undefined ? "n/a" : dispatchCommand.join(" ");
   const lines = [
     "Sandbox",
     renderKv("Session", session.sessionId),

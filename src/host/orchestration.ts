@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { ABoxAdapter } from "../aboxAdapter.js";
@@ -9,8 +8,13 @@ import { ArtifactStore } from "../artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "../config.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskMode, type TaskRequest } from "../protocol.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
-import { SessionStore, sanitizePathSegment } from "../sessionStore.js";
-import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
+import { SessionStore } from "../sessionStore.js";
+import type {
+  SessionAttemptRecord,
+  SessionReviewRecord,
+  SessionStatus,
+  SessionTurnRecord,
+} from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
 import { bold, dim, renderKeyValue, renderModeChip, renderSection } from "./ansi.js";
@@ -23,6 +27,7 @@ import {
   reviewedOutcomeExitCode,
   statusBadge,
 } from "./printers.js";
+import { writeExecutionArtifacts } from "./sessionArtifactWriter.js";
 
 export const storageRootFor = (
   repo: string | undefined,
@@ -105,30 +110,56 @@ export const recordAttempt = (
   ...(lastMessage === undefined ? {} : { lastMessage }),
 });
 
-export const writeSessionArtifact = async (
-  artifactStore: ArtifactStore,
+const upsertTurnLatestReview = async (
+  sessionStore: SessionStore,
   sessionId: string,
-  taskId: string,
-  name: string,
-  contents: string,
-  kind: string,
-  metadata?: Record<string, unknown>,
+  turnId: string,
+  latestReview: SessionReviewRecord,
 ): Promise<void> => {
-  const artifactsDir = artifactStore.artifactDir(sessionId);
-  await mkdir(artifactsDir, { recursive: true });
-  const safeName = `${sanitizePathSegment(taskId)}-${name}`;
-  const filePath = join(artifactsDir, safeName);
-  await writeFile(filePath, contents, "utf8");
-  await artifactStore.registerArtifact({
-    artifactId: `${taskId}:${name}`,
-    sessionId,
-    taskId,
-    kind,
-    name,
-    path: filePath,
-    ...(metadata === undefined ? {} : { metadata }),
-  });
+  const session = await sessionStore.loadSession(sessionId);
+  if (session === null) {
+    return;
+  }
+  const turn = session.turns.find((entry) => entry.turnId === turnId);
+  if (turn === undefined) {
+    return;
+  }
+  await sessionStore.upsertTurn(sessionId, { ...turn, latestReview });
 };
+
+type ProgressEvent = import("../workerRuntime.js").WorkerTaskProgressEvent;
+
+const formatProgressLine = (event: ProgressEvent): string => {
+  const stamp = event.timestamp.slice(11, 19);
+  const metrics = [
+    event.elapsedMs !== undefined ? `elapsed=${event.elapsedMs}ms` : "",
+    event.stdoutBytes !== undefined ? `stdout=${event.stdoutBytes}B` : "",
+    event.stderrBytes !== undefined ? `stderr=${event.stderrBytes}B` : "",
+    event.exitCode !== undefined && event.exitCode !== null ? `exit=${event.exitCode}` : "",
+    event.timedOut ? "timed_out=true" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const detail = event.message ? ` ${event.message}` : "";
+  const suffix = metrics ? ` ${dim(`(${metrics})`)}` : "";
+  return `${dim(`[${stamp}]`)} ${statusBadge(event.status)} ${bold(event.kind)}${detail}${suffix}\n`;
+};
+
+const renderDispatchBanner = (
+  sessionId: string,
+  request: WorkerTaskSpec,
+  mode: HostCliArgs["mode"],
+): string =>
+  [
+    "",
+    renderSection("Dispatch"),
+    `${statusBadge("queued")} ${renderModeChip(request.mode ?? mode)} ${dim("sending task to abox worker")}`,
+    renderKeyValue("Session", sessionId),
+    renderKeyValue("Task", request.taskId),
+    renderKeyValue("Goal", request.goal),
+    renderKeyValue("Sandbox", "ephemeral abox worker"),
+    "",
+  ].join("\n");
 
 export type ExecuteTaskContext = {
   sessionStore: SessionStore;
@@ -155,18 +186,7 @@ export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTask
     turnId,
     recordAttempt(request, "queued", "queued for sandbox execution"),
   );
-  stdoutWrite(
-    [
-      "",
-      renderSection("Dispatch"),
-      `${statusBadge("queued")} ${renderModeChip(request.mode ?? args.mode)} ${dim("sending task to abox worker")}`,
-      renderKeyValue("Session", sessionId),
-      renderKeyValue("Task", request.taskId),
-      renderKeyValue("Goal", request.goal),
-      renderKeyValue("Sandbox", "ephemeral abox worker"),
-      "",
-    ].join("\n"),
-  );
+  stdoutWrite(renderDispatchBanner(sessionId, request, args.mode));
   const execution = await runner.runTask(
     request,
     {
@@ -179,20 +199,7 @@ export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTask
     {
       onEvent: (event) => {
         onProgress?.(event);
-        const stamp = event.timestamp.slice(11, 19);
-        const metrics = [
-          event.elapsedMs !== undefined ? `elapsed=${event.elapsedMs}ms` : "",
-          event.stdoutBytes !== undefined ? `stdout=${event.stdoutBytes}B` : "",
-          event.stderrBytes !== undefined ? `stderr=${event.stderrBytes}B` : "",
-          event.exitCode !== undefined && event.exitCode !== null ? `exit=${event.exitCode}` : "",
-          event.timedOut ? "timed_out=true" : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        const detail = event.message ? ` ${event.message}` : "";
-        stdoutWrite(
-          `${dim(`[${stamp}]`)} ${statusBadge(event.status)} ${bold(event.kind)}${detail}${metrics ? ` ${dim(`(${metrics})`)}` : ""}\n`,
-        );
+        stdoutWrite(formatProgressLine(event));
       },
       onWorkerError: (error) => {
         const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
@@ -206,6 +213,9 @@ export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTask
   }
 
   const reviewed = reviewTaskResult(execution.result);
+  const dispatchCommand = Array.isArray(execution.metadata?.cmd)
+    ? execution.metadata.cmd.map((entry) => String(entry))
+    : undefined;
   await sessionStore.upsertAttempt(sessionId, turnId, {
     attemptId: request.taskId,
     request,
@@ -218,43 +228,30 @@ export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTask
       reviewedOutcome: reviewed.outcome,
       reviewedAction: reviewed.action,
     },
+    ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
+  });
+  await upsertTurnLatestReview(sessionStore, sessionId, turnId, {
+    reviewId: `review-${Date.now()}-${randomUUID().slice(0, 8)}`,
+    attemptId: request.taskId,
+    outcome: reviewed.outcome,
+    action: reviewed.action,
+    reason: reviewed.reason,
+    reviewedAt: new Date().toISOString(),
   });
 
-  await writeSessionArtifact(
+  await writeExecutionArtifacts({
     artifactStore,
     sessionId,
-    request.taskId,
-    "result.json",
-    `${JSON.stringify(execution.result, null, 2)}\n`,
-    "result",
-    { outcome: reviewed.outcome },
-  );
-  await writeSessionArtifact(
-    artifactStore,
-    sessionId,
-    request.taskId,
-    "worker-output.log",
-    `${execution.rawOutput}\n`,
-    "log",
-    { ok: execution.ok, errorCount: execution.workerErrors.length },
-  );
-  await writeSessionArtifact(
-    artifactStore,
-    sessionId,
-    request.taskId,
-    "dispatch.json",
-    `${JSON.stringify(
-      {
-        sandboxTaskId: execution.metadata?.taskId,
-        aboxCommand: execution.metadata?.cmd,
-        reviewedOutcome: reviewed.outcome,
-        reviewedAction: reviewed.action,
-      },
-      null,
-      2,
-    )}\n`,
-    "dispatch",
-  );
+    taskId: request.taskId,
+    result: execution.result,
+    rawOutput: execution.rawOutput,
+    ok: execution.ok,
+    workerErrorCount: execution.workerErrors.length,
+    sandboxTaskId: execution.metadata?.taskId,
+    aboxCommand: execution.metadata?.cmd,
+    reviewedOutcome: reviewed.outcome,
+    reviewedAction: reviewed.action,
+  });
 
   return reviewed;
 };

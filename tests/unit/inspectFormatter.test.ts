@@ -15,6 +15,7 @@ const buildSession = (overrides: Partial<SessionRecord> = {}): SessionRecord => 
   schemaVersion: 2,
   sessionId: "session-sample",
   repoRoot: "/tmp/repo",
+  title: "the goal",
   goal: "the goal",
   status: "running",
   assumeDangerousSkipPermissions: false,

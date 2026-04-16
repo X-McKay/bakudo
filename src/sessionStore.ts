@@ -9,9 +9,14 @@ import type {
   SessionStatus,
   SessionTaskRecord,
   SessionTurnRecord,
-  TurnStatus,
 } from "./sessionTypes.js";
-import { CURRENT_SESSION_SCHEMA_VERSION } from "./sessionTypes.js";
+import { CURRENT_SESSION_SCHEMA_VERSION, deriveSessionTitle } from "./sessionTypes.js";
+import {
+  loadSessionRecord,
+  migrateV1TaskToAttempt,
+  normalizeV2Record,
+  taskStatusToTurnStatus,
+} from "./sessionMigration.js";
 
 export type SessionStorePaths = {
   sessionId: string;
@@ -28,6 +33,7 @@ export type CreateSessionInput = {
   repoRoot: string;
   assumeDangerousSkipPermissions: boolean;
   status?: SessionStatus;
+  title?: string;
   turns?: SessionTurnRecord[];
   createdAt?: string;
   updatedAt?: string;
@@ -87,104 +93,7 @@ const readJsonFile = async <T>(filePath: string): Promise<T | null> => {
   }
 };
 
-const taskStatusToTurnStatus = (status: string): TurnStatus => {
-  switch (status) {
-    case "queued":
-    case "running":
-    case "failed":
-      return status;
-    case "succeeded":
-      return "completed";
-    case "needs_review":
-      return "reviewing";
-    case "blocked":
-      return "awaiting_user";
-    case "cancelled":
-      return "failed";
-    default:
-      return "queued";
-  }
-};
-
-const migrateV1TaskToAttempt = (task: SessionTaskRecord): SessionAttemptRecord => ({
-  attemptId: task.taskId,
-  status: task.status,
-  ...(task.request === undefined ? {} : { request: task.request }),
-  ...(task.result === undefined ? {} : { result: task.result }),
-  ...(task.lastMessage === undefined ? {} : { lastMessage: task.lastMessage }),
-  ...(task.metadata === undefined ? {} : { metadata: task.metadata }),
-});
-
-const migrateV1ToV2 = (raw: {
-  sessionId: string;
-  goal: string;
-  status: SessionStatus;
-  assumeDangerousSkipPermissions: boolean;
-  tasks?: SessionTaskRecord[];
-  createdAt: string;
-  updatedAt: string;
-}): SessionRecord => {
-  const tasks = raw.tasks ?? [];
-  const attempts = tasks.map(migrateV1TaskToAttempt);
-  const latestStatus = tasks.at(-1)?.status ?? "queued";
-  const turn: SessionTurnRecord = {
-    turnId: "turn-1",
-    prompt: raw.goal,
-    mode: tasks[0]?.request?.mode ?? "build",
-    status: taskStatusToTurnStatus(latestStatus),
-    attempts,
-    createdAt: raw.createdAt,
-    updatedAt: raw.updatedAt,
-  };
-  return {
-    schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-    sessionId: raw.sessionId,
-    repoRoot: ".",
-    goal: raw.goal,
-    status: raw.status,
-    assumeDangerousSkipPermissions: raw.assumeDangerousSkipPermissions,
-    turns: attempts.length === 0 ? [] : [turn],
-    createdAt: raw.createdAt,
-    updatedAt: raw.updatedAt,
-  };
-};
-
-const normalizeV2Record = (
-  record: SessionRecord,
-  overrides: Pick<CreateSessionInput, "createdAt" | "updatedAt"> = {},
-): SessionRecord => ({
-  schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-  sessionId: record.sessionId,
-  repoRoot: record.repoRoot ?? ".",
-  goal: record.goal,
-  status: record.status,
-  assumeDangerousSkipPermissions: record.assumeDangerousSkipPermissions,
-  turns: record.turns.map((turn) => ({ ...turn, attempts: [...turn.attempts] })),
-  createdAt: overrides.createdAt ?? record.createdAt,
-  updatedAt: overrides.updatedAt ?? record.updatedAt,
-});
-
-export const loadSessionRecord = (raw: unknown): SessionRecord => {
-  if (typeof raw !== "object" || raw === null) {
-    throw new Error("unrecognized session record shape");
-  }
-  const candidate = raw as {
-    schemaVersion?: unknown;
-    turns?: unknown;
-    tasks?: unknown;
-    goal?: unknown;
-  };
-  if (
-    candidate.schemaVersion === CURRENT_SESSION_SCHEMA_VERSION &&
-    Array.isArray(candidate.turns)
-  ) {
-    return normalizeV2Record(raw as SessionRecord);
-  }
-  if (Array.isArray(candidate.tasks) && typeof candidate.goal === "string") {
-    return migrateV1ToV2(raw as Parameters<typeof migrateV1ToV2>[0]);
-  }
-  throw new Error("unrecognized session record shape");
-};
+export { loadSessionRecord };
 
 const compareSessionRecordsForListing = (left: SessionRecord, right: SessionRecord): number => {
   if (left.updatedAt !== right.updatedAt) {
@@ -210,14 +119,23 @@ export class SessionStore {
   public async createSession(input: CreateSessionInput): Promise<SessionRecord> {
     const createdAt = input.createdAt ?? nowIso();
     const updatedAt = input.updatedAt ?? createdAt;
+    const turns = [...(input.turns ?? [])];
+    const title =
+      input.title ??
+      deriveSessionTitle({
+        sessionId: input.sessionId,
+        goal: input.goal,
+        turns,
+      });
     const session: SessionRecord = {
       schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
       sessionId: input.sessionId,
       repoRoot: input.repoRoot,
+      title,
       goal: input.goal,
       status: input.status ?? "draft",
       assumeDangerousSkipPermissions: input.assumeDangerousSkipPermissions,
-      turns: [...(input.turns ?? [])],
+      turns,
       createdAt,
       updatedAt,
     };
