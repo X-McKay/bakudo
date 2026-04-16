@@ -42,11 +42,14 @@ export const resolveSessionScopedInteractiveCommand = (
     };
   }
   if (shell.lastSessionId) {
-    const trailingTask = shell.lastTaskId ? [shell.lastTaskId] : [];
+    // Do not auto-fill taskId from lastTurnId: turn ids and attempt ids are
+    // different identifiers. Commands like /review, /sandbox, /logs require an
+    // attempt id, not a turn id. Passing a turn id here causes lookup failures
+    // ("no attempt found" / "no reviewed result found"). Let the command
+    // handler look up the latest attempt from the session record instead.
     return {
-      argv: [command, shell.lastSessionId, ...trailingTask],
+      argv: [command, shell.lastSessionId],
       sessionId: shell.lastSessionId,
-      ...(shell.lastTaskId ? { taskId: shell.lastTaskId } : {}),
     };
   }
   return { argv: [command, ...args] };
@@ -74,7 +77,6 @@ export const resolveInteractiveInput = (
         ? {
             argv: ["status", shell.lastSessionId],
             sessionId: shell.lastSessionId,
-            ...(shell.lastTaskId ? { taskId: shell.lastTaskId } : {}),
           }
         : { argv: ["status"] };
   }

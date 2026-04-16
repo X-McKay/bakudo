@@ -3,7 +3,7 @@ import { composerCommands } from "./commands/composer.js";
 import { inspectCommands } from "./commands/inspect.js";
 import { legacyCommands } from "./commands/legacy.js";
 import { sessionCommands } from "./commands/session.js";
-import { systemCommands } from "./commands/system.js";
+import { buildSystemCommands } from "./commands/system.js";
 
 export const buildDefaultCommandRegistry = (): HostCommandRegistry => {
   const registry = createCommandRegistry();
@@ -11,7 +11,9 @@ export const buildDefaultCommandRegistry = (): HostCommandRegistry => {
     ...sessionCommands,
     ...inspectCommands,
     ...composerCommands,
-    ...systemCommands,
+    // System commands receive the registry so /help can enumerate commands
+    // dynamically without a circular import.
+    ...buildSystemCommands(registry),
     ...legacyCommands,
   ]) {
     registry.register(spec);

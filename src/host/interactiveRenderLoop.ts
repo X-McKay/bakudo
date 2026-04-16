@@ -19,7 +19,14 @@ export type ShellContext = {
   currentMode: "build" | "plan";
   autoApprove: boolean;
   lastSessionId?: string;
-  lastTaskId?: string;
+  /**
+   * The most recently active turn identifier (e.g. `turn-1`). This is a
+   * *turn* id, not an attempt/task id. Session-scoped commands that require
+   * an attempt id (review, sandbox, logs) must NOT auto-fill from this field;
+   * they should require the caller to supply an explicit attempt id or look
+   * up the latest attempt from the session record.
+   */
+  lastTurnId?: string;
 };
 
 export const deriveShellContext = (state: HostAppState): ShellContext => {
@@ -32,7 +39,7 @@ export const deriveShellContext = (state: HostAppState): ShellContext => {
     ctx.lastSessionId = state.activeSessionId;
   }
   if (state.activeTurnId !== undefined) {
-    ctx.lastTaskId = state.activeTurnId;
+    ctx.lastTurnId = state.activeTurnId;
   }
   return ctx;
 };

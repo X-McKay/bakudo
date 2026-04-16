@@ -145,3 +145,31 @@ test("default registry: /autopilot sets mode=autopilot", async () => {
   assert.equal(deps.appState.composer.mode, "autopilot");
   assert.equal(deps.appState.composer.autoApprove, true);
 });
+
+test("default registry: /help emits dynamic list from registry (not hardcoded)", async () => {
+  const registry = buildDefaultCommandRegistry();
+  const deps = buildDeps();
+  const outcome = await registry.dispatch("/help", deps);
+  assert.equal(outcome.kind, "handled");
+  // The preamble line plus at least one command entry should be emitted.
+  assert.ok(deps.transcript.length > 1, "expected at least 2 transcript entries from /help");
+  // All entries should be 'event' items with label 'help'.
+  for (const item of deps.transcript) {
+    assert.equal(item.kind, "event");
+    if (item.kind === "event") {
+      assert.equal(item.label, "help");
+    }
+  }
+  // Every non-hidden registered command should appear in the output.
+  const visibleCommands = registry.list(deps.appState).filter((s) => s.hidden !== true);
+  const helpText = deps.transcript
+    .filter((item) => item.kind === "event")
+    .map((item) => (item.kind === "event" ? item.detail : ""))
+    .join("\n");
+  for (const spec of visibleCommands) {
+    assert.ok(
+      helpText.includes(`/${spec.name}`),
+      `expected /${spec.name} to appear in /help output`,
+    );
+  }
+});

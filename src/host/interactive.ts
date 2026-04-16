@@ -281,7 +281,16 @@ export const runInteractiveShell = async (): Promise<number> => {
   const registry = buildDefaultCommandRegistry();
 
   const persistHostState = async (): Promise<void> => {
-    await saveHostState(repoRoot, buildHostStateFromDeps(deps));
+    try {
+      await saveHostState(repoRoot, buildHostStateFromDeps(deps));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      deps.transcript.push({
+        kind: "assistant",
+        text: `Warning: could not persist host state: ${message}`,
+        tone: "warning",
+      });
+    }
   };
 
   const handleSigint = (): void => {
@@ -368,8 +377,6 @@ export const runInteractiveShell = async (): Promise<number> => {
 
       if (dispatched.kind === "fallthrough") {
         await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
-      } else {
-        await executePrompt(line, deps, execDeps);
       }
 
       await persistHostState();

@@ -1,31 +1,35 @@
-import type { HostCommandSpec } from "../commandRegistry.js";
+import type { HostCommandRegistry, HostCommandSpec } from "../commandRegistry.js";
 
-export const systemCommands: readonly HostCommandSpec[] = [
+/**
+ * Build the system command specs. The `registry` parameter is injected at
+ * construction time so that `/help` can enumerate commands dynamically without
+ * creating a circular import between this module and `commandRegistryDefaults`.
+ */
+export const buildSystemCommands = (registry: HostCommandRegistry): readonly HostCommandSpec[] => [
   {
     name: "help",
     group: "system",
     description: "Show available commands.",
     handler: ({ deps }) => {
-      // Help ordering mirrors phase doc lines 788–797: prompt usage first,
-      // then session controls, inspect, composer/mode, autopilot, legacy
-      // compat aliases, finally /exit.
-      const registryCommands = [
-        "Type a goal to dispatch a sandbox attempt in the current mode.",
-        "/new",
-        "/resume [session]",
-        "/sessions",
-        "/inspect [summary|review|artifacts|sandbox|logs]",
-        "/mode [standard|plan|autopilot]",
-        "/autopilot",
-        "/compact",
-        "/clear",
-        "/init",
-        "/run /build /plan /status /tasks /review /sandbox /logs",
-        "/help",
-        "/exit (/quit)",
-      ];
-      for (const entry of registryCommands) {
-        deps.transcript.push({ kind: "event", label: "help", detail: entry });
+      // Dynamically generate the help list from the registry so it stays in
+      // sync as commands are added, removed, or changed. Commands with
+      // visible() predicates are filtered against the current app state so
+      // only contextually relevant commands are shown. Hidden commands are
+      // excluded. The prompt usage hint is prepended as a preamble.
+      const visibleSpecs = registry.list(deps.appState).filter((spec) => spec.hidden !== true);
+      deps.transcript.push({
+        kind: "event",
+        label: "help",
+        detail: "Type a goal to dispatch a sandbox attempt in the current mode.",
+      });
+      for (const spec of visibleSpecs) {
+        const aliases =
+          spec.aliases && spec.aliases.length > 0 ? ` (/${spec.aliases.join(", /")})` : "";
+        deps.transcript.push({
+          kind: "event",
+          label: "help",
+          detail: `/${spec.name}${aliases} — ${spec.description}`,
+        });
       }
     },
   },

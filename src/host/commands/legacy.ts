@@ -57,7 +57,6 @@ export const legacyCommands: readonly HostCommandSpec[] = [
         return {
           argv: ["status", shell.lastSessionId],
           sessionId: shell.lastSessionId,
-          ...(shell.lastTaskId ? { taskId: shell.lastTaskId } : {}),
         };
       }
       return { argv: ["status"] };

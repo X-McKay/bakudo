@@ -18,7 +18,7 @@ green. The 5 public exports of `hostCli.ts` must still be exported from
 
 ## Why
 
-`hostCli.ts` is a 1452-line god module that mixes ANSI rendering, command
+`hostCli.ts` is a 1718-line god module that mixes ANSI rendering, command
 parsing, session orchestration, inspect-surface printers, and the
 interactive shell. Subsequent work (session continuity, transcript
 renderer, semantic progress mapping) needs these concerns split apart so
