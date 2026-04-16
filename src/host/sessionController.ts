@@ -18,6 +18,7 @@ import {
   storageRootFor,
 } from "./orchestration.js";
 import type { HostCliArgs } from "./parsing.js";
+import { emitTurnTransition } from "./transitionStore.js";
 
 export type SessionDispatchResult = {
   sessionId: string;
@@ -83,6 +84,15 @@ export const createAndRunFirstTurn = async (
     turns: [makeInitialTurn(turnId, prompt, args.mode)],
   });
 
+  await emitTurnTransition({
+    storageRoot: storageRootFor(args.repo, args.storageRoot),
+    sessionId: session.sessionId,
+    turnId,
+    fromStatus: "queued",
+    toStatus: "queued",
+    reason: "next_turn",
+  });
+
   const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
   const request = createTaskSpec(
     session.sessionId,
@@ -124,6 +134,7 @@ export const appendTurnToActiveSession = async (
 
   const assumeDangerousSkipPermissions = await resolveAssumeDangerous(args);
   const turnId = nextTurnId(existing);
+  const previousTurn = existing.turns.at(-1);
   const turn: SessionTurnRecord = {
     turnId,
     prompt,
@@ -134,6 +145,14 @@ export const appendTurnToActiveSession = async (
     updatedAt: nowIso(),
   };
   await sessionStore.upsertTurn(sessionId, turn);
+  await emitTurnTransition({
+    storageRoot: storageRootFor(args.repo, args.storageRoot),
+    sessionId,
+    turnId,
+    fromStatus: previousTurn?.status ?? "queued",
+    toStatus: "queued",
+    reason: "next_turn",
+  });
 
   const withTurn = await sessionStore.loadSession(sessionId);
   if (withTurn === null) {

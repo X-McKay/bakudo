@@ -9,25 +9,20 @@ import { buildRuntimeConfig, loadConfig } from "../config.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskMode, type TaskRequest } from "../protocol.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
-import type {
-  SessionAttemptRecord,
-  SessionReviewRecord,
-  SessionStatus,
-  SessionTurnRecord,
-} from "../sessionTypes.js";
+import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
-import { bold, dim, renderKeyValue, renderModeChip, renderSection } from "./ansi.js";
+import { dim, renderSection } from "./ansi.js";
 import { runtimeIo, stdoutWrite } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
+import { latestAttempt, latestTurn, printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
 import {
-  latestAttempt,
-  latestTurn,
-  printRunSummary,
-  reviewedOutcomeExitCode,
-  statusBadge,
-} from "./printers.js";
+  formatProgressLine,
+  renderDispatchBanner,
+  upsertTurnLatestReview,
+} from "./orchestrationSupport.js";
 import { writeExecutionArtifacts } from "./sessionArtifactWriter.js";
+import { emitTurnTransition, findLatestTurnTransition } from "./transitionStore.js";
 
 export const storageRootFor = (
   repo: string | undefined,
@@ -109,57 +104,6 @@ export const recordAttempt = (
   status,
   ...(lastMessage === undefined ? {} : { lastMessage }),
 });
-
-const upsertTurnLatestReview = async (
-  sessionStore: SessionStore,
-  sessionId: string,
-  turnId: string,
-  latestReview: SessionReviewRecord,
-): Promise<void> => {
-  const session = await sessionStore.loadSession(sessionId);
-  if (session === null) {
-    return;
-  }
-  const turn = session.turns.find((entry) => entry.turnId === turnId);
-  if (turn === undefined) {
-    return;
-  }
-  await sessionStore.upsertTurn(sessionId, { ...turn, latestReview });
-};
-
-type ProgressEvent = import("../workerRuntime.js").WorkerTaskProgressEvent;
-
-const formatProgressLine = (event: ProgressEvent): string => {
-  const stamp = event.timestamp.slice(11, 19);
-  const metrics = [
-    event.elapsedMs !== undefined ? `elapsed=${event.elapsedMs}ms` : "",
-    event.stdoutBytes !== undefined ? `stdout=${event.stdoutBytes}B` : "",
-    event.stderrBytes !== undefined ? `stderr=${event.stderrBytes}B` : "",
-    event.exitCode !== undefined && event.exitCode !== null ? `exit=${event.exitCode}` : "",
-    event.timedOut ? "timed_out=true" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const detail = event.message ? ` ${event.message}` : "";
-  const suffix = metrics ? ` ${dim(`(${metrics})`)}` : "";
-  return `${dim(`[${stamp}]`)} ${statusBadge(event.status)} ${bold(event.kind)}${detail}${suffix}\n`;
-};
-
-const renderDispatchBanner = (
-  sessionId: string,
-  request: WorkerTaskSpec,
-  mode: HostCliArgs["mode"],
-): string =>
-  [
-    "",
-    renderSection("Dispatch"),
-    `${statusBadge("queued")} ${renderModeChip(request.mode ?? mode)} ${dim("sending task to abox worker")}`,
-    renderKeyValue("Session", sessionId),
-    renderKeyValue("Task", request.taskId),
-    renderKeyValue("Goal", request.goal),
-    renderKeyValue("Sandbox", "ephemeral abox worker"),
-    "",
-  ].join("\n");
 
 export type ExecuteTaskContext = {
   sessionStore: SessionStore;
@@ -302,6 +246,14 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
     status: "planned",
     turns: [makeInitialTurn(turnId, args.goal ?? "", args.mode)],
   });
+  await emitTurnTransition({
+    storageRoot: rootDir,
+    sessionId: session.sessionId,
+    turnId,
+    fromStatus: "queued",
+    toStatus: "queued",
+    reason: "next_turn",
+  });
 
   const taskId = createSessionTaskKey(session.sessionId, "task-1");
   const request = createTaskSpec(
@@ -377,6 +329,22 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
     maxOutputBytes: args.maxOutputBytes,
     heartbeatIntervalMs: args.heartbeatIntervalMs,
   };
+
+  const previousTransition = await findLatestTurnTransition(
+    rootDir,
+    session.sessionId,
+    turn.turnId,
+  );
+  await emitTurnTransition({
+    storageRoot: rootDir,
+    sessionId: session.sessionId,
+    turnId: turn.turnId,
+    fromStatus: "reviewing",
+    toStatus: "running",
+    reason: "user_retry",
+    ...(previousTransition?.chainId ? { chainId: previousTransition.chainId } : {}),
+    depth: (previousTransition?.depth ?? 0) + 1,
+  });
 
   await sessionStore.saveSession({ ...session, status: "running" });
   const reviewed = await executeTask({
