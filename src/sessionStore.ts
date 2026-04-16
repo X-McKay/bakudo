@@ -24,7 +24,9 @@ import {
   sessionIndexPath,
   sortIndexEntries,
   type SessionIndexEntry,
+  type SessionSummaryView,
 } from "./host/sessionIndex.js";
+import { stderrWrite } from "./host/io.js";
 
 export type SessionStorePaths = {
   sessionId: string;
@@ -120,18 +122,6 @@ export const writeSessionIndex = async (
   await writeJsonAtomic(filePath, payload);
 };
 
-const compareSessionRecordsForListing = (left: SessionRecord, right: SessionRecord): number => {
-  if (left.updatedAt !== right.updatedAt) {
-    return left.updatedAt > right.updatedAt ? -1 : 1;
-  }
-
-  if (left.createdAt !== right.createdAt) {
-    return left.createdAt > right.createdAt ? -1 : 1;
-  }
-
-  return left.sessionId.localeCompare(right.sessionId);
-};
-
 export class SessionStore {
   public constructor(public readonly rootDir: string) {
     this.rootDir = toResolvedPath(rootDir);
@@ -177,7 +167,27 @@ export class SessionStore {
     return loadSessionRecord(raw);
   }
 
-  public async listSessions(): Promise<SessionRecord[]> {
+  /**
+   * Return lightweight session summaries for listing/resume UIs. Fast path:
+   * load `.bakudo/sessions/index.json` via {@link loadSessionIndex} and
+   * return its entries (already sorted newest-first). Self-healing fallback:
+   * if the index is missing or invalid, scan session directories, rebuild
+   * the index from `buildIndexEntryFromSession`, write it, and return the
+   * same entries. A one-line warning is emitted on stderr whenever the
+   * rebuild path runs so operators notice persistent corruption.
+   *
+   * Returns `SessionSummaryView[]`. Callers that need the full
+   * {@link SessionRecord} should follow up with {@link loadSession}.
+   */
+  public async listSessions(): Promise<SessionSummaryView[]> {
+    const existing = await loadSessionIndex(this.rootDir);
+    if (existing !== null) {
+      return existing.entries;
+    }
+    return this.scanAndRebuildIndex();
+  }
+
+  private async scanAndRebuildIndex(): Promise<SessionIndexEntry[]> {
     let entries: Dirent<string>[];
     try {
       entries = await readdir(this.rootDir, { withFileTypes: true });
@@ -205,9 +215,16 @@ export class SessionStore {
         }),
     );
 
-    return sessions
-      .filter((session): session is SessionRecord => session !== null)
-      .sort(compareSessionRecordsForListing);
+    const records = sessions.filter((session): session is SessionRecord => session !== null);
+    if (records.length === 0) {
+      // Nothing to index, and no reason to leave a warning trail when a fresh
+      // repo simply has no sessions yet.
+      return [];
+    }
+    stderrWrite("[sessions] rebuilding index from directory scan\n");
+    const rebuilt = sortIndexEntries(records.map(buildIndexEntryFromSession));
+    await writeSessionIndex(this.rootDir, rebuilt);
+    return rebuilt;
   }
 
   public async saveSession(record: SessionRecord): Promise<SessionRecord> {

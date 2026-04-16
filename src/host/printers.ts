@@ -17,6 +17,7 @@ import { formatInspectReview, formatInspectSandbox } from "./inspectFormatter.js
 import { stdoutWrite } from "./io.js";
 import { storageRootFor } from "./orchestration.js";
 import type { HostCliArgs } from "./parsing.js";
+import type { SessionSummaryView } from "./sessionIndex.js";
 
 export const statusBadge = (status: string): string => {
   switch (status) {
@@ -212,10 +213,26 @@ export const printTasks = async (args: HostCliArgs): Promise<number> => {
   return 0;
 };
 
+/**
+ * Lift the review hint captured in a {@link SessionSummaryView} into the
+ * shape `reviewViewFor` produces for full records, so listing surfaces can
+ * render `outcome`/`action` without reopening the session file. The summary
+ * never carries `reason`, so the adapter leaves it unset.
+ */
+export const reviewViewForSummary = (summary: SessionSummaryView): TurnReviewView | null => {
+  if (summary.latestReviewedOutcome === undefined || summary.latestReviewedAction === undefined) {
+    return null;
+  }
+  return {
+    outcome: summary.latestReviewedOutcome,
+    action: summary.latestReviewedAction,
+  };
+};
+
 export const printSessions = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const sessions = await new SessionStore(rootDir).listSessions();
-  if (sessions.length === 0) {
+  const summaries = await new SessionStore(rootDir).listSessions();
+  if (summaries.length === 0) {
     stdoutWrite(
       [
         renderSection("Sessions"),
@@ -227,12 +244,10 @@ export const printSessions = async (args: HostCliArgs): Promise<number> => {
   }
 
   const lines = [renderSection("Sessions")];
-  for (const session of sessions) {
-    const turn = latestTurn(session);
-    const attempt = turn === undefined ? undefined : latestAttempt(turn);
-    const reviewed = reviewViewFor(turn, attempt);
+  for (const summary of summaries) {
+    const reviewed = reviewViewForSummary(summary);
     lines.push(
-      `- ${statusBadge(session.status)} ${session.sessionId} status=${session.status} turns=${session.turns.length} attempts=${countSessionAttempts(session)} updated=${session.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} goal=${session.goal}`,
+      `- ${statusBadge(summary.status)} ${summary.sessionId} status=${summary.status} updated=${summary.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} title=${summary.title}`,
     );
   }
   stdoutWrite(lines.join("\n") + "\n");

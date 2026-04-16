@@ -51,8 +51,13 @@ export const sessionCommands: readonly HostCommandSpec[] = [
       const store = new SessionStore(rootDir);
       let target: SessionRecord | null = null;
       if (requestedId === undefined) {
-        const sessions = await store.listSessions();
-        target = sessions[0] ?? null;
+        // No-argument resume picks the newest summary from the index
+        // (entries are sorted newest `updatedAt` first) and reopens the
+        // full session file only for the winner. Avoids touching every
+        // session directory on startup.
+        const summaries = await store.listSessions();
+        const latestId = summaries[0]?.sessionId;
+        target = latestId === undefined ? null : await store.loadSession(latestId);
         if (target === null) {
           deps.transcript.push({
             kind: "assistant",
