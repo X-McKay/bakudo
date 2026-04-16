@@ -14,6 +14,27 @@ export type HostCommand =
   | "init"
   | "help";
 
+/**
+ * Copilot-parity flag namespace (2026-04-14 reference additions). PR4 only
+ * wires the parsers so the flags are recognized without erroring. Full
+ * semantics land in Phase 5 (prompt plumbing, streaming toggles, JSON output,
+ * permission policy, non-interactive automation).
+ */
+export type CopilotParityFlags = {
+  /** `-p`, `--prompt` — alternate source for the goal prompt. Reserved. */
+  prompt?: string;
+  /** `--stream=off` — disable live streaming in favor of buffered output. */
+  streamOff?: boolean;
+  /** `--plain-diff` — emit diffs in plain text rather than ansi. */
+  plainDiff?: boolean;
+  /** `--output-format=json` — machine-readable summary output. */
+  outputFormat?: "json" | "text";
+  /** `--allow-all-tools` — Phase 5 permission bypass (autopilot CI mode). */
+  allowAllTools?: boolean;
+  /** `--no-ask-user` — fail instead of prompting when user input is needed. */
+  noAskUser?: boolean;
+};
+
 export type HostCliArgs = {
   command: HostCommand;
   goal?: string;
@@ -30,6 +51,7 @@ export type HostCliArgs = {
   maxOutputBytes: number;
   heartbeatIntervalMs: number;
   killGraceMs: number;
+  copilot: CopilotParityFlags;
 };
 
 export const HOST_COMMANDS = new Set<HostCommand>([
@@ -108,6 +130,7 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     maxOutputBytes: 256 * 1024,
     heartbeatIntervalMs: 5000,
     killGraceMs: 2000,
+    copilot: {},
   };
   let explicitMode = false;
 
@@ -237,6 +260,54 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       continue;
     }
 
+    // Copilot-parity namespace — recognized but not yet consumed. Phase 5.
+    if (arg === "-p" || arg === "--prompt" || arg.startsWith("--prompt=")) {
+      const flag = arg === "-p" ? "-p" : "--prompt";
+      if (flag === "-p") {
+        const next = argv[i + 1];
+        if (next === undefined || next.startsWith("--")) {
+          throw new Error(`missing value for ${flag}`);
+        }
+        result.copilot.prompt = next;
+        i += 1;
+      } else {
+        const { value, consumed } = readLongFlag(argv, i, "--prompt");
+        result.copilot.prompt = value;
+        i += consumed - 1;
+      }
+      continue;
+    }
+    if (arg === "--stream" || arg.startsWith("--stream=")) {
+      const { value, consumed } = readLongFlag(argv, i, "--stream");
+      if (value !== "on" && value !== "off") {
+        throw new Error("invalid --stream: expected on or off");
+      }
+      result.copilot.streamOff = value === "off";
+      i += consumed - 1;
+      continue;
+    }
+    if (arg === "--plain-diff") {
+      result.copilot.plainDiff = true;
+      continue;
+    }
+    if (arg === "--output-format" || arg.startsWith("--output-format=")) {
+      const { value, consumed } = readLongFlag(argv, i, "--output-format");
+      if (value !== "json" && value !== "text") {
+        throw new Error("invalid --output-format: expected json or text");
+      }
+      result.copilot.outputFormat = value;
+      i += consumed - 1;
+      continue;
+    }
+    if (arg === "--allow-all-tools") {
+      result.copilot.allowAllTools = true;
+      continue;
+    }
+    if (arg === "--no-ask-user") {
+      result.copilot.noAskUser = true;
+      continue;
+    }
+
     if (arg.startsWith("--")) {
       throw new Error(`unknown option: ${arg}`);
     }
@@ -255,10 +326,13 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     if (result.command === "build" || result.command === "plan") {
       result.mode = result.command;
     }
-    result.goal = result.goal ?? positionals.join(" ").trim();
-    if (!result.goal) {
+    const positionalGoal = positionals.join(" ").trim();
+    const resolvedGoal =
+      result.goal ?? (positionalGoal.length > 0 ? positionalGoal : (result.copilot.prompt ?? ""));
+    if (!resolvedGoal) {
       throw new Error(`missing goal for ${result.command}`);
     }
+    result.goal = resolvedGoal;
   } else if (SESSION_REQUIRED_COMMANDS.has(result.command)) {
     const sessionId = result.sessionId ?? positionals[0];
     const taskId = result.taskId ?? positionals[1];

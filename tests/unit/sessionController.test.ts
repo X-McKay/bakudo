@@ -22,6 +22,7 @@ const baseArgs = (storageRoot: string): HostCliArgs => ({
   heartbeatIntervalMs: 5000,
   killGraceMs: 2000,
   storageRoot,
+  copilot: {},
 });
 
 test("resumeNamedSession: returns null for unknown session", async () => {

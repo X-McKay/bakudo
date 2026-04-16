@@ -29,7 +29,12 @@ import {
   resolveSessionScopedInteractiveCommand,
   sessionPromptLabel,
 } from "./interactiveResolvers.js";
-import { repoRootFor, runNewSession, resumeSession } from "./orchestration.js";
+import {
+  promptForApproval,
+  repoRootFor,
+  requiresSandboxApproval,
+  resumeSession,
+} from "./orchestration.js";
 import { type HostCliArgs, parseHostArgs, tokenizeCommand } from "./parsing.js";
 import {
   printLogs,
@@ -47,11 +52,13 @@ import {
 import { reduceHost } from "./reducer.js";
 import type { TranscriptItem } from "./renderModel.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
+import { printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
 import {
   appendTurnToActiveSession,
   createAndRunFirstTurn,
   type SessionDispatchResult,
 } from "./sessionController.js";
+import { stdoutWrite } from "./io.js";
 import { printUsage } from "./usage.js";
 
 export type { InteractiveResolution } from "./interactiveRenderLoop.js";
@@ -65,13 +72,37 @@ export {
   sessionPromptLabel,
 };
 
+/**
+ * Non-interactive one-shot session: routes `bakudo plan|build|run "goal"`
+ * through the v2 `sessionController.createAndRunFirstTurn` pipeline instead
+ * of the legacy `orchestration.runNewSession`.
+ *
+ * Deliberately does NOT persist an active session marker: PR4 decision is
+ * to let one-shot CLI calls stay stateless. Interactive mode is the only
+ * surface that writes `.bakudo/host-state.json`.
+ */
+export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<number> => {
+  if (requiresSandboxApproval(args) && !args.yes) {
+    const approved = await promptForApproval(
+      `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+    );
+    if (!approved) {
+      stdoutWrite("Dispatch cancelled.\n");
+      return 2;
+    }
+  }
+  const result = await createAndRunFirstTurn(args.goal ?? "", args);
+  printRunSummary(result.session, result.reviewed);
+  return reviewedOutcomeExitCode(result.reviewed);
+};
+
 export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
   if (args.command === "help") {
     printUsage();
     return 0;
   }
   if (args.command === "run" || args.command === "build" || args.command === "plan") {
-    return runNewSession(args);
+    return runNonInteractiveOneShot(args);
   }
   if (args.command === "sessions") {
     return printSessions(args);
@@ -127,6 +158,7 @@ const baseInteractiveArgs = (mode: "build" | "plan", autoApprove: boolean): Host
   maxOutputBytes: 256 * 1024,
   heartbeatIntervalMs: 5000,
   killGraceMs: 2000,
+  copilot: {},
 });
 
 type ControllerRoute = { goal: string; overrideMode?: "build" | "plan" };
