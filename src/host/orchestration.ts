@@ -169,8 +169,6 @@ export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTask
     metadata: {
       sandboxTaskId: execution.metadata?.taskId,
       aboxCommand: execution.metadata?.cmd,
-      reviewedOutcome: reviewed.outcome,
-      reviewedAction: reviewed.action,
     },
     ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
   });

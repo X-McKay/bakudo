@@ -54,7 +54,7 @@ export const formatUtcTimestamp = (value: string | undefined): string => {
     : date.toISOString().replace("T", " ").replace(".000Z", "Z");
 };
 
-export const nextActionHint = (reviewed: ReviewedTaskResult): string => {
+export const nextActionHint = (reviewed: { action: string }): string => {
   switch (reviewed.action) {
     case "accept":
       return "No follow-up needed.";
@@ -107,6 +107,33 @@ export const findAttemptById = (
 
 export const countSessionAttempts = (session: SessionRecord): number =>
   session.turns.reduce((total, turn) => total + turn.attempts.length, 0);
+
+export type TurnReviewView = { outcome: string; action: string; reason?: string };
+
+/**
+ * Return the structured review view for a turn/attempt pair. Prefers the
+ * turn's `latestReview` record (written during `executeTask` via
+ * `upsertTurnLatestReview`) and falls back to classifying the attempt's
+ * `result` only when the review has not landed yet.
+ */
+export const reviewViewFor = (
+  turn: SessionTurnRecord | undefined,
+  attempt: SessionAttemptRecord | undefined,
+): TurnReviewView | null => {
+  const fromTurn = turn?.latestReview;
+  if (fromTurn !== undefined) {
+    return {
+      outcome: fromTurn.outcome,
+      action: fromTurn.action,
+      ...(fromTurn.reason === undefined ? {} : { reason: fromTurn.reason }),
+    };
+  }
+  if (attempt?.result !== undefined) {
+    const reviewed = reviewTaskResult(attempt.result);
+    return { outcome: reviewed.outcome, action: reviewed.action, reason: reviewed.reason };
+  }
+  return null;
+};
 
 export const reviewedOutcomeExitCode = (reviewed: ReviewedTaskResult): number => {
   if (reviewed.outcome === "success") {
@@ -162,8 +189,16 @@ export const printTasks = async (args: HostCliArgs): Promise<number> => {
     "",
   ];
   for (const turn of session.turns) {
+    const latestAttemptId = turn.attempts.at(-1)?.attemptId;
     for (const attempt of turn.attempts) {
-      const reviewed = attempt.result === undefined ? null : reviewTaskResult(attempt.result);
+      // Prefer the turn's latestReview for the latest attempt; earlier
+      // attempts fall back to classifying their own result directly.
+      const reviewed =
+        attempt.attemptId === latestAttemptId
+          ? reviewViewFor(turn, attempt)
+          : attempt.result === undefined
+            ? null
+            : reviewTaskResult(attempt.result);
       const sandboxTaskId =
         typeof attempt.metadata?.sandboxTaskId === "string"
           ? attempt.metadata.sandboxTaskId
@@ -195,7 +230,7 @@ export const printSessions = async (args: HostCliArgs): Promise<number> => {
   for (const session of sessions) {
     const turn = latestTurn(session);
     const attempt = turn === undefined ? undefined : latestAttempt(turn);
-    const reviewed = attempt?.result ? reviewTaskResult(attempt.result) : null;
+    const reviewed = reviewViewFor(turn, attempt);
     lines.push(
       `- ${statusBadge(session.status)} ${session.sessionId} status=${session.status} turns=${session.turns.length} attempts=${countSessionAttempts(session)} updated=${session.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} goal=${session.goal}`,
     );
@@ -215,7 +250,7 @@ export const printStatus = async (args: HostCliArgs): Promise<number> => {
 
   const turn = latestTurn(session);
   const attempt = turn === undefined ? undefined : latestAttempt(turn);
-  const reviewed = attempt?.result ? reviewTaskResult(attempt.result) : null;
+  const reviewed = reviewViewFor(turn, attempt);
   const lines = [
     renderSection("Status"),
     renderKeyValue("Session", session.sessionId),
