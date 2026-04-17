@@ -265,7 +265,11 @@ test("executeTask round-trip writes the expected envelope sequence", async () =>
 
     const envelopes: SessionEventEnvelope[] = await readSessionEventLog(rootDir, sessionId);
     const kinds = envelopes.map((envelope) => envelope.kind);
-    const expected: SessionEventKind[] = [
+    // Artifact-registered envelopes are interleaved with the orchestration
+    // lifecycle after `host.review_completed` (three per `executeTask` run:
+    // result, worker-output, dispatch). Check the prefix ordering, then the
+    // trailing `host.artifact_registered` block.
+    const expectedPrefix: SessionEventKind[] = [
       "host.dispatch_started",
       "worker.attempt_started",
       "worker.attempt_progress",
@@ -275,7 +279,21 @@ test("executeTask round-trip writes the expected envelope sequence", async () =>
       "host.review_started",
       "host.review_completed",
     ];
-    assert.deepEqual(kinds, expected);
+    assert.deepEqual(kinds.slice(0, expectedPrefix.length), expectedPrefix);
+
+    const artifactEnvelopes = envelopes.filter(
+      (envelope) => envelope.kind === "host.artifact_registered",
+    );
+    assert.equal(artifactEnvelopes.length, 3);
+    const artifactKindsSeen = artifactEnvelopes.map((envelope) => envelope.payload.kind);
+    assert.deepEqual(artifactKindsSeen.sort(), ["dispatch", "log", "result"]);
+    for (const envelope of artifactEnvelopes) {
+      assert.equal(envelope.turnId, "turn-1");
+      assert.equal(envelope.attemptId, "attempt-1");
+      assert.equal(typeof envelope.payload.artifactId, "string");
+      assert.match(envelope.payload.artifactId as string, /^artifact-\d+-[0-9a-f]{8}$/u);
+      assert.equal(typeof envelope.payload.path, "string");
+    }
 
     // Every envelope must carry v2 schemaVersion and the expected actor.
     for (const envelope of envelopes) {

@@ -218,6 +218,17 @@ export type SessionEventPayloadMap = {
     action: string;
     reason: string;
   };
+  "host.artifact_registered": {
+    artifactId: string;
+    // String-union inlined to keep `src/protocol.ts` free of host-side
+    // imports; mirrors the `ArtifactKind` type exported from
+    // `src/host/artifactStore.ts`.
+    kind: "result" | "log" | "dispatch" | "patch" | "summary" | "diff" | "report";
+    name: string;
+    path: string;
+    turnId: string;
+    attemptId?: string;
+  };
 };
 
 type PayloadOf<K extends SessionEventKind> = K extends keyof SessionEventPayloadMap
