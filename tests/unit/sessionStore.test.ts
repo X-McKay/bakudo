@@ -41,7 +41,7 @@ test("SessionStore computes a stable layout and persists session state", async (
     });
 
     assert.equal(created.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
-    assert.equal(created.goal, "ship the host-side persistence scaffold");
+    assert.equal(created.title, "ship the host-side persistence scaffold");
     assert.equal(created.status, "planned");
 
     const firstResult = {

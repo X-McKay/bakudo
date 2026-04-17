@@ -84,7 +84,7 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
     "Summary",
     renderKv("Session", session.sessionId),
     renderKv("Repo", session.repoRoot),
-    renderKv("Goal", session.goal),
+    renderKv("Goal", session.turns[0]?.prompt ?? session.title),
   ];
   if (reviewed) {
     lines.push(renderKv("Outcome", reviewed.outcome));

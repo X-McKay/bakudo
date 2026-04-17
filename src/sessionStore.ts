@@ -39,9 +39,11 @@ export type SessionStorePaths = {
 
 export type CreateSessionInput = {
   sessionId: string;
+  /** Goal text — used to derive the session title via first turn prompt. */
   goal: string;
   repoRoot: string;
-  assumeDangerousSkipPermissions: boolean;
+  /** @deprecated kept for migration callers; not stored on SessionRecord. */
+  assumeDangerousSkipPermissions?: boolean;
   status?: SessionStatus;
   title?: string;
   turns?: SessionTurnRecord[];
@@ -147,9 +149,7 @@ export class SessionStore {
       sessionId: input.sessionId,
       repoRoot: input.repoRoot,
       title,
-      goal: input.goal,
       status: input.status ?? "draft",
-      assumeDangerousSkipPermissions: input.assumeDangerousSkipPermissions,
       turns,
       createdAt,
       updatedAt,
@@ -320,7 +320,7 @@ export class SessionStore {
     if (existingTurn === undefined) {
       const turn: SessionTurnRecord = {
         turnId: "turn-1",
-        prompt: session.goal,
+        prompt: session.turns[0]?.prompt ?? session.title,
         mode: taskRecord.request?.mode ?? "build",
         status: taskStatusToTurnStatus(taskRecord.status),
         attempts: [attempt],

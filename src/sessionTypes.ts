@@ -76,14 +76,6 @@ export type SessionAttemptRecord = {
    * compatibility with pre-v2 attempts that stored it only in metadata.
    */
   dispatchCommand?: string[];
-  /**
-   * @deprecated use `turn.latestReview` — retained only for v1 migration compatibility.
-   */
-  reviewedOutcome?: string;
-  /**
-   * @deprecated use `turn.latestReview` — retained only for v1 migration compatibility.
-   */
-  reviewedAction?: string;
 };
 
 export type SessionTurnRecord = {
@@ -113,18 +105,14 @@ export type SessionRecord = {
   /**
    * Short human-readable label for the session, derived from the first turn's
    * prompt (truncated at 80 chars, with trailing `…` when truncated). Falls
-   * back to `goal` and then `sessionId` when no turn/prompt is available.
+   * back to `sessionId` when no turn/prompt is available.
    */
   title: string;
-  goal: string;
   status: SessionStatus;
-  assumeDangerousSkipPermissions: boolean;
   turns: SessionTurnRecord[];
   createdAt: string;
   updatedAt: string;
-  /**
-   * @deprecated retained only for v1 migration compatibility. Always empty in v2-originated records.
-   */
+  /** @deprecated v1 compatibility — do not read in host code */
   tasks?: SessionTaskRecord[];
 };
 
@@ -165,6 +153,7 @@ export const deriveSessionTitle = (source: {
   turns?: ReadonlyArray<Pick<SessionTurnRecord, "prompt">> | undefined;
 }): string => {
   const firstPrompt = source.turns?.[0]?.prompt;
+  // `goal` is accepted for migration callers (v1→v2), but not on SessionRecord.
   const candidates = [firstPrompt, source.goal, source.sessionId];
   for (const candidate of candidates) {
     if (typeof candidate !== "string") {

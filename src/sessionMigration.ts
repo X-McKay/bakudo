@@ -164,9 +164,7 @@ export const migrateV1ToV2 = (raw: V1RawSession): SessionRecord => {
     sessionId: raw.sessionId,
     repoRoot: ".",
     title,
-    goal: raw.goal,
     status: raw.status,
-    assumeDangerousSkipPermissions: raw.assumeDangerousSkipPermissions,
     turns,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
@@ -206,12 +204,16 @@ export const normalizeV2Record = (
   overrides: NormalizeOverrides = {},
 ): SessionRecord => {
   const turns = record.turns.map(normalizeV2Turn);
+  // Previously-saved v2 files may still carry `goal` on disk; read it
+  // loosely from the raw JSON to derive a title when `title` is missing.
+  const rawGoal = (record as unknown as Record<string, unknown>).goal;
+  const goalFallback = typeof rawGoal === "string" ? rawGoal : undefined;
   const title =
     typeof record.title === "string" && record.title.length > 0
       ? record.title
       : deriveSessionTitle({
           sessionId: record.sessionId,
-          goal: record.goal,
+          goal: goalFallback,
           turns,
         });
   return {
@@ -219,9 +221,7 @@ export const normalizeV2Record = (
     sessionId: record.sessionId,
     repoRoot: record.repoRoot ?? ".",
     title,
-    goal: record.goal,
     status: record.status,
-    assumeDangerousSkipPermissions: record.assumeDangerousSkipPermissions,
     turns,
     createdAt: overrides.createdAt ?? record.createdAt,
     updatedAt: overrides.updatedAt ?? record.updatedAt,
