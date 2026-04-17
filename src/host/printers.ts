@@ -112,12 +112,7 @@ export const countSessionAttempts = (session: SessionRecord): number =>
 
 export type TurnReviewView = { outcome: string; action: string; reason?: string };
 
-/**
- * Return the structured review view for a turn/attempt pair. Prefers the
- * turn's `latestReview` record (written during `executeTask` via
- * `upsertTurnLatestReview`) and falls back to classifying the attempt's
- * `result` only when the review has not landed yet.
- */
+/** Structured review view for a turn/attempt pair. Prefers `latestReview`. */
 export const reviewViewFor = (
   turn: SessionTurnRecord | undefined,
   attempt: SessionAttemptRecord | undefined,
@@ -151,9 +146,8 @@ export const reviewedOutcomeExitCode = (reviewed: ReviewedTaskResult): number =>
 };
 
 export const printRunSummary = (session: SessionRecord, reviewed: ReviewedTaskResult): void => {
-  const located = findAttemptById(session, reviewed.taskId);
-  const attempt = located?.attempt;
-  const sandboxTaskId =
+  const attempt = findAttemptById(session, reviewed.taskId)?.attempt;
+  const sbx =
     typeof attempt?.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
   stdoutWrite(
     [
@@ -162,7 +156,7 @@ export const printRunSummary = (session: SessionRecord, reviewed: ReviewedTaskRe
       renderKeyValue("Session", session.sessionId),
       renderKeyValue("Status", `${statusBadge(session.status)} ${session.status}`),
       renderKeyValue("Task", reviewed.taskId),
-      renderKeyValue("Sandbox", sandboxTaskId),
+      renderKeyValue("Sandbox", sbx),
       renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`),
       renderKeyValue("Action", reviewed.action),
       renderKeyValue("Reason", reviewed.reason),
@@ -182,31 +176,28 @@ const loadSessionOrThrow = async (rootDir: string, sessionId: string): Promise<S
 export const printTasks = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
-
   const lines = [
     renderSection("Tasks"),
     renderKeyValue("Session", session.sessionId),
     renderKeyValue("Status", `${statusBadge(session.status)} ${session.status}`),
-    renderKeyValue("Goal", session.goal),
+    renderKeyValue("Goal", session.title),
     "",
   ];
   for (const turn of session.turns) {
-    const latestAttemptId = turn.attempts.at(-1)?.attemptId;
+    const tailId = turn.attempts.at(-1)?.attemptId;
     for (const attempt of turn.attempts) {
-      // Prefer the turn's latestReview for the latest attempt; earlier
-      // attempts fall back to classifying their own result directly.
       const reviewed =
-        attempt.attemptId === latestAttemptId
+        attempt.attemptId === tailId
           ? reviewViewFor(turn, attempt)
           : attempt.result === undefined
             ? null
             : reviewTaskResult(attempt.result);
-      const sandboxTaskId =
+      const sbx =
         typeof attempt.metadata?.sandboxTaskId === "string"
           ? attempt.metadata.sandboxTaskId
           : "n/a";
       lines.push(
-        `- ${statusBadge(attempt.status)} ${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status} sandbox=${sandboxTaskId}${reviewed ? ` outcome=${reviewed.outcome} action=${reviewed.action}` : ""}${attempt.lastMessage ? ` message=${attempt.lastMessage}` : ""}`,
+        `- ${statusBadge(attempt.status)} ${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status} sandbox=${sbx}${reviewed ? ` outcome=${reviewed.outcome} action=${reviewed.action}` : ""}${attempt.lastMessage ? ` message=${attempt.lastMessage}` : ""}`,
       );
     }
   }
@@ -214,103 +205,99 @@ export const printTasks = async (args: HostCliArgs): Promise<number> => {
   return 0;
 };
 
-/**
- * Lift the review hint captured in a {@link SessionSummaryView} into the
- * shape `reviewViewFor` produces for full records, so listing surfaces can
- * render `outcome`/`action` without reopening the session file. The summary
- * never carries `reason`, so the adapter leaves it unset.
- */
+/** Lift the index-level review hint into the shape `reviewViewFor` produces. */
 export const reviewViewForSummary = (summary: SessionSummaryView): TurnReviewView | null => {
   if (summary.latestReviewedOutcome === undefined || summary.latestReviewedAction === undefined) {
     return null;
   }
-  return {
-    outcome: summary.latestReviewedOutcome,
-    action: summary.latestReviewedAction,
-  };
+  return { outcome: summary.latestReviewedOutcome, action: summary.latestReviewedAction };
+};
+
+const emptySessionsText = (heading: string): string =>
+  [
+    renderSection(heading),
+    "  No sessions found yet.",
+    dim('  Try `bakudo plan "inspect the repo"` or start the shell with `bakudo`.'),
+  ].join("\n") + "\n";
+
+const formatSummaryLine = (summary: SessionSummaryView): string => {
+  const reviewed = reviewViewForSummary(summary);
+  return `- ${statusBadge(summary.status)} ${summary.sessionId} status=${summary.status} updated=${summary.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} title=${summary.title}`;
+};
+
+const emitSummariesJsonl = (summaries: SessionSummaryView[]): void => {
+  for (const summary of summaries) {
+    stdoutWrite(`${JSON.stringify(summary)}\n`);
+  }
 };
 
 export const printSessions = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const summaries = await timeline.listSessionSummaries(rootDir);
-  if (summaries.length === 0) {
-    stdoutWrite(
-      [
-        renderSection("Sessions"),
-        "  No sessions found yet.",
-        dim('  Try `bakudo plan "inspect the repo"` or start the shell with `bakudo`.'),
-      ].join("\n") + "\n",
-    );
+  if (args.copilot.outputFormat === "json") {
+    emitSummariesJsonl(summaries);
     return 0;
   }
-
-  const lines = [renderSection("Sessions")];
-  for (const summary of summaries) {
-    const reviewed = reviewViewForSummary(summary);
-    lines.push(
-      `- ${statusBadge(summary.status)} ${summary.sessionId} status=${summary.status} updated=${summary.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} title=${summary.title}`,
-    );
+  if (summaries.length === 0) {
+    stdoutWrite(emptySessionsText("Sessions"));
+    return 0;
   }
+  const lines = [renderSection("Sessions"), ...summaries.map(formatSummaryLine)];
   stdoutWrite(lines.join("\n") + "\n");
   return 0;
 };
 
 export const printStatus = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
+  const json = args.copilot.outputFormat === "json";
   if (!args.sessionId) {
-    // No specific session requested: render a compact host overview from
-    // the session index (fast path; no per-session file reads) rather than
-    // delegating to `printSessions` and emitting two section headers.
     const summaries = await timeline.listSessionSummaries(rootDir);
-    if (summaries.length === 0) {
-      stdoutWrite(
-        [
-          renderSection("Host Status"),
-          "  No sessions found yet.",
-          dim('  Try `bakudo plan "inspect the repo"` or start the shell with `bakudo`.'),
-        ].join("\n") + "\n",
-      );
+    if (json) {
+      emitSummariesJsonl(summaries);
       return 0;
     }
-    const overviewLines = [renderSection("Host Status")];
-    for (const summary of summaries) {
-      const reviewed = reviewViewForSummary(summary);
-      overviewLines.push(
-        `- ${statusBadge(summary.status)} ${summary.sessionId} status=${summary.status} updated=${summary.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} title=${summary.title}`,
-      );
+    if (summaries.length === 0) {
+      stdoutWrite(emptySessionsText("Host Status"));
+      return 0;
     }
-    stdoutWrite(overviewLines.join("\n") + "\n");
+    const lines = [renderSection("Host Status"), ...summaries.map(formatSummaryLine)];
+    stdoutWrite(lines.join("\n") + "\n");
     return 0;
   }
 
   const session = await loadSessionOrThrow(rootDir, args.sessionId);
+  if (json) {
+    stdoutWrite(`${JSON.stringify(session)}\n`);
+    return 0;
+  }
 
   const turn = latestTurn(session);
   const attempt = turn === undefined ? undefined : latestAttempt(turn);
   const reviewed = reviewViewFor(turn, attempt);
+  const kv = renderKeyValue;
   const lines = [
     renderSection("Status"),
-    renderKeyValue("Session", session.sessionId),
-    renderKeyValue("Goal", session.goal),
-    renderKeyValue("State", `${statusBadge(session.status)} ${session.status}`),
-    renderKeyValue("Updated", formatUtcTimestamp(session.updatedAt)),
-    renderKeyValue("Turns", String(session.turns.length)),
-    renderKeyValue("Attempts", String(countSessionAttempts(session))),
+    kv("Session", session.sessionId),
+    kv("Goal", session.title),
+    kv("State", `${statusBadge(session.status)} ${session.status}`),
+    kv("Updated", formatUtcTimestamp(session.updatedAt)),
+    kv("Turns", String(session.turns.length)),
+    kv("Attempts", String(countSessionAttempts(session))),
   ];
   if (attempt) {
-    const sandboxTaskId =
+    const sbx =
       typeof attempt.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
     lines.push(
-      renderKeyValue(
+      kv(
         "Latest",
         `${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status}`,
       ),
     );
-    lines.push(renderKeyValue("Sandbox", sandboxTaskId));
+    lines.push(kv("Sandbox", sbx));
     if (reviewed) {
-      lines.push(renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`));
-      lines.push(renderKeyValue("Action", reviewed.action));
-      lines.push(renderKeyValue("Next", nextActionHint(reviewed)));
+      lines.push(kv("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`));
+      lines.push(kv("Action", reviewed.action));
+      lines.push(kv("Next", nextActionHint(reviewed)));
     }
   }
   stdoutWrite(lines.join("\n") + "\n");
@@ -328,6 +315,10 @@ export const printSandbox = async (args: HostCliArgs): Promise<number> => {
   if (attempt === undefined) {
     throw new Error(`no attempt found for session ${session.sessionId}`);
   }
+  if (args.copilot.outputFormat === "json") {
+    stdoutWrite(`${JSON.stringify(attempt)}\n`);
+    return 0;
+  }
   const artifacts = await new ArtifactStore(rootDir).listTaskArtifacts(
     session.sessionId,
     attempt.attemptId,
@@ -342,7 +333,6 @@ export const printSandbox = async (args: HostCliArgs): Promise<number> => {
 
 export const printReview = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const artifactStore = new ArtifactStore(rootDir);
   const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
   const turn = latestTurn(session);
   if (turn === undefined) {
@@ -353,9 +343,17 @@ export const printReview = async (args: HostCliArgs): Promise<number> => {
     throw new Error(`no reviewed result found for session ${session.sessionId}`);
   }
   const reviewed = reviewTaskResult(attempt.result);
+  if (args.copilot.outputFormat === "json") {
+    const reviewRecord = turn.latestReview ?? {
+      outcome: reviewed.outcome,
+      action: reviewed.action,
+      reason: reviewed.reason,
+    };
+    stdoutWrite(`${JSON.stringify(reviewRecord)}\n`);
+    return reviewedOutcomeExitCode(reviewed);
+  }
+  const artifactStore = new ArtifactStore(rootDir);
   const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, attempt.attemptId);
-  // formatInspectReview already emits Dispatch/Worker artifact paths as
-  // key/value rows. Avoid the previous duplicate `Artifacts:` block.
   const lines = formatInspectReview({ session, attempt, reviewed, artifacts });
   lines.push(`Next       ${nextActionHint(reviewed)}`);
   stdoutWrite(`${renderSection("Review")}\n${lines.slice(1).join("\n")}\n`);
@@ -364,6 +362,20 @@ export const printReview = async (args: HostCliArgs): Promise<number> => {
 
 export const printLogs = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
+  const json = args.copilot.outputFormat === "json";
+
+  if (json) {
+    const { envelopes } = await timeline.loadEventLog(rootDir, args.sessionId ?? "");
+    const filtered =
+      args.taskId === undefined
+        ? envelopes
+        : envelopes.filter((envelope) => envelope.attemptId === args.taskId);
+    for (const envelope of filtered) {
+      stdoutWrite(`${JSON.stringify(envelope)}\n`);
+    }
+    return 0;
+  }
+
   const sessionStore = new SessionStore(rootDir);
   const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
 
