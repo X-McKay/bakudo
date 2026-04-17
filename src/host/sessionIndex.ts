@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
+import { z } from "zod";
+
 import type { ComposerMode } from "./appState.js";
 import type {
   SessionRecord,
@@ -110,21 +112,24 @@ export const sortIndexEntries = (
   return copy;
 };
 
-const isSessionIndexEntry = (value: unknown): value is SessionIndexEntry => {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-  const candidate = value as Record<string, unknown>;
-  return (
-    candidate.schemaVersion === SESSION_INDEX_SCHEMA_VERSION &&
-    typeof candidate.sessionId === "string" &&
-    typeof candidate.title === "string" &&
-    typeof candidate.repoRoot === "string" &&
-    typeof candidate.status === "string" &&
-    typeof candidate.lastMode === "string" &&
-    typeof candidate.updatedAt === "string"
-  );
-};
+/** Zod schema for structural validation of index entries from disk. */
+export const SessionIndexEntrySchema = z
+  .object({
+    schemaVersion: z.literal(SESSION_INDEX_SCHEMA_VERSION),
+    sessionId: z.string(),
+    title: z.string(),
+    repoRoot: z.string(),
+    status: z.string(),
+    lastMode: z.string(),
+    latestTurnId: z.string().optional(),
+    latestReviewedOutcome: z.string().optional(),
+    latestReviewedAction: z.string().optional(),
+    updatedAt: z.string(),
+  })
+  .strip();
+
+const isSessionIndexEntry = (value: unknown): value is SessionIndexEntry =>
+  SessionIndexEntrySchema.safeParse(value).success;
 
 /**
  * Read `.bakudo/sessions/index.json`. Returns `null` when missing, malformed,
@@ -151,16 +156,16 @@ export const loadSessionIndex = async (rootDir: string): Promise<SessionIndexFil
   } catch {
     return null;
   }
-  if (typeof parsed !== "object" || parsed === null) {
+  const topLevel = z
+    .object({
+      schemaVersion: z.literal(SESSION_INDEX_SCHEMA_VERSION),
+      entries: z.array(z.unknown()),
+    })
+    .safeParse(parsed);
+  if (!topLevel.success) {
     return null;
   }
-  const raw = parsed as { schemaVersion?: unknown; entries?: unknown };
-  if (raw.schemaVersion !== SESSION_INDEX_SCHEMA_VERSION) {
-    return null;
-  }
-  if (!Array.isArray(raw.entries)) {
-    return null;
-  }
+  const raw = topLevel.data;
   const entries: SessionIndexEntry[] = [];
   for (const candidate of raw.entries) {
     if (!isSessionIndexEntry(candidate)) {

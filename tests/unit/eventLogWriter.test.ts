@@ -340,3 +340,20 @@ test("emitSessionEvent appends a single envelope without buffering", async () =>
     await rm(rootDir, { recursive: true, force: true });
   }
 });
+
+test("readSessionEventLog: structurally invalid envelope line is dropped (Zod)", async () => {
+  const rootDir = await createTempRoot();
+  try {
+    const validEnvelope = buildEnvelope(0);
+    await emitSessionEvent(rootDir, "session-zod", validEnvelope);
+    // Append a structurally invalid line (valid JSON but missing required fields).
+    const filePath = eventLogFilePath(rootDir, "session-zod");
+    await writeFile(filePath, `${await readFile(filePath, "utf8")}{"not":"an-envelope"}\n`, "utf8");
+    const envelopes = await readSessionEventLog(rootDir, "session-zod");
+    // Only the valid envelope should survive.
+    assert.equal(envelopes.length, 1);
+    assert.equal(envelopes[0]?.eventId, validEnvelope.eventId);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});

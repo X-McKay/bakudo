@@ -265,3 +265,32 @@ test("loadSessionIndex returns null when the top-level entries field is not an a
     await rm(rootDir, { recursive: true, force: true });
   }
 });
+
+test("loadSessionIndex returns null for entry with missing required field (Zod)", async () => {
+  const rootDir = await createTempRoot();
+  try {
+    await mkdir(rootDir, { recursive: true });
+    // Entry is missing `title` — structurally invalid per Zod schema.
+    await writeFile(
+      sessionIndexPath(rootDir),
+      JSON.stringify({
+        schemaVersion: SESSION_INDEX_SCHEMA_VERSION,
+        entries: [
+          {
+            schemaVersion: SESSION_INDEX_SCHEMA_VERSION,
+            sessionId: "s1",
+            repoRoot: ".",
+            status: "completed",
+            lastMode: "standard",
+            updatedAt: "2026-04-14T09:00:00.000Z",
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const result = await loadSessionIndex(rootDir);
+    assert.equal(result, null);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});

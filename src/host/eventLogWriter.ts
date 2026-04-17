@@ -1,6 +1,8 @@
 import { appendFile, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { z } from "zod";
+
 import { createSessionEvent, type SessionEventEnvelope } from "../protocol.js";
 import { createSessionPaths } from "../sessionStore.js";
 import { stderrWrite } from "./io.js";
@@ -19,6 +21,21 @@ import { stderrWrite } from "./io.js";
  *
  * See the phase-2 PR3 brief for the authoritative contract.
  */
+
+/** Zod schema for structural validation of event envelopes read from disk. */
+export const SessionEventEnvelopeSchema = z
+  .object({
+    schemaVersion: z.number(),
+    eventId: z.string(),
+    sessionId: z.string(),
+    turnId: z.string().optional(),
+    attemptId: z.string().optional(),
+    actor: z.string(),
+    kind: z.string(),
+    timestamp: z.string(),
+    payload: z.record(z.string(), z.unknown()),
+  })
+  .strip();
 
 const EVENTS_FILE_NAME = "events.ndjson";
 const LEGACY_FILE_NAME = "events.v1.ndjson";
@@ -56,9 +73,14 @@ export const readSessionEventLog = async (
         continue;
       }
       try {
-        out.push(JSON.parse(line) as SessionEventEnvelope);
+        const parsed: unknown = JSON.parse(line);
+        const validated = SessionEventEnvelopeSchema.safeParse(parsed);
+        if (validated.success) {
+          out.push(validated.data as SessionEventEnvelope);
+        }
+        // Structurally invalid lines silently dropped; loadEventLog surfaces counts.
       } catch {
-        // Drop malformed line silently; loadEventLog surfaces counts.
+        // JSON parse failures silently dropped; loadEventLog surfaces counts.
       }
     }
     return out;

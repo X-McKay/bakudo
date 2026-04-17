@@ -2,6 +2,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
+import { z } from "zod";
+
 import type { ComposerMode } from "./appState.js";
 
 export const HOST_STATE_SCHEMA_VERSION = 1 as const;
@@ -15,6 +17,20 @@ export type HostStateRecord = {
 };
 
 const HOST_STATE_FILE_NAME = "host-state.json";
+
+/**
+ * Structural schema for host-state.json. Accepts legacy mode values (e.g.
+ * "build") since {@link normalizeMode} handles migration after validation.
+ */
+export const HostStateRawSchema = z
+  .object({
+    schemaVersion: z.number(),
+    lastActiveSessionId: z.string().optional(),
+    lastActiveTurnId: z.string().optional(),
+    lastUsedMode: z.string().optional(),
+    autoApprove: z.boolean().optional(),
+  })
+  .strip();
 
 const toResolvedPath = (repoRoot: string): string =>
   isAbsolute(repoRoot) ? repoRoot : resolve(repoRoot);
@@ -60,26 +76,21 @@ export const loadHostState = async (repoRoot: string): Promise<HostStateRecord |
   } catch {
     return null;
   }
-  if (typeof parsed !== "object" || parsed === null) {
+  const validated = HostStateRawSchema.safeParse(parsed);
+  if (!validated.success) {
     return null;
   }
-  const raw = parsed as {
-    schemaVersion?: unknown;
-    lastActiveSessionId?: unknown;
-    lastActiveTurnId?: unknown;
-    lastUsedMode?: unknown;
-    autoApprove?: unknown;
-  };
+  const raw = validated.data;
   const mode = normalizeMode(raw.lastUsedMode);
   const record: HostStateRecord = {
     schemaVersion: HOST_STATE_SCHEMA_VERSION,
     lastUsedMode: mode,
     autoApprove: raw.autoApprove === true || mode === "autopilot",
   };
-  if (typeof raw.lastActiveSessionId === "string" && raw.lastActiveSessionId.length > 0) {
+  if (raw.lastActiveSessionId !== undefined && raw.lastActiveSessionId.length > 0) {
     record.lastActiveSessionId = raw.lastActiveSessionId;
   }
-  if (typeof raw.lastActiveTurnId === "string" && raw.lastActiveTurnId.length > 0) {
+  if (raw.lastActiveTurnId !== undefined && raw.lastActiveTurnId.length > 0) {
     record.lastActiveTurnId = raw.lastActiveTurnId;
   }
   return record;
