@@ -102,16 +102,46 @@ Review: accepted — 3 files changed and targeted tests passed.
 Inspect a saved session:
 
 ```bash
-node dist/src/cli.js sessions
-node dist/src/cli.js status
-node dist/src/cli.js status <session-id>
-node dist/src/cli.js tasks <session-id>
-node dist/src/cli.js sandbox <session-id>
-node dist/src/cli.js review <session-id>
-node dist/src/cli.js logs <session-id>
-node dist/src/cli.js resume <session-id>
-node dist/src/cli.js init --repo /path/to/repo --yes
+bakudo sessions
+bakudo status
+bakudo status <session-id>
+bakudo tasks <session-id>
+bakudo sandbox <session-id>
+bakudo review <session-id>
+bakudo logs <session-id>
+bakudo resume <session-id>
+bakudo init --repo /path/to/repo --yes
 ```
+
+### JSON output
+
+All listing and inspection commands support `--json` (alias for `--output-format=json`). Output is JSONL: one JSON record per line, using the same model types as the internal storage layer (`SessionIndexEntry`, `SessionRecord`, `SessionEventEnvelope`, `ArtifactRecord`).
+
+```bash
+bakudo sessions --json          # one SessionIndexEntry per line
+bakudo status --json            # summaries, or full SessionRecord with --session-id
+bakudo logs <session-id> --json # one SessionEventEnvelope per line
+bakudo review <session-id> --json
+bakudo sandbox <session-id> --json
+```
+
+### Session model
+
+Sessions follow a **session -> turns -> attempts** hierarchy:
+
+- A **session** is a multi-turn conversation. Each session has a title derived from its first prompt.
+- A **turn** is one user prompt and its dispatched work. Turns carry a `latestReview` after the first attempt completes.
+- An **attempt** is a single sandbox execution within a turn. Failed attempts can be retried, appending new attempts to the same turn.
+
+Turn and attempt IDs are scoped to their session (e.g. `turn-1`, `1:session-abc:turn1-attempt-1`).
+
+### Config cascade
+
+Configuration is resolved in priority order: CLI flags > override file > repo-local `.bakudo/config.json` > user `~/.config/bakudo/config.json` > built-in defaults. Use `/config show` in the interactive shell to inspect the merged result.
+
+### Event log
+
+Each session records a structured event log at `.bakudo/sessions/<id>/events.ndjson`. Events use the `SessionEventEnvelope` schema (v2) and cover the full lifecycle: `user.turn_submitted`, `host.dispatch_started`, `worker.attempt_*`, `host.review_*`, `host.artifact_registered`.
 
 `Bakudo` makes the host/worker split explicit in the terminal UX:
 
