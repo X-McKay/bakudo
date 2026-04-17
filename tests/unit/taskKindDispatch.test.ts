@@ -1,0 +1,182 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { AttemptSpec } from "../../src/attemptProtocol.js";
+import { runExplicitCommand } from "../../src/worker/commandRunner.js";
+import { runVerificationCheck } from "../../src/worker/checkRunner.js";
+import { runAssistantJob } from "../../src/worker/assistantJobRunner.js";
+import { dispatchTaskKind } from "../../src/worker/taskKinds.js";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const baseSpec = (overrides: Partial<AttemptSpec> = {}): AttemptSpec => ({
+  schemaVersion: 3,
+  sessionId: "session-1",
+  turnId: "turn-1",
+  attemptId: "attempt-1",
+  taskId: "task-1",
+  intentId: "intent-1",
+  mode: "build",
+  taskKind: "explicit_command",
+  prompt: "run tests",
+  instructions: [],
+  cwd: "/tmp",
+  execution: { engine: "shell", command: ["echo", "hello"] },
+  permissions: { rules: [], allowAllTools: false, noAskUser: false },
+  budget: { timeoutSeconds: 120, maxOutputBytes: 262144, heartbeatIntervalMs: 5000 },
+  acceptanceChecks: [],
+  artifactRequests: [],
+  ...overrides,
+});
+
+// ---------------------------------------------------------------------------
+// explicit_command
+// ---------------------------------------------------------------------------
+
+test("commandRunner: returns spec.execution.command directly", () => {
+  const spec = baseSpec({
+    taskKind: "explicit_command",
+    execution: { engine: "shell", command: ["npm", "test"] },
+  });
+  const result = runExplicitCommand(spec);
+  assert.deepEqual(result.command, ["npm", "test"]);
+});
+
+test("commandRunner: returns false command when spec.execution.command is missing", () => {
+  const spec = baseSpec({
+    taskKind: "explicit_command",
+    execution: { engine: "shell" },
+  });
+  const result = runExplicitCommand(spec);
+  assert.deepEqual(result.command, ["false"]);
+});
+
+test("commandRunner: returns false command when spec.execution.command is empty", () => {
+  const spec = baseSpec({
+    taskKind: "explicit_command",
+    execution: { engine: "shell", command: [] },
+  });
+  const result = runExplicitCommand(spec);
+  assert.deepEqual(result.command, ["false"]);
+});
+
+// ---------------------------------------------------------------------------
+// verification_check
+// ---------------------------------------------------------------------------
+
+test("checkRunner: joins acceptance check commands with && in bash -lc", () => {
+  const spec = baseSpec({
+    taskKind: "verification_check",
+    acceptanceChecks: [
+      { checkId: "c1", label: "lint", command: ["npm", "run", "lint"] },
+      { checkId: "c2", label: "test", command: ["npm", "test"] },
+    ],
+  });
+  const result = runVerificationCheck(spec);
+  assert.equal(result.command[0], "bash");
+  assert.equal(result.command[1], "-lc");
+  assert.ok(result.command[2]?.includes("&&"), "expected && between commands");
+  assert.ok(result.command[2]?.includes("npm"), "expected npm in joined command");
+});
+
+test("checkRunner: skips checks without a command", () => {
+  const spec = baseSpec({
+    taskKind: "verification_check",
+    acceptanceChecks: [
+      { checkId: "c1", label: "manual", assertExitZero: true },
+      { checkId: "c2", label: "auto", command: ["echo", "ok"] },
+    ],
+  });
+  const result = runVerificationCheck(spec);
+  assert.equal(result.command[0], "bash");
+  assert.ok(!result.command[2]?.includes("manual"));
+});
+
+test("checkRunner: returns echo when no checks have commands", () => {
+  const spec = baseSpec({
+    taskKind: "verification_check",
+    acceptanceChecks: [{ checkId: "c1", label: "manual" }],
+  });
+  const result = runVerificationCheck(spec);
+  assert.deepEqual(result.command, ["echo", "no acceptance checks defined"]);
+});
+
+// ---------------------------------------------------------------------------
+// assistant_job
+// ---------------------------------------------------------------------------
+
+test("assistantJobRunner: builds claude --print command", () => {
+  const spec = baseSpec({
+    taskKind: "assistant_job",
+    execution: { engine: "agent_cli" },
+    prompt: "implement the feature",
+    instructions: ["follow the style guide"],
+    permissions: { rules: [], allowAllTools: false, noAskUser: false },
+  });
+  const result = runAssistantJob(spec);
+  assert.equal(result.command[0], "claude");
+  assert.ok(!result.command.includes("--dangerously-skip-permissions"));
+  assert.ok(result.command.includes("--print"));
+  // The bounded prompt should include both prompt and instructions
+  const promptArg = result.command[result.command.length - 1];
+  assert.ok(promptArg?.includes("implement the feature"));
+  assert.ok(promptArg?.includes("follow the style guide"));
+});
+
+test("assistantJobRunner: adds --dangerously-skip-permissions when allowAllTools", () => {
+  const spec = baseSpec({
+    taskKind: "assistant_job",
+    execution: { engine: "agent_cli" },
+    permissions: { rules: [], allowAllTools: true, noAskUser: false },
+  });
+  const result = runAssistantJob(spec);
+  assert.equal(result.command[0], "claude");
+  assert.ok(result.command.includes("--dangerously-skip-permissions"));
+  assert.ok(result.command.includes("--print"));
+});
+
+test("assistantJobRunner: joins prompt and instructions with double newlines", () => {
+  const spec = baseSpec({
+    taskKind: "assistant_job",
+    execution: { engine: "agent_cli" },
+    prompt: "do the thing",
+    instructions: ["rule one", "rule two"],
+  });
+  const result = runAssistantJob(spec);
+  const promptArg = result.command[result.command.length - 1]!;
+  assert.ok(promptArg.includes("do the thing\n\nrule one\n\nrule two"));
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch map
+// ---------------------------------------------------------------------------
+
+test("dispatchTaskKind: routes explicit_command correctly", () => {
+  const spec = baseSpec({
+    taskKind: "explicit_command",
+    execution: { engine: "shell", command: ["ls", "-la"] },
+  });
+  const result = dispatchTaskKind(spec);
+  assert.deepEqual(result.command, ["ls", "-la"]);
+});
+
+test("dispatchTaskKind: routes assistant_job correctly", () => {
+  const spec = baseSpec({
+    taskKind: "assistant_job",
+    execution: { engine: "agent_cli" },
+  });
+  const result = dispatchTaskKind(spec);
+  assert.equal(result.command[0], "claude");
+});
+
+test("dispatchTaskKind: routes verification_check correctly", () => {
+  const spec = baseSpec({
+    taskKind: "verification_check",
+    acceptanceChecks: [{ checkId: "c1", label: "test", command: ["npm", "test"] }],
+  });
+  const result = dispatchTaskKind(spec);
+  assert.equal(result.command[0], "bash");
+  assert.equal(result.command[1], "-lc");
+});
