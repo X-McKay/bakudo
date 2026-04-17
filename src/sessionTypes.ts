@@ -99,6 +99,11 @@ export type SessionTurnRecord = {
    * attempt completes a review pass.
    */
   latestReview?: SessionReviewRecord;
+  /**
+   * Inline token budget parsed from the user prompt (e.g. `+500k` → 500_000).
+   * Set at turn creation; worker-side enforcement is deferred to Phase 3.
+   */
+  tokenBudget?: number;
 };
 
 export type SessionRecord = {
