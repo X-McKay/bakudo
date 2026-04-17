@@ -10,7 +10,7 @@ import type { SessionStore } from "../sessionStore.js";
 import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
 import { dim, renderSection } from "./ansi.js";
-import { createSessionEventLogWriter } from "./eventLogWriter.js";
+import { createSessionEventLogWriter, type EventLogWriter } from "./eventLogWriter.js";
 import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import { runtimeIo, stdoutWrite } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
@@ -105,6 +105,8 @@ export const recordAttempt = (
   ...(lastMessage === undefined ? {} : { lastMessage }),
 });
 
+export type EventLogWriterFactory = (storageRoot: string, sessionId: string) => EventLogWriter;
+
 export type ExecuteTaskContext = {
   sessionStore: SessionStore;
   artifactStore: ArtifactStore;
@@ -113,12 +115,12 @@ export type ExecuteTaskContext = {
   turnId: string;
   request: WorkerTaskSpec;
   args: HostCliArgs;
+  /** Optional factory for the event log writer. Default: `createSessionEventLogWriter`. */
+  eventLogWriterFactory?: EventLogWriterFactory;
   /**
    * Optional hook invoked for every worker progress event. The interactive
-   * shell forwards these through the {@link createProgressCoalescer semantic
-   * progress coalescer} so the main transcript only sees narrations (not raw
-   * byte counters). The legacy log surface continues to use the in-module
-   * stdout writer below.
+   * shell forwards these through the semantic progress coalescer so the
+   * main transcript only sees narrations (not raw byte counters).
    */
   onProgress?: (event: import("../workerRuntime.js").WorkerTaskProgressEvent) => void;
 };
@@ -126,7 +128,8 @@ export type ExecuteTaskContext = {
 export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTaskResult> => {
   const { sessionStore, artifactStore, runner, sessionId, turnId, request, args, onProgress } = ctx;
   const storageRoot = sessionStore.rootDir;
-  const writer = createSessionEventLogWriter(storageRoot, sessionId);
+  const writerFactory = ctx.eventLogWriterFactory ?? createSessionEventLogWriter;
+  const writer = writerFactory(storageRoot, sessionId);
   try {
     await sessionStore.upsertAttempt(
       sessionId,

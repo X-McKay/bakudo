@@ -13,6 +13,7 @@ import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import { emitSessionEvent } from "./eventLogWriter.js";
 import {
   createTaskSpec,
+  type EventLogWriterFactory,
   executeTask,
   makeInitialTurn,
   repoRootFor,
@@ -65,6 +66,7 @@ const resolveAssumeDangerous = async (args: HostCliArgs): Promise<boolean> => {
 
 export type SessionDispatchOptions = {
   onProgress?: (event: WorkerTaskProgressEvent) => void;
+  eventLogWriterFactory?: EventLogWriterFactory;
 };
 
 export const createAndRunFirstTurn = async (
@@ -124,6 +126,9 @@ export const createAndRunFirstTurn = async (
     request,
     args,
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+    ...(options.eventLogWriterFactory
+      ? { eventLogWriterFactory: options.eventLogWriterFactory }
+      : {}),
   });
 
   const updated = await sessionStore.saveSession({
@@ -202,6 +207,9 @@ export const appendTurnToActiveSession = async (
     request,
     args,
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+    ...(options.eventLogWriterFactory
+      ? { eventLogWriterFactory: options.eventLogWriterFactory }
+      : {}),
   });
 
   const updated = await sessionStore.saveSession({
