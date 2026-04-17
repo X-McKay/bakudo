@@ -23,6 +23,19 @@ export const BakudoConfigSchema = z
     flushIntervalMs: z.number().optional(),
     flushSizeThreshold: z.number().optional(),
     retryDelays: z.array(z.number()).optional(),
+    agents: z
+      .record(
+        z.string(),
+        z
+          .object({
+            description: z.string().optional(),
+            permissions: z.record(z.string(), z.enum(["allow", "ask", "deny"])).optional(),
+            hidden: z.boolean().optional(),
+            subagent: z.boolean().optional(),
+          })
+          .strip(),
+      )
+      .optional(),
   })
   .strip();
 
@@ -36,6 +49,7 @@ export const BakudoConfigDefaults: Required<BakudoConfig> = {
   flushIntervalMs: 100,
   flushSizeThreshold: 4096,
   retryDelays: [50, 100, 200, 400, 800],
+  agents: undefined,
 };
 
 /**

@@ -1,3 +1,4 @@
+import type { AttemptSpec } from "./attemptProtocol.js";
 import type { TaskRequest, TaskResult, TaskStatus } from "./protocol.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, isTerminalTaskStatus } from "./protocol.js";
 
@@ -76,6 +77,11 @@ export type SessionAttemptRecord = {
    * compatibility with pre-v2 attempts that stored it only in metadata.
    */
   dispatchCommand?: string[];
+  /**
+   * Phase 3 v3 attempt specification. Present when the attempt was created by
+   * the Phase 3 dispatch pipeline; absent for legacy/v1 attempts.
+   */
+  attemptSpec?: AttemptSpec;
 };
 
 export type SessionTurnRecord = {
