@@ -18,6 +18,7 @@ import { stdoutWrite } from "./io.js";
 import { storageRootFor } from "./orchestration.js";
 import type { HostCliArgs } from "./parsing.js";
 import type { SessionSummaryView } from "./sessionIndex.js";
+import * as timeline from "./timeline.js";
 
 export const statusBadge = (status: string): string => {
   switch (status) {
@@ -171,7 +172,7 @@ export const printRunSummary = (session: SessionRecord, reviewed: ReviewedTaskRe
 };
 
 const loadSessionOrThrow = async (rootDir: string, sessionId: string): Promise<SessionRecord> => {
-  const session = await new SessionStore(rootDir).loadSession(sessionId);
+  const session = await timeline.loadSession(rootDir, sessionId);
   if (session === null) {
     throw new Error(`unknown session: ${sessionId}`);
   }
@@ -231,7 +232,7 @@ export const reviewViewForSummary = (summary: SessionSummaryView): TurnReviewVie
 
 export const printSessions = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const summaries = await new SessionStore(rootDir).listSessions();
+  const summaries = await timeline.listSessionSummaries(rootDir);
   if (summaries.length === 0) {
     stdoutWrite(
       [
@@ -260,7 +261,7 @@ export const printStatus = async (args: HostCliArgs): Promise<number> => {
     // No specific session requested: render a compact host overview from
     // the session index (fast path; no per-session file reads) rather than
     // delegating to `printSessions` and emitting two section headers.
-    const summaries = await new SessionStore(rootDir).listSessions();
+    const summaries = await timeline.listSessionSummaries(rootDir);
     if (summaries.length === 0) {
       stdoutWrite(
         [
