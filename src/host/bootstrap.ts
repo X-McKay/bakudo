@@ -1,3 +1,4 @@
+import { loadConfigCascade, type BakudoConfig } from "./config.js";
 import { HOST_STATE_SCHEMA_VERSION, loadHostState } from "./hostStateStore.js";
 import type { HostStateRecord } from "./hostStateStore.js";
 import { repoRootFor } from "./orchestration.js";
@@ -13,6 +14,8 @@ export type AboxCapabilityProbe = {
 export type HostBootstrap = {
   repoRoot: string;
   hostState: HostStateRecord | null;
+  /** Merged config cascade (defaults + user + repo + env; CLI not applied here). */
+  config: BakudoConfig;
   aboxCapabilities: AboxCapabilityProbe;
   /** Cleanup hooks registered by bootstrap. */
   dispose: () => Promise<void>;
@@ -122,9 +125,10 @@ export const initHost = memoize(async (): Promise<HostBootstrap> => {
   applySafeEnv();
   const dispose = registerShutdownHandlers();
 
-  const [hostState, aboxCapabilities] = await Promise.all([
+  const [hostState, aboxCapabilities, configResult] = await Promise.all([
     prefetchHostState(repoRoot),
     probeAboxCapabilities(),
+    loadConfigCascade(repoRoot, {}),
   ]);
 
   profileCheckpoint("preaction_done");
@@ -132,6 +136,7 @@ export const initHost = memoize(async (): Promise<HostBootstrap> => {
   return {
     repoRoot,
     hostState,
+    config: configResult.merged,
     aboxCapabilities,
     dispose,
   };

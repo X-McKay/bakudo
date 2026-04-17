@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { memoize } from "../../src/host/bootstrap.js";
+import { memoize, type HostBootstrap } from "../../src/host/bootstrap.js";
+import { BakudoConfigDefaults } from "../../src/host/config.js";
 
 test("memoize: concurrent callers share the same promise", async () => {
   let calls = 0;
@@ -54,6 +55,22 @@ test("memoize: rejections clear the cached promise (retry semantics)", async () 
   const second = await wrapped();
   assert.equal(second, "ok");
   assert.equal(calls, 2);
+});
+
+test("HostBootstrap type includes config field", () => {
+  // Type-level assertion: config field is required on HostBootstrap.
+  // This test ensures the type was correctly extended in commit 3.
+  const stub: HostBootstrap = {
+    repoRoot: "/tmp",
+    hostState: null,
+    config: { ...BakudoConfigDefaults },
+    aboxCapabilities: { kind: "stub" },
+    dispose: async () => {},
+  };
+  assert.ok(stub.config);
+  assert.equal(stub.config.mode, "standard");
+  assert.equal(stub.config.autoApprove, false);
+  assert.deepEqual(stub.config.retryDelays, BakudoConfigDefaults.retryDelays);
 });
 
 test("memoize: disposal callback invoked once under try-finally", async () => {

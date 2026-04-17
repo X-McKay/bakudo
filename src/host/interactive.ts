@@ -4,6 +4,7 @@ import { basename } from "node:path";
 
 import { initialHostAppState, type ComposerMode } from "./appState.js";
 import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
+import { loadConfigCascade } from "./config.js";
 import { emitUserTurnSubmitted } from "./eventLogWriter.js";
 import {
   HOST_STATE_SCHEMA_VERSION,
@@ -64,21 +65,11 @@ import {
 import { printUsage } from "./usage.js";
 
 export type { InteractiveResolution } from "./interactiveRenderLoop.js";
-export {
-  buildInteractiveRunResolution,
-  createInteractiveSessionIdentity,
-  rememberInteractiveContext,
-  renderPrompt,
-  resolveInteractiveInput,
-  resolveSessionScopedInteractiveCommand,
-  sessionPromptLabel,
-};
+export { buildInteractiveRunResolution, createInteractiveSessionIdentity };
+export { rememberInteractiveContext, renderPrompt, resolveInteractiveInput, sessionPromptLabel };
+export { resolveSessionScopedInteractiveCommand };
 
-/**
- * Non-interactive one-shot: routes `bakudo plan|build|run "goal"` through the
- * v2 sessionController pipeline. Does NOT persist an active session marker —
- * only interactive mode writes `.bakudo/host-state.json`.
- */
+/** Non-interactive one-shot: routes through the v2 sessionController pipeline. */
 export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<number> => {
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
@@ -271,7 +262,15 @@ export const runInteractiveShell = async (): Promise<number> => {
   const repoLabel = basename(repoRoot) || repoRoot;
   const rl = createInterface({ input, output });
   const transcript: TranscriptItem[] = [];
-  const deps: TickDeps = { transcript, appState: initialHostAppState(), repoLabel };
+
+  // Load config cascade — CLI flag threading deferred to Phase 6.
+  const configSnapshot = await loadConfigCascade(repoRoot, {});
+  const deps: TickDeps = {
+    transcript,
+    appState: initialHostAppState(),
+    repoLabel,
+    config: configSnapshot.merged,
+  };
 
   resetPromptResolvers();
   const prior = await loadHostState(repoRoot);
@@ -286,7 +285,9 @@ export const runInteractiveShell = async (): Promise<number> => {
     remember: rememberInteractiveContext,
   };
 
-  const registry = buildDefaultCommandRegistry();
+  const registry = buildDefaultCommandRegistry({
+    getConfig: () => configSnapshot,
+  });
 
   const persistHostState = async (): Promise<void> => {
     try {
