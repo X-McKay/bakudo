@@ -108,36 +108,36 @@ export type EventActor = "user" | "host" | "worker" | "reviewer";
 export type SessionEventKind =
   | "user.turn_submitted"
   | "host.turn_queued"
+  | "host.plan_started"
+  | "host.plan_completed"
+  | "host.approval_requested"
+  | "host.approval_resolved"
   | "host.dispatch_started"
-  | "host.dispatch_completed"
-  | "host.review_started"
-  | "host.review_completed"
-  | "host.event_skipped"
   | "worker.attempt_started"
   | "worker.attempt_progress"
   | "worker.attempt_completed"
   | "worker.attempt_failed"
-  | "reviewer.decision"
-  | "reviewer.guidance"
-  | "host.turn_completed"
-  | "host.session_completed";
+  | "host.review_started"
+  | "host.review_completed"
+  | "host.artifact_registered"
+  | "host.event_skipped";
 
 export const sessionEventKinds: readonly SessionEventKind[] = [
   "user.turn_submitted",
   "host.turn_queued",
+  "host.plan_started",
+  "host.plan_completed",
+  "host.approval_requested",
+  "host.approval_resolved",
   "host.dispatch_started",
-  "host.dispatch_completed",
-  "host.review_started",
-  "host.review_completed",
-  "host.event_skipped",
   "worker.attempt_started",
   "worker.attempt_progress",
   "worker.attempt_completed",
   "worker.attempt_failed",
-  "reviewer.decision",
-  "reviewer.guidance",
-  "host.turn_completed",
-  "host.session_completed",
+  "host.review_started",
+  "host.review_completed",
+  "host.artifact_registered",
+  "host.event_skipped",
 ] as const;
 
 export const isSessionEventKind = (kind: string): kind is SessionEventKind =>

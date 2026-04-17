@@ -12,15 +12,15 @@ import type { SessionEventEnvelope } from "../protocol.js";
  * via the config cascade.
  */
 export type HookEventKind =
-  | "pre.turn_submit"
-  | "post.turn_complete"
-  | "pre.dispatch"
-  | "post.dispatch"
-  | "pre.review"
-  | "post.review"
-  | "pre.approval"
-  | "post.approval"
-  | "on.session_complete";
+  | "sessionStart"
+  | "preDispatch"
+  | "preToolUse"
+  | "postToolUse"
+  | "postToolUseFailure"
+  | "postDispatch"
+  | "permissionRequest"
+  | "notification"
+  | "sessionEnd";
 
 export type HookResponseDecision = "allow" | "deny" | "skip" | "replace";
 

@@ -96,19 +96,19 @@ test("sessionEventKinds runtime array matches the SessionEventKind union", () =>
   const expected: readonly SessionEventKind[] = [
     "user.turn_submitted",
     "host.turn_queued",
+    "host.plan_started",
+    "host.plan_completed",
+    "host.approval_requested",
+    "host.approval_resolved",
     "host.dispatch_started",
-    "host.dispatch_completed",
-    "host.review_started",
-    "host.review_completed",
-    "host.event_skipped",
     "worker.attempt_started",
     "worker.attempt_progress",
     "worker.attempt_completed",
     "worker.attempt_failed",
-    "reviewer.decision",
-    "reviewer.guidance",
-    "host.turn_completed",
-    "host.session_completed",
+    "host.review_started",
+    "host.review_completed",
+    "host.artifact_registered",
+    "host.event_skipped",
   ];
   assert.deepEqual(sessionEventKinds, expected);
   for (const kind of expected) {
