@@ -120,6 +120,7 @@ const formatMessage = (goal: string): string => {
   return trimmed.length <= 96 ? trimmed : `${trimmed.slice(0, 93)}...`;
 };
 
+/** Resolved spawn args + budget overrides from either AttemptSpec or legacy spec. */
 type ResolvedCommand = {
   spawnArgs: [string, string[]];
   goalLabel: string;
@@ -128,31 +129,22 @@ type ResolvedCommand = {
   heartbeatIntervalMs?: number;
 };
 
-/**
- * Resolve the spawn arguments from either an AttemptSpec (via task-kind
- * dispatch) or a legacy WorkerTaskSpec (bash -lc goal).
- *
- * Detection: if the spec carries a `taskKind` property it is treated as an
- * {@link AttemptSpec}. Otherwise it is the legacy path.
- */
+/** Detect taskKind → AttemptSpec dispatch; else legacy bash -lc goal. */
 const resolveCommand = (spec: WorkerTaskSpec, shell: string): ResolvedCommand => {
   const raw = spec as Record<string, unknown>;
   if (typeof raw.taskKind === "string") {
-    const attemptSpec = raw as unknown as AttemptSpec;
-    const runnerCmd = dispatchTaskKind(attemptSpec);
-    const [executable = shell, ...args] = runnerCmd.command;
+    const as = raw as unknown as AttemptSpec;
+    const cmd = dispatchTaskKind(as);
+    const [exe = shell, ...args] = cmd.command;
     return {
-      spawnArgs: [executable, args],
-      goalLabel: runnerCmd.command.join(" "),
-      timeoutSeconds: attemptSpec.budget.timeoutSeconds,
-      maxOutputBytes: attemptSpec.budget.maxOutputBytes,
-      heartbeatIntervalMs: attemptSpec.budget.heartbeatIntervalMs,
+      spawnArgs: [exe, args],
+      goalLabel: cmd.command.join(" "),
+      timeoutSeconds: as.budget.timeoutSeconds,
+      maxOutputBytes: as.budget.maxOutputBytes,
+      heartbeatIntervalMs: as.budget.heartbeatIntervalMs,
     };
   }
-  return {
-    spawnArgs: [shell, ["-lc", spec.goal]],
-    goalLabel: spec.goal,
-  };
+  return { spawnArgs: [shell, ["-lc", spec.goal]], goalLabel: spec.goal };
 };
 
 const nowIso = (now?: () => Date): string => (now ?? (() => new Date()))().toISOString();
