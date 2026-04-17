@@ -1,3 +1,5 @@
+import { createSessionEvent, type SessionEventEnvelope, type TaskMode } from "../protocol.js";
+import type { ReviewedTaskResult } from "../reviewer.js";
 import type { SessionReviewRecord } from "../sessionTypes.js";
 import type { SessionStore } from "../sessionStore.js";
 import type { WorkerTaskProgressEvent, WorkerTaskSpec } from "../workerRuntime.js";
@@ -36,6 +38,67 @@ export const renderDispatchBanner = (
     renderKeyValue("Sandbox", "ephemeral abox worker"),
     "",
   ].join("\n");
+
+/**
+ * Convenience builder for the `host.dispatch_started` envelope emitted by
+ * `executeTask` just before the worker runs. Consolidated here to keep the
+ * orchestration entry point below the 400-line cap.
+ */
+export const buildDispatchStartedEnvelope = (args: {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  goal: string;
+  mode: TaskMode;
+  assumeDangerousSkipPermissions: boolean;
+}): SessionEventEnvelope =>
+  createSessionEvent({
+    kind: "host.dispatch_started",
+    sessionId: args.sessionId,
+    turnId: args.turnId,
+    attemptId: args.attemptId,
+    actor: "host",
+    payload: {
+      attemptId: args.attemptId,
+      goal: args.goal,
+      mode: args.mode,
+      assumeDangerousSkipPermissions: args.assumeDangerousSkipPermissions,
+    },
+  });
+
+export const buildReviewStartedEnvelope = (args: {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+}): SessionEventEnvelope =>
+  createSessionEvent({
+    kind: "host.review_started",
+    sessionId: args.sessionId,
+    turnId: args.turnId,
+    attemptId: args.attemptId,
+    actor: "host",
+    payload: { attemptId: args.attemptId },
+  });
+
+export const buildReviewCompletedEnvelope = (args: {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  reviewed: ReviewedTaskResult;
+}): SessionEventEnvelope =>
+  createSessionEvent({
+    kind: "host.review_completed",
+    sessionId: args.sessionId,
+    turnId: args.turnId,
+    attemptId: args.attemptId,
+    actor: "host",
+    payload: {
+      attemptId: args.attemptId,
+      outcome: args.reviewed.outcome,
+      action: args.reviewed.action,
+      reason: args.reviewed.reason,
+    },
+  });
 
 /**
  * Merge a {@link SessionReviewRecord} into the named turn. Silently no-ops

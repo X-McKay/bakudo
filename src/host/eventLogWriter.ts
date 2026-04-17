@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { SessionEventEnvelope } from "../protocol.js";
+import { createSessionEvent, type SessionEventEnvelope } from "../protocol.js";
 import { createSessionPaths } from "../sessionStore.js";
 import { stderrWrite } from "./io.js";
 
@@ -326,4 +326,27 @@ export const emitSessionEvent = async (
   } finally {
     await writer.close();
   }
+};
+
+/**
+ * Helper for the `user.turn_submitted` pre-dispatch emission shared by the
+ * non-interactive one-shot path and the interactive `dispatchThroughController`
+ * path. Keeps the envelope shape in one place.
+ */
+export const emitUserTurnSubmitted = async (
+  storageRoot: string,
+  sessionId: string,
+  prompt: string,
+  mode: string,
+): Promise<void> => {
+  await emitSessionEvent(
+    storageRoot,
+    sessionId,
+    createSessionEvent({
+      kind: "user.turn_submitted",
+      sessionId,
+      actor: "user",
+      payload: { prompt, mode },
+    }),
+  );
 };

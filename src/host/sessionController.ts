@@ -4,11 +4,13 @@ import { ABoxAdapter } from "../aboxAdapter.js";
 import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "../config.js";
+import { createSessionEvent } from "../protocol.js";
 import { type ReviewedTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
 import type { SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
+import { emitSessionEvent } from "./eventLogWriter.js";
 import {
   createTaskSpec,
   executeTask,
@@ -84,14 +86,26 @@ export const createAndRunFirstTurn = async (
     turns: [makeInitialTurn(turnId, prompt, args.mode)],
   });
 
+  const storageRoot = storageRootFor(args.repo, args.storageRoot);
   await emitTurnTransition({
-    storageRoot: storageRootFor(args.repo, args.storageRoot),
+    storageRoot,
     sessionId: session.sessionId,
     turnId,
     fromStatus: "queued",
     toStatus: "queued",
     reason: "next_turn",
   });
+  await emitSessionEvent(
+    storageRoot,
+    session.sessionId,
+    createSessionEvent({
+      kind: "host.turn_queued",
+      sessionId: session.sessionId,
+      turnId,
+      actor: "host",
+      payload: { turnId, prompt, mode: args.mode },
+    }),
+  );
 
   const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
   const request = createTaskSpec(
@@ -145,14 +159,26 @@ export const appendTurnToActiveSession = async (
     updatedAt: nowIso(),
   };
   await sessionStore.upsertTurn(sessionId, turn);
+  const storageRoot = storageRootFor(args.repo, args.storageRoot);
   await emitTurnTransition({
-    storageRoot: storageRootFor(args.repo, args.storageRoot),
+    storageRoot,
     sessionId,
     turnId,
     fromStatus: previousTurn?.status ?? "queued",
     toStatus: "queued",
     reason: "next_turn",
   });
+  await emitSessionEvent(
+    storageRoot,
+    sessionId,
+    createSessionEvent({
+      kind: "host.turn_queued",
+      sessionId,
+      turnId,
+      actor: "host",
+      payload: { turnId, prompt, mode: args.mode },
+    }),
+  );
 
   const withTurn = await sessionStore.loadSession(sessionId);
   if (withTurn === null) {

@@ -4,7 +4,23 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { createSessionEvent } from "../../src/protocol.js";
+import type {
+  ABoxTaskRunner,
+  TaskExecutionRecord,
+  TaskRunnerHandlers,
+} from "../../src/aboxTaskRunner.js";
+import type { WorkerTaskSpec } from "../../src/workerRuntime.js";
+import { ArtifactStore } from "../../src/artifactStore.js";
+import { SessionStore } from "../../src/sessionStore.js";
+import {
+  BAKUDO_PROTOCOL_SCHEMA_VERSION,
+  createSessionEvent,
+  type SessionEventEnvelope,
+  type SessionEventKind,
+} from "../../src/protocol.js";
+import type { WorkerTaskProgressEvent } from "../../src/workerRuntime.js";
+import { executeTask } from "../../src/host/orchestration.js";
+import type { HostCliArgs } from "../../src/host/parsing.js";
 import {
   createSessionEventLogWriter,
   eventLogFilePath,
@@ -122,6 +138,154 @@ test("loadEventLog returns empty state when the log file is absent", async () =>
   try {
     const loaded = await loadEventLog(rootDir, "session-missing");
     assert.deepEqual(loaded, { envelopes: [], malformedLineCount: 0 });
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+const stubRunnerEmitting = (events: WorkerTaskProgressEvent[]): ABoxTaskRunner => {
+  const execution: TaskExecutionRecord = {
+    events,
+    result: {
+      schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
+      taskId: "attempt-1",
+      sessionId: "session-exec",
+      status: "succeeded",
+      summary: "ok",
+      finishedAt: "2026-04-15T00:00:01.000Z",
+      exitCode: 0,
+      command: "echo",
+      cwd: ".",
+      shell: "bash",
+      timeoutSeconds: 60,
+      durationMs: 10,
+      exitSignal: null,
+      stdout: "",
+      stderr: "",
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      timedOut: false,
+      assumeDangerousSkipPermissions: false,
+    },
+    workerErrors: [],
+    rawOutput: "",
+    ok: true,
+    metadata: { cmd: ["abox", "run"], taskId: "abox-task-1" },
+  };
+  return {
+    runTask: async (
+      _spec: WorkerTaskSpec,
+      _overrides: Record<string, unknown>,
+      handlers: TaskRunnerHandlers = {},
+    ): Promise<TaskExecutionRecord> => {
+      for (const event of events) {
+        handlers.onEvent?.(event);
+      }
+      return execution;
+    },
+  } as unknown as ABoxTaskRunner;
+};
+
+test("executeTask round-trip writes the expected envelope sequence", async () => {
+  const rootDir = await createTempRoot();
+  try {
+    const sessionId = "session-exec";
+    const sessionStore = new SessionStore(rootDir);
+    const artifactStore = new ArtifactStore(rootDir);
+    await sessionStore.createSession({
+      sessionId,
+      goal: "exec-goal",
+      repoRoot: ".",
+      assumeDangerousSkipPermissions: false,
+      status: "running",
+      turns: [
+        {
+          turnId: "turn-1",
+          prompt: "exec-goal",
+          mode: "plan",
+          status: "running",
+          attempts: [],
+          createdAt: "2026-04-15T00:00:00.000Z",
+          updatedAt: "2026-04-15T00:00:00.000Z",
+        },
+      ],
+    });
+
+    const baseProgress: WorkerTaskProgressEvent = {
+      schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
+      kind: "task.progress",
+      taskId: "attempt-1",
+      sessionId,
+      status: "running",
+      timestamp: "2026-04-15T00:00:00.500Z",
+    };
+    const events: WorkerTaskProgressEvent[] = [
+      { ...baseProgress, kind: "task.started", status: "running" },
+      { ...baseProgress, kind: "task.progress", message: "step 1" },
+      { ...baseProgress, kind: "task.progress", message: "step 2" },
+      { ...baseProgress, kind: "task.progress", message: "step 3" },
+      { ...baseProgress, kind: "task.completed", status: "succeeded" },
+    ];
+    const runner = stubRunnerEmitting(events);
+
+    const args: HostCliArgs = {
+      command: "run",
+      config: "config/default.json",
+      aboxBin: "abox",
+      mode: "plan",
+      yes: false,
+      shell: "bash",
+      timeoutSeconds: 60,
+      maxOutputBytes: 1024,
+      heartbeatIntervalMs: 5000,
+      killGraceMs: 2000,
+      storageRoot: rootDir,
+      copilot: {},
+    };
+
+    const request = {
+      schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
+      taskId: "attempt-1",
+      sessionId,
+      goal: "exec-goal",
+      mode: "plan" as const,
+      cwd: ".",
+      assumeDangerousSkipPermissions: false,
+    };
+
+    await executeTask({
+      sessionStore,
+      artifactStore,
+      runner,
+      sessionId,
+      turnId: "turn-1",
+      request,
+      args,
+    });
+
+    const envelopes: SessionEventEnvelope[] = await readSessionEventLog(rootDir, sessionId);
+    const kinds = envelopes.map((envelope) => envelope.kind);
+    const expected: SessionEventKind[] = [
+      "host.dispatch_started",
+      "worker.attempt_started",
+      "worker.attempt_progress",
+      "worker.attempt_progress",
+      "worker.attempt_progress",
+      "worker.attempt_completed",
+      "host.review_started",
+      "host.review_completed",
+    ];
+    assert.deepEqual(kinds, expected);
+
+    // Every envelope must carry v2 schemaVersion and the expected actor.
+    for (const envelope of envelopes) {
+      assert.equal(envelope.schemaVersion, 2);
+      if (envelope.kind.startsWith("worker.")) {
+        assert.equal(envelope.actor, "worker");
+      } else if (envelope.kind.startsWith("host.")) {
+        assert.equal(envelope.actor, "host");
+      }
+    }
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

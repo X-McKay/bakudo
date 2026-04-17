@@ -13,10 +13,15 @@ import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
 import { dim, renderSection } from "./ansi.js";
+import { createSessionEventLogWriter } from "./eventLogWriter.js";
+import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import { runtimeIo, stdoutWrite } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import { latestAttempt, latestTurn, printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
 import {
+  buildDispatchStartedEnvelope,
+  buildReviewCompletedEnvelope,
+  buildReviewStartedEnvelope,
   formatProgressLine,
   renderDispatchBanner,
   upsertTurnLatestReview,
@@ -125,77 +130,108 @@ export type ExecuteTaskContext = {
 
 export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTaskResult> => {
   const { sessionStore, artifactStore, runner, sessionId, turnId, request, args, onProgress } = ctx;
-  await sessionStore.upsertAttempt(
-    sessionId,
-    turnId,
-    recordAttempt(request, "queued", "queued for sandbox execution"),
-  );
-  stdoutWrite(renderDispatchBanner(sessionId, request, args.mode));
-  const execution = await runner.runTask(
-    request,
-    {
-      shell: args.shell,
-      timeoutSeconds: args.timeoutSeconds,
-      maxOutputBytes: args.maxOutputBytes,
-      heartbeatIntervalMs: args.heartbeatIntervalMs,
-      killGraceMs: args.killGraceMs,
-    },
-    {
-      onEvent: (event) => {
-        onProgress?.(event);
-        stdoutWrite(formatProgressLine(event));
-      },
-      onWorkerError: (error) => {
-        const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
-        stdoutWrite(`[worker-error] ${message}\n`);
-      },
-    },
-  );
+  const storageRoot = sessionStore.rootDir;
+  const writer = createSessionEventLogWriter(storageRoot, sessionId);
+  try {
+    await sessionStore.upsertAttempt(
+      sessionId,
+      turnId,
+      recordAttempt(request, "queued", "queued for sandbox execution"),
+    );
+    stdoutWrite(renderDispatchBanner(sessionId, request, args.mode));
 
-  for (const event of execution.events) {
-    await sessionStore.appendTaskEvent(sessionId, event);
-  }
+    await writer.append(
+      buildDispatchStartedEnvelope({
+        sessionId,
+        turnId,
+        attemptId: request.taskId,
+        goal: request.goal,
+        mode: request.mode ?? composerModeToTaskMode(args.mode),
+        assumeDangerousSkipPermissions: args.yes ?? false,
+      }),
+    );
 
-  const reviewed = reviewTaskResult(execution.result);
-  const dispatchCommand = Array.isArray(execution.metadata?.cmd)
-    ? execution.metadata.cmd.map((entry) => String(entry))
-    : undefined;
-  await sessionStore.upsertAttempt(sessionId, turnId, {
-    attemptId: request.taskId,
-    request,
-    status: execution.result.status,
-    result: execution.result,
-    lastMessage: reviewed.reason,
-    metadata: {
+    const execution = await runner.runTask(
+      request,
+      {
+        shell: args.shell,
+        timeoutSeconds: args.timeoutSeconds,
+        maxOutputBytes: args.maxOutputBytes,
+        heartbeatIntervalMs: args.heartbeatIntervalMs,
+        killGraceMs: args.killGraceMs,
+      },
+      {
+        onEvent: (event) => {
+          onProgress?.(event);
+          // Parallel sinks: coalescer consumes raw events via onProgress, the
+          // projector feeds the persistent event log in lock-step.
+          void writer.append(projectLegacyWorkerEvent(sessionId, turnId, request.taskId, event));
+          stdoutWrite(formatProgressLine(event));
+        },
+        onWorkerError: (error) => {
+          const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
+          stdoutWrite(`[worker-error] ${message}\n`);
+        },
+      },
+    );
+
+    const reviewed = reviewTaskResult(execution.result);
+
+    await writer.append(
+      buildReviewStartedEnvelope({ sessionId, turnId, attemptId: request.taskId }),
+    );
+
+    const dispatchCommand = Array.isArray(execution.metadata?.cmd)
+      ? execution.metadata.cmd.map((entry) => String(entry))
+      : undefined;
+    await sessionStore.upsertAttempt(sessionId, turnId, {
+      attemptId: request.taskId,
+      request,
+      status: execution.result.status,
+      result: execution.result,
+      lastMessage: reviewed.reason,
+      metadata: {
+        sandboxTaskId: execution.metadata?.taskId,
+        aboxCommand: execution.metadata?.cmd,
+      },
+      ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
+    });
+    await upsertTurnLatestReview(sessionStore, sessionId, turnId, {
+      reviewId: `review-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      attemptId: request.taskId,
+      outcome: reviewed.outcome,
+      action: reviewed.action,
+      reason: reviewed.reason,
+      reviewedAt: new Date().toISOString(),
+    });
+
+    await writer.append(
+      buildReviewCompletedEnvelope({
+        sessionId,
+        turnId,
+        attemptId: request.taskId,
+        reviewed,
+      }),
+    );
+
+    await writeExecutionArtifacts({
+      artifactStore,
+      sessionId,
+      taskId: request.taskId,
+      result: execution.result,
+      rawOutput: execution.rawOutput,
+      ok: execution.ok,
+      workerErrorCount: execution.workerErrors.length,
       sandboxTaskId: execution.metadata?.taskId,
       aboxCommand: execution.metadata?.cmd,
-    },
-    ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
-  });
-  await upsertTurnLatestReview(sessionStore, sessionId, turnId, {
-    reviewId: `review-${Date.now()}-${randomUUID().slice(0, 8)}`,
-    attemptId: request.taskId,
-    outcome: reviewed.outcome,
-    action: reviewed.action,
-    reason: reviewed.reason,
-    reviewedAt: new Date().toISOString(),
-  });
+      reviewedOutcome: reviewed.outcome,
+      reviewedAction: reviewed.action,
+    });
 
-  await writeExecutionArtifacts({
-    artifactStore,
-    sessionId,
-    taskId: request.taskId,
-    result: execution.result,
-    rawOutput: execution.rawOutput,
-    ok: execution.ok,
-    workerErrorCount: execution.workerErrors.length,
-    sandboxTaskId: execution.metadata?.taskId,
-    aboxCommand: execution.metadata?.cmd,
-    reviewedOutcome: reviewed.outcome,
-    reviewedAction: reviewed.action,
-  });
-
-  return reviewed;
+    return reviewed;
+  } finally {
+    await writer.close();
+  }
 };
 
 const nowIso = (): string => new Date().toISOString();
