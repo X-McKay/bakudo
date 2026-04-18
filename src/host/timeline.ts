@@ -6,6 +6,12 @@ import { SessionStore } from "../sessionStore.js";
 import { eventLogFilePath, readSessionEventLog } from "./eventLogWriter.js";
 import { listArtifactRecords, type ArtifactRecord } from "./artifactStore.js";
 import type { SessionSummaryView } from "./sessionIndex.js";
+import { type AttemptLineage, deriveAttemptLineage } from "./attemptLineage.js";
+import {
+  listTurnTransitions,
+  type TurnTransition,
+  type TurnTransitionReason,
+} from "./transitionStore.js";
 
 /**
  * Canonical timeline query surface for the session storage layer.
@@ -172,4 +178,99 @@ export const listTurnArtifacts = async (
 ): Promise<ArtifactRecord[]> => {
   const records = await listArtifactRecords(storageRoot, sessionId);
   return records.filter((record) => record.turnId === turnId);
+};
+
+// ---------------------------------------------------------------------------
+// Lineage queries (Phase 4 PR3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retry-reason transitions that extend a chain. `next_turn` is excluded
+ * because it marks the start of a turn, not a retry. Must stay aligned with
+ * {@link RetryInitiator} classification in `attemptLineage.ts`.
+ */
+const RETRY_TRANSITION_REASONS: ReadonlySet<TurnTransitionReason> = new Set<TurnTransitionReason>([
+  "user_retry",
+  "host_retry",
+  "recovery_required",
+  "approval_denied_retry",
+  "protocol_mismatch_recovery",
+]);
+
+/**
+ * Slice a turn's transitions list to only include the first `retryBudget`
+ * retry-reason transitions (all non-retry transitions are preserved). Used
+ * by the lineage helpers so the Nth attempt's lineage matches the Nth retry
+ * transition even when later retries have already been appended to the log.
+ */
+const sliceTransitionsForAttempt = (
+  transitions: readonly TurnTransition[],
+  retryBudget: number,
+): TurnTransition[] => {
+  const result: TurnTransition[] = [];
+  let retryCount = 0;
+  for (const transition of transitions) {
+    if (RETRY_TRANSITION_REASONS.has(transition.reason)) {
+      if (retryCount >= retryBudget) {
+        continue;
+      }
+      retryCount += 1;
+    }
+    result.push(transition);
+  }
+  return result;
+};
+
+/**
+ * Derive {@link AttemptLineage} for a single attempt. Reads the session (for
+ * the turn + attempt records) and the transitions log, pre-filters to the
+ * turn's transitions, and slices so the attempt's derivation sees only the
+ * retry transitions up through its own index in the turn.
+ *
+ * Returns `null` when the session, turn, or attempt is missing.
+ */
+export const loadAttemptLineage = async (
+  storageRoot: string,
+  sessionId: string,
+  turnId: string,
+  attemptId: string,
+): Promise<AttemptLineage | null> => {
+  const turn = await loadTurn(storageRoot, sessionId, turnId);
+  if (turn === null) {
+    return null;
+  }
+  const attemptIndex = turn.attempts.findIndex((entry) => entry.attemptId === attemptId);
+  if (attemptIndex === -1) {
+    return null;
+  }
+  const attempt = turn.attempts[attemptIndex];
+  if (attempt === undefined) {
+    return null;
+  }
+  const allTransitions = await listTurnTransitions(storageRoot, sessionId);
+  const turnTransitions = allTransitions.filter((entry) => entry.turnId === turnId);
+  const sliced = sliceTransitionsForAttempt(turnTransitions, attemptIndex);
+  return deriveAttemptLineage(attempt, sliced);
+};
+
+/**
+ * Derive {@link AttemptLineage} for every attempt in a turn, in attempt
+ * order. Returns `[]` when the session or turn is missing, or when the turn
+ * has no attempts.
+ */
+export const listTurnLineage = async (
+  storageRoot: string,
+  sessionId: string,
+  turnId: string,
+): Promise<AttemptLineage[]> => {
+  const turn = await loadTurn(storageRoot, sessionId, turnId);
+  if (turn === null) {
+    return [];
+  }
+  const allTransitions = await listTurnTransitions(storageRoot, sessionId);
+  const turnTransitions = allTransitions.filter((entry) => entry.turnId === turnId);
+  return turn.attempts.map((attempt, index) => {
+    const sliced = sliceTransitionsForAttempt(turnTransitions, index);
+    return deriveAttemptLineage(attempt, sliced);
+  });
 };
