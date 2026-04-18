@@ -111,6 +111,46 @@ test("runDoctorChecks: includes repo-writeability PASS for a fresh temp dir", as
 });
 
 // ---------------------------------------------------------------------------
+// Phase 5 PR14 — reports renderer + keybinding wiring landed
+// ---------------------------------------------------------------------------
+
+test("runDoctorChecks: reports the Phase 5 renderer-backend + keybindings checks", async () => {
+  await withTempRepo(async (repoRoot) => {
+    const env = await runDoctorChecks({
+      repoRoot,
+      env: {},
+      nodeRuntime: "v22.0.0",
+      stdout: { isTTY: false, write: () => true },
+    });
+    // The checks list mentions the renderer-backend probe so missing
+    // prerequisites surface clearly (`05-…hardening.md:287-293`).
+    const rendererCheck = env.checks.find((c) => c.name === "renderer-backend");
+    assert.ok(rendererCheck, "renderer-backend check reported");
+    // Keybindings path is present even when no user bindings file exists.
+    assert.ok(env.keybindingsPath.length > 0, "keybindings path is non-empty");
+    assert.equal(
+      Array.isArray(env.keybindingsConflicts),
+      true,
+      "keybindings conflicts array always populated",
+    );
+  });
+});
+
+test("runDoctorChecks (json envelope): renderer backend is one of the documented values", async () => {
+  await withTempRepo(async (repoRoot) => {
+    const env = await runDoctorChecks({
+      repoRoot,
+      env: {},
+      nodeRuntime: "v22.0.0",
+      stdout: { isTTY: false, write: () => true },
+    });
+    // The renderer-backend value is the one automation callers match on
+    // when deciding whether to pass `--plain` / `--json` in CI.
+    assert.ok(["tty", "plain", "json"].includes(env.rendererBackend));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // formatDoctorReport (human-readable)
 // ---------------------------------------------------------------------------
 
