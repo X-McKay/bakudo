@@ -214,9 +214,10 @@ test("one-shot JSON tape: dispatch failure emits an error envelope on the last l
   const lines = stdout.tape().trimEnd().split("\n");
   assert.equal(lines.length, 3);
   const last = JSON.parse(lines[lines.length - 1]!) as JsonErrorEnvelope;
+  assert.equal(last.ok, false);
   assert.equal(last.kind, "error");
-  assert.equal(last.code, "worker_execution");
-  assert.ok(last.message.includes("abox binary not found"));
+  assert.equal(last.error.code, "worker_execution");
+  assert.ok(last.error.message.includes("abox binary not found"));
 });
 
 test("one-shot error envelope: buildJsonErrorEnvelope matches the emitted shape", () => {

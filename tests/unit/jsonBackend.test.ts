@@ -119,36 +119,45 @@ test("emitJsonError produces a single-line error envelope with code + message + 
   const line = stdout.chunks[0]!;
   assert.ok(line.endsWith("\n"));
   const parsed = JSON.parse(line.trimEnd()) as JsonErrorEnvelope;
+  assert.equal(parsed.ok, false);
   assert.equal(parsed.kind, "error");
-  assert.equal(parsed.code, "policy_denied");
-  assert.equal(parsed.message, "write to /etc/passwd rejected");
-  assert.deepEqual(parsed.details, { tool: "shell_write", path: "/etc/passwd" });
+  assert.equal(parsed.error.code, "policy_denied");
+  assert.equal(parsed.error.message, "write to /etc/passwd rejected");
+  assert.deepEqual(parsed.error.details, { tool: "shell_write", path: "/etc/passwd" });
 });
 
-test("emitJsonError defaults details to an empty object when omitted", () => {
+test("emitJsonError omits details when the caller does not supply any", () => {
   const stdout = captureStdout();
   const backend = new JsonBackend(stdout);
 
   backend.emitJsonError({ code: "user_input", message: "bad CLI args" });
 
   const parsed = JSON.parse(stdout.chunks[0]!.trimEnd()) as JsonErrorEnvelope;
-  assert.deepEqual(parsed.details, {});
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.kind, "error");
+  assert.equal(parsed.error.code, "user_input");
+  assert.equal(parsed.error.details, undefined);
 });
 
-test("buildJsonErrorEnvelope (pure builder) matches the emit-shape for every taxonomy code", () => {
+test("buildJsonErrorEnvelope (pure builder) matches the W9 shape for every taxonomy code", () => {
   const codes = [
     "user_input",
     "approval_denied",
     "policy_denied",
     "worker_protocol_mismatch",
     "worker_execution",
+    "session_corruption",
+    "session_lock",
+    "artifact_persistence",
+    "recovery_required",
   ] as const;
   for (const code of codes) {
     const envelope = buildJsonErrorEnvelope({ code, message: `m:${code}` });
+    assert.equal(envelope.ok, false);
     assert.equal(envelope.kind, "error");
-    assert.equal(envelope.code, code);
-    assert.equal(envelope.message, `m:${code}`);
-    assert.deepEqual(envelope.details, {});
+    assert.equal(envelope.error.code, code);
+    assert.equal(envelope.error.message, `m:${code}`);
+    assert.equal(envelope.error.details, undefined);
   }
 });
 

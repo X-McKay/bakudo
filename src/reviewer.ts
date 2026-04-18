@@ -7,6 +7,12 @@ import type {
 import type { ArtifactRecord } from "./host/artifactStore.js";
 import type { ApprovalRecord } from "./host/approvalStore.js";
 import type { AttemptLineage } from "./host/attemptLineage.js";
+import {
+  classifyError,
+  type BakudoErrorCode,
+  type ExitCode,
+  type RenderedError,
+} from "./host/errors.js";
 import type { TaskResult } from "./protocol.js";
 import {
   classifyReviewedOutcome,
@@ -17,6 +23,15 @@ import {
 import type { SessionAttemptRecord } from "./sessionTypes.js";
 
 export type { ReviewConfidence } from "./resultClassifier.js";
+
+/**
+ * Phase 6 W9: the reviewer is the classification point for any error that
+ * escapes a dispatch. The multi-tier classifier lives in `host/errors.ts`;
+ * it is re-exported here so callers that already import from `reviewer.ts`
+ * can pick up the taxonomy without another import hop.
+ */
+export { classifyError };
+export type { BakudoErrorCode, ExitCode, RenderedError };
 
 export type ReviewedTaskResult = ReviewClassification & {
   taskId: string;

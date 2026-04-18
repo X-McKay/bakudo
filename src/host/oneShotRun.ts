@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { buildOneShotReviewEnvelope } from "./copilotFlags.js";
+import { classifyError } from "./errors.js";
 import {
   createSessionEventLogWriter,
   emitUserTurnSubmitted,
@@ -97,10 +98,17 @@ export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<numbe
     }
     return reviewedOutcomeExitCode(result.reviewed);
   } catch (error) {
+    // Phase 6 W9: route the throw through the multi-tier classifier so the
+    // emitted `{kind:"error"}` line — and the returned exit code — always
+    // match the stable error taxonomy in `./errors.ts`.
+    const rendered = classifyError(error);
     if (jsonBackend !== undefined) {
-      const message = error instanceof Error ? error.message : String(error);
-      jsonBackend.emitJsonError({ code: "worker_execution", message });
-      return 1;
+      jsonBackend.emitJsonError({
+        code: rendered.code,
+        message: rendered.message,
+        ...(rendered.details !== undefined ? { details: rendered.details } : {}),
+      });
+      return rendered.exitCode;
     }
     throw error;
   }
