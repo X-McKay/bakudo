@@ -10,6 +10,7 @@ import {
   dispatchCleanupCommand,
   dispatchDoctorCommand,
   dispatchHelpCommand,
+  dispatchMetricsCommand,
   dispatchUsageCommand,
   dispatchVersionCommand,
 } from "./distributionCommands.js";
@@ -94,6 +95,9 @@ export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> =>
   }
   if (args.command === "chronicle") {
     return dispatchChronicleCommand(args);
+  }
+  if (args.command === "metrics") {
+    return dispatchMetricsCommand(args);
   }
   if (args.command === "run" || args.command === "build" || args.command === "plan") {
     return runNonInteractiveOneShot(args);

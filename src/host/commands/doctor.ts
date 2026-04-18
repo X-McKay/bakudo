@@ -45,6 +45,7 @@ import {
 } from "../redaction.js";
 import { countSpanFilesOnDisk, describeOtlpEndpoint } from "../telemetry/otelSpans.js";
 import { bakudoLogDir } from "../telemetry/xdgPaths.js";
+import { buildMetricsSection, type DoctorMetricsSection } from "../metrics/doctorMetricsSection.js";
 import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
 import { describeUiMode, getActiveUiMode, type UiMode } from "../uiMode.js";
 import { computeStorageTotalBytes } from "./cleanup.js";
@@ -114,7 +115,11 @@ export type DoctorEnvelope = {
    * themselves are not secret but users don't benefit from seeing them).
    */
   redaction: RedactionPolicySummary;
+  /** Phase 6 Wave 6d PR11 — W7 metrics snapshot (plan lines 430-440). */
+  metrics: DoctorMetricsSection;
 };
+
+export type { DoctorMetricsSection };
 
 export type DoctorContext = {
   repoRoot: string;
@@ -317,6 +322,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     redaction: summarizeRedactionPolicy(
       resolveEffectiveRedactionPolicy(cascade.merged.redaction ?? undefined),
     ),
+    metrics: buildMetricsSection(),
   };
 
   return envelope;

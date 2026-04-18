@@ -393,3 +393,24 @@ test("formatDoctorReport: human report includes a 'storage:' line", async () => 
     assert.match(body, /retention: intermediate >\d+d/u);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 6 Wave 6d PR11 — `metrics` section is present on the envelope.
+// ---------------------------------------------------------------------------
+
+test("runDoctorChecks: envelope.metrics surfaces the recorder snapshot", async () => {
+  await withTempRepo(async (repoRoot) => {
+    const env = await runDoctorChecks({
+      repoRoot,
+      env: {},
+      nodeRuntime: "v22.0.0",
+      stdout: { isTTY: false, write: () => true },
+    });
+    assert.ok("metrics" in env, "metrics section present");
+    assert.equal(typeof env.metrics.totalMeasurements, "number");
+    assert.ok(env.metrics.totalMeasurements >= 0);
+    assert.equal(typeof env.metrics.droppedEventBatches, "number");
+    assert.ok(env.metrics.droppedEventBatches >= 0);
+    assert.equal(typeof env.metrics.aggregates, "object");
+  });
+});

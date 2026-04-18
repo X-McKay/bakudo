@@ -19,6 +19,7 @@ export type HostCommand =
   | "cleanup"
   | "usage"
   | "chronicle"
+  | "metrics"
   | "version";
 
 /**
@@ -103,6 +104,12 @@ export type HostCliArgs = {
    * opaque so the command module owns its own surface.
    */
   chronicleArgs?: string[];
+  /**
+   * Phase 6 Wave 6d PR11 — raw flag/value tokens forwarded to the `metrics`
+   * command's own parser (`--format text|json`, `--json`, `--text`). Kept
+   * opaque so the command module owns its own surface.
+   */
+  metricsArgs?: string[];
 };
 
 export const HOST_COMMANDS = new Set<HostCommand>([
@@ -122,6 +129,7 @@ export const HOST_COMMANDS = new Set<HostCommand>([
   "cleanup",
   "usage",
   "chronicle",
+  "metrics",
   "version",
 ]);
 
@@ -285,11 +293,17 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       // `--session-id` and returns a helpful "did you mean --session" error
       // so the parse-error surface (plain text or JSON envelope) is shared
       // with every other subcommand-arg validation failure.
-      if (result.command === "usage" || result.command === "chronicle") {
+      if (
+        result.command === "usage" ||
+        result.command === "chronicle" ||
+        result.command === "metrics"
+      ) {
         const target: string[] =
           result.command === "usage"
             ? (result.usageArgs = result.usageArgs ?? [])
-            : (result.chronicleArgs = result.chronicleArgs ?? []);
+            : result.command === "chronicle"
+              ? (result.chronicleArgs = result.chronicleArgs ?? [])
+              : (result.metricsArgs = result.metricsArgs ?? []);
         target.push(arg);
         if (!arg.includes("=") && argv[i + 1] !== undefined) {
           target.push(argv[i + 1] as string);
@@ -389,11 +403,18 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     // Phase 6 Wave 6c PR8 — `bakudo usage` + `bakudo chronicle` forward their
     // own flag namespaces to the command module so the contract stays local.
     // Any `--foo` / `--foo=bar` / `--foo bar` pair is passed through verbatim.
-    if ((result.command === "usage" || result.command === "chronicle") && arg.startsWith("--")) {
+    if (
+      (result.command === "usage" ||
+        result.command === "chronicle" ||
+        result.command === "metrics") &&
+      arg.startsWith("--")
+    ) {
       const target: string[] =
         result.command === "usage"
           ? (result.usageArgs = result.usageArgs ?? [])
-          : (result.chronicleArgs = result.chronicleArgs ?? []);
+          : result.command === "chronicle"
+            ? (result.chronicleArgs = result.chronicleArgs ?? [])
+            : (result.metricsArgs = result.metricsArgs ?? []);
       target.push(arg);
       // If the flag has no `=` form AND the next token does not start with
       // `--`, treat it as the flag's value (e.g. `--since 24h`).
@@ -484,7 +505,11 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     if (positionals.length > 0) {
       throw new Error("cleanup does not accept positional arguments");
     }
-  } else if (result.command === "usage" || result.command === "chronicle") {
+  } else if (
+    result.command === "usage" ||
+    result.command === "chronicle" ||
+    result.command === "metrics"
+  ) {
     // Positionals are not meaningful for these commands (all selection flows
     // through flags). Bail early with a clear error so typos surface.
     if (positionals.length > 0) {

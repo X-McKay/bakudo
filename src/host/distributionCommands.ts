@@ -103,3 +103,17 @@ export const dispatchChronicleCommand = async (args: HostCliArgs): Promise<numbe
   });
   return result.exitCode;
 };
+
+/**
+ * Phase 6 Wave 6d PR11 — dispatch path for `bakudo metrics`. Prints the
+ * in-memory {@link MetricsRecorder} snapshot. TTY-independent JSON via
+ * `--format=json` / `--json` per lock-in 12.
+ */
+export const dispatchMetricsCommand = async (args: HostCliArgs): Promise<number> => {
+  const { runMetricsCommand } = await import("./commands/metrics.js");
+  const result = await runMetricsCommand({
+    args: args.metricsArgs ?? [],
+    stdoutIsTty: probeStdoutIsTty(),
+  });
+  return result.exitCode;
+};
