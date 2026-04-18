@@ -76,6 +76,10 @@ export const composerModeToTaskMode = (mode: TaskMode | string): TaskMode => {
   return "build";
 };
 
+/**
+ * @deprecated Replaced by planAttempt → executeAttempt pipeline (Phase 3).
+ * Remove in Phase 6.
+ */
 export const createTaskSpec = (
   sessionId: string,
   taskId: string,
@@ -126,6 +130,10 @@ export type ExecuteTaskContext = {
   onProgress?: (event: import("../workerRuntime.js").WorkerTaskProgressEvent) => void;
 };
 
+/**
+ * @deprecated Replaced by planAttempt → executeAttempt pipeline (Phase 3).
+ * Remove in Phase 6.
+ */
 export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTaskResult> => {
   const { sessionStore, artifactStore, runner, sessionId, turnId, request, args, onProgress } = ctx;
   const storageRoot = sessionStore.rootDir;

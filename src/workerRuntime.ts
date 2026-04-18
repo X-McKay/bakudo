@@ -12,6 +12,11 @@ export const WORKER_EVENT_PREFIX = "BAKUDO_WORKER_EVENT";
 export const WORKER_RESULT_PREFIX = "BAKUDO_WORKER_RESULT";
 export const WORKER_ERROR_PREFIX = "BAKUDO_WORKER_ERROR";
 
+/**
+ * @deprecated Replaced by {@link AttemptSpec} in the planAttempt → executeAttempt
+ * pipeline (Phase 3). Kept for backward compatibility with legacy executeTask
+ * callers. Remove in Phase 6.
+ */
 export type WorkerTaskSpec = TaskRequest & {
   timeoutSeconds?: number;
   maxOutputBytes?: number;
