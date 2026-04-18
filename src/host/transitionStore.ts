@@ -9,9 +9,30 @@ export type TurnTransitionReason =
   | "next_turn"
   | "user_retry"
   | "host_retry"
+  /**
+   * Phase 4 PR6: host-driven retry where the user also supplied refinement
+   * text ("retry this time with --verbose", etc). Treated identically to
+   * `host_retry` for lineage/initiator classification, but kept as a
+   * distinct reason so inspect views can surface the refinement intent.
+   */
+  | "host_retry_refine"
   | "recovery_required"
   | "approval_denied_retry"
-  | "protocol_mismatch_recovery";
+  | "protocol_mismatch_recovery"
+  /**
+   * Phase 4 PR4: the user rewound the session via `/timeline`, abandoning
+   * later turns and branching a new turn off an earlier one. Logged on the
+   * new turn so the transitions log carries the branch point; the attempt
+   * lineage helpers classify this as non-retry (no matching retry reasons
+   * set) so it does not extend an attempt chain.
+   */
+  | "user_rewind"
+  /**
+   * Phase 4 PR6: user pressed halt on an in-flight or reviewing turn. The
+   * host records the intent via `applyFollowUpAction` and marks the turn
+   * as `cancelled`. Not classified as a retry (no new attempt chain).
+   */
+  | "user_halt";
 
 export type TurnTransition = {
   transitionId: string;
