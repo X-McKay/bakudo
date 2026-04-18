@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import { z } from "zod";
 
@@ -258,4 +259,20 @@ export const loadDurableAllowlist = async (repoRoot: string): Promise<Permission
  */
 export const persistDurableRule = async (repoRoot: string, rule: PermissionRule): Promise<void> => {
   await appendNdjsonLine(durableAllowlistPath(repoRoot), rule);
+};
+
+/**
+ * Rewrite the durable allowlist file with the supplied rules, replacing any
+ * prior contents. Used by `/allow-all off` to remove specific rules while
+ * preserving the rest. No dedup — callers filter before calling.
+ */
+export const writeDurableAllowlist = async (
+  repoRoot: string,
+  rules: ReadonlyArray<PermissionRule>,
+): Promise<void> => {
+  const filePath = durableAllowlistPath(repoRoot);
+  await mkdir(dirname(filePath), { recursive: true });
+  const body = rules.map((rule) => JSON.stringify(rule)).join("\n");
+  const payload = rules.length === 0 ? "" : `${body}\n`;
+  await writeFile(filePath, payload, { encoding: "utf8" });
 };

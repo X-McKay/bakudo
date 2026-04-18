@@ -42,6 +42,7 @@ const USER_RETRY_REASONS: ReadonlySet<TurnTransitionReason> = new Set<TurnTransi
 
 const HOST_RETRY_REASONS: ReadonlySet<TurnTransitionReason> = new Set<TurnTransitionReason>([
   "host_retry",
+  "host_retry_refine",
   "recovery_required",
   "approval_denied_retry",
   "protocol_mismatch_recovery",

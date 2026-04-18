@@ -2,18 +2,24 @@ import { ArtifactStore } from "../../artifactStore.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../../reviewer.js";
 import { SessionStore } from "../../sessionStore.js";
 import type { InspectTab } from "../appState.js";
+import { listTurnApprovals } from "../approvalStore.js";
 import type { HostCommandSpec } from "../commandRegistry.js";
-import {
-  formatInspectArtifacts,
-  formatInspectLogs,
-  formatInspectReview,
-  formatInspectSandbox,
-  formatInspectSummary,
-} from "../inspectFormatter.js";
+import { readSessionEventLog } from "../eventLogWriter.js";
+import { formatInspectSandbox } from "../inspectFormatter.js";
+import { formatInspectTab, type InspectTabName } from "../inspectTabs.js";
 import { storageRootFor } from "../orchestration.js";
+import { loadAttemptProvenance } from "../timeline.js";
 import { reduceHost } from "../reducer.js";
 
-const KNOWN_TABS: readonly InspectTab[] = ["summary", "review", "artifacts", "sandbox", "logs"];
+const KNOWN_TABS: readonly InspectTab[] = [
+  "summary",
+  "review",
+  "provenance",
+  "artifacts",
+  "approvals",
+  "sandbox",
+  "logs",
+];
 
 const isInspectTab = (value: string): value is InspectTab =>
   (KNOWN_TABS as readonly string[]).includes(value);
@@ -22,7 +28,8 @@ export const inspectCommands: readonly HostCommandSpec[] = [
   {
     name: "inspect",
     group: "inspect",
-    description: "Inspect the active session; pass a tab (summary|review|artifacts|sandbox|logs).",
+    description:
+      "Inspect the active session; pass a tab (summary|review|provenance|artifacts|approvals|logs). `sandbox` is a legacy alias.",
     handler: async ({ args, deps }) => {
       const requestedTab = args[0];
       const tab: InspectTab =
@@ -57,36 +64,38 @@ export const inspectCommands: readonly HostCommandSpec[] = [
           ? []
           : await artifactStore.listTaskArtifacts(session.sessionId, attempt.attemptId);
 
+      // The legacy `sandbox` tab keeps its narrow formatter; all other tabs
+      // route through the six-tab dispatcher so the renderers stay consistent
+      // across surfaces.
       let lines: string[];
-      if (tab === "summary") {
-        lines = formatInspectSummary({
-          session,
-          ...(turn ? { turn } : {}),
-          ...(attempt ? { attempt } : {}),
-        });
-      } else if (tab === "review") {
-        if (attempt?.result === undefined) {
-          lines = ["Review", "  (no reviewed result yet)"];
-        } else {
-          const reviewed: ReviewedTaskResult = reviewTaskResult(attempt.result);
-          lines = formatInspectReview({ session, attempt, reviewed, artifacts });
-        }
-      } else if (tab === "sandbox") {
+      if (tab === "sandbox") {
         lines = attempt
           ? formatInspectSandbox({ session, attempt, artifacts })
           : ["Sandbox", "  (no attempts yet)"];
-      } else if (tab === "artifacts") {
-        lines = formatInspectArtifacts({
+      } else {
+        const reviewed: ReviewedTaskResult | undefined =
+          attempt?.result === undefined ? undefined : reviewTaskResult(attempt.result);
+        const approvals =
+          turn === undefined
+            ? []
+            : await listTurnApprovals(rootDir, session.sessionId, turn.turnId);
+        const provenance =
+          attempt === undefined
+            ? undefined
+            : ((await loadAttemptProvenance(rootDir, session.sessionId, attempt.attemptId)) ??
+              undefined);
+        const envelopes = await readSessionEventLog(rootDir, session.sessionId);
+        const events = await store.readTaskEvents(session.sessionId);
+        lines = formatInspectTab(tab as InspectTabName, {
           session,
+          ...(turn ? { turn } : {}),
           ...(attempt ? { attempt } : {}),
           artifacts,
-        });
-      } else {
-        const events = await store.readTaskEvents(session.sessionId);
-        lines = formatInspectLogs({
-          session,
-          ...(attempt ? { attempt } : {}),
           events,
+          ...(reviewed ? { reviewed } : {}),
+          ...(provenance ? { provenance } : {}),
+          approvals,
+          envelopes,
         });
       }
       for (const line of lines) {

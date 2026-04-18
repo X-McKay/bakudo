@@ -6,6 +6,7 @@ import { legacyCommands } from "./commands/legacy.js";
 import { runCommandSpec } from "./commands/runCommand.js";
 import { sessionCommands } from "./commands/session.js";
 import { buildSystemCommands } from "./commands/system.js";
+import { timelineCommandSpec } from "./commands/timeline.js";
 import type { BakudoConfig, ConfigLayer } from "./config.js";
 
 export type CommandRegistryOptions = {
@@ -20,6 +21,7 @@ export const buildDefaultCommandRegistry = (
     options.getConfig !== undefined ? buildConfigCommands(options.getConfig) : [];
   for (const spec of [
     ...sessionCommands,
+    timelineCommandSpec,
     ...inspectCommands,
     ...composerCommands,
     ...configCommands,

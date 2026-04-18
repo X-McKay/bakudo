@@ -46,6 +46,9 @@ const renderOverlay = (frame: RenderFrame): string[] => {
   if (overlay.kind === "command_palette") {
     return ["[command palette]"];
   }
+  if (overlay.kind === "timeline_picker") {
+    return ["[timeline picker]"];
+  }
   return ["[session picker]"];
 };
 

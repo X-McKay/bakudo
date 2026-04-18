@@ -12,9 +12,27 @@ export type HostScreen = "transcript" | "sessions" | "inspect" | "help";
  */
 export type ComposerMode = "standard" | "plan" | "autopilot";
 
-export type InspectTab = "summary" | "review" | "artifacts" | "sandbox" | "logs";
+/**
+ * Phase 4 PR4 adds a `provenance` tab for the per-attempt dispatch record
+ * and a `approvals` tab for the per-turn approval audit trail. The pre-PR4
+ * `sandbox` tab is retained so any external callers that still request it
+ * keep working — the dispatcher aliases it to the new `provenance` renderer.
+ */
+export type InspectTab =
+  | "summary"
+  | "review"
+  | "provenance"
+  | "artifacts"
+  | "approvals"
+  | "sandbox"
+  | "logs";
 
-export type PromptKind = "approval" | "resume_confirm" | "command_palette" | "session_picker";
+export type PromptKind =
+  | "approval"
+  | "resume_confirm"
+  | "command_palette"
+  | "session_picker"
+  | "timeline_picker";
 
 export type PromptEntry = {
   id: string;
@@ -29,7 +47,8 @@ export type HostOverlay =
   | { kind: "command_palette" }
   | { kind: "session_picker" }
   | { kind: "approval"; message: string }
-  | { kind: "resume_confirm"; message: string };
+  | { kind: "resume_confirm"; message: string }
+  | { kind: "timeline_picker" };
 
 export type HostAppState = {
   screen: HostScreen;
