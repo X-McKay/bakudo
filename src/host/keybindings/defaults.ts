@@ -68,6 +68,7 @@ export const buildDefaultBindings = (
     {
       context: "Global",
       bindings: {
+        "?": "app:quickHelp",
         "ctrl+c": "app:interrupt",
         "ctrl+d": "app:exit",
         "ctrl+k": "app:commandPalette",

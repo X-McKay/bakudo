@@ -1,6 +1,9 @@
 import type { RenderFrame, TranscriptItem } from "../renderModel.js";
 
 import type { ComposerMode } from "../appState.js";
+import { DEFAULT_BINDINGS } from "../keybindings/defaults.js";
+import { getKeybindingsFor } from "../keybindings/hooks.js";
+import { buildQuickHelpContents } from "../overlays/quickHelp.js";
 import { renderApprovalPromptLines } from "./approvalPromptCopy.js";
 import { renderCommandPaletteOverlayLines } from "./commandPaletteOverlay.js";
 import { renderSessionPickerOverlayLines } from "./sessionPickerOverlay.js";
@@ -56,6 +59,23 @@ const renderOverlay = (frame: RenderFrame): string[] => {
   }
   if (overlay.kind === "timeline_picker") {
     return ["[timeline picker]"];
+  }
+  if (overlay.kind === "quick_help") {
+    const registered = getKeybindingsFor(
+      overlay.context === "dialog"
+        ? "Dialog"
+        : overlay.context === "inspect"
+          ? "Inspect"
+          : overlay.context === "transcript"
+            ? "Transcript"
+            : "Composer",
+    );
+    return buildQuickHelpContents(
+      overlay.context,
+      DEFAULT_BINDINGS,
+      registered.size > 0 ? registered : undefined,
+      overlay.dialogKind,
+    );
   }
   return renderSessionPickerOverlayLines(overlay.request);
 };

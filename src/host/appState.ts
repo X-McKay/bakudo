@@ -33,7 +33,21 @@ export type PromptKind =
   | "resume_confirm"
   | "command_palette"
   | "session_picker"
-  | "timeline_picker";
+  | "timeline_picker"
+  | "quick_help";
+
+/**
+ * Payload for the `quick_help` overlay — the `?` modal that projects the
+ * active keybinding set for the current context. `dialogKind` is populated
+ * when the overlay opens while another dialog is pending so the help lines
+ * can tailor to that dialog's verbs (confirm/cancel/back vs. navigate).
+ */
+export type QuickHelpContext = "composer" | "inspect" | "dialog" | "transcript";
+
+export type QuickHelpPayload = {
+  context: QuickHelpContext;
+  dialogKind?: string;
+};
 
 export type PromptEntry = {
   id: string;
@@ -112,7 +126,8 @@ export type HostOverlay =
   | { kind: "approval"; message: string }
   | { kind: "approval_prompt"; request: ApprovalPromptRequest; cursorIndex: number }
   | { kind: "resume_confirm"; message: string }
-  | { kind: "timeline_picker" };
+  | { kind: "timeline_picker" }
+  | { kind: "quick_help"; context: QuickHelpContext; dialogKind?: string };
 
 /**
  * Windowed-scroll state for the Inspect pane. `scrollOffset` is the index
@@ -150,6 +165,12 @@ export type HostAppState = {
    * `approval_dialog_cursor_*`). Always in `[0, APPROVAL_DIALOG_CURSOR_COUNT)`.
    */
   approvalDialogCursor: number;
+  /**
+   * When set, the `?` quick-help overlay is active and preempts any pending
+   * dialog. `dialogKind` carries the underlying dialog kind so the help
+   * content can show the right verbs. See `renderModel.promoteQuickHelp`.
+   */
+  quickHelp?: QuickHelpPayload;
 };
 
 export const deriveAutoApprove = (mode: ComposerMode): boolean => mode === "autopilot";
