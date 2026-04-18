@@ -1,4 +1,5 @@
 import { createCommandRegistry, type HostCommandRegistry } from "./commandRegistry.js";
+import { chronicleCommandSpec } from "./commands/chronicle.js";
 import { cleanupCommandSpec } from "./commands/cleanup.js";
 import { composerCommands } from "./commands/composer.js";
 import { buildConfigCommands } from "./commands/config.js";
@@ -12,6 +13,7 @@ import { runCommandSpec } from "./commands/runCommand.js";
 import { sessionCommands } from "./commands/session.js";
 import { buildSystemCommands } from "./commands/system.js";
 import { timelineCommandSpec } from "./commands/timeline.js";
+import { usageCommandSpec } from "./commands/usage.js";
 import { versionCommandSpec } from "./commands/version.js";
 import type { BakudoConfig, ConfigLayer } from "./config.js";
 
@@ -36,6 +38,8 @@ export const buildDefaultCommandRegistry = (
     versionCommandSpec,
     doctorCommandSpec,
     cleanupCommandSpec,
+    usageCommandSpec,
+    chronicleCommandSpec,
     helpTopicCommandSpec,
     // System commands receive the registry so /help can enumerate commands
     // dynamically without a circular import.

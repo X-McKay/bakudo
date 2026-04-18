@@ -6,9 +6,11 @@ import { initialHostAppState, type ComposerMode } from "./appState.js";
 import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
 import { loadConfigCascade } from "./config.js";
 import {
+  dispatchChronicleCommand,
   dispatchCleanupCommand,
   dispatchDoctorCommand,
   dispatchHelpCommand,
+  dispatchUsageCommand,
   dispatchVersionCommand,
 } from "./distributionCommands.js";
 import { emitUserTurnSubmitted } from "./eventLogWriter.js";
@@ -86,6 +88,12 @@ export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> =>
   }
   if (args.command === "cleanup") {
     return dispatchCleanupCommand(args);
+  }
+  if (args.command === "usage") {
+    return dispatchUsageCommand(args);
+  }
+  if (args.command === "chronicle") {
+    return dispatchChronicleCommand(args);
   }
   if (args.command === "run" || args.command === "build" || args.command === "plan") {
     return runNonInteractiveOneShot(args);
