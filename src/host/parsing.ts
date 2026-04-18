@@ -13,7 +13,9 @@ export type HostCommand =
   | "sandbox"
   | "status"
   | "init"
-  | "help";
+  | "help"
+  | "doctor"
+  | "version";
 
 /**
  * Copilot-parity flag namespace. Phase 1 PR4 reserved the names; Phase 5 PR11
@@ -56,6 +58,11 @@ export type HostCliArgs = {
   goal?: string;
   sessionId?: string;
   taskId?: string;
+  /**
+   * Topic argument for `bakudo help <topic>`. Populated only when the
+   * command is `help` and a single positional argument is supplied.
+   */
+  helpTopic?: string;
   config: string;
   aboxBin: string;
   repo?: string;
@@ -83,6 +90,8 @@ export const HOST_COMMANDS = new Set<HostCommand>([
   "status",
   "init",
   "help",
+  "doctor",
+  "version",
 ]);
 
 export const RUN_COMMANDS = new Set<HostCommand>(["run", "build", "plan"]);
@@ -351,6 +360,21 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
   } else if (result.command === "init") {
     if (positionals.length > 0) {
       throw new Error("init does not accept positional arguments");
+    }
+  } else if (result.command === "help") {
+    // `bakudo help <topic>` — first positional is the topic name. Additional
+    // positionals are tolerated (joined with spaces) so multi-word topics
+    // remain forward-compatible; current topic set is single-word.
+    if (positionals[0] !== undefined) {
+      result.helpTopic = positionals.join(" ").trim();
+    }
+  } else if (result.command === "version") {
+    if (positionals.length > 0) {
+      throw new Error("version does not accept positional arguments");
+    }
+  } else if (result.command === "doctor") {
+    if (positionals.length > 0) {
+      throw new Error("doctor does not accept positional arguments");
     }
   }
 

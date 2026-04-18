@@ -97,15 +97,23 @@ test("selectRendererBackend: NO_COLOR forces PlainBackend even with TTY", () => 
   });
 });
 
-test("TtyBackend.render: writes \\x1Bc clear then transcript-frame lines", () => {
+test("TtyBackend.render: enters alt-screen + hides cursor, then targeted clear + body", () => {
   const stdout = captureStdout(true);
-  const backend = new TtyBackend(stdout);
+  // Pass an env that explicitly leaves alt-screen enabled so the test is
+  // isolated from the ambient process.env.
+  const backend = new TtyBackend(stdout, { env: {} });
   const frame = buildFrame();
 
   backend.render(frame);
 
-  assert.equal(stdout.chunks[0], "\x1Bc", "first chunk is the screen-clear escape");
-  const body = stdout.chunks.slice(1).join("");
+  assert.equal(stdout.chunks[0], "\x1B[?1049h", "first chunk enters alt-screen (DECSET 1049)");
+  assert.equal(stdout.chunks[1], "\x1B[?25l", "second chunk hides the cursor");
+  assert.equal(
+    stdout.chunks[2],
+    "\x1B[H\x1B[2J",
+    "third chunk is the targeted cursor-home + clear-screen sequence",
+  );
+  const body = stdout.chunks.slice(3).join("");
   const expected = `${renderTranscriptFrame(frame).join("\n")}\n`;
   assert.equal(body, expected, "body matches renderTranscriptFrame output");
   // Sanity: body should (potentially) contain ANSI escapes, and its stripped
@@ -127,35 +135,20 @@ test("PlainBackend.render: writes transcript-frame-plain lines with trailing new
   assert.ok(body.endsWith("\n"), "output ends with a bare newline separator");
 });
 
-test("JsonBackend.render: writes one JSONL envelope per call with kind=frame", () => {
-  const stdout = captureStdout(false);
-  const backend = new JsonBackend(stdout);
-  const frame = buildFrame();
-
-  backend.render(frame);
-
-  assert.equal(stdout.chunks.length, 1, "exactly one write per render call");
-  const line = stdout.chunks[0] ?? "";
-  assert.ok(line.endsWith("\n"), "envelope terminates with newline");
-  const parsed = JSON.parse(line.trimEnd()) as { kind: string; frame: RenderFrame };
-  assert.equal(parsed.kind, "frame", "envelope kind tag");
-  assert.deepEqual(parsed.frame, frame, "envelope frame payload matches input");
-});
-
-test("JsonBackend.render: emits one envelope per call across multiple frames", () => {
+test("JsonBackend.render is a no-op (PR3 moved emission to emitJsonEnvelope)", () => {
+  // Phase 5 PR3 changed JsonBackend.render to be documented as a no-op.
+  // Render-frame state is not meaningful to automation consumers; the real
+  // emission path is `emitJsonEnvelope(envelope)` invoked by the
+  // sessionController tee. See `tests/unit/jsonBackend.test.ts` for the
+  // full emission-surface contract.
   const stdout = captureStdout(false);
   const backend = new JsonBackend(stdout);
   const frame = buildFrame();
 
   backend.render(frame);
   backend.render(frame);
-  backend.render(frame);
 
-  assert.equal(stdout.chunks.length, 3, "one JSONL line per render call");
-  for (const chunk of stdout.chunks) {
-    const parsed = JSON.parse(chunk.trimEnd()) as { kind: string };
-    assert.equal(parsed.kind, "frame");
-  }
+  assert.equal(stdout.chunks.length, 0, "render(frame) must not write to stdout");
 });
 
 test("RendererBackend interface: all three backends are assignable to the type", () => {

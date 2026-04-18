@@ -5,6 +5,11 @@ import { basename } from "node:path";
 import { initialHostAppState, type ComposerMode } from "./appState.js";
 import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
 import { loadConfigCascade } from "./config.js";
+import {
+  dispatchDoctorCommand,
+  dispatchHelpCommand,
+  dispatchVersionCommand,
+} from "./distributionCommands.js";
 import { emitUserTurnSubmitted } from "./eventLogWriter.js";
 import {
   HOST_STATE_SCHEMA_VERSION,
@@ -15,13 +20,15 @@ import {
 import { runtimeIo, withCapturedStdout, type TextWriter } from "./io.js";
 import { runInit } from "./init.js";
 import {
+  createSessionRenderer,
   deriveShellContext,
   executePrompt,
-  tickRender,
   type InteractiveResolution,
   type ShellContext,
   type TickDeps,
 } from "./interactiveRenderLoop.js";
+import { registerKeybinding } from "./keybindings/hooks.js";
+import { installSignalHandlers, registerCleanupHandler } from "./signalHandlers.js";
 import {
   buildInteractiveRunResolution,
   createInteractiveSessionIdentity,
@@ -68,8 +75,13 @@ export { runNonInteractiveOneShot };
 
 export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
   if (args.command === "help") {
-    printUsage();
-    return 0;
+    return dispatchHelpCommand(args);
+  }
+  if (args.command === "version") {
+    return dispatchVersionCommand(args);
+  }
+  if (args.command === "doctor") {
+    return dispatchDoctorCommand(args);
   }
   if (args.command === "run" || args.command === "build" || args.command === "plan") {
     return runNonInteractiveOneShot(args);
@@ -279,6 +291,20 @@ export const runInteractiveShell = async (): Promise<number> => {
     }
   };
 
+  // Phase 5 PR5: session-scoped renderer + signal handlers. Single backend
+  // across ticks so alt-screen state stays consistent; cleanup runs LIFO on
+  // SIGINT/SIGTERM/uncaughtException.
+  const { tick: renderTick, backend: sessionBackend } = createSessionRenderer();
+  const unregisterBackendCleanup = registerCleanupHandler(() => {
+    sessionBackend.dispose?.();
+  });
+  const uninstallSignals = installSignalHandlers();
+  // TODO(phase5-pr5): `app:redraw` fires through the registry today; when W3
+  // lands raw-key dispatch, Ctrl+L will invoke this handler on a live key.
+  const unregisterRedraw = registerKeybinding("Global", "app:redraw", () => {
+    renderTick(deps);
+  });
+
   const handleSigint = (): void => {
     const head = deps.appState.promptQueue[0];
     if (head === undefined) {
@@ -287,14 +313,14 @@ export const runInteractiveShell = async (): Promise<number> => {
     }
     cancelPendingPrompt(head.id);
     deps.appState = reduceHost(deps.appState, { type: "cancel_prompt", id: head.id });
-    tickRender(deps);
+    renderTick(deps);
   };
   type SignalHandler = (name: string, handler: () => void) => unknown;
   const nodeProcess = (globalThis as { process?: { on?: SignalHandler; off?: SignalHandler } })
     .process;
   nodeProcess?.on?.("SIGINT", handleSigint);
 
-  tickRender(deps);
+  renderTick(deps);
   try {
     while (true) {
       let answer: string;
@@ -314,7 +340,7 @@ export const runInteractiveShell = async (): Promise<number> => {
 
       // Route answers for active prompts first.
       if (answerHeadPrompt(line, deps)) {
-        tickRender(deps);
+        renderTick(deps);
         continue;
       }
 
@@ -326,7 +352,7 @@ export const runInteractiveShell = async (): Promise<number> => {
       }
       if (dispatched.kind === "handled") {
         await persistHostState();
-        tickRender(deps);
+        renderTick(deps);
         continue;
       }
 
@@ -345,7 +371,7 @@ export const runInteractiveShell = async (): Promise<number> => {
             deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
           }
           await persistHostState();
-          tickRender(deps);
+          renderTick(deps);
           continue;
         }
         // Unknown slash command: push a notice rather than silently dropping.
@@ -356,7 +382,7 @@ export const runInteractiveShell = async (): Promise<number> => {
             tone: "warning",
           });
           await persistHostState();
-          tickRender(deps);
+          renderTick(deps);
           continue;
         }
       }
@@ -366,11 +392,15 @@ export const runInteractiveShell = async (): Promise<number> => {
       }
 
       await persistHostState();
-      tickRender(deps);
+      renderTick(deps);
     }
   } finally {
     nodeProcess?.off?.("SIGINT", handleSigint);
     resetPromptResolvers();
     rl.close();
+    unregisterRedraw();
+    uninstallSignals();
+    unregisterBackendCleanup();
+    sessionBackend.dispose?.();
   }
 };

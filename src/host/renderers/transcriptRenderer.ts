@@ -1,22 +1,22 @@
-import { bold, cyan, dim, gray, green, red, renderModeChip, yellow } from "../ansi.js";
+import { bold, dim, gray, renderModeChip, tone } from "../ansi.js";
 import { renderApprovalPromptLines } from "./approvalPromptCopy.js";
 import type { RenderFrame, TranscriptItem } from "../renderModel.js";
 
 const toneWrap = (
   text: string,
-  tone: "info" | "success" | "warning" | "error" | undefined,
+  toneName: "info" | "success" | "warning" | "error" | undefined,
 ): string => {
-  if (tone === "info") {
-    return cyan(text);
+  if (toneName === "info") {
+    return tone.info(text);
   }
-  if (tone === "success") {
-    return green(text);
+  if (toneName === "success") {
+    return tone.success(text);
   }
-  if (tone === "warning") {
-    return yellow(text);
+  if (toneName === "warning") {
+    return tone.warning(text);
   }
-  if (tone === "error") {
-    return red(text);
+  if (toneName === "error") {
+    return tone.error(text);
   }
   return text;
 };
@@ -48,7 +48,7 @@ const renderOverlay = (frame: RenderFrame): string[] => {
     return [];
   }
   if (overlay.kind === "approval") {
-    return [yellow(`[approval] ${overlay.message} [y/N]`)];
+    return [tone.warning(`[approval] ${overlay.message} [y/N]`)];
   }
   if (overlay.kind === "approval_prompt") {
     // VERBATIM copy per Phase 4 spec (04-provenance-first-inspection-and-approval.md
@@ -56,15 +56,15 @@ const renderOverlay = (frame: RenderFrame): string[] => {
     return renderApprovalPromptLines(overlay.request);
   }
   if (overlay.kind === "resume_confirm") {
-    return [yellow(`[resume?] ${overlay.message} [y/N]`)];
+    return [tone.warning(`[resume?] ${overlay.message} [y/N]`)];
   }
   if (overlay.kind === "command_palette") {
-    return [cyan("[command palette]")];
+    return [tone.info("[command palette]")];
   }
   if (overlay.kind === "timeline_picker") {
-    return [cyan("[timeline picker]")];
+    return [tone.info("[timeline picker]")];
   }
-  return [cyan("[session picker]")];
+  return [tone.info("[session picker]")];
 };
 
 export const renderTranscriptFrame = (frame: RenderFrame): string[] => {

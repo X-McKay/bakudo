@@ -12,7 +12,7 @@ import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import type { ComposerMode } from "./appState.js";
 import { BakudoConfigDefaults } from "./config.js";
-import { emitSessionEvent } from "./eventLogWriter.js";
+import { emitSessionEvent, type JsonEventSink } from "./eventLogWriter.js";
 import { executeAttempt } from "./executeAttempt.js";
 import {
   type EventLogWriterFactory,
@@ -85,6 +85,14 @@ const resolveAutoApprove = (args: HostCliArgs): boolean =>
 export type SessionDispatchOptions = {
   onProgress?: (event: WorkerTaskProgressEvent) => void;
   eventLogWriterFactory?: EventLogWriterFactory;
+  /**
+   * Optional JSONL tee for `--output-format=json`. When provided, pre-dispatch
+   * envelopes (`host.turn_queued`) are also forwarded to the sink alongside
+   * the attempt-scoped writer stream. The dispatch-inner writer receives the
+   * sink via `eventLogWriterFactory`; they are supplied together by
+   * `runNonInteractiveOneShot`.
+   */
+  sink?: JsonEventSink;
 };
 
 export const createAndRunFirstTurn = async (
@@ -135,6 +143,7 @@ export const createAndRunFirstTurn = async (
       actor: "host",
       payload: { turnId, prompt: effectivePrompt, mode: args.mode },
     }),
+    options.sink,
   );
 
   const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
@@ -227,6 +236,7 @@ export const appendTurnToActiveSession = async (
       actor: "host",
       payload: { turnId, prompt: effectivePrompt, mode: args.mode },
     }),
+    options.sink,
   );
 
   const withTurn = await sessionStore.loadSession(sessionId);

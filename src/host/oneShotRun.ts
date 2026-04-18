@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 
 import { buildOneShotReviewEnvelope } from "./copilotFlags.js";
-import { emitUserTurnSubmitted } from "./eventLogWriter.js";
-import { stdoutWrite } from "./io.js";
+import {
+  createSessionEventLogWriter,
+  emitUserTurnSubmitted,
+  type JsonEventSink,
+} from "./eventLogWriter.js";
+import { getBaseStdout, stdoutWrite } from "./io.js";
 import { promptForApproval, requiresSandboxApproval, storageRootFor } from "./orchestration.js";
 import type { HostCliArgs } from "./parsing.js";
 import { printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
+import { JsonBackend } from "./renderers/jsonBackend.js";
+import type { RendererStdout } from "./rendererBackend.js";
 import type { ReviewClassification } from "../resultClassifier.js";
 import { createAndRunFirstTurn } from "./sessionController.js";
 
@@ -28,10 +34,27 @@ const emitOneShotJsonSummary = (sessionId: string, reviewed: ReviewClassificatio
 };
 
 /**
+ * Build a `JsonBackend` bound to the current stdout. Phase 5 PR3: used to
+ * tee the session event log to stdout during a `--output-format=json`
+ * one-shot run. The backend's `render(frame)` path is a no-op by contract;
+ * we only use `emitJsonEnvelope` / `emitJsonError` here.
+ */
+const createOneShotJsonBackend = (): JsonBackend => {
+  const stdout = getBaseStdout() as unknown as RendererStdout;
+  return new JsonBackend(stdout);
+};
+
+/**
  * Non-interactive one-shot: routes through the v2 sessionController
  * pipeline. Extracted from `interactive.ts` (Phase 5 PR11) so that file
  * stays under the 400-line cap now that the JSON summary + Copilot flag
  * plumbing lives here.
+ *
+ * Phase 5 PR3: when `--output-format=json` is active, the one-shot path
+ * builds a `JsonBackend` tee that fans every session event envelope to
+ * stdout as the dispatch unfolds. The terminal stdout line is the
+ * `buildOneShotReviewEnvelope` summary on success, or a
+ * `JsonBackend.emitJsonError` envelope on dispatch failure.
  */
 export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<number> => {
   if (requiresSandboxApproval(args) && !args.yes && args.copilot.allowAllTools !== true) {
@@ -47,12 +70,38 @@ export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<numbe
   const withSession: HostCliArgs = { ...args, sessionId };
   const storageRoot = storageRootFor(withSession.repo, withSession.storageRoot);
   const goal = resolveOneShotGoal(args);
-  await emitUserTurnSubmitted(storageRoot, sessionId, goal, args.mode);
-  const result = await createAndRunFirstTurn(goal, withSession);
-  if (args.copilot.outputFormat === "json") {
-    emitOneShotJsonSummary(result.session.sessionId, result.reviewed);
-  } else {
-    printRunSummary(result.session, result.reviewed);
+  const useJson = args.copilot.outputFormat === "json";
+  const jsonBackend: JsonBackend | undefined = useJson ? createOneShotJsonBackend() : undefined;
+  const sink: JsonEventSink | undefined = jsonBackend;
+
+  try {
+    // Pre-dispatch pump — tee through the sink so automation callers see
+    // the `user.turn_submitted` / `host.turn_queued` lines before any worker
+    // envelopes arrive.
+    await emitUserTurnSubmitted(storageRoot, sessionId, goal, args.mode, sink);
+
+    const result = await createAndRunFirstTurn(goal, withSession, {
+      ...(sink !== undefined
+        ? {
+            sink,
+            eventLogWriterFactory: (sroot, sid) =>
+              createSessionEventLogWriter(sroot, sid, { sink }),
+          }
+        : {}),
+    });
+
+    if (useJson) {
+      emitOneShotJsonSummary(result.session.sessionId, result.reviewed);
+    } else {
+      printRunSummary(result.session, result.reviewed);
+    }
+    return reviewedOutcomeExitCode(result.reviewed);
+  } catch (error) {
+    if (jsonBackend !== undefined) {
+      const message = error instanceof Error ? error.message : String(error);
+      jsonBackend.emitJsonError({ code: "worker_execution", message });
+      return 1;
+    }
+    throw error;
   }
-  return reviewedOutcomeExitCode(result.reviewed);
 };

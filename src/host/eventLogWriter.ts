@@ -8,18 +8,11 @@ import { createSessionPaths } from "../sessionStore.js";
 import { stderrWrite } from "./io.js";
 
 /**
- * Append-only NDJSON writer for the v2 session event log.
- *
- * Writer behavior:
- *  - Buffered append with flush on size (64 entries), bytes (4 KiB), or
- *    elapsed time (100 ms since first pending entry). First trip wins.
- *  - Retry schedule: 5 attempts at 50/100/200/400/800 ms for transient fs
- *    errors (EAGAIN, EBUSY, EMFILE, ENFILE, ENOSPC); other errors fail fast.
- *  - On first v2 write, rename any legacy `events.ndjson` whose first line
- *    lacks `"schemaVersion":2` to `events.v1.ndjson` atomically.
- *  - Oversized envelopes (> 256 KiB serialized) are dropped with a warning.
- *
- * See the phase-2 PR3 brief for the authoritative contract.
+ * Append-only NDJSON writer for the v2 session event log. Buffered flush on
+ * 64 entries / 4 KiB / 100 ms (first trigger wins); retries EAGAIN/EBUSY/
+ * EMFILE/ENFILE/ENOSPC at 50/100/200/400/800 ms; renames legacy
+ * `events.ndjson` → `events.v1.ndjson` on first v2 write; drops envelopes
+ * above 256 KiB. See the phase-2 PR3 brief for the authoritative contract.
  */
 
 /** Zod schema for structural validation of event envelopes read from disk. */
@@ -92,6 +85,14 @@ export const readSessionEventLog = async (
   }
 };
 
+/**
+ * Minimal sink contract for the `--output-format=json` tee. Defined here (not
+ * in the renderers module) so `eventLogWriter` stays import-clean — any
+ * producer that structurally matches, notably `JsonBackend`, can be passed
+ * directly as `{ sink }`.
+ */
+export type JsonEventSink = { emitJsonEnvelope(envelope: SessionEventEnvelope): void };
+
 export type EventLogWriterOptions = {
   /** Override `Date.now()` for deterministic tests. */
   now?: () => number;
@@ -104,6 +105,12 @@ export type EventLogWriterOptions = {
   appendFileImpl?: (filePath: string, data: string) => Promise<void>;
   /** Override the retry delay function; tests use this to skip real waits. */
   sleepImpl?: (ms: number) => Promise<void>;
+  /**
+   * Optional JSONL tee for `--output-format=json`. Every envelope accepted by
+   * `append` is forwarded; oversized envelopes (dropped from file) are NOT
+   * forwarded. Sink errors are swallowed.
+   */
+  sink?: JsonEventSink;
 };
 
 export type EventLogWriter = {
@@ -171,11 +178,7 @@ const maybeRenameLegacy = async (filePath: string, legacyPath: string): Promise<
   await rename(filePath, legacyPath);
 };
 
-/**
- * Build a buffered, retrying writer bound to a single `(storageRoot, sessionId)`
- * pair. Lifetime is attempt-scoped — create one at the top of `executeTask` and
- * close it in `finally`. See the module docstring for the full contract.
- */
+/** Build an attempt-scoped buffered writer. See module docstring for contract. */
 export const createSessionEventLogWriter = (
   storageRoot: string,
   sessionId: string,
@@ -188,6 +191,16 @@ export const createSessionEventLogWriter = (
   const cancel = options.timerProvider?.cancel ?? defaultCancel;
   const doAppend = options.appendFileImpl ?? defaultAppendFile;
   const sleep = options.sleepImpl ?? defaultSleep;
+  const sink = options.sink;
+  /** Swallow sink errors so a broken pipe cannot halt durable persistence. */
+  const emitToSink = (envelope: SessionEventEnvelope): void => {
+    if (sink === undefined) return;
+    try {
+      sink.emitJsonEnvelope(envelope);
+    } catch {
+      /* intentionally swallowed */
+    }
+  };
 
   const pending: string[] = [];
   let pendingBytes = 0;
@@ -299,6 +312,9 @@ export const createSessionEventLogWriter = (
       );
       return;
     }
+    // Fan out to the stdout tee before scheduling the durable append so
+    // automation consumers see each event immediately (no flush-trigger wait).
+    emitToSink(envelope);
     pending.push(serialized);
     pendingBytes += serialized.length;
     if (pendingSince === null) {
@@ -333,16 +349,21 @@ export const createSessionEventLogWriter = (
 };
 
 /**
- * Short-lived writer for low-frequency pre-dispatch events (`user.turn_submitted`,
- * `host.turn_queued`). Opens, appends, and closes a one-shot writer — does NOT
- * share buffering with the attempt-scoped writer used by `executeTask`.
+ * One-shot writer for pre-dispatch events (`user.turn_submitted`,
+ * `host.turn_queued`). Does NOT share buffering with the attempt-scoped
+ * writer. Forwards to `sink` when supplied (for `--output-format=json`).
  */
 export const emitSessionEvent = async (
   storageRoot: string,
   sessionId: string,
   envelope: SessionEventEnvelope,
+  sink?: JsonEventSink,
 ): Promise<void> => {
-  const writer = createSessionEventLogWriter(storageRoot, sessionId);
+  const writer = createSessionEventLogWriter(
+    storageRoot,
+    sessionId,
+    sink !== undefined ? { sink } : {},
+  );
   try {
     await writer.append(envelope);
   } finally {
@@ -351,15 +372,15 @@ export const emitSessionEvent = async (
 };
 
 /**
- * Helper for the `user.turn_submitted` pre-dispatch emission shared by the
- * non-interactive one-shot path and the interactive `dispatchThroughController`
- * path. Keeps the envelope shape in one place.
+ * Pre-dispatch `user.turn_submitted` emission shared by the one-shot and
+ * interactive paths. Forwards to `sink` when supplied.
  */
 export const emitUserTurnSubmitted = async (
   storageRoot: string,
   sessionId: string,
   prompt: string,
   mode: string,
+  sink?: JsonEventSink,
 ): Promise<void> => {
   await emitSessionEvent(
     storageRoot,
@@ -370,5 +391,6 @@ export const emitUserTurnSubmitted = async (
       actor: "user",
       payload: { prompt, mode },
     }),
+    sink,
   );
 };

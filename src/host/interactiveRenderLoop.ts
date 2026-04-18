@@ -6,7 +6,11 @@ import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
-import { selectRendererBackend, type RendererStdout } from "./rendererBackend.js";
+import {
+  selectRendererBackend,
+  type RendererBackend,
+  type RendererStdout,
+} from "./rendererBackend.js";
 import type { TextWriter } from "./io.js";
 
 /**
@@ -163,6 +167,31 @@ export const tickRender = (deps: TickDeps): void => {
   const stdout = stdoutAsRendererStdout();
   const backend = selectRendererBackend({ stdout });
   backend.render(frame);
+};
+
+/**
+ * Phase 5 PR5 — build a session-scoped renderer pair: a `tick` function that
+ * reuses the same backend for every frame, plus the backend itself so the
+ * caller can wire `dispose()` into signal handlers.
+ *
+ * Using this instead of {@link tickRender} guarantees alt-screen enter/exit
+ * fires exactly once per interactive session.
+ */
+export const createSessionRenderer = (): {
+  tick: (deps: TickDeps) => void;
+  backend: RendererBackend;
+} => {
+  const stdout = stdoutAsRendererStdout();
+  const backend = selectRendererBackend({ stdout });
+  const tick = (deps: TickDeps): void => {
+    const frame = selectRenderFrame({
+      state: deps.appState,
+      transcript: deps.transcript,
+      ...(deps.repoLabel !== undefined ? { repoLabel: deps.repoLabel } : {}),
+    });
+    backend.render(frame);
+  };
+  return { tick, backend };
 };
 
 export type ExecuteDeps = {
