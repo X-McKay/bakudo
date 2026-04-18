@@ -1,4 +1,5 @@
 import { createCommandRegistry, type HostCommandRegistry } from "./commandRegistry.js";
+import { cleanupCommandSpec } from "./commands/cleanup.js";
 import { composerCommands } from "./commands/composer.js";
 import { buildConfigCommands } from "./commands/config.js";
 import { doctorCommandSpec } from "./commands/doctor.js";
@@ -34,6 +35,7 @@ export const buildDefaultCommandRegistry = (
     ...experimentalCommands,
     versionCommandSpec,
     doctorCommandSpec,
+    cleanupCommandSpec,
     helpTopicCommandSpec,
     // System commands receive the registry so /help can enumerate commands
     // dynamically without a circular import.

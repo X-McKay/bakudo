@@ -6,6 +6,7 @@ import { initialHostAppState, type ComposerMode } from "./appState.js";
 import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
 import { loadConfigCascade } from "./config.js";
 import {
+  dispatchCleanupCommand,
   dispatchDoctorCommand,
   dispatchHelpCommand,
   dispatchVersionCommand,
@@ -82,6 +83,9 @@ export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> =>
   }
   if (args.command === "doctor") {
     return dispatchDoctorCommand(args);
+  }
+  if (args.command === "cleanup") {
+    return dispatchCleanupCommand(args);
   }
   if (args.command === "run" || args.command === "build" || args.command === "plan") {
     return runNonInteractiveOneShot(args);

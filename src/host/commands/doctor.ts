@@ -35,10 +35,12 @@ import {
 import { stdoutWrite } from "../io.js";
 import { xdgKeybindingsPath } from "../keybindings/userBindings.js";
 import { validateBindings } from "../keybindings/validate.js";
-import { repoRootFor } from "../orchestration.js";
+import { repoRootFor, storageRootFor } from "../orchestration.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
+import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
 import { describeUiMode, getActiveUiMode, type UiMode } from "../uiMode.js";
+import { computeStorageTotalBytes } from "./cleanup.js";
 
 /**
  * Envelope produced by `bakudo doctor --output-format=json`. Key names
@@ -70,6 +72,21 @@ export type DoctorEnvelope = {
    * the mode be recorded so a report specifies which surface the user hit.
    */
   uiMode: { active: UiMode; description: string };
+  /**
+   * Phase 6 W4 — storage footprint + active retention policy snapshot.
+   * Surfaced in `bakudo doctor` so operators can spot growth without
+   * running a full `bakudo cleanup --dry-run`. Additive — older automation
+   * that does not know about this field continues to parse cleanly.
+   */
+  storage: {
+    storageRoot: string;
+    totalArtifactBytes: number;
+    retentionPolicy: {
+      intermediateMaxAgeMs: number;
+      intermediateKinds: ReadonlyArray<string>;
+      protectedKinds: ReadonlyArray<string>;
+    };
+  };
 };
 
 export type DoctorContext = {
@@ -185,6 +202,17 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
   // 11. Telemetry (stubbed).
   const telemetryCheck = checkTelemetry();
 
+  // 12. Storage footprint (Phase 6 W4). Best-effort: a missing storage root
+  // (fresh repo) yields zero bytes rather than a check failure.
+  const storageRoot = storageRootFor(repoRoot, undefined);
+  let totalArtifactBytes = 0;
+  try {
+    totalArtifactBytes = await computeStorageTotalBytes(storageRoot);
+  } catch {
+    // Tolerate scan failures — `bakudo cleanup --dry-run` provides the
+    // detailed surface; doctor must never `fail` on storage probing.
+  }
+
   const checks: DoctorCheckResult[] = [
     nodeCheck,
     ...aboxChecks,
@@ -229,6 +257,15 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     uiMode: {
       active: getActiveUiMode(),
       description: describeUiMode(getActiveUiMode()),
+    },
+    storage: {
+      storageRoot,
+      totalArtifactBytes,
+      retentionPolicy: {
+        intermediateMaxAgeMs: DEFAULT_RETENTION_POLICY.intermediateMaxAgeMs,
+        intermediateKinds: DEFAULT_RETENTION_POLICY.intermediateKinds,
+        protectedKinds: DEFAULT_RETENTION_POLICY.protectedKinds,
+      },
     },
   };
 
@@ -280,6 +317,12 @@ export const formatDoctorReport = (envelope: DoctorEnvelope): string[] => {
   lines.push(`  config layers: ${envelope.configCascadePaths.join(" | ")}`);
   // Phase 6 W1 — plan 06 hard rule 3: bug reports must record the UI mode.
   lines.push(`  ui mode: ${envelope.uiMode.active} (${envelope.uiMode.description})`);
+  // Phase 6 W4 — storage footprint + active retention policy.
+  const mb = (envelope.storage.totalArtifactBytes / (1024 * 1024)).toFixed(2);
+  const days = Math.round(envelope.storage.retentionPolicy.intermediateMaxAgeMs / 86_400_000);
+  lines.push(
+    `  storage: ${mb} MB at ${envelope.storage.storageRoot} (retention: intermediate >${days}d)`,
+  );
   lines.push("");
   return lines;
 };
