@@ -1,6 +1,10 @@
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import {
+  appendArtifactRecord as appendArtifactRecordV2,
+  type ArtifactRecord as ArtifactRecordV2,
+} from "./host/artifactStore.js";
 import { ArtifactPersistenceError } from "./host/errors.js";
 import { DEFAULT_REDACTION_POLICY, redactRecord, type RedactionPolicy } from "./host/redaction.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "./protocol.js";
@@ -140,6 +144,23 @@ export class ArtifactStore {
    */
   public async listArtifactsForSession(sessionId: string): Promise<ArtifactRecord[]> {
     return this.listArtifacts(sessionId);
+  }
+
+  /**
+   * Wave 6c PR7 review-fix B1: thin wrapper around the v2 append-only NDJSON
+   * writer in `./host/artifactStore.ts`. Threads the store's effective
+   * (merged) redaction policy through to the free function so the v2 write
+   * path honours config-cascade `redaction.extra*Patterns`. Without this
+   * shim, `sessionArtifactWriter.writeSessionArtifact` called the free
+   * function directly and silently fell back to `DEFAULT_REDACTION_POLICY`,
+   * bypassing user-configured extras on every persisted artifact record.
+   *
+   * Kept as a method to mirror {@link registerArtifact}'s shape — callers
+   * that have an `ArtifactStore` in hand should not need to also pass the
+   * storage root separately (it is already `this.rootDir`).
+   */
+  public async appendArtifactRecord(sessionId: string, record: ArtifactRecordV2): Promise<void> {
+    await appendArtifactRecordV2(this.rootDir, sessionId, record, this.redactionPolicy);
   }
 
   /**

@@ -117,7 +117,10 @@ test("runDoctorChecks: envelope.telemetry carries spansOnDisk + droppedEventBatc
       nodeRuntime: "v22.0.0",
       stdout: { isTTY: false, write: () => true },
     });
-    assert.equal(env.telemetry.enabled, true);
+    // Wave 6c PR7 review-fix N6: telemetry primitives exist but are not yet
+    // wired into production. `doctor` reports `enabled: false` until a
+    // follow-up PR wires them into the hot path.
+    assert.equal(env.telemetry.enabled, false);
     assert.equal(typeof env.telemetry.spansOnDisk, "number");
     assert.ok(env.telemetry.spansOnDisk >= 0);
     assert.equal(env.telemetry.droppedEventBatches, 0);

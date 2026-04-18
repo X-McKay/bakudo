@@ -281,7 +281,14 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
       ...(terminalCap.colorfgbg !== undefined ? { colorfgbg: terminalCap.colorfgbg } : {}),
     },
     telemetry: {
-      enabled: true,
+      // Wave 6c PR7 review-fix N6: the telemetry primitives
+      // (`TimeDeltaLogger`, `SpanRecorder`) exist but are NOT yet wired into
+      // production call-sites (`executeAttempt`, `writeSessionArtifact`,
+      // etc.). Reporting `enabled: true` would be a literal lie — operators
+      // reading `doctor` would misread it as confirming a live feature.
+      // Flip back to `true` in the follow-up PR that wires the recorders
+      // into the production hot path.
+      enabled: false,
       note:
         otlp.configured === true
           ? "local spans + OTLP export active"

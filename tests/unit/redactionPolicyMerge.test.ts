@@ -9,8 +9,13 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { ArtifactStore } from "../../src/artifactStore.js";
+import { artifactsFilePath } from "../../src/host/artifactStore.js";
 import {
   DEFAULT_REDACTION_POLICY,
   REDACTION_MARKER,
@@ -20,7 +25,9 @@ import {
   resolveEffectiveRedactionPolicy,
   resolveRedactionPolicyForHost,
   summarizeRedactionPolicy,
+  type RedactionPolicy,
 } from "../../src/host/redaction.js";
+import { writeSessionArtifact } from "../../src/host/sessionArtifactWriter.js";
 
 test("resolveEffectiveRedactionPolicy: undefined input returns DEFAULT_REDACTION_POLICY reference", () => {
   const policy = resolveEffectiveRedactionPolicy();
@@ -100,4 +107,53 @@ test("summarizeRedactionPolicy: text pattern count rises when extras merge in", 
     summary.textPatternCount,
     DEFAULT_REDACTION_POLICY.textSecretPatterns.length + extraCount,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Wave 6c PR7 review-fix B1 — `writeSessionArtifact` must honour the store's
+// effective redaction policy on the v2 NDJSON append path, not silently fall
+// back to `DEFAULT_REDACTION_POLICY`. Before the fix, the free function
+// `appendArtifactRecord` was called without a policy argument, so
+// config-cascade `redaction.extraTextPatterns` were dropped from every v2
+// artifact record (the legacy v1 registry already worked via the store).
+// ---------------------------------------------------------------------------
+
+test("writeSessionArtifact: v2 NDJSON record is redacted by the store's effective policy", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-pr7-b1-"));
+  try {
+    const effectivePolicy: RedactionPolicy = {
+      envAllowlist: [...DEFAULT_REDACTION_POLICY.envAllowlist],
+      envDenyPatterns: [...DEFAULT_REDACTION_POLICY.envDenyPatterns],
+      // Extra user-configured pattern that matches `mysecret-<token>`.
+      textSecretPatterns: [...DEFAULT_REDACTION_POLICY.textSecretPatterns, /mysecret-\w+/gu],
+    };
+    const store = new ArtifactStore(storageRoot, effectivePolicy);
+    const sessionId = "session-b1";
+    const turnId = "turn-b1";
+    const attemptId = "attempt-b1";
+    await writeSessionArtifact(
+      store,
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      "result.json",
+      '{"leak":"value"}',
+      "result",
+      // Payload whose metadata carries the user-configured secret.
+      { notes: "leaked mysecret-abc123 in metadata" },
+    );
+    const ndjsonPath = artifactsFilePath(storageRoot, sessionId);
+    const body = await readFile(ndjsonPath, "utf8");
+    assert.ok(
+      body.includes(REDACTION_MARKER),
+      `expected [REDACTED] marker in NDJSON body, got: ${body}`,
+    );
+    assert.ok(
+      !body.includes("mysecret-abc123"),
+      `raw secret leaked into v2 NDJSON record: ${body}`,
+    );
+  } finally {
+    await rm(storageRoot, { recursive: true, force: true });
+  }
 });

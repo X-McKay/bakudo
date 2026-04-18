@@ -7,7 +7,6 @@ import { createSessionPaths, sanitizePathSegment } from "../sessionStore.js";
 import type { SessionReviewAction, SessionReviewOutcome } from "../sessionTypes.js";
 import { stripAnsi } from "./ansi.js";
 import {
-  appendArtifactRecord,
   ARTIFACT_RECORD_SCHEMA_VERSION,
   type ArtifactKind,
   type ArtifactRecord,
@@ -101,7 +100,11 @@ export const writeSessionArtifact = async (
     createdAt: new Date().toISOString(),
     ...(metadata === undefined ? {} : { metadata }),
   };
-  await appendArtifactRecord(storageRoot, sessionId, record);
+  // Wave 6c PR7 review-fix B1: route through the store method so the
+  // v2 NDJSON write sees the effective (merged) redaction policy. Calling
+  // the free function directly with positional args silently defaults to
+  // `DEFAULT_REDACTION_POLICY` and drops config-cascade extras.
+  await artifactStore.appendArtifactRecord(sessionId, record);
 
   // Fire-and-forget short-lived envelope write (same pattern as the
   // pre-dispatch emitters).

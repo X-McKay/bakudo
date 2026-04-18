@@ -8,67 +8,98 @@ import type { ComposerMode } from "./appState.js";
 import { stderrWrite } from "./io.js";
 
 /**
+ * Wave 6c PR7 review-fix B2 — `log_level` (snake_case) is the canonical
+ * user-facing key documented in plan 06 line 944 (`{ "log_level": "info" }`).
+ * We accept `logLevel` (camelCase) as a backwards-compat alias, then
+ * normalize to the internal `logLevel` symbol before validation so every
+ * downstream reader (`bootstrap.ts`, etc.) keeps its existing shape.
+ *
+ * Precedence when both keys are present in the same layer: `log_level`
+ * wins (documented form > alias). This matches the "config lies over code"
+ * principle — the key we document MUST take priority over one we merely
+ * tolerate for forward compat.
+ */
+const normalizeLogLevelKey = (raw: unknown): unknown => {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return raw;
+  }
+  const input = raw as Record<string, unknown>;
+  // Fast path: no snake_case key → nothing to normalize.
+  if (!("log_level" in input)) {
+    return raw;
+  }
+  // `log_level` present → becomes `logLevel` in the normalized view,
+  // overriding any inline camelCase alias per the documented precedence.
+  const { log_level: snake, logLevel: _camel, ...rest } = input;
+  void _camel;
+  return { ...rest, logLevel: snake };
+};
+
+/**
  * Zod schema for the bakudo config surface. Phase 2 — intentionally minimal.
  * Future phases grow `agents`, `hooks`, `permissions`, `keybindings`, `theme`.
  *
  * Unknown keys are silently stripped so a repo-local config from a newer bakudo
  * version does not crash an older one (tolerant-merge, OpenCode pattern).
  */
-export const BakudoConfigSchema = z
-  .object({
-    mode: z.enum(["standard", "plan", "autopilot"]).optional(),
-    autoApprove: z.boolean().optional(),
-    logLevel: z.enum(["none", "error", "warning", "info", "debug", "all", "default"]).optional(),
-    /**
-     * Experimental-feature gate. Historically a bare boolean ("enable the
-     * whole cluster"); Phase 5 PR13 additionally accepts a per-feature
-     * record keyed by flag name (see `src/host/flags.ts`). Both shapes
-     * round-trip through {@link validateConfigLayer} unchanged — readers
-     * must handle the union via `experimental(flagName)`.
-     */
-    experimental: z.union([z.boolean(), z.record(z.string(), z.boolean())]).optional(),
-    flushIntervalMs: z.number().optional(),
-    flushSizeThreshold: z.number().optional(),
-    retryDelays: z.array(z.number()).optional(),
-    agents: z
-      .record(
-        z.string(),
-        z
-          .object({
-            description: z.string().optional(),
-            permissions: z.record(z.string(), z.enum(["allow", "ask", "deny"])).optional(),
-            hidden: z.boolean().optional(),
-            subagent: z.boolean().optional(),
-          })
-          .strip(),
-      )
-      .optional(),
-    /**
-     * Phase 6 W5 — env-passthrough policy. Users opt specific host env vars
-     * in via `envPolicy.allowlist`; the default is empty (no passthrough).
-     * `BAKUDO_ENV_ALLOWLIST=FOO,BAR` adds to whatever config declares.
-     */
-    envPolicy: z
-      .object({
-        allowlist: z.array(z.string()).optional(),
-      })
-      .strip()
-      .optional(),
-    /**
-     * Phase 6 W5 — redaction overrides. Users may supply extra regex sources
-     * as strings; patterns compile with the global + case-insensitive flags
-     * used throughout the default policy. Invalid patterns are dropped with
-     * a single stderr warning from {@link validateConfigLayer}.
-     */
-    redaction: z
-      .object({
-        extraTextPatterns: z.array(z.string()).optional(),
-        extraEnvDenyPatterns: z.array(z.string()).optional(),
-      })
-      .strip()
-      .optional(),
-  })
-  .strip();
+export const BakudoConfigSchema = z.preprocess(
+  normalizeLogLevelKey,
+  z
+    .object({
+      mode: z.enum(["standard", "plan", "autopilot"]).optional(),
+      autoApprove: z.boolean().optional(),
+      logLevel: z.enum(["none", "error", "warning", "info", "debug", "all", "default"]).optional(),
+      /**
+       * Experimental-feature gate. Historically a bare boolean ("enable the
+       * whole cluster"); Phase 5 PR13 additionally accepts a per-feature
+       * record keyed by flag name (see `src/host/flags.ts`). Both shapes
+       * round-trip through {@link validateConfigLayer} unchanged — readers
+       * must handle the union via `experimental(flagName)`.
+       */
+      experimental: z.union([z.boolean(), z.record(z.string(), z.boolean())]).optional(),
+      flushIntervalMs: z.number().optional(),
+      flushSizeThreshold: z.number().optional(),
+      retryDelays: z.array(z.number()).optional(),
+      agents: z
+        .record(
+          z.string(),
+          z
+            .object({
+              description: z.string().optional(),
+              permissions: z.record(z.string(), z.enum(["allow", "ask", "deny"])).optional(),
+              hidden: z.boolean().optional(),
+              subagent: z.boolean().optional(),
+            })
+            .strip(),
+        )
+        .optional(),
+      /**
+       * Phase 6 W5 — env-passthrough policy. Users opt specific host env vars
+       * in via `envPolicy.allowlist`; the default is empty (no passthrough).
+       * `BAKUDO_ENV_ALLOWLIST=FOO,BAR` adds to whatever config declares.
+       */
+      envPolicy: z
+        .object({
+          allowlist: z.array(z.string()).optional(),
+        })
+        .strip()
+        .optional(),
+      /**
+       * Phase 6 W5 — redaction overrides. Users may supply extra regex sources
+       * as strings; patterns compile with the global + case-insensitive flags
+       * used throughout the default policy. Invalid patterns are dropped with
+       * a single stderr warning from {@link validateConfigLayer}.
+       */
+      redaction: z
+        .object({
+          extraTextPatterns: z.array(z.string()).optional(),
+          extraEnvDenyPatterns: z.array(z.string()).optional(),
+        })
+        .strip()
+        .optional(),
+    })
+    .strip(),
+);
 
 export type BakudoConfig = z.infer<typeof BakudoConfigSchema>;
 
