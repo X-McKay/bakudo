@@ -4,7 +4,7 @@ import type { ABoxTaskRunner, TaskExecutionRecord } from "../aboxTaskRunner.js";
 import type { ArtifactStore } from "../artifactStore.js";
 import type { AttemptExecutionResult, AttemptSpec } from "../attemptProtocol.js";
 import type { TaskMode } from "../protocol.js";
-import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
+import { type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import { createSessionEventLogWriter } from "./eventLogWriter.js";
@@ -77,7 +77,7 @@ export const toAttemptExecutionResult = (
  */
 export const executeAttempt = async (
   ctx: ExecuteAttemptContext,
-): Promise<{ reviewed: ReviewedTaskResult; executionResult: AttemptExecutionResult }> => {
+): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
   const { sessionStore, artifactStore, runner, sessionId, turnId, spec, args, onProgress } = ctx;
   const storageRoot = sessionStore.rootDir;
   const writerFactory = ctx.eventLogWriterFactory ?? createSessionEventLogWriter;
@@ -124,7 +124,7 @@ export const executeAttempt = async (
     );
 
     const executionResult = toAttemptExecutionResult(spec, execution);
-    const reviewed = reviewTaskResult(execution.result);
+    const reviewed = reviewAttemptResult(spec, executionResult);
 
     await writer.append(
       buildReviewStartedEnvelope({ sessionId, turnId, attemptId: spec.attemptId }),

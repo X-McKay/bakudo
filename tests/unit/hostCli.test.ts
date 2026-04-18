@@ -130,43 +130,21 @@ test("host cli dispatches status and init commands", async () => {
 test("reviewed outcome exit codes are stable", () => {
   assert.equal(
     reviewedOutcomeExitCode({
-      taskId: "task-1",
-      sessionId: "session-1",
-      status: "succeeded",
       outcome: "success",
       action: "accept",
       reason: "ok",
       retryable: false,
       needsUser: false,
-      result: {
-        schemaVersion: 1,
-        taskId: "task-1",
-        sessionId: "session-1",
-        status: "succeeded",
-        summary: "ok",
-        finishedAt: "2026-04-13T00:00:00.000Z",
-      },
     }),
     0,
   );
   assert.equal(
     reviewedOutcomeExitCode({
-      taskId: "task-2",
-      sessionId: "session-1",
-      status: "blocked",
       outcome: "blocked_needs_user",
       action: "ask_user",
       reason: "approval needed",
       retryable: false,
       needsUser: true,
-      result: {
-        schemaVersion: 1,
-        taskId: "task-2",
-        sessionId: "session-1",
-        status: "blocked",
-        summary: "approval needed",
-        finishedAt: "2026-04-13T00:00:00.000Z",
-      },
     }),
     2,
   );

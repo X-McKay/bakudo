@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import type { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import type { ArtifactStore } from "../artifactStore.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskMode, type TaskRequest } from "../protocol.js";
+import type { ReviewClassification } from "../resultClassifier.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
 import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
@@ -32,7 +33,7 @@ export const storageRootFor = (
 
 export const repoRootFor = (repo: string | undefined): string => resolve(repo ?? ".");
 
-export const sessionStatusFromReview = (reviewed: ReviewedTaskResult): SessionStatus => {
+export const sessionStatusFromReview = (reviewed: ReviewClassification): SessionStatus => {
   if (reviewed.outcome === "success") {
     return "completed";
   }

@@ -5,7 +5,7 @@ import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "../config.js";
 import { createSessionEvent } from "../protocol.js";
-import { type ReviewedTaskResult } from "../reviewer.js";
+import type { ReviewClassification } from "../resultClassifier.js";
 import { SessionStore } from "../sessionStore.js";
 import type { SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
@@ -30,7 +30,7 @@ export type SessionDispatchResult = {
   sessionId: string;
   turnId: string;
   attemptId: string;
-  reviewed: ReviewedTaskResult;
+  reviewed: ReviewClassification;
   session: SessionRecord;
 };
 

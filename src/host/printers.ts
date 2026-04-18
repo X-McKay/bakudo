@@ -1,5 +1,6 @@
 import { ArtifactStore } from "../artifactStore.js";
-import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
+import type { ReviewClassification } from "../resultClassifier.js";
+import { reviewTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
 import type { SessionAttemptRecord, SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import {
@@ -132,7 +133,7 @@ export const reviewViewFor = (
   return null;
 };
 
-export const reviewedOutcomeExitCode = (reviewed: ReviewedTaskResult): number => {
+export const reviewedOutcomeExitCode = (reviewed: ReviewClassification): number => {
   if (reviewed.outcome === "success") {
     return 0;
   }
@@ -145,22 +146,27 @@ export const reviewedOutcomeExitCode = (reviewed: ReviewedTaskResult): number =>
   return 1;
 };
 
-export const printRunSummary = (session: SessionRecord, reviewed: ReviewedTaskResult): void => {
-  const attempt = findAttemptById(session, reviewed.taskId)?.attempt;
+export const printRunSummary = (
+  session: SessionRecord,
+  reviewed: ReviewClassification & { taskId?: string; result?: { summary: string } },
+): void => {
+  const taskId = reviewed.taskId ?? session.turns.at(-1)?.attempts.at(-1)?.attemptId ?? "n/a";
+  const attempt = findAttemptById(session, taskId)?.attempt;
   const sbx =
     typeof attempt?.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
+  const summary = reviewed.result?.summary ?? attempt?.result?.summary ?? "n/a";
   stdoutWrite(
     [
       "",
       renderSection("Summary"),
       renderKeyValue("Session", session.sessionId),
       renderKeyValue("Status", `${statusBadge(session.status)} ${session.status}`),
-      renderKeyValue("Task", reviewed.taskId),
+      renderKeyValue("Task", taskId),
       renderKeyValue("Sandbox", sbx),
       renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`),
       renderKeyValue("Action", reviewed.action),
       renderKeyValue("Reason", reviewed.reason),
-      renderKeyValue("Summary", reviewed.result.summary),
+      renderKeyValue("Summary", summary),
     ].join("\n") + "\n",
   );
 };
