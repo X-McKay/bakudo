@@ -1,5 +1,11 @@
 import type { SessionRecord } from "../../sessionTypes.js";
 import type { HostCommandSpec } from "../commandRegistry.js";
+import type { DialogDispatcher } from "../dialogLauncher.js";
+import {
+  launchSessionPickerDialog,
+  type SessionIndexReader,
+} from "../launchSessionPickerDialog.js";
+import { registerKeybinding } from "../keybindings/hooks.js";
 import { storageRootFor } from "../orchestration.js";
 import { awaitPrompt, newPromptId } from "../promptResolvers.js";
 import { reduceHost } from "../reducer.js";
@@ -44,23 +50,37 @@ export const sessionCommands: readonly HostCommandSpec[] = [
     name: "resume",
     aliases: ["continue"] as const,
     group: "session",
-    description: "Resume a saved session by id (or the most recently active one).",
+    description: "Resume a session. No arg opens a picker; with an id, resumes that session.",
     handler: async ({ args, deps }) => {
       const requestedId = args[0];
       const rootDir = storageRootFor(undefined, undefined);
       let target: SessionRecord | null = null;
       if (requestedId === undefined) {
-        // No-argument resume picks the newest summary from the index
-        // (entries are sorted newest `updatedAt` first) and reopens the
-        // full session file only for the winner. Avoids touching every
-        // session directory on startup.
-        const summaries = await timeline.listSessionSummaries(rootDir);
-        const latestId = summaries[0]?.sessionId;
-        target = latestId === undefined ? null : await timeline.loadSession(rootDir, latestId);
-        if (target === null) {
+        // Phase 5 PR7 — no-arg resume opens the session picker so the user
+        // can pick from all saved sessions (newest-first with fuzzy-match).
+        const dispatcher: DialogDispatcher = {
+          getState: () => deps.appState,
+          setState: (next) => {
+            deps.appState = next;
+          },
+        };
+        const reader: SessionIndexReader = {
+          listSessionSummaries: async () => timeline.listSessionSummaries(rootDir),
+        };
+        const choice = await launchSessionPickerDialog(dispatcher, reader);
+        if (choice === "cancel") {
           deps.transcript.push({
             kind: "assistant",
             text: "No saved session to resume.",
+            tone: "warning",
+          });
+          return;
+        }
+        target = await timeline.loadSession(rootDir, choice.sessionId);
+        if (target === null) {
+          deps.transcript.push({
+            kind: "assistant",
+            text: `No saved session matches "${choice.sessionId}".`,
             tone: "warning",
           });
           return;
@@ -117,3 +137,17 @@ export const sessionCommands: readonly HostCommandSpec[] = [
     handler: () => ({ argv: ["sessions"] }),
   },
 ];
+
+/**
+ * Register the default `history:search` keybinding handler (bound to
+ * `Ctrl+R` via `keybindings/defaults.ts`). The handler opens the session
+ * picker. Called opportunistically by the interactive shell bootstrap —
+ * passing the actual dispatcher is the shell's responsibility.
+ *
+ * TODO(phase5-pr8): raw-key dispatch is not wired through the
+ * readline-based interactive loop yet. Today, `/resume` is the
+ * user-reachable surface; the keybinding registration here is a stub so
+ * PR8 can switch over without changing call sites.
+ */
+export const registerSessionPickerKeybinding = (handler: () => void): (() => void) =>
+  registerKeybinding("Global", "history:search", handler);

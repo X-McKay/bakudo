@@ -6,7 +6,6 @@ import {
   answerApprovalDialog,
   launchApprovalDialog,
   launchRecoveryDialog,
-  launchSessionPickerDialog,
   parseApprovalChoice,
   type ApprovalRequest,
   type DialogDispatcher,
@@ -153,10 +152,6 @@ test("launchRecoveryDialog: stub throws not-implemented", async () => {
   );
 });
 
-test("launchSessionPickerDialog: stub throws not-implemented", async () => {
-  const dispatcher = makeDispatcher();
-  await assert.rejects(
-    launchSessionPickerDialog(dispatcher, { purpose: "resume" }),
-    /not implemented/,
-  );
-});
+// launchSessionPickerDialog is now fully implemented in its own module
+// (`launchSessionPickerDialog.ts`); round-trip + cancel coverage lives in
+// `sessionPicker.test.ts`.

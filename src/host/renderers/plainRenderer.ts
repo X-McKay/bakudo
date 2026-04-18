@@ -2,6 +2,8 @@ import type { RenderFrame, TranscriptItem } from "../renderModel.js";
 
 import type { ComposerMode } from "../appState.js";
 import { renderApprovalPromptLines } from "./approvalPromptCopy.js";
+import { renderCommandPaletteOverlayLines } from "./commandPaletteOverlay.js";
+import { renderSessionPickerOverlayLines } from "./sessionPickerOverlay.js";
 
 const modeLabel = (mode: ComposerMode): string => {
   if (mode === "plan") {
@@ -50,12 +52,12 @@ const renderOverlay = (frame: RenderFrame): string[] => {
     return [`[resume?] ${overlay.message} [y/N]`];
   }
   if (overlay.kind === "command_palette") {
-    return ["[command palette]"];
+    return renderCommandPaletteOverlayLines(overlay.request);
   }
   if (overlay.kind === "timeline_picker") {
     return ["[timeline picker]"];
   }
-  return ["[session picker]"];
+  return renderSessionPickerOverlayLines(overlay.request);
 };
 
 export const renderTranscriptFramePlain = (frame: RenderFrame): string[] => {

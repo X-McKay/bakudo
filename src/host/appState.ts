@@ -60,11 +60,48 @@ export type ApprovalPromptRequest = {
 };
 
 /**
+ * Payload carried on a `command_palette` prompt entry. `items` is the full
+ * command list (name + description), populated by the launcher. `input`
+ * holds the current filter text, and `selectedIndex` is the highlighted row
+ * *within the filtered view*. Renderers project these fields verbatim.
+ *
+ * The reducer owns the evolution of `input` / `selectedIndex`; the launcher
+ * only inspects the final state when the user confirms.
+ */
+export type CommandPaletteItem = {
+  name: string;
+  description: string;
+};
+
+export type CommandPaletteRequest = {
+  items: ReadonlyArray<CommandPaletteItem>;
+  input: string;
+  selectedIndex: number;
+};
+
+/**
+ * Payload carried on a `session_picker` prompt entry. Same shape as the
+ * command palette — the fuzzy-filter machinery is identical; only the item
+ * vocabulary differs. `items` is pre-sorted newest-first before the launcher
+ * enqueues.
+ */
+export type SessionPickerItem = {
+  sessionId: string;
+  label: string;
+};
+
+export type SessionPickerPayload = {
+  items: ReadonlyArray<SessionPickerItem>;
+  input: string;
+  selectedIndex: number;
+};
+
+/**
  * Derived overlay view used by renderers. Always projected from `promptQueue[0]`.
  */
 export type HostOverlay =
-  | { kind: "command_palette" }
-  | { kind: "session_picker" }
+  | { kind: "command_palette"; request: CommandPaletteRequest }
+  | { kind: "session_picker"; request: SessionPickerPayload }
   | { kind: "approval"; message: string }
   | { kind: "approval_prompt"; request: ApprovalPromptRequest }
   | { kind: "resume_confirm"; message: string }

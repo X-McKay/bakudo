@@ -206,22 +206,30 @@ export const launchRecoveryDialog = async (
   throw new Error("launchRecoveryDialog: not implemented");
 };
 
-export type SessionPickerRequest = {
-  purpose: "resume" | "rewind";
-  excludeSessionId?: string;
-};
-
-export type SessionPickerChoice = { kind: "selected"; sessionId: string } | { kind: "cancelled" };
+/**
+ * Phase 5 PR7 — the real session-picker launcher ships in
+ * `./launchSessionPickerDialog.ts`. The old `(purpose, excludeSessionId)`
+ * request shape is superseded by an index-reader injection so the launcher
+ * doesn't need to know where sessions live on disk.
+ *
+ * Re-exported here so legacy imports (`dialogLauncher.js`) keep working.
+ */
+export {
+  answerSessionPickerDialog,
+  buildSessionPickerItems,
+  formatSessionPickerLabel,
+  launchSessionPickerDialog,
+  type SessionIndexReader,
+  type SessionPickerDialogChoice,
+} from "./launchSessionPickerDialog.js";
 
 /**
- * Planned for Phase 5 — interactive session picker. Same contract as the
- * approval launcher: queue submission, promise resolution, dequeue on
- * completion.
+ * Phase 5 PR7 — command palette launcher. See
+ * `./launchCommandPaletteDialog.ts` for the implementation.
  */
-export const launchSessionPickerDialog = async (
-  _dispatcher: DialogDispatcher,
-  _request: SessionPickerRequest,
-): Promise<SessionPickerChoice> => {
-  // TODO(phase5): implement alongside the resume/rewind overhaul.
-  throw new Error("launchSessionPickerDialog: not implemented");
-};
+export {
+  answerCommandPaletteDialog,
+  buildCommandPaletteItems,
+  launchCommandPaletteDialog,
+  type CommandPaletteDialogChoice,
+} from "./launchCommandPaletteDialog.js";

@@ -1,9 +1,11 @@
 import type {
   ApprovalPromptRequest,
+  CommandPaletteRequest,
   ComposerMode,
   HostAppState,
   HostOverlay,
   PromptEntry,
+  SessionPickerPayload,
 } from "./appState.js";
 
 export type FrameMode = "prompt" | "transcript";
@@ -69,12 +71,16 @@ const deriveOverlay = (prompt: PromptEntry | undefined): HostOverlay | undefined
     return { kind: "resume_confirm", message };
   }
   if (prompt.kind === "command_palette") {
-    return { kind: "command_palette" };
+    // Payload well-formedness is a producer contract — only the
+    // `launchCommandPaletteDialog` launcher creates these entries.
+    const request = prompt.payload as CommandPaletteRequest;
+    return { kind: "command_palette", request };
   }
   if (prompt.kind === "timeline_picker") {
     return { kind: "timeline_picker" };
   }
-  return { kind: "session_picker" };
+  const request = prompt.payload as SessionPickerPayload;
+  return { kind: "session_picker", request };
 };
 
 export const selectRenderFrame = (inputs: FrameInputs): RenderFrame => {

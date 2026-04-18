@@ -70,6 +70,7 @@ export const buildDefaultBindings = (
       bindings: {
         "ctrl+c": "app:interrupt",
         "ctrl+d": "app:exit",
+        "ctrl+k": "app:commandPalette",
         "ctrl+l": "app:redraw",
         "ctrl+r": "history:search",
       },
