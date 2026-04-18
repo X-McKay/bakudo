@@ -33,8 +33,6 @@ import {
   describeTerminalCapability,
   rendererBackendName,
   type DoctorCheckResult,
-  type DoctorStatus,
-  type RendererBackendName,
   worstStatus,
 } from "../doctorCheck.js";
 import { stdoutWrite } from "../io.js";
@@ -43,64 +41,20 @@ import { validateBindings } from "../keybindings/validate.js";
 import { repoRootFor, storageRootFor } from "../orchestration.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
-import {
-  resolveEffectiveRedactionPolicy,
-  summarizeRedactionPolicy,
-  type RedactionPolicySummary,
-} from "../redaction.js";
+import { resolveEffectiveRedactionPolicy, summarizeRedactionPolicy } from "../redaction.js";
 import { countSpanFilesOnDisk, describeOtlpEndpoint } from "../telemetry/otelSpans.js";
 import { bakudoLogDir } from "../telemetry/xdgPaths.js";
+import { buildMetricsSection, type DoctorMetricsSection } from "../metrics/doctorMetricsSection.js";
 import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
-import { describeUiMode, getActiveUiMode, type UiMode } from "../uiMode.js";
+import { describeUiMode, getActiveUiMode } from "../uiMode.js";
 import { computeStorageTotalBytes } from "./cleanup.js";
 
-/**
- * Envelope produced by `bakudo doctor --output-format=json`. Key names
- * are load-bearing for automation — treat as a stable contract.
- */
-export type DoctorEnvelope = {
-  name: "bakudo-doctor";
-  bakudoVersion: string;
-  status: DoctorStatus;
-  checks: DoctorCheckResult[];
-  node: { runtime: string; required: number };
-  abox: { available: boolean; version?: string; capabilities: string; bin: string };
-  rendererBackend: RendererBackendName;
-  agentProfile: string;
-  configCascadePaths: string[];
-  keybindingsPath: string;
-  keybindingsConflicts: string[];
-  terminal: {
-    isTty: boolean;
-    supportsAnsi: boolean;
-    noColor: boolean;
-    term?: string;
-    colorfgbg?: string;
-  };
-  /** Wave 6c PR7 — local-only OTel status (plan 870). `otlp.host` never carries the bearer token. */
-  telemetry: {
-    enabled: boolean;
-    note: string;
-    logDir: string;
-    spansOnDisk: number;
-    droppedEventBatches: number;
-    otlp: { configured: boolean; host?: string };
-  };
-  /** W1: active UI mode + description (plan hard rule 3, bug-report surface). */
-  uiMode: { active: UiMode; description: string };
-  /** W4: storage footprint + retention policy snapshot. Additive field. */
-  storage: {
-    storageRoot: string;
-    totalArtifactBytes: number;
-    retentionPolicy: {
-      intermediateMaxAgeMs: number;
-      intermediateKinds: ReadonlyArray<string>;
-      protectedKinds: ReadonlyArray<string>;
-    };
-  };
-  /** W5 hard rule 384: effective redaction/env-allowlist summary (counts only). */
-  redaction: RedactionPolicySummary;
-};
+// PR11 review N3 — the `DoctorEnvelope` type moved to `doctorEnvelopeTypes.ts`
+// so this file stays under the 400-LOC cap. Re-export keeps the existing
+// import path (`./commands/doctor.js`) stable for callers and tests.
+export type { DoctorEnvelope } from "./doctorEnvelopeTypes.js";
+import type { DoctorEnvelope } from "./doctorEnvelopeTypes.js";
+export type { DoctorMetricsSection };
 
 export type DoctorContext = {
   repoRoot: string;
@@ -241,7 +195,9 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     conflictCheck,
     telemetryCheck,
   ];
-
+  // PR11 review N3 — share the singleton `droppedEventBatches` across the
+  // `telemetry` and `metrics` fields instead of hard-coding zero.
+  const metricsSection = buildMetricsSection();
   const envelope: DoctorEnvelope = {
     name: "bakudo-doctor",
     bakudoVersion: BAKUDO_VERSION,
@@ -281,7 +237,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
           : "local-only (spans recorded on disk; no OTLP export)",
       logDir,
       spansOnDisk,
-      droppedEventBatches: 0,
+      droppedEventBatches: metricsSection.droppedEventBatches,
       otlp:
         otlp.host === undefined
           ? { configured: otlp.configured }
@@ -303,6 +259,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     redaction: summarizeRedactionPolicy(
       resolveEffectiveRedactionPolicy(cascade.merged.redaction ?? undefined),
     ),
+    metrics: metricsSection,
   };
 
   return envelope;

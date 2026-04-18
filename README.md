@@ -255,6 +255,30 @@ bakudo chronicle --format json         # NDJSON stream (one envelope per line)
 
 Filters are ANDed. In the shell, `/chronicle` defaults to `--since 24h --session <active>`.
 
+### /metrics
+
+`bakudo metrics` / `/metrics` prints the in-memory UX success-metrics bucket
+(Phase 6 Workstream 7, plan lines 430-461). The bucket tracks shell-startup
+latency, time-to-first-render, prompt-to-host-line latency, worker-to-review
+latency, session-listing latency, and per-workflow command counts. Snapshot is
+side-channel only — never emitted as a `SessionEventEnvelope`. See
+[`plans/bakudo-ux/06-rollout-reliability-and-operability.md:426-463`](../plans/bakudo-ux/06-rollout-reliability-and-operability.md).
+
+```bash
+bakudo metrics                  # text table (TTY default)
+bakudo metrics --format=json    # machine-readable snapshot
+bakudo metrics --json           # alias for --format=json (lock-in 12)
+```
+
+The thresholds (plan 443-448) are asserted by
+`tests/unit/metricsThresholds.test.ts`; the dropped-batch SLO (plan 804-811)
+by `tests/integration/dropped-batch-slo.test.ts`. Scripted benchmarks live
+under `tests/benchmarks/*.bench.ts` — invoke manually, e.g.:
+
+```bash
+pnpm build && node dist/tests/benchmarks/open-shell-and-resume-latest.bench.js
+```
+
 ### Provenance
 
 Every dispatch persists a `ProvenanceRecord` to `<storage>/<session>/provenance.ndjson` with:

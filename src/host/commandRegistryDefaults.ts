@@ -8,6 +8,7 @@ import { buildExperimentalCommands } from "./commands/experimental.js";
 import { helpTopicCommandSpec } from "./commands/help.js";
 import { inspectCommands } from "./commands/inspect.js";
 import { legacyCommands } from "./commands/legacy.js";
+import { metricsCommandSpec } from "./commands/metrics.js";
 import { buildPaletteCommands } from "./commands/palette.js";
 import { runCommandSpec } from "./commands/runCommand.js";
 import { sessionCommands } from "./commands/session.js";
@@ -40,6 +41,7 @@ export const buildDefaultCommandRegistry = (
     cleanupCommandSpec,
     usageCommandSpec,
     chronicleCommandSpec,
+    metricsCommandSpec,
     helpTopicCommandSpec,
     // System commands receive the registry so /help can enumerate commands
     // dynamically without a circular import.

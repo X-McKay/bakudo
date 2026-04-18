@@ -2,6 +2,7 @@ import { loadConfigCascade, type BakudoConfig } from "./config.js";
 import { setExperimentalConfigResolver } from "./flags.js";
 import { HOST_STATE_SCHEMA_VERSION, loadHostState } from "./hostStateStore.js";
 import type { HostStateRecord } from "./hostStateStore.js";
+import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 import { repoRootFor } from "./orchestration.js";
 import { profileCheckpoint, profileReport } from "./startupProfiler.js";
 import {
@@ -158,6 +159,9 @@ const probeAboxCapabilities = async (): Promise<AboxCapabilityProbe> =>
  */
 export const initHost = memoize(async (): Promise<HostBootstrap> => {
   profileCheckpoint("preaction_entry");
+  // Wave 6d PR11 (W7 shell-startup metric): record the entry-time mark so
+  // the render loop can compute shell-startup latency on first paint.
+  getMetricsRecorder().mark("shell.startup_begin");
 
   const repoRoot = repoRootFor(undefined);
   applySafeEnv();
