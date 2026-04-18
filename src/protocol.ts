@@ -9,6 +9,67 @@ export const BAKUDO_PROTOCOL_SCHEMA_VERSION = 1 as const;
 export type ProtocolSchemaVersion = typeof BAKUDO_PROTOCOL_SCHEMA_VERSION;
 export type TaskMode = "build" | "plan";
 
+// ---------------------------------------------------------------------------
+// Phase 6 W3 — Host/Worker Version Negotiation surface
+// ---------------------------------------------------------------------------
+
+/**
+ * Protocol versions the host can speak when dispatching to a worker. The host
+ * compiles {@link AttemptSpec} v3 (the Phase 3 contract that supersedes the
+ * legacy {@link TaskRequest} v1), so it advertises both. A worker must include
+ * at least one of these in its `protocolVersions` to accept dispatch.
+ */
+export const BAKUDO_HOST_PROTOCOL_VERSIONS: readonly number[] = [1, 3] as const;
+
+/**
+ * Highest protocol the host knows how to compile. Used in
+ * {@link WorkerProtocolMismatchError} messages so operators can read the
+ * "host wants v3, worker offers [1]" line directly.
+ */
+export const BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION = 3 as const;
+
+/** Task kinds the host can compile {@link AttemptSpec}s for. */
+export const BAKUDO_HOST_TASK_KINDS: readonly string[] = [
+  "assistant_job",
+  "explicit_command",
+  "verification_check",
+] as const;
+
+/** Execution engines the host knows how to dispatch through. */
+export const BAKUDO_HOST_EXECUTION_ENGINES: readonly string[] = ["agent_cli", "shell"] as const;
+
+/**
+ * The v1 baseline a worker is assumed to support when the capability probe
+ * fails. Per the A6 fallback (plan 820–828) this restricts dispatch to
+ * `explicit_command` only — the only kind the legacy contract guarantees.
+ */
+export const BAKUDO_WORKER_V1_BASELINE_TASK_KINDS: readonly string[] = [
+  "explicit_command",
+] as const;
+export const BAKUDO_WORKER_V1_BASELINE_ENGINES: readonly string[] = ["shell"] as const;
+
+/**
+ * Capabilities a worker advertises in response to a `--capabilities` probe.
+ * Shape mirrors the plan's suggested JSON (lines 239–262); the three core
+ * arrays are required so the parser can validate before dispatch. `source`
+ * is host-side metadata — `"probe"` when the worker emitted JSON,
+ * `"fallback_v1"` when the probe failed and the host assumed the v1 baseline.
+ */
+export type WorkerCapabilities = {
+  protocolVersions: number[];
+  taskKinds: string[];
+  executionEngines: string[];
+  source: "probe" | "fallback_v1";
+};
+
+/** Compose the v1 fallback capabilities (A6, plan 820–828). */
+export const v1FallbackWorkerCapabilities = (): WorkerCapabilities => ({
+  protocolVersions: [1],
+  taskKinds: [...BAKUDO_WORKER_V1_BASELINE_TASK_KINDS],
+  executionEngines: [...BAKUDO_WORKER_V1_BASELINE_ENGINES],
+  source: "fallback_v1",
+});
+
 export type TaskStatus =
   | "queued"
   | "running"

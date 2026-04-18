@@ -22,6 +22,15 @@ export class ABoxAdapter {
     private readonly spawnFn: SpawnFn = spawn,
   ) {}
 
+  /**
+   * Resolved binary path (or bin name) used to invoke abox. Phase 6 W3
+   * uses this as the cache key for the worker capability probe so two
+   * adapters pointing at the same binary share one probe.
+   */
+  public get binPath(): string {
+    return this.aboxBin;
+  }
+
   public async runInStream(
     streamId: string,
     command: string,

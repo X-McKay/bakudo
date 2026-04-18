@@ -2,6 +2,11 @@ import { readFile } from "node:fs/promises";
 
 import { ABoxAdapter } from "./aboxAdapter.js";
 import type { AttemptSpec } from "./attemptProtocol.js";
+import {
+  getCachedWorkerCapabilities,
+  negotiateAttemptAgainstCapabilities,
+  type ProbeOutcome,
+} from "./host/workerCapabilities.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskResult } from "./protocol.js";
 import {
   WORKER_ERROR_PREFIX,
@@ -233,8 +238,20 @@ export const attemptSpecToWorkerSpec = (spec: AttemptSpec): WorkerTaskSpec => {
   return extended;
 };
 
+/**
+ * Optional override for the worker capability probe used by
+ * {@link ABoxTaskRunner.runAttempt}. Tests inject a stub here to avoid
+ * spawning a real abox; production callers omit it and the runner uses the
+ * cached `abox --capabilities` probe keyed on the adapter's bin path.
+ */
+export type WorkerCapabilitiesProvider = (bin: string) => Promise<ProbeOutcome>;
+
 export class ABoxTaskRunner {
-  public constructor(private readonly adapter: ABoxAdapter) {}
+  public constructor(
+    private readonly adapter: ABoxAdapter,
+    private readonly capabilitiesProvider: WorkerCapabilitiesProvider = (bin) =>
+      getCachedWorkerCapabilities({ bin }),
+  ) {}
 
   public async runTask(
     spec: WorkerTaskSpec,
@@ -266,6 +283,12 @@ export class ABoxTaskRunner {
   /**
    * Run an {@link AttemptSpec} through the worker pipeline. Converts the
    * spec to a {@link WorkerTaskSpec}, delegates to {@link runTask}.
+   *
+   * Phase 6 W3 — runs the worker capability negotiation against the cached
+   * probe before dispatch. On a mismatch (protocol version, task kind, or
+   * execution engine), throws {@link WorkerProtocolMismatchError} synchronously
+   * so the host's error pipeline (exit code 4, JSON envelope, plain-text
+   * banner, `inspect` view) handles the failure uniformly.
    */
   public async runAttempt(
     spec: AttemptSpec,
@@ -278,6 +301,12 @@ export class ABoxTaskRunner {
     } = {},
     handlers: TaskRunnerHandlers = {},
   ): Promise<TaskExecutionRecord> {
+    const probe = await this.capabilitiesProvider(this.adapter.binPath);
+    negotiateAttemptAgainstCapabilities({
+      spec,
+      capabilities: probe.capabilities,
+      ...(probe.fallbackReason === undefined ? {} : { fallbackReason: probe.fallbackReason }),
+    });
     const workerSpec = attemptSpecToWorkerSpec(spec);
     return this.runTask(workerSpec, overrides, handlers);
   }

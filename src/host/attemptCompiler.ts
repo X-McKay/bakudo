@@ -7,9 +7,32 @@ import type {
   TurnIntent,
   TurnIntentKind,
 } from "../attemptProtocol.js";
+import {
+  BAKUDO_HOST_EXECUTION_ENGINES,
+  BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION,
+  BAKUDO_HOST_TASK_KINDS,
+} from "../protocol.js";
 import type { ComposerMode } from "./appState.js";
 import type { BakudoConfig } from "./config.js";
 import { compileProfilePermissions } from "./permissionEvaluator.js";
+
+// ---------------------------------------------------------------------------
+// Host capability surface (Phase 6 W3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Snapshot of what the compiler can produce — the AttemptSpec schema version
+ * it emits, the task kinds it understands, and the execution engines it
+ * routes them to. `ABoxTaskRunner.runAttempt` compares this surface against
+ * the worker's `--capabilities` reply and throws `WorkerProtocolMismatchError`
+ * on a miss. Exported so `bakudo doctor` and the negotiation tests can read
+ * the host side without re-deriving it from the maps below.
+ */
+export const HOST_ATTEMPT_CAPABILITIES = {
+  protocolVersion: BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION,
+  taskKinds: BAKUDO_HOST_TASK_KINDS,
+  executionEngines: BAKUDO_HOST_EXECUTION_ENGINES,
+} as const;
 
 // ---------------------------------------------------------------------------
 // Public context type
