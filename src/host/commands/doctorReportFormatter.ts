@@ -59,7 +59,8 @@ export const formatDoctorReport = (envelope: DoctorEnvelope): string[] => {
   const mb = (envelope.storage.totalArtifactBytes / (1024 * 1024)).toFixed(2);
   const days = Math.round(envelope.storage.retentionPolicy.intermediateMaxAgeMs / 86_400_000);
   lines.push(
-    `  storage: ${mb} MB at ${envelope.storage.storageRoot} (retention: intermediate >${days}d)`,
+    `  storage: ${mb} MB at ${envelope.storage.storageRoot}` +
+      ` (layout: ${envelope.storage.layout}, retention: intermediate >${days}d)`,
   );
   // Phase 6 W5 hard rule 384 — redaction / env policy mode (effective
   // merged policy post Wave 6c PR7 — see resolveEffectiveRedactionPolicy).

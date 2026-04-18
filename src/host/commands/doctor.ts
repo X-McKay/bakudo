@@ -11,6 +11,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 
 import { BAKUDO_VERSION } from "../../version.js";
 import type { HostCommandSpec } from "../commandRegistry.js";
@@ -47,6 +48,7 @@ import { bakudoLogDir } from "../telemetry/xdgPaths.js";
 import { buildMetricsSection, type DoctorMetricsSection } from "../metrics/doctorMetricsSection.js";
 import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
 import { describeUiMode, getActiveUiMode } from "../uiMode.js";
+import { detectLegacyLayout, realMigrationFs, type MigrationPaths } from "../xdgMigration.js";
 import { computeStorageTotalBytes } from "./cleanup.js";
 
 // PR11 review N3 — the `DoctorEnvelope` type moved to `doctorEnvelopeTypes.ts`
@@ -183,6 +185,17 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     // detailed surface; doctor must never `fail` on storage probing.
   }
 
+  // Phase 6 Wave 6e PR16 — detect the current on-disk layout generation.
+  const migrationPaths: MigrationPaths = {
+    repoRoot,
+    home: homedir(),
+    xdgLogDir: logDir,
+  };
+  const layoutDetection = await detectLegacyLayout(
+    realMigrationFs({ mutate: false }),
+    migrationPaths,
+  );
+
   const checks: DoctorCheckResult[] = [
     nodeCheck,
     ...aboxChecks,
@@ -250,6 +263,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     storage: {
       storageRoot,
       totalArtifactBytes,
+      layout: layoutDetection.layout,
       retentionPolicy: {
         intermediateMaxAgeMs: DEFAULT_RETENTION_POLICY.intermediateMaxAgeMs,
         intermediateKinds: DEFAULT_RETENTION_POLICY.intermediateKinds,

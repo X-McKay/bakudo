@@ -58,10 +58,14 @@ export type DoctorEnvelope = {
    * Surfaced in `bakudo doctor` so operators can spot growth without
    * running a full `bakudo cleanup --dry-run`. Additive — older automation
    * that does not know about this field continues to parse cleanly.
+   *
+   * Phase 6 Wave 6e PR16: `layout` reports the on-disk layout generation
+   * (`"legacy"` = pre-XDG `.bakudo/`; `"xdg"` = post-migration). Additive.
    */
   storage: {
     storageRoot: string;
     totalArtifactBytes: number;
+    layout: "legacy" | "xdg";
     retentionPolicy: {
       intermediateMaxAgeMs: number;
       intermediateKinds: ReadonlyArray<string>;
