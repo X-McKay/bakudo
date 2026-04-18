@@ -19,7 +19,9 @@ between layers except `retryDelays`, which replaces.
 - `mode` — `"standard" | "plan" | "autopilot"`. Default `"standard"`.
 - `autoApprove` — boolean. Force `--yes` semantics.
 - `logLevel` — `"none" | "error" | "warning" | "info" | "debug" | "all" | "default"`.
-- `experimental` — boolean. Enables experimental surfaces (gated per feature).
+- `experimental` — boolean OR `Record<string, boolean>` keyed by flag name.
+  `true` enables the whole cluster; a record toggles features individually.
+  See `/experimental show` for the current registry.
 - `flushIntervalMs` — number. Event-log flush cadence.
 - `flushSizeThreshold` — number. Event-log flush size trigger.
 - `retryDelays` — number[]. Host-side retry backoff tuple.
@@ -31,6 +33,10 @@ between layers except `retryDelays`, which replaces.
 - `BAKUDO_STORAGE_ROOT` — override the session storage directory.
 - `NO_COLOR` — disable ANSI colors (affects renderer selection).
 - `XDG_CONFIG_HOME` — overrides `~/.config` for the user-config path.
+- `BAKUDO_EXPERIMENTAL=all` — enables every experimental feature for the
+  current session (cluster gate; overridden by per-feature vars).
+- `BAKUDO_EXPERIMENTAL_<FLAG>` — enables or disables a single flag
+  (`1`/`true`/`on`/`yes` vs. `0`/`false`/`off`/`no`). Beats the cluster.
 
 ## Inspect the merged cascade
 

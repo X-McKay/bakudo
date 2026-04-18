@@ -1,4 +1,5 @@
 import { loadConfigCascade, type BakudoConfig } from "./config.js";
+import { setExperimentalConfigResolver } from "./flags.js";
 import { HOST_STATE_SCHEMA_VERSION, loadHostState } from "./hostStateStore.js";
 import type { HostStateRecord } from "./hostStateStore.js";
 import { repoRootFor } from "./orchestration.js";
@@ -130,6 +131,10 @@ export const initHost = memoize(async (): Promise<HostBootstrap> => {
     probeAboxCapabilities(),
     loadConfigCascade(repoRoot, {}),
   ]);
+
+  // Phase 5 PR13: expose the merged experimental config to `flags.ts` so
+  // `experimental(flag)` can consult the cascade at the access site.
+  setExperimentalConfigResolver(() => configResult.merged.experimental);
 
   profileCheckpoint("preaction_done");
 
