@@ -1,28 +1,28 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
-import { ABoxAdapter } from "../aboxAdapter.js";
-import { ABoxTaskRunner } from "../aboxTaskRunner.js";
-import { ArtifactStore } from "../artifactStore.js";
-import { buildRuntimeConfig, loadConfig } from "../config.js";
+import type { ABoxTaskRunner } from "../aboxTaskRunner.js";
+import type { ArtifactStore } from "../artifactStore.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskMode, type TaskRequest } from "../protocol.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
-import { SessionStore, sanitizePathSegment } from "../sessionStore.js";
+import type { SessionStore } from "../sessionStore.js";
 import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
-import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
-import { bold, dim, renderKeyValue, renderModeChip, renderSection } from "./ansi.js";
+import { dim, renderSection } from "./ansi.js";
+import { createSessionEventLogWriter, type EventLogWriter } from "./eventLogWriter.js";
+import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import { runtimeIo, stdoutWrite } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import {
-  latestAttempt,
-  latestTurn,
-  printRunSummary,
-  reviewedOutcomeExitCode,
-  statusBadge,
-} from "./printers.js";
+  buildDispatchStartedEnvelope,
+  buildReviewCompletedEnvelope,
+  buildReviewStartedEnvelope,
+  formatProgressLine,
+  renderDispatchBanner,
+  upsertTurnLatestReview,
+} from "./orchestrationSupport.js";
+import { writeExecutionArtifacts } from "./sessionArtifactWriter.js";
 
 export const storageRootFor = (
   repo: string | undefined,
@@ -105,30 +105,7 @@ export const recordAttempt = (
   ...(lastMessage === undefined ? {} : { lastMessage }),
 });
 
-export const writeSessionArtifact = async (
-  artifactStore: ArtifactStore,
-  sessionId: string,
-  taskId: string,
-  name: string,
-  contents: string,
-  kind: string,
-  metadata?: Record<string, unknown>,
-): Promise<void> => {
-  const artifactsDir = artifactStore.artifactDir(sessionId);
-  await mkdir(artifactsDir, { recursive: true });
-  const safeName = `${sanitizePathSegment(taskId)}-${name}`;
-  const filePath = join(artifactsDir, safeName);
-  await writeFile(filePath, contents, "utf8");
-  await artifactStore.registerArtifact({
-    artifactId: `${taskId}:${name}`,
-    sessionId,
-    taskId,
-    kind,
-    name,
-    path: filePath,
-    ...(metadata === undefined ? {} : { metadata }),
-  });
-};
+export type EventLogWriterFactory = (storageRoot: string, sessionId: string) => EventLogWriter;
 
 export type ExecuteTaskContext = {
   sessionStore: SessionStore;
@@ -138,125 +115,125 @@ export type ExecuteTaskContext = {
   turnId: string;
   request: WorkerTaskSpec;
   args: HostCliArgs;
+  /** Optional factory for the event log writer. Default: `createSessionEventLogWriter`. */
+  eventLogWriterFactory?: EventLogWriterFactory;
   /**
    * Optional hook invoked for every worker progress event. The interactive
-   * shell forwards these through the {@link createProgressCoalescer semantic
-   * progress coalescer} so the main transcript only sees narrations (not raw
-   * byte counters). The legacy log surface continues to use the in-module
-   * stdout writer below.
+   * shell forwards these through the semantic progress coalescer so the
+   * main transcript only sees narrations (not raw byte counters).
    */
   onProgress?: (event: import("../workerRuntime.js").WorkerTaskProgressEvent) => void;
 };
 
 export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTaskResult> => {
   const { sessionStore, artifactStore, runner, sessionId, turnId, request, args, onProgress } = ctx;
-  await sessionStore.upsertAttempt(
-    sessionId,
-    turnId,
-    recordAttempt(request, "queued", "queued for sandbox execution"),
-  );
-  stdoutWrite(
-    [
-      "",
-      renderSection("Dispatch"),
-      `${statusBadge("queued")} ${renderModeChip(request.mode ?? args.mode)} ${dim("sending task to abox worker")}`,
-      renderKeyValue("Session", sessionId),
-      renderKeyValue("Task", request.taskId),
-      renderKeyValue("Goal", request.goal),
-      renderKeyValue("Sandbox", "ephemeral abox worker"),
-      "",
-    ].join("\n"),
-  );
-  const execution = await runner.runTask(
-    request,
-    {
-      shell: args.shell,
-      timeoutSeconds: args.timeoutSeconds,
-      maxOutputBytes: args.maxOutputBytes,
-      heartbeatIntervalMs: args.heartbeatIntervalMs,
-      killGraceMs: args.killGraceMs,
-    },
-    {
-      onEvent: (event) => {
-        onProgress?.(event);
-        const stamp = event.timestamp.slice(11, 19);
-        const metrics = [
-          event.elapsedMs !== undefined ? `elapsed=${event.elapsedMs}ms` : "",
-          event.stdoutBytes !== undefined ? `stdout=${event.stdoutBytes}B` : "",
-          event.stderrBytes !== undefined ? `stderr=${event.stderrBytes}B` : "",
-          event.exitCode !== undefined && event.exitCode !== null ? `exit=${event.exitCode}` : "",
-          event.timedOut ? "timed_out=true" : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        const detail = event.message ? ` ${event.message}` : "";
-        stdoutWrite(
-          `${dim(`[${stamp}]`)} ${statusBadge(event.status)} ${bold(event.kind)}${detail}${metrics ? ` ${dim(`(${metrics})`)}` : ""}\n`,
-        );
-      },
-      onWorkerError: (error) => {
-        const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
-        stdoutWrite(`[worker-error] ${message}\n`);
-      },
-    },
-  );
+  const storageRoot = sessionStore.rootDir;
+  const writerFactory = ctx.eventLogWriterFactory ?? createSessionEventLogWriter;
+  const writer = writerFactory(storageRoot, sessionId);
+  try {
+    await sessionStore.upsertAttempt(
+      sessionId,
+      turnId,
+      recordAttempt(request, "queued", "queued for sandbox execution"),
+    );
+    stdoutWrite(renderDispatchBanner(sessionId, request, args.mode));
 
-  for (const event of execution.events) {
-    await sessionStore.appendTaskEvent(sessionId, event);
-  }
+    await writer.append(
+      buildDispatchStartedEnvelope({
+        sessionId,
+        turnId,
+        attemptId: request.taskId,
+        goal: request.goal,
+        mode: request.mode ?? composerModeToTaskMode(args.mode),
+        assumeDangerousSkipPermissions: args.yes ?? false,
+      }),
+    );
 
-  const reviewed = reviewTaskResult(execution.result);
-  await sessionStore.upsertAttempt(sessionId, turnId, {
-    attemptId: request.taskId,
-    request,
-    status: execution.result.status,
-    result: execution.result,
-    lastMessage: reviewed.reason,
-    metadata: {
+    const execution = await runner.runTask(
+      request,
+      {
+        shell: args.shell,
+        timeoutSeconds: args.timeoutSeconds,
+        maxOutputBytes: args.maxOutputBytes,
+        heartbeatIntervalMs: args.heartbeatIntervalMs,
+        killGraceMs: args.killGraceMs,
+      },
+      {
+        onEvent: (event) => {
+          onProgress?.(event);
+          // Parallel sinks: coalescer consumes raw events via onProgress, the
+          // projector feeds the persistent event log in lock-step.
+          void writer.append(projectLegacyWorkerEvent(sessionId, turnId, request.taskId, event));
+          stdoutWrite(formatProgressLine(event));
+        },
+        onWorkerError: (error) => {
+          const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
+          stdoutWrite(`[worker-error] ${message}\n`);
+        },
+      },
+    );
+
+    const reviewed = reviewTaskResult(execution.result);
+
+    await writer.append(
+      buildReviewStartedEnvelope({ sessionId, turnId, attemptId: request.taskId }),
+    );
+
+    const dispatchCommand = Array.isArray(execution.metadata?.cmd)
+      ? execution.metadata.cmd.map((entry) => String(entry))
+      : undefined;
+    await sessionStore.upsertAttempt(sessionId, turnId, {
+      attemptId: request.taskId,
+      request,
+      status: execution.result.status,
+      result: execution.result,
+      lastMessage: reviewed.reason,
+      metadata: {
+        sandboxTaskId: execution.metadata?.taskId,
+        aboxCommand: execution.metadata?.cmd,
+      },
+      ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
+    });
+    await upsertTurnLatestReview(sessionStore, sessionId, turnId, {
+      reviewId: `review-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      attemptId: request.taskId,
+      outcome: reviewed.outcome,
+      action: reviewed.action,
+      reason: reviewed.reason,
+      reviewedAt: new Date().toISOString(),
+    });
+
+    await writer.append(
+      buildReviewCompletedEnvelope({
+        sessionId,
+        turnId,
+        attemptId: request.taskId,
+        reviewed,
+      }),
+    );
+
+    // Drain the buffered writer before short-lived artifact emitters run.
+    await writer.flush();
+    await writeExecutionArtifacts({
+      artifactStore,
+      storageRoot,
+      sessionId,
+      turnId,
+      taskId: request.taskId,
+      result: execution.result,
+      rawOutput: execution.rawOutput,
+      ok: execution.ok,
+      workerErrorCount: execution.workerErrors.length,
       sandboxTaskId: execution.metadata?.taskId,
       aboxCommand: execution.metadata?.cmd,
       reviewedOutcome: reviewed.outcome,
       reviewedAction: reviewed.action,
-    },
-  });
+    });
 
-  await writeSessionArtifact(
-    artifactStore,
-    sessionId,
-    request.taskId,
-    "result.json",
-    `${JSON.stringify(execution.result, null, 2)}\n`,
-    "result",
-    { outcome: reviewed.outcome },
-  );
-  await writeSessionArtifact(
-    artifactStore,
-    sessionId,
-    request.taskId,
-    "worker-output.log",
-    `${execution.rawOutput}\n`,
-    "log",
-    { ok: execution.ok, errorCount: execution.workerErrors.length },
-  );
-  await writeSessionArtifact(
-    artifactStore,
-    sessionId,
-    request.taskId,
-    "dispatch.json",
-    `${JSON.stringify(
-      {
-        sandboxTaskId: execution.metadata?.taskId,
-        aboxCommand: execution.metadata?.cmd,
-        reviewedOutcome: reviewed.outcome,
-        reviewedAction: reviewed.action,
-      },
-      null,
-      2,
-    )}\n`,
-    "dispatch",
-  );
-
-  return reviewed;
+    return reviewed;
+  } finally {
+    await writer.close();
+  }
 };
 
 const nowIso = (): string => new Date().toISOString();
@@ -275,126 +252,10 @@ export const makeInitialTurn = (
   updatedAt: nowIso(),
 });
 
-export const runNewSession = async (args: HostCliArgs): Promise<number> => {
-  const fileConfig = await loadConfig(args.config);
-  const runtimeConfig = buildRuntimeConfig(fileConfig);
-  const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const assumeDangerousSkipPermissions =
-    args.mode === "build" ? runtimeConfig.assumeDangerousSkipPermissions : false;
-  const sessionStore = new SessionStore(rootDir);
-  const artifactStore = new ArtifactStore(rootDir);
-  const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo));
-
-  if (requiresSandboxApproval(args) && !args.yes) {
-    const approved = await promptForApproval(
-      `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
-    );
-    if (!approved) {
-      stdoutWrite("Dispatch cancelled.\n");
-      return 2;
-    }
-  }
-
-  const turnId = "turn-1";
-  const session = await sessionStore.createSession({
-    sessionId,
-    goal: args.goal ?? "",
-    repoRoot: repoRootFor(args.repo),
-    assumeDangerousSkipPermissions,
-    status: "planned",
-    turns: [makeInitialTurn(turnId, args.goal ?? "", args.mode)],
-  });
-
-  const taskId = createSessionTaskKey(session.sessionId, "task-1");
-  const request = createTaskSpec(
-    session.sessionId,
-    taskId,
-    args.goal ?? "",
-    assumeDangerousSkipPermissions,
-    args,
-  );
-  await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask({
-    sessionStore,
-    artifactStore,
-    runner,
-    sessionId: session.sessionId,
-    turnId,
-    request,
-    args,
-  });
-
-  const finalSession = await sessionStore.saveSession({
-    ...(await sessionStore.loadSession(session.sessionId))!,
-    status: sessionStatusFromReview(reviewed),
-  });
-  printRunSummary(finalSession, reviewed);
-  return reviewedOutcomeExitCode(reviewed);
-};
-
-export const resumeSession = async (args: HostCliArgs): Promise<number> => {
-  const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const sessionStore = new SessionStore(rootDir);
-  const artifactStore = new ArtifactStore(rootDir);
-  const session = await sessionStore.loadSession(args.sessionId ?? "");
-  if (session === null) {
-    throw new Error(`unknown session: ${args.sessionId}`);
-  }
-
-  const turn = latestTurn(session);
-  if (turn === undefined) {
-    throw new Error(`no resumable turn found for session ${session.sessionId}`);
-  }
-  const attempt = latestAttempt(turn, args.taskId);
-  if (attempt === undefined || attempt.request === undefined) {
-    throw new Error(`no resumable attempt found for session ${session.sessionId}`);
-  }
-
-  const priorReview = attempt.result === undefined ? null : reviewTaskResult(attempt.result);
-  if (priorReview?.outcome === "success") {
-    printRunSummary(session, priorReview);
-    return 0;
-  }
-  if (priorReview?.outcome === "blocked_needs_user" || priorReview?.outcome === "policy_denied") {
-    printRunSummary(session, priorReview);
-    return reviewedOutcomeExitCode(priorReview);
-  }
-
-  if (requiresSandboxApproval(args) && !args.yes) {
-    const approved = await promptForApproval(
-      `Re-dispatch task ${attempt.attemptId} into an ephemeral abox sandbox with dangerous-skip-permissions?`,
-    );
-    if (!approved) {
-      stdoutWrite("Resume cancelled.\n");
-      return 2;
-    }
-  }
-
-  const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo));
-  const retryId = createSessionTaskKey(session.sessionId, `retry-${turn.attempts.length + 1}`);
-  const request: WorkerTaskSpec = {
-    ...attempt.request,
-    taskId: retryId,
-    timeoutSeconds: args.timeoutSeconds,
-    maxOutputBytes: args.maxOutputBytes,
-    heartbeatIntervalMs: args.heartbeatIntervalMs,
-  };
-
-  await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask({
-    sessionStore,
-    artifactStore,
-    runner,
-    sessionId: session.sessionId,
-    turnId: turn.turnId,
-    request,
-    args,
-  });
-  const updated = await sessionStore.saveSession({
-    ...(await sessionStore.loadSession(session.sessionId))!,
-    status: sessionStatusFromReview(reviewed),
-  });
-  printRunSummary(updated, reviewed);
-  return reviewedOutcomeExitCode(reviewed);
-};
+/**
+ * Re-exported from `./sessionLifecycle.js` so existing callers
+ * (`interactive.ts`) don't need to migrate their imports during PR4. The
+ * lifecycle helpers live in the new module to keep this file under the
+ * 400-line cap.
+ */
+export { runNewSession, resumeSession } from "./sessionLifecycle.js";

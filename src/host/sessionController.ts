@@ -4,13 +4,17 @@ import { ABoxAdapter } from "../aboxAdapter.js";
 import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "../config.js";
+import { createSessionEvent } from "../protocol.js";
 import { type ReviewedTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
 import type { SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
+import { emitSessionEvent } from "./eventLogWriter.js";
+import { parseTokenBudget } from "./tokenBudget.js";
 import {
   createTaskSpec,
+  type EventLogWriterFactory,
   executeTask,
   makeInitialTurn,
   repoRootFor,
@@ -18,6 +22,7 @@ import {
   storageRootFor,
 } from "./orchestration.js";
 import type { HostCliArgs } from "./parsing.js";
+import { emitTurnTransition } from "./transitionStore.js";
 
 export type SessionDispatchResult = {
   sessionId: string;
@@ -62,6 +67,7 @@ const resolveAssumeDangerous = async (args: HostCliArgs): Promise<boolean> => {
 
 export type SessionDispatchOptions = {
   onProgress?: (event: WorkerTaskProgressEvent) => void;
+  eventLogWriterFactory?: EventLogWriterFactory;
 };
 
 export const createAndRunFirstTurn = async (
@@ -74,20 +80,51 @@ export const createAndRunFirstTurn = async (
   const assumeDangerousSkipPermissions = await resolveAssumeDangerous(args);
   const turnId = "turn-1";
 
+  // Parse inline token budget (e.g. "+500k fix the bug").
+  const { budget, cleanedPrompt } = parseTokenBudget(prompt);
+  const effectivePrompt = budget !== null ? cleanedPrompt : prompt;
+
+  const initialTurn = makeInitialTurn(turnId, effectivePrompt, args.mode);
+  if (budget !== null) {
+    initialTurn.tokenBudget = budget.tokens;
+  }
+  // TODO(Phase 3): worker-side budget enforcement — stop at limit, prompt "continue?".
+
   const session = await sessionStore.createSession({
     sessionId,
-    goal: prompt,
+    goal: effectivePrompt,
     repoRoot: repoRootFor(args.repo),
     assumeDangerousSkipPermissions,
     status: "running",
-    turns: [makeInitialTurn(turnId, prompt, args.mode)],
+    turns: [initialTurn],
   });
+
+  const storageRoot = storageRootFor(args.repo, args.storageRoot);
+  await emitTurnTransition({
+    storageRoot,
+    sessionId: session.sessionId,
+    turnId,
+    fromStatus: "queued",
+    toStatus: "queued",
+    reason: "next_turn",
+  });
+  await emitSessionEvent(
+    storageRoot,
+    session.sessionId,
+    createSessionEvent({
+      kind: "host.turn_queued",
+      sessionId: session.sessionId,
+      turnId,
+      actor: "host",
+      payload: { turnId, prompt: effectivePrompt, mode: args.mode },
+    }),
+  );
 
   const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
   const request = createTaskSpec(
     session.sessionId,
     attemptId,
-    prompt,
+    effectivePrompt,
     assumeDangerousSkipPermissions,
     args,
   );
@@ -100,6 +137,9 @@ export const createAndRunFirstTurn = async (
     request,
     args,
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+    ...(options.eventLogWriterFactory
+      ? { eventLogWriterFactory: options.eventLogWriterFactory }
+      : {}),
   });
 
   const updated = await sessionStore.saveSession({
@@ -124,16 +164,44 @@ export const appendTurnToActiveSession = async (
 
   const assumeDangerousSkipPermissions = await resolveAssumeDangerous(args);
   const turnId = nextTurnId(existing);
+  const previousTurn = existing.turns.at(-1);
+
+  // Parse inline token budget.
+  const { budget, cleanedPrompt } = parseTokenBudget(prompt);
+  const effectivePrompt = budget !== null ? cleanedPrompt : prompt;
+  // TODO(Phase 3): worker-side budget enforcement — stop at limit, prompt "continue?".
+
   const turn: SessionTurnRecord = {
     turnId,
-    prompt,
+    prompt: effectivePrompt,
     mode: args.mode,
     status: "queued",
     attempts: [],
     createdAt: nowIso(),
     updatedAt: nowIso(),
+    ...(budget !== null ? { tokenBudget: budget.tokens } : {}),
   };
   await sessionStore.upsertTurn(sessionId, turn);
+  const storageRoot = storageRootFor(args.repo, args.storageRoot);
+  await emitTurnTransition({
+    storageRoot,
+    sessionId,
+    turnId,
+    fromStatus: previousTurn?.status ?? "queued",
+    toStatus: "queued",
+    reason: "next_turn",
+  });
+  await emitSessionEvent(
+    storageRoot,
+    sessionId,
+    createSessionEvent({
+      kind: "host.turn_queued",
+      sessionId,
+      turnId,
+      actor: "host",
+      payload: { turnId, prompt: effectivePrompt, mode: args.mode },
+    }),
+  );
 
   const withTurn = await sessionStore.loadSession(sessionId);
   if (withTurn === null) {
@@ -143,7 +211,7 @@ export const appendTurnToActiveSession = async (
   const request = createTaskSpec(
     sessionId,
     attemptId,
-    prompt,
+    effectivePrompt,
     assumeDangerousSkipPermissions,
     args,
   );
@@ -157,6 +225,9 @@ export const appendTurnToActiveSession = async (
     request,
     args,
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+    ...(options.eventLogWriterFactory
+      ? { eventLogWriterFactory: options.eventLogWriterFactory }
+      : {}),
   });
 
   const updated = await sessionStore.saveSession({

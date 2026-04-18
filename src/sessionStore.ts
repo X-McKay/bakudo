@@ -9,9 +9,24 @@ import type {
   SessionStatus,
   SessionTaskRecord,
   SessionTurnRecord,
-  TurnStatus,
 } from "./sessionTypes.js";
-import { CURRENT_SESSION_SCHEMA_VERSION } from "./sessionTypes.js";
+import { CURRENT_SESSION_SCHEMA_VERSION, deriveSessionTitle } from "./sessionTypes.js";
+import {
+  loadSessionRecord,
+  migrateV1TaskToAttempt,
+  normalizeV2Record,
+  taskStatusToTurnStatus,
+} from "./sessionMigration.js";
+import {
+  SESSION_INDEX_SCHEMA_VERSION,
+  buildIndexEntryFromSession,
+  loadSessionIndex,
+  sessionIndexPath,
+  sortIndexEntries,
+  type SessionIndexEntry,
+  type SessionSummaryView,
+} from "./host/sessionIndex.js";
+import { stderrWrite } from "./host/io.js";
 
 export type SessionStorePaths = {
   sessionId: string;
@@ -24,10 +39,13 @@ export type SessionStorePaths = {
 
 export type CreateSessionInput = {
   sessionId: string;
+  /** Goal text — used to derive the session title via first turn prompt. */
   goal: string;
   repoRoot: string;
-  assumeDangerousSkipPermissions: boolean;
+  /** @deprecated kept for migration callers; not stored on SessionRecord. */
+  assumeDangerousSkipPermissions?: boolean;
   status?: SessionStatus;
+  title?: string;
   turns?: SessionTurnRecord[];
   createdAt?: string;
   updatedAt?: string;
@@ -87,115 +105,23 @@ const readJsonFile = async <T>(filePath: string): Promise<T | null> => {
   }
 };
 
-const taskStatusToTurnStatus = (status: string): TurnStatus => {
-  switch (status) {
-    case "queued":
-    case "running":
-    case "failed":
-      return status;
-    case "succeeded":
-      return "completed";
-    case "needs_review":
-      return "reviewing";
-    case "blocked":
-      return "awaiting_user";
-    case "cancelled":
-      return "failed";
-    default:
-      return "queued";
-  }
-};
+export { loadSessionRecord };
 
-const migrateV1TaskToAttempt = (task: SessionTaskRecord): SessionAttemptRecord => ({
-  attemptId: task.taskId,
-  status: task.status,
-  ...(task.request === undefined ? {} : { request: task.request }),
-  ...(task.result === undefined ? {} : { result: task.result }),
-  ...(task.lastMessage === undefined ? {} : { lastMessage: task.lastMessage }),
-  ...(task.metadata === undefined ? {} : { metadata: task.metadata }),
-});
-
-const migrateV1ToV2 = (raw: {
-  sessionId: string;
-  goal: string;
-  status: SessionStatus;
-  assumeDangerousSkipPermissions: boolean;
-  tasks?: SessionTaskRecord[];
-  createdAt: string;
-  updatedAt: string;
-}): SessionRecord => {
-  const tasks = raw.tasks ?? [];
-  const attempts = tasks.map(migrateV1TaskToAttempt);
-  const latestStatus = tasks.at(-1)?.status ?? "queued";
-  const turn: SessionTurnRecord = {
-    turnId: "turn-1",
-    prompt: raw.goal,
-    mode: tasks[0]?.request?.mode ?? "build",
-    status: taskStatusToTurnStatus(latestStatus),
-    attempts,
-    createdAt: raw.createdAt,
-    updatedAt: raw.updatedAt,
+/**
+ * Atomic write of `.bakudo/sessions/index.json` with entries sorted newest
+ * first. Exposed for the scan-and-rebuild fallback in {@link SessionStore}
+ * and for tests that want to pre-seed an index.
+ */
+export const writeSessionIndex = async (
+  rootDir: string,
+  entries: ReadonlyArray<SessionIndexEntry>,
+): Promise<void> => {
+  const filePath = sessionIndexPath(rootDir);
+  const payload = {
+    schemaVersion: SESSION_INDEX_SCHEMA_VERSION,
+    entries: sortIndexEntries(entries),
   };
-  return {
-    schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-    sessionId: raw.sessionId,
-    repoRoot: ".",
-    goal: raw.goal,
-    status: raw.status,
-    assumeDangerousSkipPermissions: raw.assumeDangerousSkipPermissions,
-    turns: attempts.length === 0 ? [] : [turn],
-    createdAt: raw.createdAt,
-    updatedAt: raw.updatedAt,
-  };
-};
-
-const normalizeV2Record = (
-  record: SessionRecord,
-  overrides: Pick<CreateSessionInput, "createdAt" | "updatedAt"> = {},
-): SessionRecord => ({
-  schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-  sessionId: record.sessionId,
-  repoRoot: record.repoRoot ?? ".",
-  goal: record.goal,
-  status: record.status,
-  assumeDangerousSkipPermissions: record.assumeDangerousSkipPermissions,
-  turns: record.turns.map((turn) => ({ ...turn, attempts: [...turn.attempts] })),
-  createdAt: overrides.createdAt ?? record.createdAt,
-  updatedAt: overrides.updatedAt ?? record.updatedAt,
-});
-
-export const loadSessionRecord = (raw: unknown): SessionRecord => {
-  if (typeof raw !== "object" || raw === null) {
-    throw new Error("unrecognized session record shape");
-  }
-  const candidate = raw as {
-    schemaVersion?: unknown;
-    turns?: unknown;
-    tasks?: unknown;
-    goal?: unknown;
-  };
-  if (
-    candidate.schemaVersion === CURRENT_SESSION_SCHEMA_VERSION &&
-    Array.isArray(candidate.turns)
-  ) {
-    return normalizeV2Record(raw as SessionRecord);
-  }
-  if (Array.isArray(candidate.tasks) && typeof candidate.goal === "string") {
-    return migrateV1ToV2(raw as Parameters<typeof migrateV1ToV2>[0]);
-  }
-  throw new Error("unrecognized session record shape");
-};
-
-const compareSessionRecordsForListing = (left: SessionRecord, right: SessionRecord): number => {
-  if (left.updatedAt !== right.updatedAt) {
-    return left.updatedAt > right.updatedAt ? -1 : 1;
-  }
-
-  if (left.createdAt !== right.createdAt) {
-    return left.createdAt > right.createdAt ? -1 : 1;
-  }
-
-  return left.sessionId.localeCompare(right.sessionId);
+  await writeJsonAtomic(filePath, payload);
 };
 
 export class SessionStore {
@@ -210,14 +136,21 @@ export class SessionStore {
   public async createSession(input: CreateSessionInput): Promise<SessionRecord> {
     const createdAt = input.createdAt ?? nowIso();
     const updatedAt = input.updatedAt ?? createdAt;
+    const turns = [...(input.turns ?? [])];
+    const title =
+      input.title ??
+      deriveSessionTitle({
+        sessionId: input.sessionId,
+        goal: input.goal,
+        turns,
+      });
     const session: SessionRecord = {
       schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
       sessionId: input.sessionId,
       repoRoot: input.repoRoot,
-      goal: input.goal,
+      title,
       status: input.status ?? "draft",
-      assumeDangerousSkipPermissions: input.assumeDangerousSkipPermissions,
-      turns: [...(input.turns ?? [])],
+      turns,
       createdAt,
       updatedAt,
     };
@@ -234,7 +167,27 @@ export class SessionStore {
     return loadSessionRecord(raw);
   }
 
-  public async listSessions(): Promise<SessionRecord[]> {
+  /**
+   * Return lightweight session summaries for listing/resume UIs. Fast path:
+   * load `.bakudo/sessions/index.json` via {@link loadSessionIndex} and
+   * return its entries (already sorted newest-first). Self-healing fallback:
+   * if the index is missing or invalid, scan session directories, rebuild
+   * the index from `buildIndexEntryFromSession`, write it, and return the
+   * same entries. A one-line warning is emitted on stderr whenever the
+   * rebuild path runs so operators notice persistent corruption.
+   *
+   * Returns `SessionSummaryView[]`. Callers that need the full
+   * {@link SessionRecord} should follow up with {@link loadSession}.
+   */
+  public async listSessions(): Promise<SessionSummaryView[]> {
+    const existing = await loadSessionIndex(this.rootDir);
+    if (existing !== null) {
+      return existing.entries;
+    }
+    return this.scanAndRebuildIndex();
+  }
+
+  private async scanAndRebuildIndex(): Promise<SessionIndexEntry[]> {
     let entries: Dirent<string>[];
     try {
       entries = await readdir(this.rootDir, { withFileTypes: true });
@@ -262,15 +215,43 @@ export class SessionStore {
         }),
     );
 
-    return sessions
-      .filter((session): session is SessionRecord => session !== null)
-      .sort(compareSessionRecordsForListing);
+    const records = sessions.filter((session): session is SessionRecord => session !== null);
+    if (records.length === 0) {
+      // Nothing to index, and no reason to leave a warning trail when a fresh
+      // repo simply has no sessions yet.
+      return [];
+    }
+    stderrWrite("[sessions] rebuilding index from directory scan\n");
+    const rebuilt = sortIndexEntries(records.map(buildIndexEntryFromSession));
+    await writeSessionIndex(this.rootDir, rebuilt);
+    return rebuilt;
   }
 
   public async saveSession(record: SessionRecord): Promise<SessionRecord> {
     const normalized = normalizeV2Record(record, { updatedAt: record.updatedAt ?? nowIso() });
     await writeJsonAtomic(this.paths(normalized.sessionId).sessionFile, normalized);
+    await this.upsertIndexEntry(normalized);
     return normalized;
+  }
+
+  /**
+   * Incremental upsert of the session summary index alongside a full-session
+   * save. Reads current `index.json` (empty list when missing/corrupt — the
+   * self-healing scan in {@link listSessions} rebuilds it on next read),
+   * replaces-or-appends the entry for `record.sessionId`, re-sorts by
+   * `updatedAt` descending, and atomic-writes the index.
+   */
+  private async upsertIndexEntry(record: SessionRecord): Promise<void> {
+    const entry = buildIndexEntryFromSession(record);
+    const existing = await loadSessionIndex(this.rootDir);
+    const entries = existing === null ? [] : [...existing.entries];
+    const index = entries.findIndex((candidate) => candidate.sessionId === entry.sessionId);
+    if (index === -1) {
+      entries.push(entry);
+    } else {
+      entries[index] = entry;
+    }
+    await writeSessionIndex(this.rootDir, entries);
   }
 
   public async upsertTurn(
@@ -339,7 +320,7 @@ export class SessionStore {
     if (existingTurn === undefined) {
       const turn: SessionTurnRecord = {
         turnId: "turn-1",
-        prompt: session.goal,
+        prompt: session.turns[0]?.prompt ?? session.title,
         mode: taskRecord.request?.mode ?? "build",
         status: taskStatusToTurnStatus(taskRecord.status),
         attempts: [attempt],

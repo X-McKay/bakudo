@@ -99,3 +99,19 @@ test("loadHostState migrates legacy 'build' mode to 'standard'", async () => {
     await rm(repoRoot, { recursive: true, force: true });
   }
 });
+
+test("loadHostState returns null for structurally invalid JSON (wrong field types)", async () => {
+  const repoRoot = await createTempRepo();
+  try {
+    await mkdir(join(repoRoot, ".bakudo"), { recursive: true });
+    // Valid JSON but schemaVersion is a string instead of number.
+    await writeFile(
+      join(repoRoot, ".bakudo", "host-state.json"),
+      JSON.stringify({ schemaVersion: "one", lastUsedMode: "standard", autoApprove: false }),
+      "utf8",
+    );
+    assert.equal(await loadHostState(repoRoot), null);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});

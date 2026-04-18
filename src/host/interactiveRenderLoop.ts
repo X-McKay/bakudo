@@ -2,6 +2,7 @@ import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../protocol.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import { supportsAnsi } from "./ansi.js";
 import type { ComposerMode, HostAppState } from "./appState.js";
+import type { BakudoConfig } from "./config.js";
 import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
@@ -55,6 +56,8 @@ export type TickDeps = {
   appState: HostAppState;
   /** Short repo basename displayed in the frame header (PR3 follow-up). */
   repoLabel?: string;
+  /** Merged config cascade. Populated by the interactive shell bootstrap. */
+  config?: BakudoConfig;
 };
 
 const renderFrameLines = (

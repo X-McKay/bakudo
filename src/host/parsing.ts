@@ -290,6 +290,10 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       result.copilot.plainDiff = true;
       continue;
     }
+    if (arg === "--json") {
+      result.copilot.outputFormat = "json";
+      continue;
+    }
     if (arg === "--output-format" || arg.startsWith("--output-format=")) {
       const { value, consumed } = readLongFlag(argv, i, "--output-format");
       if (value !== "json" && value !== "text") {

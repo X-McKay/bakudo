@@ -40,6 +40,29 @@ export type SessionTaskRecord = {
   metadata?: Record<string, unknown>;
 };
 
+export type SessionReviewOutcome =
+  | "success"
+  | "retryable_failure"
+  | "blocked_needs_user"
+  | "policy_denied"
+  | "incomplete_needs_follow_up";
+
+export type SessionReviewAction = "accept" | "retry" | "ask_user" | "halt" | "follow_up";
+
+/**
+ * Structured host-side review of an attempt outcome. Lives on the turn
+ * (`SessionTurnRecord.latestReview`), not on the attempt, so a turn can carry
+ * its most recent verdict even after multiple retry attempts accumulate.
+ */
+export type SessionReviewRecord = {
+  reviewId: string;
+  attemptId: string;
+  outcome: SessionReviewOutcome;
+  action: SessionReviewAction;
+  reason?: string;
+  reviewedAt: string;
+};
+
 export type SessionAttemptRecord = {
   attemptId: string;
   status: AttemptStatus;
@@ -47,6 +70,12 @@ export type SessionAttemptRecord = {
   result?: TaskResult;
   lastMessage?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Abox CLI invocation string array, hoisted out of `metadata.aboxCommand` for
+   * first-class surfacing (inspect/sandbox views). Optional for migration
+   * compatibility with pre-v2 attempts that stored it only in metadata.
+   */
+  dispatchCommand?: string[];
 };
 
 export type SessionTurnRecord = {
@@ -57,25 +86,39 @@ export type SessionTurnRecord = {
   attempts: SessionAttemptRecord[];
   createdAt: string;
   updatedAt: string;
+  /**
+   * Most recent structured review for this turn. May be absent until the first
+   * attempt completes a review pass.
+   */
+  latestReview?: SessionReviewRecord;
+  /**
+   * Inline token budget parsed from the user prompt (e.g. `+500k` → 500_000).
+   * Set at turn creation; worker-side enforcement is deferred to Phase 3.
+   */
+  tokenBudget?: number;
 };
 
 export type SessionRecord = {
   schemaVersion: number;
   sessionId: string;
   repoRoot: string;
-  goal: string;
+  /**
+   * Short human-readable label for the session, derived from the first turn's
+   * prompt (truncated at 80 chars, with trailing `…` when truncated). Falls
+   * back to `sessionId` when no turn/prompt is available.
+   */
+  title: string;
   status: SessionStatus;
-  assumeDangerousSkipPermissions: boolean;
   turns: SessionTurnRecord[];
   createdAt: string;
   updatedAt: string;
-  /**
-   * @deprecated retained only for v1 migration compatibility. Always empty in v2-originated records.
-   */
+  /** @deprecated v1 compatibility — do not read in host code */
   tasks?: SessionTaskRecord[];
 };
 
 export const CURRENT_SESSION_SCHEMA_VERSION = 2 as const;
+
+export const SESSION_TITLE_MAX_LENGTH = 80;
 
 export const sessionTerminalStatuses: readonly TerminalSessionStatus[] = [
   "completed",
@@ -98,3 +141,99 @@ export const isCompletedTaskRecord = (task: SessionTaskRecord): boolean =>
 
 export const isCompletedAttemptRecord = (attempt: SessionAttemptRecord): boolean =>
   isTerminalTaskStatus(attempt.status) && attempt.status === "succeeded";
+
+/**
+ * Derive a session title from the first turn's prompt. Truncates at
+ * {@link SESSION_TITLE_MAX_LENGTH} chars (trailing whitespace trimmed; `…`
+ * suffix appended when truncated). Falls back to `goal` and then `sessionId`.
+ */
+export const deriveSessionTitle = (source: {
+  sessionId: string;
+  goal?: string | undefined;
+  turns?: ReadonlyArray<Pick<SessionTurnRecord, "prompt">> | undefined;
+}): string => {
+  const firstPrompt = source.turns?.[0]?.prompt;
+  // `goal` is accepted for migration callers (v1→v2), but not on SessionRecord.
+  const candidates = [firstPrompt, source.goal, source.sessionId];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    if (trimmed.length <= SESSION_TITLE_MAX_LENGTH) {
+      return trimmed;
+    }
+    return `${trimmed.slice(0, SESSION_TITLE_MAX_LENGTH).replace(/\s+$/u, "")}…`;
+  }
+  return source.sessionId;
+};
+
+const SUCCESS_OUTCOME_TOKENS: readonly string[] = ["accepted", "accept"];
+const RETRYABLE_OUTCOME_TOKENS: readonly string[] = ["retry", "failed", "retryable_failure"];
+const BLOCKED_OUTCOME_TOKENS: readonly string[] = ["blocked", "blocked_needs_user", "ask"];
+
+/**
+ * Coerce a loose/legacy `reviewedOutcome` string into the structured
+ * {@link SessionReviewOutcome} enum per the Phase 2 mapping table.
+ */
+export const coerceSessionReviewOutcome = (value: unknown): SessionReviewOutcome => {
+  if (typeof value !== "string") {
+    return "retryable_failure";
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0) {
+    return "retryable_failure";
+  }
+  if (
+    normalized === "success" ||
+    normalized.includes("success") ||
+    SUCCESS_OUTCOME_TOKENS.includes(normalized)
+  ) {
+    return "success";
+  }
+  if (normalized === "policy_denied") {
+    return "policy_denied";
+  }
+  if (normalized === "incomplete_needs_follow_up") {
+    return "incomplete_needs_follow_up";
+  }
+  if (BLOCKED_OUTCOME_TOKENS.includes(normalized)) {
+    return "blocked_needs_user";
+  }
+  if (RETRYABLE_OUTCOME_TOKENS.includes(normalized)) {
+    return "retryable_failure";
+  }
+  return "retryable_failure";
+};
+
+/**
+ * Coerce a loose/legacy `reviewedAction` string into the structured
+ * {@link SessionReviewAction} enum per the Phase 2 mapping table.
+ */
+export const coerceSessionReviewAction = (value: unknown): SessionReviewAction => {
+  if (typeof value !== "string") {
+    return "accept";
+  }
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case "accept":
+    case "accepted":
+      return "accept";
+    case "retry":
+      return "retry";
+    case "ask_user":
+    case "ask":
+      return "ask_user";
+    case "halt":
+    case "stop":
+      return "halt";
+    case "follow_up":
+    case "followup":
+      return "follow_up";
+    default:
+      return "accept";
+  }
+};

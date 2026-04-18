@@ -7,6 +7,11 @@ import test from "node:test";
 import { ArtifactStore } from "../../src/artifactStore.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../../src/protocol.js";
 import { SessionStore } from "../../src/sessionStore.js";
+import {
+  SESSION_INDEX_SCHEMA_VERSION,
+  loadSessionIndex,
+  sessionIndexPath,
+} from "../../src/host/sessionIndex.js";
 import { CURRENT_SESSION_SCHEMA_VERSION } from "../../src/sessionTypes.js";
 import type { TaskProgressEvent, TaskResult } from "../../src/protocol.js";
 
@@ -36,7 +41,7 @@ test("SessionStore computes a stable layout and persists session state", async (
     });
 
     assert.equal(created.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
-    assert.equal(created.goal, "ship the host-side persistence scaffold");
+    assert.equal(created.title, "ship the host-side persistence scaffold");
     assert.equal(created.status, "planned");
 
     const firstResult = {
@@ -98,6 +103,53 @@ test("SessionStore computes a stable layout and persists session state", async (
 
     const onDiskEvents = await readFile(paths.eventsFile, "utf8");
     assert.equal(onDiskEvents.trim().split("\n").length, 2);
+
+    // The session index is written alongside each save and carries a single
+    // entry for this session, with status and latestTurnId reflecting the
+    // most recent upsert.
+    assert.equal((await stat(sessionIndexPath(rootDir))).isFile(), true);
+    const index = await loadSessionIndex(rootDir);
+    assert.ok(index);
+    assert.equal(index.schemaVersion, SESSION_INDEX_SCHEMA_VERSION);
+    assert.equal(index.entries.length, 1);
+    assert.equal(index.entries[0]?.sessionId, sessionId);
+    assert.equal(index.entries[0]?.latestTurnId, "turn-1");
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("SessionStore upserts the index entry on repeated saves of the same session", async () => {
+  const rootDir = await createTempRoot();
+  try {
+    const store = new SessionStore(rootDir);
+    const sessionId = "session-upsert";
+    await store.createSession({
+      sessionId,
+      goal: "first",
+      repoRoot: ".",
+      assumeDangerousSkipPermissions: false,
+      status: "planned",
+      createdAt: "2026-04-14T10:00:00.000Z",
+      updatedAt: "2026-04-14T10:00:00.000Z",
+    });
+
+    // Second save: flip status and advance updatedAt. Expect a single entry
+    // in the index (upsert, not append) with the newest status/updatedAt.
+    const loaded = await store.loadSession(sessionId);
+    assert.ok(loaded);
+    await store.saveSession({
+      ...loaded,
+      status: "completed",
+      updatedAt: "2026-04-14T11:00:00.000Z",
+    });
+
+    const index = await loadSessionIndex(rootDir);
+    assert.ok(index);
+    assert.equal(index.entries.length, 1);
+    assert.equal(index.entries[0]?.sessionId, sessionId);
+    assert.equal(index.entries[0]?.status, "completed");
+    assert.equal(index.entries[0]?.updatedAt, "2026-04-14T11:00:00.000Z");
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

@@ -322,7 +322,7 @@ test("migration: round-trip v1 -> load -> save -> reload keeps v2 shape", async 
     const reloaded = await store.loadSession("session-rt");
     assert.ok(reloaded);
     assert.equal(reloaded.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
-    assert.equal(reloaded.goal, "round trip");
+    assert.equal(reloaded.title, "round trip");
     assert.equal(reloaded.turns.length, 1);
     assert.equal(reloaded.turns[0]?.prompt, "round trip");
     assert.equal(reloaded.turns[0]?.attempts.length, 2);

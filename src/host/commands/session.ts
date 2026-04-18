@@ -1,9 +1,9 @@
-import { SessionStore } from "../../sessionStore.js";
 import type { SessionRecord } from "../../sessionTypes.js";
 import type { HostCommandSpec } from "../commandRegistry.js";
 import { storageRootFor } from "../orchestration.js";
 import { awaitPrompt, newPromptId } from "../promptResolvers.js";
 import { reduceHost } from "../reducer.js";
+import * as timeline from "../timeline.js";
 
 const setSessionAsActive = (
   deps: Parameters<HostCommandSpec["handler"]>[0]["deps"],
@@ -48,11 +48,15 @@ export const sessionCommands: readonly HostCommandSpec[] = [
     handler: async ({ args, deps }) => {
       const requestedId = args[0];
       const rootDir = storageRootFor(undefined, undefined);
-      const store = new SessionStore(rootDir);
       let target: SessionRecord | null = null;
       if (requestedId === undefined) {
-        const sessions = await store.listSessions();
-        target = sessions[0] ?? null;
+        // No-argument resume picks the newest summary from the index
+        // (entries are sorted newest `updatedAt` first) and reopens the
+        // full session file only for the winner. Avoids touching every
+        // session directory on startup.
+        const summaries = await timeline.listSessionSummaries(rootDir);
+        const latestId = summaries[0]?.sessionId;
+        target = latestId === undefined ? null : await timeline.loadSession(rootDir, latestId);
         if (target === null) {
           deps.transcript.push({
             kind: "assistant",
@@ -62,7 +66,7 @@ export const sessionCommands: readonly HostCommandSpec[] = [
           return;
         }
       } else {
-        target = await store.loadSession(requestedId);
+        target = await timeline.loadSession(rootDir, requestedId);
         if (target === null) {
           deps.transcript.push({
             kind: "assistant",

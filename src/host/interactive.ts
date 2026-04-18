@@ -1,16 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { basename } from "node:path";
 
-import type { ComposerMode } from "./appState.js";
-import { initialHostAppState } from "./appState.js";
+import { initialHostAppState, type ComposerMode } from "./appState.js";
 import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
+import { loadConfigCascade } from "./config.js";
+import { emitUserTurnSubmitted } from "./eventLogWriter.js";
 import {
   HOST_STATE_SCHEMA_VERSION,
   loadHostState,
   saveHostState,
   type HostStateRecord,
 } from "./hostStateStore.js";
-import { runtimeIo, withCapturedStdout, type TextWriter } from "./io.js";
+import { runtimeIo, stdoutWrite, withCapturedStdout, type TextWriter } from "./io.js";
 import { runInit } from "./init.js";
 import {
   deriveShellContext,
@@ -34,53 +36,40 @@ import {
   repoRootFor,
   requiresSandboxApproval,
   resumeSession,
+  storageRootFor,
 } from "./orchestration.js";
-import { type HostCliArgs, parseHostArgs, tokenizeCommand } from "./parsing.js";
+import { parseHostArgs, tokenizeCommand, type HostCliArgs } from "./parsing.js";
 import {
   printLogs,
   printReview,
+  printRunSummary,
   printSandbox,
   printSessions,
   printStatus,
   printTasks,
+  reviewedOutcomeExitCode,
 } from "./printers.js";
 import {
   answerPrompt,
   cancelPrompt as cancelPendingPrompt,
   resetPromptResolvers,
 } from "./promptResolvers.js";
+import { createProgressCoalescer } from "./progressCoalescer.js";
 import { reduceHost } from "./reducer.js";
 import type { TranscriptItem } from "./renderModel.js";
-import { createProgressCoalescer } from "./progressCoalescer.js";
-import { printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
 import {
   appendTurnToActiveSession,
   createAndRunFirstTurn,
   type SessionDispatchResult,
 } from "./sessionController.js";
-import { stdoutWrite } from "./io.js";
 import { printUsage } from "./usage.js";
 
 export type { InteractiveResolution } from "./interactiveRenderLoop.js";
-export {
-  buildInteractiveRunResolution,
-  createInteractiveSessionIdentity,
-  rememberInteractiveContext,
-  renderPrompt,
-  resolveInteractiveInput,
-  resolveSessionScopedInteractiveCommand,
-  sessionPromptLabel,
-};
+export { buildInteractiveRunResolution, createInteractiveSessionIdentity };
+export { rememberInteractiveContext, renderPrompt, resolveInteractiveInput, sessionPromptLabel };
+export { resolveSessionScopedInteractiveCommand };
 
-/**
- * Non-interactive one-shot session: routes `bakudo plan|build|run "goal"`
- * through the v2 `sessionController.createAndRunFirstTurn` pipeline instead
- * of the legacy `orchestration.runNewSession`.
- *
- * Deliberately does NOT persist an active session marker: PR4 decision is
- * to let one-shot CLI calls stay stateless. Interactive mode is the only
- * surface that writes `.bakudo/host-state.json`.
- */
+/** Non-interactive one-shot: routes through the v2 sessionController pipeline. */
 export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<number> => {
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
@@ -91,7 +80,11 @@ export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<numbe
       return 2;
     }
   }
-  const result = await createAndRunFirstTurn(args.goal ?? "", args);
+  const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const withSession: HostCliArgs = { ...args, sessionId };
+  const storageRoot = storageRootFor(withSession.repo, withSession.storageRoot);
+  await emitUserTurnSubmitted(storageRoot, sessionId, args.goal ?? "", args.mode);
+  const result = await createAndRunFirstTurn(args.goal ?? "", withSession);
   printRunSummary(result.session, result.reviewed);
   return reviewedOutcomeExitCode(result.reviewed);
 };
@@ -194,15 +187,21 @@ const dispatchThroughController = async (
 ): Promise<SessionDispatchResult> => {
   const shell: ShellContext = deriveShellContext(deps.appState);
   const mode = overrideMode ?? composerModeToTaskMode(deps.appState.composer.mode);
-  const args = baseInteractiveArgs(mode, shell.autoApprove);
+  const baseArgs = baseInteractiveArgs(mode, shell.autoApprove);
+  // Pre-generate sessionId so user.turn_submitted lands before the dispatch.
+  const activeSessionId = deps.appState.activeSessionId;
+  const sessionId = activeSessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const args: HostCliArgs = activeSessionId === undefined ? { ...baseArgs, sessionId } : baseArgs;
+  const root = storageRootFor(args.repo, args.storageRoot);
+  await emitUserTurnSubmitted(root, sessionId, goal, deps.appState.composer.mode);
   const coalesce = createProgressCoalescer((item) => {
     deps.transcript.push(item);
   });
   const options = { onProgress: coalesce };
   try {
     return await withCapturedStdout(sinkWriter, async () => {
-      if (deps.appState.activeSessionId !== undefined) {
-        return appendTurnToActiveSession(deps.appState.activeSessionId, goal, args, options);
+      if (activeSessionId !== undefined) {
+        return appendTurnToActiveSession(activeSessionId, goal, args, options);
       }
       return createAndRunFirstTurn(goal, args, options);
     });
@@ -263,7 +262,15 @@ export const runInteractiveShell = async (): Promise<number> => {
   const repoLabel = basename(repoRoot) || repoRoot;
   const rl = createInterface({ input, output });
   const transcript: TranscriptItem[] = [];
-  const deps: TickDeps = { transcript, appState: initialHostAppState(), repoLabel };
+
+  // Load config cascade — CLI flag threading deferred to Phase 6.
+  const configSnapshot = await loadConfigCascade(repoRoot, {});
+  const deps: TickDeps = {
+    transcript,
+    appState: initialHostAppState(),
+    repoLabel,
+    config: configSnapshot.merged,
+  };
 
   resetPromptResolvers();
   const prior = await loadHostState(repoRoot);
@@ -278,7 +285,9 @@ export const runInteractiveShell = async (): Promise<number> => {
     remember: rememberInteractiveContext,
   };
 
-  const registry = buildDefaultCommandRegistry();
+  const registry = buildDefaultCommandRegistry({
+    getConfig: () => configSnapshot,
+  });
 
   const persistHostState = async (): Promise<void> => {
     try {
