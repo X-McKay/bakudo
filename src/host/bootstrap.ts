@@ -4,6 +4,15 @@ import { HOST_STATE_SCHEMA_VERSION, loadHostState } from "./hostStateStore.js";
 import type { HostStateRecord } from "./hostStateStore.js";
 import { repoRootFor } from "./orchestration.js";
 import { profileCheckpoint, profileReport } from "./startupProfiler.js";
+import {
+  HEAP_WATCHDOG_GATE_ENV,
+  HEAP_RSS_THRESHOLD_ENV,
+  isWatchdogEnabled,
+  parseThresholdEnv,
+  startHeapWatchdog,
+  type HeapWatchdogHandle,
+} from "./telemetry/heapWatchdog.js";
+import { resolveLogLevel, type LogLevel } from "./telemetry/logLevel.js";
 
 export type AboxCapabilityProbe = {
   /** Stubbed until Phase 6 Workstream 3 wires the real probe. */
@@ -18,6 +27,13 @@ export type HostBootstrap = {
   /** Merged config cascade (defaults + user + repo + env; CLI not applied here). */
   config: BakudoConfig;
   aboxCapabilities: AboxCapabilityProbe;
+  /**
+   * Resolved effective log level for this process. Wave 6c PR7 (A6.7):
+   * result of `resolveLogLevel(config → env → CLI → TTY heuristic)`.
+   * Callers that want to gate verbose output consult this instead of
+   * reading `process.env.BAKUDO_LOG_LEVEL` directly.
+   */
+  logLevel: Exclude<LogLevel, "default">;
   /** Cleanup hooks registered by bootstrap. */
   dispose: () => Promise<void>;
 };
@@ -65,13 +81,14 @@ const applySafeEnv = (): void => {
   if (env.NO_COLOR === undefined && env.FORCE_COLOR === undefined) {
     // leave unset — ansi helpers auto-detect TTY
   }
-  // BAKUDO_LOG_LEVEL placeholder; real config cascade lands in Phase 2.
-  if (env.BAKUDO_LOG_LEVEL === undefined) {
-    env.BAKUDO_LOG_LEVEL = "info";
-  }
+  // Wave 6c PR7 (A6.7): BAKUDO_LOG_LEVEL is no longer auto-populated here.
+  // The real effective level is resolved by `resolveLogLevel` from the
+  // cascade (config → env → CLI → TTY heuristic). Preserving user-set
+  // BAKUDO_LOG_LEVEL values is intentional — that env var is still a
+  // runtime override.
 };
 
-const registerShutdownHandlers = (): (() => Promise<void>) => {
+const registerShutdownHandlers = (watchdog: HeapWatchdogHandle | null): (() => Promise<void>) => {
   const proc = getProcess();
   const registered: Array<[string, () => void]> = [];
   const onTerm = (): void => {
@@ -97,8 +114,28 @@ const registerShutdownHandlers = (): (() => Promise<void>) => {
         proc.off(name, handler);
       }
     }
+    // Wave 6c PR7 (A6.6): stop the heap watchdog timer so a short-lived
+    // CLI command can exit cleanly. The interval is `.unref()`-ed at
+    // start so this is belt-and-braces, not load-bearing.
+    if (watchdog !== null) {
+      watchdog.stop();
+    }
     await profileReport();
   };
+};
+
+/**
+ * Wave 6c PR7 (A6.6) — opt-in heap-snapshot watchdog. Returns `null` when
+ * the gate env var is not set to `"1"`. The watchdog's interval is
+ * `unref()`-ed so a short-lived CLI never blocks on shutdown.
+ */
+const maybeStartHeapWatchdog = (): HeapWatchdogHandle | null => {
+  const env = getProcess()?.env ?? {};
+  if (!isWatchdogEnabled(env)) {
+    return null;
+  }
+  const thresholdBytes = parseThresholdEnv(env[HEAP_RSS_THRESHOLD_ENV]);
+  return startHeapWatchdog({ thresholdBytes });
 };
 
 const prefetchHostState = async (repoRoot: string): Promise<HostStateRecord | null> => {
@@ -124,7 +161,11 @@ export const initHost = memoize(async (): Promise<HostBootstrap> => {
 
   const repoRoot = repoRootFor(undefined);
   applySafeEnv();
-  const dispose = registerShutdownHandlers();
+  // Wave 6c PR7 (A6.6): start the opt-in heap watchdog BEFORE the async
+  // fan-out so a long-blocking fs.stat during config load is visible on
+  // the watchdog's RSS samples. Disposal cleans it up.
+  const watchdog = maybeStartHeapWatchdog();
+  const dispose = registerShutdownHandlers(watchdog);
 
   const [hostState, aboxCapabilities, configResult] = await Promise.all([
     prefetchHostState(repoRoot),
@@ -136,6 +177,20 @@ export const initHost = memoize(async (): Promise<HostBootstrap> => {
   // `experimental(flag)` can consult the cascade at the access site.
   setExperimentalConfigResolver(() => configResult.merged.experimental);
 
+  // Wave 6c PR7 (A6.7): resolve the effective log level from the cascade +
+  // env override. CLI flags are applied by hostCli after parsing; the
+  // bootstrap-level value is the "no CLI flag" baseline and is re-resolved
+  // by callers that have a CLI argv in hand.
+  const env = getProcess()?.env ?? {};
+  const tty =
+    (globalThis as unknown as { process?: { stdout?: { isTTY?: boolean } } }).process?.stdout
+      ?.isTTY === true;
+  const logLevel = resolveLogLevel({
+    ...(configResult.merged.logLevel !== undefined ? { config: configResult.merged.logLevel } : {}),
+    ...(env.BAKUDO_LOG_LEVEL !== undefined ? { env: env.BAKUDO_LOG_LEVEL } : {}),
+    isTty: tty,
+  });
+
   profileCheckpoint("preaction_done");
 
   return {
@@ -143,9 +198,13 @@ export const initHost = memoize(async (): Promise<HostBootstrap> => {
     hostState,
     config: configResult.merged,
     aboxCapabilities,
+    logLevel,
     dispose,
   };
 });
+
+/** Re-export constants for consumers that want to document the gating env. */
+export { HEAP_WATCHDOG_GATE_ENV, HEAP_RSS_THRESHOLD_ENV };
 
 /**
  * Drive `fn` under the bootstrap, guaranteeing disposal even on throw. The

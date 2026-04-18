@@ -65,12 +65,14 @@ test("HostBootstrap type includes config field", () => {
     hostState: null,
     config: { ...BakudoConfigDefaults },
     aboxCapabilities: { kind: "stub" },
+    logLevel: "info",
     dispose: async () => {},
   };
   assert.ok(stub.config);
   assert.equal(stub.config.mode, "standard");
   assert.equal(stub.config.autoApprove, false);
   assert.deepEqual(stub.config.retryDelays, BakudoConfigDefaults.retryDelays);
+  assert.equal(stub.logLevel, "info");
 });
 
 test("memoize: disposal callback invoked once under try-finally", async () => {

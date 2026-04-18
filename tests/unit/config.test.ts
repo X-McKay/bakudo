@@ -105,3 +105,48 @@ test("validateConfigLayer: strips unknown keys from valid input", () => {
   assert.equal(result.mode, "plan");
   assert.equal((result as Record<string, unknown>).unknownField, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Wave 6c PR7 review-fix B2 — `log_level` (snake_case) is the canonical
+// user-facing key per plan 06 line 944; `logLevel` (camelCase) is tolerated
+// as a backwards-compat alias. Precedence when both are present in the same
+// layer: `log_level` wins (documented form > alias).
+// ---------------------------------------------------------------------------
+
+test("BakudoConfigSchema: accepts plan-documented `log_level` snake_case key", () => {
+  const raw = { log_level: "debug" };
+  const result = BakudoConfigSchema.safeParse(raw);
+  assert.equal(result.success, true);
+  assert.ok(result.success);
+  assert.equal(result.data.logLevel, "debug");
+  // Snake-case key is normalized away from the parsed view.
+  assert.equal((result.data as Record<string, unknown>).log_level, undefined);
+});
+
+test("BakudoConfigSchema: accepts legacy `logLevel` camelCase alias for forward compat", () => {
+  const raw = { logLevel: "debug" };
+  const result = BakudoConfigSchema.safeParse(raw);
+  assert.equal(result.success, true);
+  assert.ok(result.success);
+  assert.equal(result.data.logLevel, "debug");
+});
+
+test("BakudoConfigSchema: `log_level` takes precedence over `logLevel` when both set", () => {
+  const raw = { log_level: "info", logLevel: "debug" };
+  const result = BakudoConfigSchema.safeParse(raw);
+  assert.equal(result.success, true);
+  assert.ok(result.success);
+  // Documented form wins — `logLevel` alias is overridden.
+  assert.equal(result.data.logLevel, "info");
+});
+
+test("BakudoConfigSchema: invalid `log_level` value is rejected (same enum as `logLevel`)", () => {
+  const result = BakudoConfigSchema.safeParse({ log_level: "trace" });
+  assert.equal(result.success, false);
+});
+
+test('validateConfigLayer: plan-literal `{"log_level": "debug"}` resolves to logLevel=debug', () => {
+  const resolved = validateConfigLayer({ log_level: "debug" }, "user-plan-literal");
+  assert.ok(resolved);
+  assert.equal(resolved.logLevel, "debug");
+});

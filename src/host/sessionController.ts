@@ -13,6 +13,7 @@ import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import type { ComposerMode } from "./appState.js";
 import { BakudoConfigDefaults, loadConfigCascade } from "./config.js";
 import { resolveEnvPolicyForHost } from "./envPolicy.js";
+import { resolveRedactionPolicyForHost } from "./redaction.js";
 import { emitSessionEvent, readSessionEventLog, type JsonEventSink } from "./eventLogWriter.js";
 import { executeAttempt } from "./executeAttempt.js";
 import { SessionLockBusyError, acquireSessionLock, type SessionLockHandle } from "./lockFile.js";
@@ -63,12 +64,20 @@ const buildRunnerContext = async (
       ? { configAllowlist: hostConfig.envPolicy.allowlist }
       : {},
   );
+  // Wave 6c PR7 carryover #7: build the effective redaction policy (default
+  // patterns + user-configured extras) and pass it to artifact writers so
+  // `redaction.extraTextPatterns` / `extraEnvDenyPatterns` take effect
+  // end-to-end. Mirrors the resolveEnvPolicyForHost lock-in 26 pattern —
+  // do NOT hard-code DEFAULT_REDACTION_POLICY at this site.
+  const redactionPolicy = resolveRedactionPolicyForHost({
+    ...(hostConfig.redaction !== undefined ? { configExtra: hostConfig.redaction } : {}),
+  });
   return {
     // Production entry points enforce the per-session lock; tests that
     // instantiate `SessionStore` directly continue to see the legacy
     // default (`enforceLock: false`). See plan Hard Rule 1.
     sessionStore: new SessionStore(rootDir, { enforceLock: true }),
-    artifactStore: new ArtifactStore(rootDir),
+    artifactStore: new ArtifactStore(rootDir, redactionPolicy),
     runner: new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo), undefined, envPolicy),
   };
 };
