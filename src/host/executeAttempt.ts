@@ -8,8 +8,16 @@ import { type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js"
 import type { SessionStore } from "../sessionStore.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import type { ComposerMode } from "./appState.js";
-import { createSessionEventLogWriter } from "./eventLogWriter.js";
+import {
+  extractIntendedOperation,
+  resolveApprovalBeforeDispatch,
+  type ApprovalProducerOutcome,
+  type ResolveApprovalInput,
+} from "./approvalProducer.js";
+import type { DialogDispatcher } from "./dialogLauncher.js";
+import { createSessionEventLogWriter, type EventLogWriter } from "./eventLogWriter.js";
 import { projectLegacyWorkerEvent } from "./eventProjector.js";
+import type { HookRegistry } from "./hooks.js";
 import { stdoutWrite } from "./io.js";
 import type { EventLogWriterFactory } from "./orchestration.js";
 import {
@@ -59,6 +67,19 @@ export type ExecuteAttemptContext = {
   args: HostCliArgs;
   eventLogWriterFactory?: EventLogWriterFactory;
   onProgress?: (event: WorkerTaskProgressEvent) => void;
+  /**
+   * Phase 4 PR7 — optional approval pipeline plumbing. When provided,
+   * `executeAttempt` calls `resolveApprovalBeforeDispatch` before starting
+   * the worker so deny rules short-circuit and ask-rules surface an
+   * interactive dialog. Omitted in non-interactive contexts (CLI one-shots,
+   * most unit tests) — approval is a no-op there.
+   */
+  approvalDispatcher?: DialogDispatcher;
+  hookRegistry?: HookRegistry;
+  /** Root used for the durable workspace allowlist; defaults to `spec.cwd`. */
+  repoRoot?: string;
+  /** Override for `resolveApprovalBeforeDispatch`; test hook. */
+  approvalOverride?: (input: ResolveApprovalInput) => Promise<ApprovalProducerOutcome>;
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +135,17 @@ export const executeAttempt = async (
       attemptSpec: spec,
     });
 
+    const composerMode = inferComposerMode(spec);
+
+    // Phase 4 PR7 — run the approval producer before any dispatch envelopes
+    // so deny/ask decisions short-circuit the worker entirely. The producer
+    // emits its own `host.approval_requested` / `host.approval_resolved`
+    // envelopes; `host.dispatch_started` follows only on proceed.
+    const approvalOutcome = await runApprovalIfNeeded({ ctx, writer, composerMode });
+    if (approvalOutcome.status === "blocked") {
+      return handleBlockedDispatch({ ctx, writer, rationale: approvalOutcome.rationale });
+    }
+
     await writer.append(
       buildDispatchStartedEnvelope({
         sessionId,
@@ -124,8 +156,6 @@ export const executeAttempt = async (
         assumeDangerousSkipPermissions: spec.permissions.allowAllTools,
       }),
     );
-
-    const composerMode = inferComposerMode(spec);
     const started = await recordProvenanceStart({
       storageRoot,
       sessionId,
@@ -239,4 +269,114 @@ export const executeAttempt = async (
   } finally {
     await writer.close();
   }
+};
+
+// ---------------------------------------------------------------------------
+// Approval producer integration helpers (Phase 4 PR7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the approval producer when (a) the spec has a concrete intended
+ * operation and (b) a dispatcher was threaded through. Otherwise the
+ * function no-ops and returns `"proceed"` so non-interactive callers are
+ * unchanged.
+ */
+const runApprovalIfNeeded = async (args: {
+  ctx: ExecuteAttemptContext;
+  writer: EventLogWriter;
+  composerMode: ComposerMode;
+}): Promise<ApprovalProducerOutcome> => {
+  const { ctx, writer, composerMode } = args;
+  const operation = extractIntendedOperation(ctx.spec);
+  if (operation === null) {
+    return { status: "proceed" };
+  }
+  if (ctx.approvalDispatcher === undefined && ctx.approvalOverride === undefined) {
+    // No interactive dispatcher and no test override — skip the dialog path
+    // entirely. The durable-allowlist / deny-rule evaluation fires only
+    // when the caller opts in by providing a dispatcher.
+    return { status: "proceed" };
+  }
+
+  const input: ResolveApprovalInput = {
+    storageRoot: ctx.sessionStore.rootDir,
+    repoRoot: ctx.repoRoot ?? ctx.spec.cwd,
+    spec: ctx.spec,
+    operation,
+    composerMode,
+    agentProfileName: PROFILE_NAME[composerMode],
+    writer,
+    // `dispatcher` is required by the producer surface; the test override
+    // never touches it, so a stub object satisfies the contract.
+    dispatcher: ctx.approvalDispatcher ?? {
+      getState: () => {
+        throw new Error("approvalDispatcher.getState called without a dispatcher");
+      },
+      setState: () => {
+        throw new Error("approvalDispatcher.setState called without a dispatcher");
+      },
+    },
+    ...(ctx.hookRegistry !== undefined ? { hookRegistry: ctx.hookRegistry } : {}),
+  };
+
+  if (ctx.approvalOverride !== undefined) {
+    return ctx.approvalOverride(input);
+  }
+  return resolveApprovalBeforeDispatch(input);
+};
+
+/**
+ * Produce the synthetic return value for a dispatch that was blocked by the
+ * approval producer. The turn record reflects `"blocked"` so the follow-up
+ * UI (`/retry`, `/halt`) can surface the reason; no envelope is emitted
+ * beyond what the producer already wrote.
+ */
+const handleBlockedDispatch = async (args: {
+  ctx: ExecuteAttemptContext;
+  writer: EventLogWriter;
+  rationale: string;
+}): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
+  const { ctx, rationale } = args;
+  // `args.writer` is accepted for symmetry with the proceed path and so
+  // future consumers can emit an additional "blocked" envelope here without
+  // changing the signature — the Phase 4 producer already wrote its own
+  // `host.approval_resolved` envelope before returning blocked.
+  void args.writer;
+  const { spec, sessionStore, sessionId, turnId } = ctx;
+  const blockedAt = new Date().toISOString();
+
+  await sessionStore.upsertAttempt(sessionId, turnId, {
+    attemptId: spec.attemptId,
+    status: "blocked",
+    lastMessage: rationale,
+    attemptSpec: spec,
+  });
+
+  const executionResult: AttemptExecutionResult = {
+    schemaVersion: 3,
+    attemptId: spec.attemptId,
+    taskKind: spec.taskKind,
+    status: "blocked",
+    summary: rationale,
+    exitCode: null,
+    startedAt: blockedAt,
+    finishedAt: blockedAt,
+    durationMs: 0,
+    artifacts: [],
+  };
+  const reviewed: ReviewedAttemptResult = {
+    attemptId: spec.attemptId,
+    intentId: spec.intentId,
+    status: "blocked",
+    // `policy_denied` matches the ReviewClassification surface for policy
+    // short-circuits; the reviewer normally lands here via text heuristics
+    // on worker output, but approval-denials are the same category.
+    outcome: "policy_denied",
+    action: "halt",
+    reason: rationale,
+    retryable: false,
+    needsUser: true,
+    confidence: "high",
+  };
+  return { reviewed, executionResult };
 };
