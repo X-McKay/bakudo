@@ -4,8 +4,11 @@ import type { SessionEventEnvelope } from "../protocol.js";
  * Hook-dispatch surface types and internal dispatch pipeline.
  * PR3 shipped types; PR6 delivers the dispatcher contract.
  *
- * Phase 6 will wire user-configurable hooks via the config cascade.
- * PR6 ships the internal API so Phase 6 just plugs in a config reader.
+ * Wave 6c PR9 adds a user-configurable command-hook surface specified at
+ * plan 06 lines 740–764, implemented in the sibling module
+ * `./hookCommandRunner.ts`. The existing in-process {@link dispatchHook}
+ * pipeline is retained unchanged for internal handlers (W2 recovery,
+ * W4 permissionRequest hook on the approval producer).
  */
 
 /**
@@ -173,3 +176,7 @@ export const dispatchHook = async (
 
 // Re-export kind discriminators for external consumers.
 export type { SyncHookKind, AsyncHookKind };
+
+// Wave 6c PR9 — user-configurable command-hook surface (plan 06 lines 740–764)
+// lives in `./hookCommandRunner.ts` to keep this file under the 400-LOC cap.
+// Consumers import it directly from that module.

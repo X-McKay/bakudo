@@ -16,6 +16,7 @@ import { resolveEnvPolicyForHost } from "./envPolicy.js";
 import { resolveRedactionPolicyForHost } from "./redaction.js";
 import { emitSessionEvent, readSessionEventLog, type JsonEventSink } from "./eventLogWriter.js";
 import { executeAttempt } from "./executeAttempt.js";
+import { createSessionProbeFailureEmitter } from "./workerCapabilities.js";
 import { SessionLockBusyError, acquireSessionLock, type SessionLockHandle } from "./lockFile.js";
 import {
   buildEventKindLoader,
@@ -72,13 +73,29 @@ const buildRunnerContext = async (
   const redactionPolicy = resolveRedactionPolicyForHost({
     ...(hostConfig.redaction !== undefined ? { configExtra: hostConfig.redaction } : {}),
   });
+  // Wave 6c PR9 carryover #6 — wire the deferred `worker.capability_probe_failed`
+  // diagnostic to the session event log. Runner-instance scope = session scope
+  // (the runner is constructed once per session), so runner-level dedupe
+  // satisfies the one-shot-per-session rule. See `workerCapabilities.ts` for
+  // the factory that builds the fire-and-forget emitter.
+  const probeFailureEmitter = createSessionProbeFailureEmitter({
+    storageRoot: rootDir,
+    emitSessionEvent,
+  });
+
   return {
     // Production entry points enforce the per-session lock; tests that
     // instantiate `SessionStore` directly continue to see the legacy
     // default (`enforceLock: false`). See plan Hard Rule 1.
     sessionStore: new SessionStore(rootDir, { enforceLock: true }),
     artifactStore: new ArtifactStore(rootDir, redactionPolicy),
-    runner: new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo), undefined, envPolicy),
+    runner: new ABoxTaskRunner(
+      new ABoxAdapter(args.aboxBin, args.repo),
+      undefined,
+      envPolicy,
+      undefined,
+      probeFailureEmitter,
+    ),
   };
 };
 

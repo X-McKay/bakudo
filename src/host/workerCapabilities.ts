@@ -29,7 +29,9 @@ import { promisify } from "node:util";
 import type { AttemptSpec } from "../attemptProtocol.js";
 import {
   BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION,
+  createSessionEvent,
   hostDefaultFallbackCapabilities,
+  type SessionEventEnvelope,
   type WorkerCapabilities,
 } from "../protocol.js";
 import { WorkerProtocolMismatchError } from "./errors.js";
@@ -296,4 +298,111 @@ export const negotiateAttemptAgainstCapabilities = (ctx: NegotiationContext): vo
       },
     );
   }
+};
+
+// ---------------------------------------------------------------------------
+// Wave 6c PR9 — probe-failure diagnostic (carryover #6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Payload discriminator for the deferred `worker.capability_probe_failed`
+ * diagnostic. Rides on the existing `host.event_skipped` envelope kind per
+ * lock-in 6 (no new envelope kinds; diagnostics go via the discriminator
+ * pattern W2 + W3 established). The W3 PR carried the `fallbackReason` on
+ * {@link ProbeOutcome}; this helper produces the session-event that observers
+ * (`inspect`, chronicle, JSON mode) read to learn that the probe fell back.
+ */
+export const PROBE_FAILED_SKIPPED_KIND = "worker.capability_probe_failed" as const;
+
+export type ProbeFailedEnvelopeInput = {
+  sessionId: string;
+  turnId?: string;
+  attemptId?: string;
+  bin: string;
+  outcome: ProbeOutcome;
+  /** Override timestamp — tests pin this for deterministic goldens. */
+  timestamp?: string;
+};
+
+/**
+ * Build the `host.event_skipped` envelope that reports a probe-failure
+ * fallback. Returns `null` when the outcome is from a successful probe —
+ * callers treat `null` as "nothing to emit" so dedupe becomes trivial.
+ *
+ * The payload carries:
+ *   skippedKind:    stable discriminator string (see {@link PROBE_FAILED_SKIPPED_KIND})
+ *   reason:         free-form fallbackReason from the outcome
+ *   bin:            worker bin path that failed the probe (operator-visible)
+ *   fallbackSource: capabilities.source on the outcome (always
+ *                   `"fallback_host_default"` when the diagnostic fires)
+ */
+export const buildProbeFailedSkippedEnvelope = (
+  input: ProbeFailedEnvelopeInput,
+): SessionEventEnvelope | null => {
+  if (input.outcome.capabilities.source !== "fallback_host_default") {
+    return null;
+  }
+  const reason = input.outcome.fallbackReason;
+  if (reason === undefined || reason.length === 0) {
+    return null;
+  }
+  const payload: Record<string, unknown> = {
+    skippedKind: PROBE_FAILED_SKIPPED_KIND,
+    reason,
+    bin: input.bin,
+    fallbackSource: input.outcome.capabilities.source,
+  };
+  if (input.outcome.rawOutput !== undefined) {
+    payload.rawOutput = input.outcome.rawOutput;
+  }
+  return createSessionEvent({
+    kind: "host.event_skipped",
+    sessionId: input.sessionId,
+    actor: "host",
+    payload,
+    ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+    ...(input.attemptId !== undefined ? { attemptId: input.attemptId } : {}),
+    ...(input.timestamp !== undefined ? { timestamp: input.timestamp } : {}),
+  });
+};
+
+/**
+ * Narrow callback shape for the writer used by
+ * {@link createSessionProbeFailureEmitter}. Mirrors `emitSessionEvent` from
+ * `./eventLogWriter.js` without importing it — the indirection keeps the
+ * protocol layer import-free of session-store plumbing.
+ */
+export type ProbeFailureSessionEventWriter = (
+  storageRoot: string,
+  sessionId: string,
+  envelope: SessionEventEnvelope,
+) => Promise<void>;
+
+/**
+ * Build the runner's `probeFailureEmitter` callback. The factory wraps
+ * {@link buildProbeFailedSkippedEnvelope} and a caller-supplied writer, so
+ * production construction sites don't repeat the envelope-shape wiring.
+ *
+ * Fire-and-forget — a failing writer MUST NOT break dispatch.
+ */
+export const createSessionProbeFailureEmitter = (args: {
+  storageRoot: string;
+  emitSessionEvent: ProbeFailureSessionEventWriter;
+}): ((input: { outcome: ProbeOutcome; bin: string; spec: AttemptSpec }) => void) => {
+  const { storageRoot, emitSessionEvent: writeEvent } = args;
+  return ({ outcome, bin, spec }) => {
+    const envelope = buildProbeFailedSkippedEnvelope({
+      sessionId: spec.sessionId,
+      ...(spec.turnId !== undefined ? { turnId: spec.turnId } : {}),
+      ...(spec.attemptId !== undefined ? { attemptId: spec.attemptId } : {}),
+      bin,
+      outcome,
+    });
+    if (envelope === null) {
+      return;
+    }
+    void writeEvent(storageRoot, spec.sessionId, envelope).catch(() => {
+      /* swallow — diagnostic emission MUST NOT break dispatch */
+    });
+  };
 };

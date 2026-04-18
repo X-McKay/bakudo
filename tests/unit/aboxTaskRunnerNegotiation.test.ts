@@ -66,11 +66,19 @@ test("runAttempt: probe-fail fallback still dispatches (2026-04-18 plan amendmen
     capabilities: hostDefaultFallbackCapabilities(),
     fallbackReason: "abox does not support --capabilities",
   });
-  const runner = new ABoxTaskRunner(adapter, provider);
+  // Wave 6c PR9 carryover #6 — capture the diagnostic emission alongside
+  // the existing dispatch-proceeds assertion.
+  const emitted: Array<{ outcome: ProbeOutcome; bin: string }> = [];
+  const runner = new ABoxTaskRunner(adapter, provider, undefined, undefined, ({ outcome, bin }) => {
+    emitted.push({ outcome, bin });
+  });
 
   const result = await runner.runAttempt(buildSpec());
   assert.equal(spawnCalls, 1, "host-default fallback must not block dispatch");
   assert.equal(result.ok, true);
+  assert.equal(emitted.length, 1, "probe-failure diagnostic must fire exactly once");
+  assert.equal(emitted[0]!.outcome.capabilities.source, "fallback_host_default");
+  assert.equal(emitted[0]!.outcome.fallbackReason, "abox does not support --capabilities");
 });
 
 test("runAttempt: restrictive successful probe still rejects synchronously (hard rule 267)", async () => {

@@ -97,6 +97,73 @@ export const BakudoConfigSchema = z.preprocess(
         })
         .strip()
         .optional(),
+      /**
+       * Wave 6c PR9 — user-configurable hooks (plan 06 lines 740–764).
+       * Each event-kind key maps to an ordered list of handler entries. The
+       * only shape currently accepted is `{ type: "command", command: <path> }`
+       * — the hook dispatcher spawns the command, streams the
+       * `SessionEventEnvelope` as JSON on stdin, parses stdout as a
+       * `HookResponse`, and enforces the action matrix per-kind.
+       *
+       * Schema-level validation is deliberately permissive (entries with
+       * unknown `type` are stripped to `{ command }` only); the dispatcher
+       * is the source of truth for runtime behaviour.
+       */
+      hooks: z
+        .object({
+          sessionStart: z
+            .array(
+              z
+                .object({
+                  type: z.literal("command"),
+                  command: z.string(),
+                })
+                .strip(),
+            )
+            .optional(),
+          preToolUse: z
+            .array(
+              z
+                .object({
+                  type: z.literal("command"),
+                  command: z.string(),
+                })
+                .strip(),
+            )
+            .optional(),
+          postToolUse: z
+            .array(
+              z
+                .object({
+                  type: z.literal("command"),
+                  command: z.string(),
+                })
+                .strip(),
+            )
+            .optional(),
+          permissionRequest: z
+            .array(
+              z
+                .object({
+                  type: z.literal("command"),
+                  command: z.string(),
+                })
+                .strip(),
+            )
+            .optional(),
+          sessionEnd: z
+            .array(
+              z
+                .object({
+                  type: z.literal("command"),
+                  command: z.string(),
+                })
+                .strip(),
+            )
+            .optional(),
+        })
+        .strip()
+        .optional(),
     })
     .strip(),
 );
@@ -114,6 +181,7 @@ export const BakudoConfigDefaults: Required<BakudoConfig> = {
   agents: undefined,
   envPolicy: undefined,
   redaction: undefined,
+  hooks: undefined,
 };
 
 /**
