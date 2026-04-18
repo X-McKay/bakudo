@@ -101,6 +101,8 @@ test("sessionEventKinds runtime array matches the SessionEventKind union", () =>
     "host.approval_requested",
     "host.approval_resolved",
     "host.dispatch_started",
+    "host.provenance_started",
+    "host.provenance_finalized",
     "worker.attempt_started",
     "worker.attempt_progress",
     "worker.attempt_completed",

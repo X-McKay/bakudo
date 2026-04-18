@@ -274,3 +274,31 @@ export const listTurnLineage = async (
     return deriveAttemptLineage(attempt, sliced);
   });
 };
+
+// ---------------------------------------------------------------------------
+// Provenance — Phase 4 PR2 additions
+// ---------------------------------------------------------------------------
+
+import {
+  listSessionProvenance as listSessionProvenanceInStore,
+  listTurnProvenance as listTurnProvenanceInStore,
+  loadProvenance as loadProvenanceInStore,
+  type ProvenanceRecord,
+} from "./provenance.js";
+
+export const loadAttemptProvenance = async (
+  storageRoot: string,
+  sessionId: string,
+  attemptId: string,
+): Promise<ProvenanceRecord | null> => loadProvenanceInStore(storageRoot, sessionId, attemptId);
+
+export const listTurnProvenanceRecords = async (
+  storageRoot: string,
+  sessionId: string,
+  turnId: string,
+): Promise<ProvenanceRecord[]> => listTurnProvenanceInStore(storageRoot, sessionId, turnId);
+
+export const listSessionProvenanceRecords = async (
+  storageRoot: string,
+  sessionId: string,
+): Promise<ProvenanceRecord[]> => listSessionProvenanceInStore(storageRoot, sessionId);
