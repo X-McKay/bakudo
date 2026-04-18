@@ -42,6 +42,7 @@ import {
   resolveSessionScopedInteractiveCommand,
   sessionPromptLabel,
 } from "./interactiveResolvers.js";
+import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 import { repoRootFor, resumeSession, storageRootFor } from "./orchestration.js";
 import { parseHostArgs, tokenizeCommand, type HostCliArgs } from "./parsing.js";
 import {
@@ -78,6 +79,12 @@ import { runNonInteractiveOneShot } from "./oneShotRun.js";
 export { runNonInteractiveOneShot };
 
 export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
+  // Wave 6d PR11 review blocker B2: user-initiated top-level dispatch — one
+  // increment per invocation. `dispatchHostCommand` has a single caller
+  // (`hostCli.ts`) and does not recurse, so double-counting is not possible
+  // from the current call graph. If a future refactor adds a recursive
+  // internal dispatch, this site needs to be guarded.
+  getMetricsRecorder().incWorkflowCommand();
   if (args.command === "help") {
     return dispatchHelpCommand(args);
   }

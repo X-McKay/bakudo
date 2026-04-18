@@ -28,8 +28,6 @@ import {
   describeTerminalCapability,
   rendererBackendName,
   type DoctorCheckResult,
-  type DoctorStatus,
-  type RendererBackendName,
   worstStatus,
 } from "../doctorCheck.js";
 import { stdoutWrite } from "../io.js";
@@ -38,87 +36,19 @@ import { validateBindings } from "../keybindings/validate.js";
 import { repoRootFor, storageRootFor } from "../orchestration.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
-import {
-  resolveEffectiveRedactionPolicy,
-  summarizeRedactionPolicy,
-  type RedactionPolicySummary,
-} from "../redaction.js";
+import { resolveEffectiveRedactionPolicy, summarizeRedactionPolicy } from "../redaction.js";
 import { countSpanFilesOnDisk, describeOtlpEndpoint } from "../telemetry/otelSpans.js";
 import { bakudoLogDir } from "../telemetry/xdgPaths.js";
 import { buildMetricsSection, type DoctorMetricsSection } from "../metrics/doctorMetricsSection.js";
 import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
-import { describeUiMode, getActiveUiMode, type UiMode } from "../uiMode.js";
+import { describeUiMode, getActiveUiMode } from "../uiMode.js";
 import { computeStorageTotalBytes } from "./cleanup.js";
 
-/**
- * Envelope produced by `bakudo doctor --output-format=json`. Key names
- * are load-bearing for automation — treat as a stable contract.
- */
-export type DoctorEnvelope = {
-  name: "bakudo-doctor";
-  bakudoVersion: string;
-  status: DoctorStatus;
-  checks: DoctorCheckResult[];
-  node: { runtime: string; required: number };
-  abox: { available: boolean; version?: string; capabilities: string; bin: string };
-  rendererBackend: RendererBackendName;
-  agentProfile: string;
-  configCascadePaths: string[];
-  keybindingsPath: string;
-  keybindingsConflicts: string[];
-  terminal: {
-    isTty: boolean;
-    supportsAnsi: boolean;
-    noColor: boolean;
-    term?: string;
-    colorfgbg?: string;
-  };
-  /**
-   * Phase 6 Wave 6c PR7 — local-only OTel telemetry status (plan line 870).
-   * `spansOnDisk` counts `spans-*.json` files in the bakudo log dir;
-   * `droppedEventBatches` echoes the classic durability counter; `otlp`
-   * describes the export endpoint (yes/no + host, NEVER bearer token).
-   */
-  telemetry: {
-    enabled: boolean;
-    note: string;
-    logDir: string;
-    spansOnDisk: number;
-    droppedEventBatches: number;
-    otlp: { configured: boolean; host?: string };
-  };
-  /**
-   * Active UI rollout mode for the invocation (Phase 6 W1). Copy this into
-   * bug reports along with `bakudoVersion` — plan 06 hard rule 3 requires
-   * the mode be recorded so a report specifies which surface the user hit.
-   */
-  uiMode: { active: UiMode; description: string };
-  /**
-   * Phase 6 W4 — storage footprint + active retention policy snapshot.
-   * Surfaced in `bakudo doctor` so operators can spot growth without
-   * running a full `bakudo cleanup --dry-run`. Additive — older automation
-   * that does not know about this field continues to parse cleanly.
-   */
-  storage: {
-    storageRoot: string;
-    totalArtifactBytes: number;
-    retentionPolicy: {
-      intermediateMaxAgeMs: number;
-      intermediateKinds: ReadonlyArray<string>;
-      protectedKinds: ReadonlyArray<string>;
-    };
-  };
-  /**
-   * Phase 6 W5 hard rule 384 — the active redaction / env-allowlist policy
-   * summary so operators can tell at a glance whether secret scrubbing is
-   * enabled. Counts only; pattern bodies are not surfaced (the patterns
-   * themselves are not secret but users don't benefit from seeing them).
-   */
-  redaction: RedactionPolicySummary;
-  /** Phase 6 Wave 6d PR11 — W7 metrics snapshot (plan lines 430-440). */
-  metrics: DoctorMetricsSection;
-};
-
+// PR11 review N3 — the `DoctorEnvelope` type moved to `doctorEnvelopeTypes.ts`
+// so this file stays under the 400-LOC cap. Re-export keeps the existing
+// import path (`./commands/doctor.js`) stable for callers and tests.
+export type { DoctorEnvelope } from "./doctorEnvelopeTypes.js";
+import type { DoctorEnvelope } from "./doctorEnvelopeTypes.js";
 export type { DoctorMetricsSection };
 
 export type DoctorContext = {
@@ -260,7 +190,9 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     conflictCheck,
     telemetryCheck,
   ];
-
+  // PR11 review N3 — share the singleton `droppedEventBatches` across the
+  // `telemetry` and `metrics` fields instead of hard-coding zero.
+  const metricsSection = buildMetricsSection();
   const envelope: DoctorEnvelope = {
     name: "bakudo-doctor",
     bakudoVersion: BAKUDO_VERSION,
@@ -300,7 +232,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
           : "local-only (spans recorded on disk; no OTLP export)",
       logDir,
       spansOnDisk,
-      droppedEventBatches: 0,
+      droppedEventBatches: metricsSection.droppedEventBatches,
       otlp:
         otlp.host === undefined
           ? { configured: otlp.configured }
@@ -322,7 +254,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
     redaction: summarizeRedactionPolicy(
       resolveEffectiveRedactionPolicy(cascade.merged.redaction ?? undefined),
     ),
-    metrics: buildMetricsSection(),
+    metrics: metricsSection,
   };
 
   return envelope;

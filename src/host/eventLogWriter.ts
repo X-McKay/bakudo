@@ -6,6 +6,7 @@ import { z } from "zod";
 import { createSessionEvent, type SessionEventEnvelope } from "../protocol.js";
 import { createSessionPaths } from "../sessionStore.js";
 import { stderrWrite } from "./io.js";
+import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 
 /**
  * Append-only NDJSON writer for the v2 session event log. Buffered flush on
@@ -284,6 +285,12 @@ export const createSessionEventLogWriter = (
       }
     }
     droppedBatchCount += 1;
+    // Wave 6d PR11 review blocker B3: mirror the drop into the process-wide
+    // metrics singleton so `bakudo metrics`, `bakudo doctor`, and the
+    // `metrics.droppedEventBatches` section surface the live value. The
+    // writer-local counter stays intact for the ergonomic
+    // `writer.getDroppedBatchCount()` API.
+    getMetricsRecorder().incDroppedBatch();
     const { code, message } = extractErrorFields(lastError);
     stderrWrite(
       `[bakudo.events] dropped batch of ${batch.length} envelopes for session ${sessionId}: ${code} ${message}\n`,
@@ -307,6 +314,9 @@ export const createSessionEventLogWriter = (
     const serialized = `${JSON.stringify(envelope)}\n`;
     if (serialized.length > OVERSIZED_ENVELOPE_BYTES) {
       droppedBatchCount += 1;
+      // Wave 6d PR11 review blocker B3: mirror the drop into the process-wide
+      // metrics singleton (see the retry-exhaustion site above for context).
+      getMetricsRecorder().incDroppedBatch();
       stderrWrite(
         `[bakudo.events] dropped batch of 1 envelopes for session ${sessionId}: EOVERSIZE envelope ${serialized.length} bytes exceeds ${OVERSIZED_ENVELOPE_BYTES}\n`,
       );

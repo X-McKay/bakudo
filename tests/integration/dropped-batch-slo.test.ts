@@ -30,7 +30,12 @@ import {
   createSessionEventLogWriter,
   FLUSH_INTERVAL_MS,
   FLUSH_SIZE_ENTRIES,
+  OVERSIZED_ENVELOPE_BYTES,
 } from "../../src/host/eventLogWriter.js";
+import {
+  getMetricsRecorder,
+  resetMetricsRecorderForTest,
+} from "../../src/host/metrics/metricsRecorder.js";
 import { createSessionEvent } from "../../src/protocol.js";
 
 const makeEnvelope = (sessionId: string, seq: number) =>
@@ -123,6 +128,89 @@ test(
       // larger than any plausible flush interval, so the writer had every
       // opportunity to drain pending entries.
       void FLUSH_INTERVAL_MS;
+    } finally {
+      await rm(storageRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Assertion 3 — B3: the live singleton `MetricsRecorder` mirrors the drop
+// ---------------------------------------------------------------------------
+
+test(
+  "dropped-batch SLO: retry-exhaustion drop increments the metrics singleton (B3)",
+  { timeout: 10_000 },
+  async () => {
+    // Wave 6d PR11 review blocker B3: until this wiring, the writer's local
+    // `droppedBatchCount` was the only counter; `bakudo metrics` / `bakudo
+    // doctor.metrics.droppedEventBatches` always read zero. Force an
+    // exhaustive-retry failure and confirm the singleton now mirrors it.
+    resetMetricsRecorderForTest();
+    const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-slo-b3-retry-"));
+    try {
+      const writer = createSessionEventLogWriter(storageRoot, "session-b3-retry", {
+        // Every append fails with a retryable EAGAIN → the writer walks the
+        // full 5-entry retry ladder and drops the batch.
+        appendFileImpl: async () => {
+          const err = new Error("synthetic EAGAIN") as NodeJS.ErrnoException;
+          err.code = "EAGAIN";
+          throw err;
+        },
+        sleepImpl: async () => undefined,
+      });
+      // One envelope is enough; the flush cadence is entry-count + size +
+      // interval, but `close()` forces a final flush regardless.
+      await writer.append(makeEnvelope("session-b3-retry", 0));
+      await writer.close();
+
+      const localDropped = writer.getDroppedBatchCount();
+      assert.ok(localDropped > 0, "writer-local drop counter must fire on retry exhaustion");
+      const singletonDropped = getMetricsRecorder().snapshot().droppedEventBatches;
+      assert.equal(
+        singletonDropped,
+        localDropped,
+        "singleton droppedEventBatches must mirror the writer-local counter exactly",
+      );
+    } finally {
+      await rm(storageRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "dropped-batch SLO: oversized envelope drop increments the metrics singleton (B3)",
+  { timeout: 10_000 },
+  async () => {
+    // The second `droppedBatchCount += 1` site is the oversized-envelope
+    // guard (serialized > 256 KiB). Build one that trips the limit and
+    // confirm the singleton mirror fires there too.
+    resetMetricsRecorderForTest();
+    const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-slo-b3-oversize-"));
+    try {
+      const writer = createSessionEventLogWriter(storageRoot, "session-b3-oversize", {
+        appendFileImpl: async () => {
+          // Should never be reached — oversize is rejected before flush.
+        },
+      });
+      const bigPayload = "x".repeat(OVERSIZED_ENVELOPE_BYTES + 1024);
+      const bigEnv = createSessionEvent({
+        kind: "host.event_skipped",
+        sessionId: "session-b3-oversize",
+        actor: "host",
+        payload: { skippedKind: "metric.oversize_probe", giant: bigPayload },
+      });
+      await writer.append(bigEnv);
+      await writer.close();
+
+      const localDropped = writer.getDroppedBatchCount();
+      assert.ok(localDropped >= 1, "oversize envelope must register a local drop");
+      const singletonDropped = getMetricsRecorder().snapshot().droppedEventBatches;
+      assert.ok(
+        singletonDropped >= 1,
+        "singleton droppedEventBatches must record the oversize drop",
+      );
+      assert.equal(singletonDropped, localDropped, "local + singleton counters must agree");
     } finally {
       await rm(storageRoot, { recursive: true, force: true });
     }

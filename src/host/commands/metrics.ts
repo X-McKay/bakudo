@@ -11,8 +11,10 @@
  */
 
 import type { HostCommandSpec } from "../commandRegistry.js";
+import { buildJsonErrorEnvelope } from "../errors.js";
 import { stdoutWrite } from "../io.js";
 import { getMetricsRecorder, METRIC_NAMES } from "../metrics/metricsRecorder.js";
+import { argvRequestsJson } from "./jsonFormatDetection.js";
 
 export type MetricsCommandArgs = {
   format: "text" | "json";
@@ -128,7 +130,17 @@ export const runMetricsCommand = async (
 ): Promise<{ report?: MetricsReport; exitCode: number; error?: string }> => {
   const parsed = parseMetricsArgs(input.args, input.stdoutIsTty ?? false);
   if (!parsed.ok) {
-    stdoutWrite(`${parsed.error}\n`);
+    // Wave 6d PR11 review (lock-in 19) — when the caller requested
+    // `--format=json` (or is running non-TTY which implies machine-readable
+    // per lock-in 12), surface the parse error through the canonical
+    // `{ok:false, kind:"error", error:{...}}` envelope instead of the plain
+    // line. The plain-text path is preserved for interactive TTY callers.
+    if (argvRequestsJson(input.args, input.stdoutIsTty)) {
+      const envelope = buildJsonErrorEnvelope({ code: "user_input", message: parsed.error });
+      stdoutWrite(`${JSON.stringify(envelope)}\n`);
+    } else {
+      stdoutWrite(`${parsed.error}\n`);
+    }
     return { exitCode: 2, error: parsed.error };
   }
   const report = buildMetricsReport();

@@ -16,7 +16,21 @@
  * .performance` shim for uniform test behavior on Node 22).
  */
 
-/** Canonical names of the six required metrics from plan 06 lines 430-440. */
+/**
+ * Canonical names of the six required metrics from plan 06 lines 430-440.
+ *
+ * Wave 6d PR11 review blocker B2: PR11 wires **two** producers in production
+ * — `shell.startup_ms` (from `bootstrap.initHost` → first render-loop paint
+ * in `createSessionRenderer`) and `workflow.command_count` (one increment
+ * per top-level `dispatchHostCommand` call). The other four metrics
+ * (`render.ttfr_ms`, `prompt.to_host_line_ms`, `worker.to_review_ms`,
+ * `session.list_ms`) are exercised today through
+ * `tests/unit/metricsThresholds.test.ts` + `benchmarkHarness` and their
+ * production producer wiring is explicitly deferred to the cleanup PR that
+ * lands alongside PR7 N1 telemetry wiring. Removing them from
+ * `METRIC_NAMES` now would break the schema contract `bakudo doctor` and
+ * `bakudo metrics` publish — so we leave them declared and producer-less.
+ */
 export const METRIC_NAMES = [
   /** 1. shell startup latency on TTY (from process start to render-loop-ready) */
   "shell.startup_ms",
@@ -65,6 +79,14 @@ export type MetricSnapshot = {
   totalMeasurements: number;
   /** Wall-clock time the snapshot was taken (ISO 8601 UTC). */
   takenAt: string;
+  /**
+   * Process-lifetime mirror of the append-only event-log writer's dropped-
+   * batch counter (Wave 6d PR11 review B3). `eventLogWriter` calls
+   * {@link MetricsRecorder.incDroppedBatch} at both drop sites so consumers
+   * of the snapshot (`bakudo metrics`, `bakudo doctor`) surface the live
+   * value without having to reach into every individual writer closure.
+   */
+  droppedEventBatches: number;
 };
 
 const perfNow = (): number => {
@@ -200,6 +222,7 @@ export class MetricsRecorder {
       aggregates,
       totalMeasurements: this.measurements.length,
       takenAt: new Date().toISOString(),
+      droppedEventBatches: this.droppedEventBatches,
     };
   }
 }

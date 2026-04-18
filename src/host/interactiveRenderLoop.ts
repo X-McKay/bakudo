@@ -3,6 +3,7 @@ import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import type { ComposerMode, HostAppState } from "./appState.js";
 import type { BakudoConfig } from "./config.js";
 import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
+import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 import type { HostCliArgs } from "./parsing.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
@@ -183,6 +184,12 @@ export const createSessionRenderer = (): {
 } => {
   const stdout = stdoutAsRendererStdout();
   const backend = selectRendererBackend({ stdout });
+  // Wave 6d PR11 review blocker B2: the first paint of the session renderer
+  // is the plan's "time-to-first-render" hook point (plan 06 line 437). On
+  // the first tick we close the `shell.startup_begin` → `shell.startup_done`
+  // pair bootstrap opens at `initHost`, so `bakudo metrics` surfaces real
+  // shell-startup latency in the wild instead of always zero.
+  let firstPaintRecorded = false;
   const tick = (deps: TickDeps): void => {
     const frame = selectRenderFrame({
       state: deps.appState,
@@ -190,6 +197,12 @@ export const createSessionRenderer = (): {
       ...(deps.repoLabel !== undefined ? { repoLabel: deps.repoLabel } : {}),
     });
     backend.render(frame);
+    if (!firstPaintRecorded) {
+      firstPaintRecorded = true;
+      const recorder = getMetricsRecorder();
+      recorder.mark("shell.startup_done");
+      recorder.measureBetween("shell.startup_ms", "shell.startup_begin", "shell.startup_done");
+    }
   };
   return { tick, backend };
 };

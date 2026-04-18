@@ -132,3 +132,41 @@ test("runMetricsCommand: --format=xml (invalid value) returns exit code 2", asyn
   assert.equal(result.exitCode, 2);
   assert.match(result.error ?? "", /text.*json|'text'.*'json'/u);
 });
+
+test("runMetricsCommand: parse error in JSON mode emits canonical error envelope (lock-in 19)", async () => {
+  // Wave 6d PR11 review blocker B1: when the caller asked for `--format=json`
+  // and the argv parser then rejects an *adjacent* typo, we must surface the
+  // failure as `{ok:false, kind:"error", error:{code,message,details?}}`
+  // instead of a plain line. Mirrors the PR8 precedent in chronicle / usage.
+  resetMetricsRecorderForTest();
+  const cap = capture();
+  const result = await withCapturedStdout(cap.writer, () =>
+    runMetricsCommand({ args: ["--sinc", "1d", "--format=json"], stdoutIsTty: false }),
+  );
+  assert.equal(result.exitCode, 2);
+  const body = cap.chunks.join("").trim();
+  const parsed = JSON.parse(body) as {
+    ok: boolean;
+    kind: string;
+    error: { code: string; message: string };
+  };
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.kind, "error");
+  assert.equal(parsed.error.code, "user_input");
+  assert.ok(parsed.error.message.length > 0);
+});
+
+test("runMetricsCommand: parse error in text mode still emits a plain diagnostic line", async () => {
+  // Confirm the plain-text path is preserved for interactive TTY callers —
+  // only JSON-requesting callers get the envelope.
+  resetMetricsRecorderForTest();
+  const cap = capture();
+  const result = await withCapturedStdout(cap.writer, () =>
+    runMetricsCommand({ args: ["--sinc", "1d", "--format=text"], stdoutIsTty: true }),
+  );
+  assert.equal(result.exitCode, 2);
+  const body = cap.chunks.join("").trim();
+  // Not JSON: trying to parse throws.
+  assert.throws(() => JSON.parse(body));
+  assert.ok(body.includes("metrics:"));
+});
