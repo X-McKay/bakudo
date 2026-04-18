@@ -17,6 +17,8 @@ export type HostCommand =
   | "help"
   | "doctor"
   | "cleanup"
+  | "usage"
+  | "chronicle"
   | "version";
 
 /**
@@ -88,6 +90,19 @@ export type HostCliArgs = {
    * surface without polluting the top-level shape.
    */
   cleanupArgs?: string[];
+  /**
+   * Phase 6 Wave 6c PR8 — raw flag/value tokens forwarded to the `usage`
+   * command's own parser (`--session <id>`, `--since <dur>`, `--format
+   * text|json`). Kept opaque so the command module owns its own surface.
+   */
+  usageArgs?: string[];
+  /**
+   * Phase 6 Wave 6c PR8 — raw flag/value tokens forwarded to the `chronicle`
+   * command's own parser (`--since <dur>`, `--tool <name>`, `--approval
+   * denied`, `--session <id>`, `--format text|json`, `--limit <n>`). Kept
+   * opaque so the command module owns its own surface.
+   */
+  chronicleArgs?: string[];
 };
 
 export const HOST_COMMANDS = new Set<HostCommand>([
@@ -105,6 +120,8 @@ export const HOST_COMMANDS = new Set<HostCommand>([
   "help",
   "doctor",
   "cleanup",
+  "usage",
+  "chronicle",
   "version",
 ]);
 
@@ -260,6 +277,26 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       continue;
     }
     if (arg === "--session-id" || arg.startsWith("--session-id=")) {
+      // Phase 6 Wave 6c PR8 — `bakudo usage` / `bakudo chronicle` do not take
+      // `--session-id`; their session selector is `--session`. Instead of
+      // silently swallowing the value into `result.sessionId` (which the
+      // dispatchers ignore for these commands), forward the tokens to the
+      // subcommand passthrough list. The subcommand parser recognises
+      // `--session-id` and returns a helpful "did you mean --session" error
+      // so the parse-error surface (plain text or JSON envelope) is shared
+      // with every other subcommand-arg validation failure.
+      if (result.command === "usage" || result.command === "chronicle") {
+        const target: string[] =
+          result.command === "usage"
+            ? (result.usageArgs = result.usageArgs ?? [])
+            : (result.chronicleArgs = result.chronicleArgs ?? []);
+        target.push(arg);
+        if (!arg.includes("=") && argv[i + 1] !== undefined) {
+          target.push(argv[i + 1] as string);
+          i += 1;
+        }
+        continue;
+      }
       const { value, consumed } = readLongFlag(argv, i, "--session-id");
       result.sessionId = value;
       i += consumed - 1;
@@ -349,6 +386,25 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       continue;
     }
 
+    // Phase 6 Wave 6c PR8 — `bakudo usage` + `bakudo chronicle` forward their
+    // own flag namespaces to the command module so the contract stays local.
+    // Any `--foo` / `--foo=bar` / `--foo bar` pair is passed through verbatim.
+    if ((result.command === "usage" || result.command === "chronicle") && arg.startsWith("--")) {
+      const target: string[] =
+        result.command === "usage"
+          ? (result.usageArgs = result.usageArgs ?? [])
+          : (result.chronicleArgs = result.chronicleArgs ?? []);
+      target.push(arg);
+      // If the flag has no `=` form AND the next token does not start with
+      // `--`, treat it as the flag's value (e.g. `--since 24h`).
+      const next = argv[i + 1];
+      if (!arg.includes("=") && next !== undefined && !next.startsWith("--")) {
+        target.push(next);
+        i += 1;
+      }
+      continue;
+    }
+
     if (arg.startsWith("--")) {
       throw new Error(`unknown option: ${arg}`);
     }
@@ -427,6 +483,12 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
   } else if (result.command === "cleanup") {
     if (positionals.length > 0) {
       throw new Error("cleanup does not accept positional arguments");
+    }
+  } else if (result.command === "usage" || result.command === "chronicle") {
+    // Positionals are not meaningful for these commands (all selection flows
+    // through flags). Bail early with a clear error so typos surface.
+    if (positionals.length > 0) {
+      throw new Error(`${result.command} does not accept positional arguments`);
     }
   }
 

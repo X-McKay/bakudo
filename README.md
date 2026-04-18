@@ -229,6 +229,32 @@ Use `/allow-all on|off|show` to manage the session-scoped `allow_all_tools` rule
 
 `/timeline` opens a turn-level rollback picker. Each row shows `turn-N status agent-profile · brief goal summary · timestamp`. Selecting a row offers `inspect this turn` (read-only) or `restart from this turn` (creates a new turn whose `parentTurnId` is the selected turn and writes a `TurnTransition { reason: "user_rewind" }`).
 
+### /usage
+
+`bakudo usage` / `/usage` reports per-session token + attempt totals derived from the Phase 2 append-only event log. No new envelope kinds are introduced; the reader tolerates payloads with or without token accounting.
+
+```bash
+bakudo usage --session <id>            # rollup for one session (TTY table)
+bakudo usage --since 7d                # last week across every session
+bakudo usage --format json             # machine-readable envelope
+```
+
+In the shell, `/usage` defaults to the active session. Flags supported: `--session <id>`, `--since <duration>`, `--format text|json`.
+
+### /chronicle
+
+`bakudo chronicle` / `/chronicle` queries the cross-session event log (the same indexed store `/inspect` reads) so operators have a scriptable audit surface without ad hoc log greps. Plan reference: [`plans/bakudo-ux/06-rollout-reliability-and-operability.md:782-791`](../plans/bakudo-ux/06-rollout-reliability-and-operability.md).
+
+```bash
+bakudo chronicle --since 7d            # envelopes newer than 7 days
+bakudo chronicle --tool shell          # envelopes whose payload references a tool
+bakudo chronicle --approval denied     # host.approval_resolved with denied / auto_denied
+bakudo chronicle --session <id>        # restrict to a single session
+bakudo chronicle --format json         # NDJSON stream (one envelope per line)
+```
+
+Filters are ANDed. In the shell, `/chronicle` defaults to `--since 24h --session <active>`.
+
 ### Provenance
 
 Every dispatch persists a `ProvenanceRecord` to `<storage>/<session>/provenance.ndjson` with:

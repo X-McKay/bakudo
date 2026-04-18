@@ -61,3 +61,45 @@ export const dispatchCleanupCommand = async (args: HostCliArgs): Promise<number>
   });
   return result.exitCode;
 };
+
+/**
+ * TTY probe: caller passes the isTty bit so the command can pick the
+ * default `--format` (text for interactive stdout, json otherwise — plan
+ * lock-in 12 is honoured because `--format json` never touches the
+ * renderer registry).
+ */
+const probeStdoutIsTty = (): boolean => {
+  const proc = (globalThis as unknown as { process?: { stdout?: { isTTY?: boolean } } }).process;
+  return proc?.stdout?.isTTY === true;
+};
+
+/**
+ * Phase 6 Wave 6c PR8 — dispatch path for `bakudo usage`. Mirrors
+ * {@link dispatchCleanupCommand}: forward raw flag tokens to the command
+ * module so the flag contract stays local.
+ */
+export const dispatchUsageCommand = async (args: HostCliArgs): Promise<number> => {
+  const { runUsageCommand } = await import("./commands/usage.js");
+  const result = await runUsageCommand({
+    args: args.usageArgs ?? [],
+    repoRoot: repoRootFor(args.repo),
+    stdoutIsTty: probeStdoutIsTty(),
+    ...(args.storageRoot !== undefined ? { storageRoot: args.storageRoot } : {}),
+  });
+  return result.exitCode;
+};
+
+/**
+ * Phase 6 Wave 6c PR8 — dispatch path for `bakudo chronicle`. Same shape
+ * as the `usage` dispatcher; the command module owns parse + filter.
+ */
+export const dispatchChronicleCommand = async (args: HostCliArgs): Promise<number> => {
+  const { runChronicleCommand } = await import("./commands/chronicle.js");
+  const result = await runChronicleCommand({
+    args: args.chronicleArgs ?? [],
+    repoRoot: repoRootFor(args.repo),
+    stdoutIsTty: probeStdoutIsTty(),
+    ...(args.storageRoot !== undefined ? { storageRoot: args.storageRoot } : {}),
+  });
+  return result.exitCode;
+};
