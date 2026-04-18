@@ -9,9 +9,12 @@ import type { SessionTurnRecord } from "../../src/sessionTypes.js";
 import {
   buildTimelineRows,
   inspectTimelineTurn,
+  launchTimelinePicker,
   parseTimelineSelection,
   restartFromTurn,
+  TIMELINE_PICKER_ACTION_ID,
 } from "../../src/host/commands/timeline.js";
+import { clearKeybindings, getKeybindingsFor } from "../../src/host/keybindings/hooks.js";
 import { listTurnTransitions } from "../../src/host/transitionStore.js";
 
 const withTempRoot = async (fn: (root: string) => Promise<void>): Promise<void> => {
@@ -191,4 +194,38 @@ test("inspectTimelineTurn: missing turn surfaces an error line", async () => {
     const lines = await inspectTimelineTurn(root, "session-inspect-miss", "turn-nope");
     assert.match(lines.join("\n"), /not found/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5 PR8 — Double-Esc chord plumbing.
+// ---------------------------------------------------------------------------
+
+test("TIMELINE_PICKER_ACTION_ID: stable action ID used by the Composer binding", () => {
+  assert.equal(TIMELINE_PICKER_ACTION_ID, "app:timelinePicker");
+});
+
+test("launchTimelinePicker: registers handler under Composer → app:timelinePicker", () => {
+  clearKeybindings();
+  let fired = 0;
+  const dispose = launchTimelinePicker(() => {
+    fired += 1;
+  });
+  try {
+    const handlers = getKeybindingsFor("Composer");
+    const handler = handlers.get(TIMELINE_PICKER_ACTION_ID);
+    assert.ok(handler !== undefined);
+    handler?.({ action: TIMELINE_PICKER_ACTION_ID });
+    assert.equal(fired, 1);
+  } finally {
+    dispose();
+    clearKeybindings();
+  }
+});
+
+test("launchTimelinePicker: disposer clears the registration", () => {
+  clearKeybindings();
+  const dispose = launchTimelinePicker(() => {});
+  dispose();
+  const handlers = getKeybindingsFor("Composer");
+  assert.equal(handlers.get(TIMELINE_PICKER_ACTION_ID), undefined);
 });

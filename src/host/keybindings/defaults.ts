@@ -82,16 +82,20 @@ export const buildDefaultBindings = (
         [modeCycleKey]: "composer:cycleMode",
         enter: "composer:submit",
         "ctrl+x ctrl+k": "composer:killAgents",
+        "escape escape": "app:timelinePicker",
       },
     },
     {
       context: "Inspect",
       bindings: {
         tab: "inspect:tabNext",
+        "shift+tab": "inspect:tabPrev",
         pageup: "inspect:scrollUp",
         "ctrl+u": "inspect:scrollUp",
         pagedown: "inspect:scrollDown",
         "ctrl+d": "inspect:scrollDown",
+        home: "inspect:scrollHome",
+        end: "inspect:scrollEnd",
       },
     },
     {

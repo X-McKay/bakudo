@@ -60,6 +60,13 @@ export type ApprovalPromptRequest = {
 };
 
 /**
+ * Count of options the approval prompt cursor cycles through: [1] allow
+ * once, [2] allow always, [3] deny, [4] show context. Exported so reducers
+ * and renderers stay in sync with the option list in `approvalPromptCopy`.
+ */
+export const APPROVAL_DIALOG_CURSOR_COUNT = 4;
+
+/**
  * Payload carried on a `command_palette` prompt entry. `items` is the full
  * command list (name + description), populated by the launcher. `input`
  * holds the current filter text, and `selectedIndex` is the highlighted row
@@ -103,9 +110,27 @@ export type HostOverlay =
   | { kind: "command_palette"; request: CommandPaletteRequest }
   | { kind: "session_picker"; request: SessionPickerPayload }
   | { kind: "approval"; message: string }
-  | { kind: "approval_prompt"; request: ApprovalPromptRequest }
+  | { kind: "approval_prompt"; request: ApprovalPromptRequest; cursorIndex: number }
   | { kind: "resume_confirm"; message: string }
   | { kind: "timeline_picker" };
+
+/**
+ * Windowed-scroll state for the Inspect pane. `scrollOffset` is the index
+ * of the first visible line within the active tab's formatted output;
+ * `scrollHeight` is the viewport height reported by the renderer (number
+ * of lines that fit at once). The reducer clamps `scrollOffset` against
+ * the formatted content length at the call site — total content length is
+ * unknown to the reducer, so the renderer's windowing helper handles the
+ * final clamp. See `inspectScroll.ts`.
+ */
+export type InspectState = {
+  sessionId?: string;
+  turnId?: string;
+  attemptId?: string;
+  tab: InspectTab;
+  scrollOffset: number;
+  scrollHeight: number;
+};
 
 export type HostAppState = {
   screen: HostScreen;
@@ -116,22 +141,31 @@ export type HostAppState = {
   };
   activeSessionId?: string;
   activeTurnId?: string;
-  inspect: {
-    sessionId?: string;
-    turnId?: string;
-    attemptId?: string;
-    tab: InspectTab;
-  };
+  inspect: InspectState;
   promptQueue: ReadonlyArray<PromptEntry>;
   notices: string[];
+  /**
+   * Cursor index for the approval prompt's [1]/[2]/[3]/[4] option list.
+   * Shift+Tab cycles through the options (see `reducer` actions
+   * `approval_dialog_cursor_*`). Always in `[0, APPROVAL_DIALOG_CURSOR_COUNT)`.
+   */
+  approvalDialogCursor: number;
 };
 
 export const deriveAutoApprove = (mode: ComposerMode): boolean => mode === "autopilot";
 
+/** Default viewport height when the renderer has not reported one yet. */
+export const DEFAULT_INSPECT_SCROLL_HEIGHT = 20;
+
 export const initialHostAppState = (): HostAppState => ({
   screen: "transcript",
   composer: { mode: "standard", autoApprove: false, text: "" },
-  inspect: { tab: "summary" },
+  inspect: {
+    tab: "summary",
+    scrollOffset: 0,
+    scrollHeight: DEFAULT_INSPECT_SCROLL_HEIGHT,
+  },
   promptQueue: [],
   notices: [],
+  approvalDialogCursor: 0,
 });

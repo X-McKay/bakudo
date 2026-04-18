@@ -35,6 +35,11 @@ test("DEFAULT_BINDINGS: Global has app:interrupt, app:exit, app:redraw, history:
   assert.equal(block.bindings["ctrl+r"], "history:search");
 });
 
+test("DEFAULT_BINDINGS: Global retains PR7's ctrl+k → app:commandPalette", () => {
+  const block = findBlock(DEFAULT_BINDINGS, "Global");
+  assert.equal(block.bindings["ctrl+k"], "app:commandPalette");
+});
+
 test("DEFAULT_BINDINGS: Composer has cancel, submit, killAgents chord", () => {
   const block = findBlock(DEFAULT_BINDINGS, "Composer");
   assert.equal(block.bindings["escape"], "composer:cancel");
@@ -42,11 +47,23 @@ test("DEFAULT_BINDINGS: Composer has cancel, submit, killAgents chord", () => {
   assert.equal(block.bindings["ctrl+x ctrl+k"], "composer:killAgents");
 });
 
+test("DEFAULT_BINDINGS: Composer has escape-escape → app:timelinePicker (PR8)", () => {
+  const block = findBlock(DEFAULT_BINDINGS, "Composer");
+  assert.equal(block.bindings["escape escape"], "app:timelinePicker");
+});
+
 test("DEFAULT_BINDINGS: Inspect has tabNext, scrollUp, scrollDown", () => {
   const block = findBlock(DEFAULT_BINDINGS, "Inspect");
   assert.equal(block.bindings["tab"], "inspect:tabNext");
   assert.equal(block.bindings["pageup"], "inspect:scrollUp");
   assert.equal(block.bindings["pagedown"], "inspect:scrollDown");
+});
+
+test("DEFAULT_BINDINGS: Inspect adds shift+tab / home / end (PR8)", () => {
+  const block = findBlock(DEFAULT_BINDINGS, "Inspect");
+  assert.equal(block.bindings["shift+tab"], "inspect:tabPrev");
+  assert.equal(block.bindings["home"], "inspect:scrollHome");
+  assert.equal(block.bindings["end"], "inspect:scrollEnd");
 });
 
 test("DEFAULT_BINDINGS: Dialog has back, confirm, cancel", () => {

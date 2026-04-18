@@ -9,6 +9,14 @@ import {
   type SessionPickerPayload,
 } from "./appState.js";
 import { matchesFuzzy } from "./fuzzyFilter.js";
+import {
+  cycleApprovalCursor,
+  cycleTab,
+  scrollBy,
+  scrollPageStep,
+  SCROLL_LINE_STEP,
+  withInspect,
+} from "./reducerInspect.js";
 
 export type HostAction =
   | { type: "set_mode"; mode: ComposerMode }
@@ -25,6 +33,18 @@ export type HostAction =
       attemptId?: string;
       tab?: InspectTab;
     }
+  | { type: "inspect_scroll_up" }
+  | { type: "inspect_scroll_down" }
+  | { type: "inspect_scroll_pageup" }
+  | { type: "inspect_scroll_pagedown" }
+  | { type: "inspect_scroll_home" }
+  | { type: "inspect_scroll_end" }
+  | { type: "inspect_scroll_set_scroll_height"; height: number }
+  | { type: "inspect_tab_next" }
+  | { type: "inspect_tab_prev" }
+  | { type: "approval_dialog_cursor_up" }
+  | { type: "approval_dialog_cursor_down" }
+  | { type: "approval_dialog_cursor_reset" }
   | { type: "enqueue_prompt"; prompt: PromptEntry }
   | { type: "dequeue_prompt"; id: string }
   | { type: "cancel_prompt"; id?: string }
@@ -71,7 +91,13 @@ const updateInspect = (
   state: HostAppState,
   patch: { sessionId?: string; turnId?: string; attemptId?: string; tab?: InspectTab },
 ): HostAppState => {
-  const inspect: HostAppState["inspect"] = { tab: patch.tab ?? state.inspect.tab };
+  const tabChanged = patch.tab !== undefined && patch.tab !== state.inspect.tab;
+  const inspect: HostAppState["inspect"] = {
+    tab: patch.tab ?? state.inspect.tab,
+    // Tab changes reset scroll to the top (per spec); otherwise preserve.
+    scrollOffset: tabChanged ? 0 : state.inspect.scrollOffset,
+    scrollHeight: state.inspect.scrollHeight,
+  };
   const sessionId = patch.sessionId ?? state.inspect.sessionId;
   const turnId = patch.turnId ?? state.inspect.turnId;
   const attemptId = patch.attemptId ?? state.inspect.attemptId;
@@ -216,6 +242,44 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
       return { ...state, screen: action.screen };
     case "set_inspect_target":
       return updateInspect(state, action);
+    case "inspect_scroll_up":
+      return scrollBy(state, -SCROLL_LINE_STEP);
+    case "inspect_scroll_down":
+      return scrollBy(state, SCROLL_LINE_STEP);
+    case "inspect_scroll_pageup":
+      return scrollBy(state, -scrollPageStep(state.inspect.scrollHeight));
+    case "inspect_scroll_pagedown":
+      return scrollBy(state, scrollPageStep(state.inspect.scrollHeight));
+    case "inspect_scroll_home":
+      if (state.inspect.scrollOffset === 0) {
+        return state;
+      }
+      return withInspect(state, { ...state.inspect, scrollOffset: 0 });
+    case "inspect_scroll_end":
+      // The reducer doesn't know the content length — set a large sentinel
+      // and let the windowing helper clamp on render. Using Number.MAX_SAFE_INTEGER
+      // would serialize awkwardly; a big finite number keeps round-trips clean.
+      return withInspect(state, { ...state.inspect, scrollOffset: 1_000_000 });
+    case "inspect_scroll_set_scroll_height": {
+      const height = Math.max(1, Math.floor(action.height));
+      if (height === state.inspect.scrollHeight) {
+        return state;
+      }
+      return withInspect(state, { ...state.inspect, scrollHeight: height });
+    }
+    case "inspect_tab_next":
+      return cycleTab(state, 1);
+    case "inspect_tab_prev":
+      return cycleTab(state, -1);
+    case "approval_dialog_cursor_up":
+      return cycleApprovalCursor(state, -1);
+    case "approval_dialog_cursor_down":
+      return cycleApprovalCursor(state, 1);
+    case "approval_dialog_cursor_reset":
+      if (state.approvalDialogCursor === 0) {
+        return state;
+      }
+      return { ...state, approvalDialogCursor: 0 };
     case "enqueue_prompt":
       return { ...state, promptQueue: [...state.promptQueue, action.prompt] };
     case "dequeue_prompt": {
