@@ -38,6 +38,11 @@ import { validateBindings } from "../keybindings/validate.js";
 import { repoRootFor, storageRootFor } from "../orchestration.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
+import {
+  DEFAULT_REDACTION_POLICY,
+  summarizeRedactionPolicy,
+  type RedactionPolicySummary,
+} from "../redaction.js";
 import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
 import { describeUiMode, getActiveUiMode, type UiMode } from "../uiMode.js";
 import { computeStorageTotalBytes } from "./cleanup.js";
@@ -87,6 +92,13 @@ export type DoctorEnvelope = {
       protectedKinds: ReadonlyArray<string>;
     };
   };
+  /**
+   * Phase 6 W5 hard rule 384 — the active redaction / env-allowlist policy
+   * summary so operators can tell at a glance whether secret scrubbing is
+   * enabled. Counts only; pattern bodies are not surfaced (the patterns
+   * themselves are not secret but users don't benefit from seeing them).
+   */
+  redaction: RedactionPolicySummary;
 };
 
 export type DoctorContext = {
@@ -267,6 +279,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
         protectedKinds: DEFAULT_RETENTION_POLICY.protectedKinds,
       },
     },
+    redaction: summarizeRedactionPolicy(DEFAULT_REDACTION_POLICY),
   };
 
   return envelope;
@@ -322,6 +335,13 @@ export const formatDoctorReport = (envelope: DoctorEnvelope): string[] => {
   const days = Math.round(envelope.storage.retentionPolicy.intermediateMaxAgeMs / 86_400_000);
   lines.push(
     `  storage: ${mb} MB at ${envelope.storage.storageRoot} (retention: intermediate >${days}d)`,
+  );
+  // Phase 6 W5 hard rule 384 — redaction / env policy mode.
+  lines.push(
+    `  redaction: ${envelope.redaction.active ? "active" : "inactive"}` +
+      ` (env allowlist: ${envelope.redaction.envAllowlistCount},` +
+      ` env deny patterns: ${envelope.redaction.envDenyPatternCount},` +
+      ` text patterns: ${envelope.redaction.textPatternCount})`,
   );
   lines.push("");
   return lines;

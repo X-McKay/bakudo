@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import { ABoxAdapter } from "./aboxAdapter.js";
 import type { AttemptSpec } from "./attemptProtocol.js";
+import { DEFAULT_ENV_POLICY, filterEnv, type EnvPolicy } from "./host/envPolicy.js";
 import {
   getCachedWorkerCapabilities,
   negotiateAttemptAgainstCapabilities,
@@ -246,11 +247,38 @@ export const attemptSpecToWorkerSpec = (spec: AttemptSpec): WorkerTaskSpec => {
  */
 export type WorkerCapabilitiesProvider = (bin: string) => Promise<ProbeOutcome>;
 
+/**
+ * Phase 6 W5 — snapshot of `process.env` used when the runner is constructed
+ * without an explicit env source. Kept as a getter so tests can stub the
+ * node global without a module-load race.
+ */
+const hostEnvSnapshot = (): Readonly<Record<string, string | undefined>> => {
+  const g = globalThis as unknown as {
+    process?: { env?: Record<string, string | undefined> };
+  };
+  return g.process?.env ?? {};
+};
+
 export class ABoxTaskRunner {
   public constructor(
     private readonly adapter: ABoxAdapter,
     private readonly capabilitiesProvider: WorkerCapabilitiesProvider = (bin) =>
       getCachedWorkerCapabilities({ bin }),
+    /**
+     * Phase 6 W5 — the env policy to apply to the host env before spawning.
+     * Default is {@link DEFAULT_ENV_POLICY} (empty allowlist). Callers that
+     * want a wider allowlist (from config cascade or `BAKUDO_ENV_ALLOWLIST`)
+     * inject a resolved {@link EnvPolicy} here.
+     */
+    private readonly envPolicy: EnvPolicy = DEFAULT_ENV_POLICY,
+    /**
+     * Phase 6 W5 — injectable host env so tests can assert the filter
+     * without mutating real `process.env`. Production callers omit this and
+     * the runner reads the live `process.env` at dispatch time.
+     */
+    private readonly envSource: () => Readonly<
+      Record<string, string | undefined>
+    > = hostEnvSnapshot,
   ) {}
 
   public async runTask(
@@ -267,15 +295,25 @@ export class ABoxTaskRunner {
     const command = await buildWorkerLaunchCommand(spec, overrides);
     const timeoutSeconds = (overrides.timeoutSeconds ?? spec.timeoutSeconds ?? 120) + 20;
     const streamId = spec.streamId ?? spec.taskId;
+    // Phase 6 W5 — route the host env through the allowlist BEFORE building
+    // the spawn. Default policy has an empty allowlist, so workers see a
+    // clean env unless the user has opted in to specific names.
+    const filteredEnv = filterEnv(this.envSource(), this.envPolicy);
     let rawOutput = "";
-    const execution = await this.adapter.runInStreamLive(streamId, command, timeoutSeconds, {
-      onStdout: (chunk) => {
-        rawOutput += chunk;
+    const execution = await this.adapter.runInStreamLive(
+      streamId,
+      command,
+      timeoutSeconds,
+      {
+        onStdout: (chunk) => {
+          rawOutput += chunk;
+        },
+        onStderr: (chunk) => {
+          rawOutput += chunk;
+        },
       },
-      onStderr: (chunk) => {
-        rawOutput += chunk;
-      },
-    });
+      filteredEnv,
+    );
     const output = rawOutput.length > 0 ? rawOutput : execution.output;
     return parseExecutionOutput(spec, output, execution.ok, execution.metadata, handlers);
   }

@@ -12,6 +12,15 @@ export type StreamHandlers = {
   onStderr?: (chunk: string) => void;
 };
 
+/**
+ * Phase 6 W5 — explicit env override for a single spawn. When `undefined`
+ * the adapter inherits the parent process env (the pre-W5 behavior). The
+ * {@link import("./aboxTaskRunner.js").ABoxTaskRunner} passes the
+ * env-allowlist-filtered map here so nothing leaks beyond what the user
+ * opted in to.
+ */
+export type SpawnEnv = Readonly<Record<string, string>> | undefined;
+
 export class ABoxAdapter {
   private sequence = 0;
 
@@ -80,12 +89,20 @@ export class ABoxAdapter {
     command: string,
     timeoutSeconds = 120,
     handlers: StreamHandlers = {},
+    env?: SpawnEnv,
   ): Promise<ToolResult> {
     const { taskId, cmd } = this.buildInvocation(streamId, command);
-    const child = this.spawnFn(this.aboxBin, cmd, {
+    // Phase 6 W5 — when `env` is supplied, we pass ONLY those vars (plus the
+    // ephemeral-opt-out signal the adapter inspects below); without `env` we
+    // inherit the parent process env (pre-W5 behaviour). The `ABoxTaskRunner`
+    // always supplies a filtered map so nothing leaks from the host to the
+    // worker unless explicitly allowlisted.
+    const spawnOptions: Parameters<SpawnFn>[2] = {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-    });
+      ...(env === undefined ? {} : { env }),
+    };
+    const child = this.spawnFn(this.aboxBin, cmd, spawnOptions);
 
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];

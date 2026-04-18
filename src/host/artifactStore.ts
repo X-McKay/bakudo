@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { createSessionPaths } from "../sessionStore.js";
 import { ArtifactPersistenceError } from "./errors.js";
+import { DEFAULT_REDACTION_POLICY, redactRecord } from "./redaction.js";
 
 /**
  * First-class artifact record v2 — artifacts become durable records keyed by
@@ -68,7 +69,11 @@ export const appendArtifactRecord = async (
 ): Promise<void> => {
   const filePath = artifactsFilePath(storageRoot, sessionId);
   await mkdir(dirname(filePath), { recursive: true });
-  const line = `${JSON.stringify(record)}\n`;
+  // Phase 6 W5 hard rule 382 — redact before persisting. The artifact index
+  // is durable; any obvious secret-looking substring in a name or metadata
+  // field is scrubbed before the line is appended.
+  const redacted = redactRecord(record, DEFAULT_REDACTION_POLICY);
+  const line = `${JSON.stringify(redacted)}\n`;
   await writeFile(filePath, line, { encoding: "utf8", flag: "a" });
 };
 

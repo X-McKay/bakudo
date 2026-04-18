@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { ArtifactPersistenceError } from "./host/errors.js";
+import { DEFAULT_REDACTION_POLICY, redactRecord } from "./host/redaction.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "./protocol.js";
 import { createSessionArtifactsFilePath, createSessionPaths } from "./sessionStore.js";
 
@@ -88,17 +89,23 @@ export class ArtifactStore {
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
     });
 
+    // Phase 6 W5 hard rule 382 — redact before persisting so obvious secrets
+    // in artifact names / metadata never hit disk verbatim.
+    const redacted = redactRecord(record, DEFAULT_REDACTION_POLICY);
+
     const existing = await this.listArtifacts(input.sessionId);
     const nextArtifacts = [...existing];
-    const index = nextArtifacts.findIndex((artifact) => artifact.artifactId === record.artifactId);
+    const index = nextArtifacts.findIndex(
+      (artifact) => artifact.artifactId === redacted.artifactId,
+    );
     if (index === -1) {
-      nextArtifacts.push(record);
+      nextArtifacts.push(redacted);
     } else {
-      nextArtifacts[index] = record;
+      nextArtifacts[index] = redacted;
     }
 
     await writeJsonAtomic(this.artifactFile(input.sessionId), nextArtifacts);
-    return record;
+    return redacted;
   }
 
   public async listArtifacts(sessionId: string): Promise<ArtifactRecord[]> {

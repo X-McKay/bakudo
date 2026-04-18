@@ -9,6 +9,21 @@ import type {
   SessionReviewRecord,
   SessionTurnRecord,
 } from "../sessionTypes.js";
+import { DEFAULT_REDACTION_POLICY, redactText } from "./redaction.js";
+
+/**
+ * Phase 6 W5 hard rule 383 — inspect summaries must NEVER expose raw secret
+ * values. Every string that originates from user input, worker output, or
+ * persisted metadata passes through this helper before rendering.
+ */
+const safe = (value: string): string => redactText(value, DEFAULT_REDACTION_POLICY);
+
+/**
+ * Convenience: redact `undefined`-safe. Returns `undefined` unchanged so
+ * callers can chain with existing optional-chaining.
+ */
+const safeMaybe = (value: string | undefined): string | undefined =>
+  value === undefined ? undefined : safe(value);
 
 type ArtifactRow = Awaited<ReturnType<ArtifactStore["listTaskArtifacts"]>>[number];
 
@@ -64,13 +79,13 @@ const protocolMismatchOf = (
 };
 
 const renderProtocolMismatchLines = (view: ProtocolMismatchView): string[] => {
-  const lines: string[] = [renderKv("Mismatch", view.message)];
+  const lines: string[] = [renderKv("Mismatch", safe(view.message))];
   if (view.recoveryHint !== undefined) {
-    lines.push(renderKv("Hint", view.recoveryHint));
+    lines.push(renderKv("Hint", safe(view.recoveryHint)));
   }
   if (view.details !== undefined) {
     const detailLine = Object.entries(view.details)
-      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .map(([k, v]) => `${k}=${safe(typeof v === "string" ? v : JSON.stringify(v))}`)
       .join(" ");
     if (detailLine.length > 0) {
       lines.push(renderKv("Detail", detailLine));
@@ -131,7 +146,9 @@ const selectReviewView = (
 };
 
 const formatArtifactRows = (artifacts: ArtifactRow[]): string[] =>
-  artifacts.map((artifact) => `  - ${artifact.name} (${artifact.kind}) -> ${artifact.path}`);
+  artifacts.map(
+    (artifact) => `  - ${safe(artifact.name)} (${artifact.kind}) -> ${safe(artifact.path)}`,
+  );
 
 export type InspectSummaryInput = {
   session: SessionRecord;
@@ -152,8 +169,8 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
   const lines = [
     "Summary",
     renderKv("Session", session.sessionId),
-    renderKv("Repo", session.repoRoot),
-    renderKv("Goal", session.turns[0]?.prompt ?? session.title),
+    renderKv("Repo", safe(session.repoRoot)),
+    renderKv("Goal", safe(session.turns[0]?.prompt ?? session.title)),
   ];
   if (reviewed) {
     lines.push(renderKv("Outcome", reviewed.outcome));
@@ -224,14 +241,14 @@ export const formatInspectReview = (input: InspectReviewInput): string[] => {
     lines.push(renderKv("Confidence", reviewed.confidence));
   }
   if (reviewed.userExplanation !== undefined && reviewed.userExplanation.length > 0) {
-    lines.push(renderKv("Explain", reviewed.userExplanation));
+    lines.push(renderKv("Explain", safe(reviewed.userExplanation)));
   }
-  lines.push(renderKv("Reason", reviewed.reason));
+  lines.push(renderKv("Reason", safe(reviewed.reason)));
   if (reviewed.remediationHint !== undefined && reviewed.remediationHint.length > 0) {
-    lines.push(renderKv("Remedy", reviewed.remediationHint));
+    lines.push(renderKv("Remedy", safe(reviewed.remediationHint)));
   }
   if (result) {
-    lines.push(renderKv("Summary", result.summary));
+    lines.push(renderKv("Summary", safe(result.summary)));
     if (result.exitCode !== undefined && result.exitCode !== null) {
       lines.push(renderKv("Exit", String(result.exitCode)));
     }
@@ -241,13 +258,13 @@ export const formatInspectReview = (input: InspectReviewInput): string[] => {
     lines.push(renderKv("Finished", formatUtc(result.finishedAt)));
   }
   if (typeof attempt.metadata?.sandboxTaskId === "string") {
-    lines.push(renderKv("Sandbox", attempt.metadata.sandboxTaskId));
+    lines.push(renderKv("Sandbox", safeMaybe(attempt.metadata.sandboxTaskId) ?? ""));
   }
   if (dispatchArtifact) {
-    lines.push(renderKv("Dispatch", dispatchArtifact.path));
+    lines.push(renderKv("Dispatch", safe(dispatchArtifact.path)));
   }
   if (workerLog) {
-    lines.push(renderKv("Worker", workerLog.path));
+    lines.push(renderKv("Worker", safe(workerLog.path)));
   }
   return lines;
 };
@@ -261,7 +278,11 @@ export type InspectSandboxInput = {
 export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
   const { session, attempt, artifacts } = input;
   const dispatchCommand = dispatchCommandOf(attempt);
-  const aboxCommand = dispatchCommand === undefined ? "n/a" : dispatchCommand.join(" ");
+  // Phase 6 W5 hard rule 383 — dispatch commands may embed inline secrets
+  // (e.g. `bash -c 'curl -H "Authorization: Bearer sk-…"'`). Route through
+  // {@link redactText} before joining for display.
+  const aboxCommand =
+    dispatchCommand === undefined ? "n/a" : dispatchCommand.map((arg) => safe(arg)).join(" ");
   const lines = [
     "Sandbox",
     renderKv("Session", session.sessionId),
@@ -282,7 +303,7 @@ export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
     lines.push(...formatArtifactRows(artifacts));
   }
   if (attempt.result?.summary) {
-    lines.push(renderKv("Summary", attempt.result.summary));
+    lines.push(renderKv("Summary", safe(attempt.result.summary)));
   }
   return lines;
 };
@@ -336,7 +357,7 @@ export const formatInspectLogs = (input: InspectLogsInput): string[] => {
     return lines;
   }
   for (const event of filtered) {
-    const message = event.message ? ` ${event.message}` : "";
+    const message = event.message ? ` ${safe(event.message)}` : "";
     lines.push(`${event.timestamp} ${event.taskId} ${event.kind} ${event.status}${message}`);
   }
   return lines;
