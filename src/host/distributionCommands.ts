@@ -33,6 +33,11 @@ export const dispatchDoctorCommand = async (args: HostCliArgs): Promise<number> 
   if (args.copilot.outputFormat === "json") {
     flags.push("--output-format=json");
   }
+  // Wave 6d A6.10 edge #4 — forward captured doctor-specific flags so
+  // `--explain-config <key>` reaches the command module.
+  if (args.doctorArgs !== undefined) {
+    flags.push(...args.doctorArgs);
+  }
   const result =
     args.aboxBin !== "abox"
       ? await runDoctorCommand({

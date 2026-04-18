@@ -103,6 +103,13 @@ export type HostCliArgs = {
    * opaque so the command module owns its own surface.
    */
   chronicleArgs?: string[];
+  /**
+   * Phase 6 Wave 6d A6.10 edge #4 — raw flag/value tokens forwarded to the
+   * `doctor` command for `--explain-config <key>`. Kept opaque so the
+   * command module owns its own surface. Empty for every non-`doctor`
+   * invocation.
+   */
+  doctorArgs?: string[];
 };
 
 export const HOST_COMMANDS = new Set<HostCommand>([
@@ -381,6 +388,22 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       // `--older-than` and `--session` take a follow-up value (non-`=` form).
       if ((arg === "--older-than" || arg === "--session") && argv[i + 1] !== undefined) {
         result.cleanupArgs.push(argv[i + 1] as string);
+        i += 1;
+      }
+      continue;
+    }
+
+    // Phase 6 Wave 6d A6.10 edge #4 — `bakudo doctor --explain-config <key>`
+    // forwards to the doctor module. Kept local so doctor.ts owns parse +
+    // semantics; we just capture the opaque tokens.
+    if (
+      result.command === "doctor" &&
+      (arg === "--explain-config" || arg.startsWith("--explain-config="))
+    ) {
+      result.doctorArgs = result.doctorArgs ?? [];
+      result.doctorArgs.push(arg);
+      if (arg === "--explain-config" && argv[i + 1] !== undefined) {
+        result.doctorArgs.push(argv[i + 1] as string);
         i += 1;
       }
       continue;
