@@ -180,6 +180,41 @@ Each session records a structured event log at `.bakudo/sessions/<id>/events.ndj
 - **Worker narration**: the shell shows assistant-style status lines (`Worker is producing output.`) instead of raw event names. Full event detail is available in `/inspect logs`.
 - **Provenance** stays first-class: every attempt records its sandbox task ID, dispatch command, and artifact paths, accessible via `/inspect sandbox` and `/inspect artifacts`.
 
+### Approvals
+
+Bakudo asks before risky actions in standard mode and persists every decision:
+
+- **Interactive prompt** shows the pending operation, the matched rule set, and four choices: `[1] allow once`, `[2] allow always`, `[3] deny`, `[4] show context`.
+- **Deny-precedence invariant**: any `deny` rule wins, even against an `allow` in a higher layer and even in autopilot. `/allow-all on` does NOT bypass deny.
+- **Durable allowlist**: `allow always` appends a `PermissionRule` to `<repo>/.bakudo/approvals.jsonl` that survives across sessions; `/allow-all show` lists it; `/allow-all off` removes a session-scoped rule.
+- **Audit log**: every approval (including hook-sourced auto-approvals and deny-short-circuits) writes an `ApprovalRecord` to `<storage>/<session>/approvals.ndjson`, plus `host.approval_requested` + `host.approval_resolved` envelopes in the session event log.
+
+Use `/allow-all on|off|show` to manage the session-scoped `allow_all_tools` rule.
+
+### Inspect tabs
+
+`/inspect [tab]` shows one of six tabs backed by the durable session records:
+
+- `summary` — turn status, goal, review outcome, retry lineage.
+- `review` — the reviewer's outcome, action, reason, and confidence grade.
+- `provenance` — active agent profile, attempt spec, abox dispatch command, sandbox task ID, env allowlist, exit details. Renamed from `sandbox` (the old alias still routes here).
+- `artifacts` — registered artifact paths (results, patches, summaries, logs).
+- `approvals` — chronological `ApprovalRecord` entries with rationale and matched rule.
+- `logs` — raw `SessionEventEnvelope` stream.
+
+### /timeline
+
+`/timeline` opens a turn-level rollback picker. Each row shows `turn-N status agent-profile · brief goal summary · timestamp`. Selecting a row offers `inspect this turn` (read-only) or `restart from this turn` (creates a new turn whose `parentTurnId` is the selected turn and writes a `TurnTransition { reason: "user_rewind" }`).
+
+### Provenance
+
+Every dispatch persists a `ProvenanceRecord` to `<storage>/<session>/provenance.ndjson` with:
+
+- `attemptId`, `sandboxTaskId`, `dispatchCommand[]`, the active agent profile (name + autopilot flag), `permissionRulesSnapshot[]`, `envAllowlist[]`, `workerEngine`, `taskMode`, `composerMode`.
+- Finalisation appends `exitCode`, `exitSignal`, `timedOut`, `elapsedMs`.
+
+Records are read by the `provenance` inspect tab and answer "what exactly ran and why was it allowed?" without falling back to raw log parsing.
+
 Legacy compatibility mode is still available:
 
 ```bash

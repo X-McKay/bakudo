@@ -29,6 +29,7 @@ export type InspectTab =
 
 export type PromptKind =
   | "approval"
+  | "approval_prompt"
   | "resume_confirm"
   | "command_palette"
   | "session_picker"
@@ -41,12 +42,31 @@ export type PromptEntry = {
 };
 
 /**
+ * Payload shape carried on an `approval_prompt` queue entry. Keep narrow —
+ * renderers project from these fields verbatim (see `dialogLauncher.ts` and
+ * the Phase 4 approval-prompt copy in renderers).
+ */
+export type ApprovalPromptRequest = {
+  sessionId: string;
+  turnId: string;
+  attemptId?: string;
+  tool: string;
+  argument: string;
+  policySnapshot: {
+    agent: string;
+    composerMode: ComposerMode;
+    autopilot: boolean;
+  };
+};
+
+/**
  * Derived overlay view used by renderers. Always projected from `promptQueue[0]`.
  */
 export type HostOverlay =
   | { kind: "command_palette" }
   | { kind: "session_picker" }
   | { kind: "approval"; message: string }
+  | { kind: "approval_prompt"; request: ApprovalPromptRequest }
   | { kind: "resume_confirm"; message: string }
   | { kind: "timeline_picker" };
 
