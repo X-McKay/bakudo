@@ -27,6 +27,12 @@ import {
   type SessionSummaryView,
 } from "./host/sessionIndex.js";
 import { stderrWrite } from "./host/io.js";
+import {
+  SessionLockNotHeldError,
+  acquireSessionLock,
+  type AcquireLockOptions,
+  type SessionLockHandle,
+} from "./host/lockFile.js";
 
 export type SessionStorePaths = {
   sessionId: string;
@@ -124,13 +130,102 @@ export const writeSessionIndex = async (
   await writeJsonAtomic(filePath, payload);
 };
 
+/**
+ * Options for {@link SessionStore}. `enforceLock` toggles the Phase 6 W2
+ * guard rail that rejects mutating writes performed without a held
+ * per-session lock. Production entry points (`sessionController`) pass
+ * `enforceLock: true`; the default is `false` so the existing test suite and
+ * read-modify-write helpers that pre-date W2 keep working unmodified.
+ *
+ * The Hard Rule "writes to a session without a lock must fail clearly"
+ * (plan 199) is satisfied by making every production caller opt in; the
+ * knob itself exists to keep that transition low-risk.
+ */
+export type SessionStoreOptions = {
+  /**
+   * When `true`, mutating writes throw {@link SessionLockNotHeldError} unless
+   * a lock handle has been acquired via {@link SessionStore.withLock} or
+   * registered via {@link SessionStore.registerLock}. Default `false`.
+   */
+  enforceLock?: boolean;
+};
+
 export class SessionStore {
-  public constructor(public readonly rootDir: string) {
+  public readonly rootDir: string;
+  private readonly enforceLock: boolean;
+  private readonly heldLocks = new Map<string, SessionLockHandle>();
+
+  public constructor(rootDir: string, options: SessionStoreOptions = {}) {
     this.rootDir = toResolvedPath(rootDir);
+    this.enforceLock = options.enforceLock === true;
   }
 
   public paths(sessionId: string): SessionStorePaths {
     return createSessionPaths(this.rootDir, sessionId);
+  }
+
+  /**
+   * Acquire the per-session lock and run `fn` while holding it. The lock is
+   * released on the async boundary regardless of whether `fn` throws.
+   *
+   * Callers that have already acquired a lock (e.g. `createAndRunFirstTurn`)
+   * and are nesting store mutations inside it do NOT need to nest `withLock`
+   * — the outer acquire already authorizes the writes. The store's lock
+   * registry is keyed by session id so re-entrant acquires are merged.
+   */
+  public async withLock<T>(
+    sessionId: string,
+    fn: (handle: SessionLockHandle) => Promise<T>,
+    options: AcquireLockOptions = {},
+  ): Promise<T> {
+    const existing = this.heldLocks.get(sessionId);
+    if (existing !== undefined) {
+      // Re-entrant acquire. The outer caller is responsible for release.
+      return fn(existing);
+    }
+    const sessionDir = this.paths(sessionId).sessionDir;
+    const handle = await acquireSessionLock(sessionId, sessionDir, options);
+    this.heldLocks.set(sessionId, handle);
+    try {
+      return await fn(handle);
+    } finally {
+      this.heldLocks.delete(sessionId);
+      await handle.release();
+    }
+  }
+
+  /**
+   * Register an externally-acquired lock handle so that subsequent writes on
+   * this store instance pass the `assertLockHeld` guard without re-entering
+   * `withLock`. Used by `sessionController` which needs to keep the lock
+   * across multiple write batches (create session → dispatch → save review).
+   * Returns an unregister callback that the caller must invoke after releasing
+   * the lock via `handle.release()`.
+   */
+  public registerLock(handle: SessionLockHandle): () => void {
+    this.heldLocks.set(handle.sessionId, handle);
+    return () => {
+      const current = this.heldLocks.get(handle.sessionId);
+      if (current === handle) {
+        this.heldLocks.delete(handle.sessionId);
+      }
+    };
+  }
+
+  /** Inspect whether the caller holds the lock for `sessionId` on this store. */
+  public isLockHeld(sessionId: string): boolean {
+    return this.heldLocks.has(sessionId);
+  }
+
+  /**
+   * Guard rail: throws {@link SessionLockNotHeldError} when a mutating write
+   * is attempted without a held lock + `enforceLock` is on. Stays a no-op
+   * when enforcement is disabled (legacy compat).
+   */
+  private assertLockHeld(sessionId: string): void {
+    if (!this.enforceLock) return;
+    if (this.heldLocks.has(sessionId)) return;
+    throw new SessionLockNotHeldError(sessionId);
   }
 
   public async createSession(input: CreateSessionInput): Promise<SessionRecord> {
@@ -154,8 +249,17 @@ export class SessionStore {
       createdAt,
       updatedAt,
     };
-    await this.saveSession(session);
-    return session;
+    // Bootstrap write: no prior session exists, so `wx` on the lock file is
+    // always uncontended. Auto-acquire a short-lived lock so the invariant
+    // "every write happens under a lock" holds even on the first write.
+    if (!this.enforceLock || this.heldLocks.has(session.sessionId)) {
+      await this.saveSession(session);
+      return session;
+    }
+    return this.withLock(session.sessionId, async () => {
+      await this.saveSession(session);
+      return session;
+    });
   }
 
   public async loadSession(sessionId: string): Promise<SessionRecord | null> {
@@ -228,6 +332,7 @@ export class SessionStore {
   }
 
   public async saveSession(record: SessionRecord): Promise<SessionRecord> {
+    this.assertLockHeld(record.sessionId);
     const normalized = normalizeV2Record(record, { updatedAt: record.updatedAt ?? nowIso() });
     await writeJsonAtomic(this.paths(normalized.sessionId).sessionFile, normalized);
     await this.upsertIndexEntry(normalized);

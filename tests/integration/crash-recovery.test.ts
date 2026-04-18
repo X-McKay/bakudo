@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
+
+import { acquireSessionLock, sessionLockFilePath } from "../../src/host/lockFile.js";
+import {
+  clearCleanupHandlers,
+  registerCleanupHandler,
+  runCleanupHandlers,
+} from "../../src/host/signalHandlers.js";
 
 // The project narrows `process` at the type level; reach the full runtime
 // via `globalThis` for the test-only bits (execPath, cwd).
@@ -144,4 +154,30 @@ test("crash recovery: SIGINT exits with code 130 and fires LIFO cleanup", async 
     ["CLEANUP_C", "CLEANUP_B", "CLEANUP_A"],
     "cleanup handlers fired LIFO",
   );
+});
+
+test("crash recovery: cleanup handler releases a held session lock", async () => {
+  // Register a lock, wire its release as a cleanup handler (mirroring the
+  // production wiring in `sessionController.withAcquiredLock`), then run the
+  // cleanup chain and assert the `.lock` file is gone.
+  const dir = await mkdtemp(join(tmpdir(), "bakudo-crash-lock-"));
+  try {
+    clearCleanupHandlers();
+    const handle = await acquireSessionLock("s-crash", dir, { pid: 42 });
+    registerCleanupHandler(async () => {
+      await handle.release();
+    });
+    // Before cleanup: lock file exists.
+    await stat(sessionLockFilePath(dir));
+    await runCleanupHandlers();
+    // After cleanup: lock file removed.
+    const exists = await stat(sessionLockFilePath(dir)).then(
+      () => true,
+      () => false,
+    );
+    assert.equal(exists, false, "cleanup handler released the lock");
+  } finally {
+    clearCleanupHandlers();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
