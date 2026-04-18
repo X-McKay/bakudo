@@ -57,9 +57,12 @@ const DEFAULT_PROBE_TIMEOUT_MS = 2000;
 export type ProbeOutcome = {
   capabilities: WorkerCapabilities;
   /**
-   * Free-form diagnostic message. Populated when the probe fell back to v1;
-   * surfaced through the `host.event_skipped` recovery channel by the runner
-   * so logs still carry the reason.
+   * Free-form diagnostic message. Populated when the probe fell back to the
+   * host-default capability set. Currently carried into
+   * {@link WorkerProtocolMismatchError.details} so post-mortem surfaces
+   * (`inspect`, JSON envelope) keep the reason. Session-event emission
+   * (`worker.capability_probe_failed` via `host.event_skipped`) is deferred
+   * to Wave 6c observability — see `plans/bakudo-ux/phase-6-w3-capability-probe-finding.md`.
    */
   fallbackReason?: string;
   /** Raw stdout for debugging when parse fails (`source === "fallback_host_default"`). */
@@ -105,7 +108,7 @@ const validateCapabilitiesJson = (value: unknown): WorkerCapabilities | null => 
 /**
  * Run the worker capability probe (`<bin> --capabilities`) and parse its
  * stdout. On any failure (nonzero exit, timeout, parse error) returns the
- * v1-baseline fallback per the A6 contract.
+ * host-default fallback per the amended A6 contract.
  */
 export const probeWorkerCapabilities = async (
   input: ProbeWorkerCapabilitiesInput,
@@ -200,7 +203,7 @@ export const __resetWorkerCapabilitiesCacheForTests = (): void => {
 export type NegotiationContext = {
   /** AttemptSpec the host is about to dispatch. */
   spec: AttemptSpec;
-  /** Worker capabilities returned by the probe (or the v1 fallback). */
+  /** Worker capabilities returned by the probe (or the host-default fallback). */
   capabilities: WorkerCapabilities;
   /**
    * Fallback diagnostic, if the capabilities came from the v1-fallback
