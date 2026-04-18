@@ -117,6 +117,8 @@ export type SessionEventKind =
   | "host.approval_requested"
   | "host.approval_resolved"
   | "host.dispatch_started"
+  | "host.provenance_started"
+  | "host.provenance_finalized"
   | "worker.attempt_started"
   | "worker.attempt_progress"
   | "worker.attempt_completed"
@@ -134,6 +136,8 @@ export const sessionEventKinds: readonly SessionEventKind[] = [
   "host.approval_requested",
   "host.approval_resolved",
   "host.dispatch_started",
+  "host.provenance_started",
+  "host.provenance_finalized",
   "worker.attempt_started",
   "worker.attempt_progress",
   "worker.attempt_completed",
@@ -179,6 +183,19 @@ export type SessionEventPayloadMap = {
     goal: string;
     mode: TaskMode;
     assumeDangerousSkipPermissions: boolean;
+  };
+  "host.provenance_started": {
+    provenanceId: string;
+    attemptId: string;
+    sandboxTaskId?: string;
+    dispatchCommand: string[];
+  };
+  "host.provenance_finalized": {
+    provenanceId: string;
+    attemptId: string;
+    exitCode: number | null;
+    timedOut: boolean;
+    elapsedMs: number;
   };
   "host.approval_requested": {
     approvalId: string;
