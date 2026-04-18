@@ -1,4 +1,5 @@
 import { bold, cyan, dim, gray, green, red, renderModeChip, yellow } from "../ansi.js";
+import { renderApprovalPromptLines } from "./approvalPromptCopy.js";
 import type { RenderFrame, TranscriptItem } from "../renderModel.js";
 
 const toneWrap = (
@@ -48,6 +49,11 @@ const renderOverlay = (frame: RenderFrame): string[] => {
   }
   if (overlay.kind === "approval") {
     return [yellow(`[approval] ${overlay.message} [y/N]`)];
+  }
+  if (overlay.kind === "approval_prompt") {
+    // VERBATIM copy per Phase 4 spec (04-provenance-first-inspection-and-approval.md
+    // §Approval Prompt UX). No tone wrapping — must match byte-for-byte.
+    return renderApprovalPromptLines(overlay.request);
   }
   if (overlay.kind === "resume_confirm") {
     return [yellow(`[resume?] ${overlay.message} [y/N]`)];

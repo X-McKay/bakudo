@@ -1,6 +1,7 @@
 import type { RenderFrame, TranscriptItem } from "../renderModel.js";
 
 import type { ComposerMode } from "../appState.js";
+import { renderApprovalPromptLines } from "./approvalPromptCopy.js";
 
 const modeLabel = (mode: ComposerMode): string => {
   if (mode === "plan") {
@@ -39,6 +40,11 @@ const renderOverlay = (frame: RenderFrame): string[] => {
   }
   if (overlay.kind === "approval") {
     return [`[approval] ${overlay.message} [y/N]`];
+  }
+  if (overlay.kind === "approval_prompt") {
+    // VERBATIM copy per Phase 4 spec — mirrors the transcript renderer
+    // exactly since the plain renderer is used for non-TTY/log capture.
+    return renderApprovalPromptLines(overlay.request);
   }
   if (overlay.kind === "resume_confirm") {
     return [`[resume?] ${overlay.message} [y/N]`];
