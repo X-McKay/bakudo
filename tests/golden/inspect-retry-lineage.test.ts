@@ -20,3 +20,13 @@ test("golden/inspect-retry-lineage.tty.txt: self-match", async () => {
   const fixture = await loadFixture("inspect-retry-lineage.tty.txt");
   assert.equal(diffAgainstFixture(fixture, fixture.bytes).kind, "equal");
 });
+
+// W6E cleanup PR15-NB5 — content anchors for the lineage chain structure.
+// `host_retry` (reason code from Phase 2 W3), `chain_01HXYZCHAIN5` (fixture
+// chainId), `transitionId` (must be surfaced in each transition block).
+test("golden/inspect-retry-lineage.tty.txt: renders lineage chain anchors", async () => {
+  const fixture = await loadFixture("inspect-retry-lineage.tty.txt");
+  for (const anchor of ["host_retry", "chain_01HXYZCHAIN5", "transitionId"]) {
+    assert.ok(fixture.bytes.includes(anchor), `retry-lineage fixture missing "${anchor}" anchor`);
+  }
+});

@@ -374,6 +374,9 @@ test("runDoctorChecks: envelope.storage carries totalArtifactBytes + retentionPo
     assert.ok(env.storage.totalArtifactBytes >= 0);
     assert.equal(typeof env.storage.storageRoot, "string");
     assert.ok(env.storage.storageRoot.length > 0);
+    // Wave 6e PR16: storage.layout is an additive field reporting the
+    // on-disk layout generation. Must be one of the two declared literals.
+    assert.ok(env.storage.layout === "legacy" || env.storage.layout === "xdg");
     assert.ok(env.storage.retentionPolicy.intermediateMaxAgeMs > 0);
     assert.ok(env.storage.retentionPolicy.intermediateKinds.length > 0);
     assert.ok(env.storage.retentionPolicy.protectedKinds.length > 0);

@@ -126,14 +126,17 @@ test("timeAsync: records the elapsed ms of an async callback", async () => {
   assert.equal(agg.count, 1);
 });
 
-test("METRIC_NAMES: all six required metrics are named (plan 06 lines 430-440)", () => {
-  assert.equal(METRIC_NAMES.length, 6);
+test("METRIC_NAMES: required metrics are named (plan 06 lines 430-440)", () => {
+  // Six plan-mandated names + `inspect.render_ms` added in W6E cleanup
+  // (#21 — inspect-summary benchmark's logical metric).
+  assert.equal(METRIC_NAMES.length, 7);
   assert.ok(METRIC_NAMES.includes("shell.startup_ms"));
   assert.ok(METRIC_NAMES.includes("render.ttfr_ms"));
   assert.ok(METRIC_NAMES.includes("prompt.to_host_line_ms"));
   assert.ok(METRIC_NAMES.includes("worker.to_review_ms"));
   assert.ok(METRIC_NAMES.includes("session.list_ms"));
   assert.ok(METRIC_NAMES.includes("workflow.command_count"));
+  assert.ok(METRIC_NAMES.includes("inspect.render_ms"));
 });
 
 test("singleton: getMetricsRecorder returns the same instance until reset", () => {

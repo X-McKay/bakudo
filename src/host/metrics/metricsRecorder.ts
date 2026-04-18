@@ -44,6 +44,8 @@ export const METRIC_NAMES = [
   "session.list_ms",
   /** 6. number of commands needed for common workflows */
   "workflow.command_count",
+  /** 7. inspect summary render from persisted data (W6E cleanup #21) */
+  "inspect.render_ms",
 ] as const;
 
 export type MetricName = (typeof METRIC_NAMES)[number];

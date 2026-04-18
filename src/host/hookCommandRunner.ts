@@ -233,7 +233,7 @@ const spawnSingleCommandHook = async (args: {
     // Swallow EPIPE on a hook that closes stdin before we write. Without this
     // listener Node would upgrade EPIPE to an unhandled `error` event on the
     // child and wedge the test harness.
-    stdin.on("error", () => {
+    stdin.once("error", () => {
       /* hook closed stdin early — non-zero exit path will report it */
     });
     try {
