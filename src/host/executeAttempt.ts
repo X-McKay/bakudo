@@ -7,6 +7,7 @@ import type { TaskMode } from "../protocol.js";
 import { type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
+import type { ComposerMode } from "./appState.js";
 import { createSessionEventLogWriter } from "./eventLogWriter.js";
 import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import { stdoutWrite } from "./io.js";
@@ -19,7 +20,30 @@ import {
   upsertTurnLatestReview,
 } from "./orchestrationSupport.js";
 import type { HostCliArgs } from "./parsing.js";
+import { recordProvenanceFinalize, recordProvenanceStart } from "./provenanceProducer.js";
 import { writeExecutionArtifacts } from "./sessionArtifactWriter.js";
+
+/**
+ * Infer the host-level {@link ComposerMode} from the worker-level AttemptSpec.
+ * `AttemptSpec.mode` is `"build" | "plan"`; `allowAllTools` means the host
+ * was in Autopilot when the spec was compiled. Mirrors the inverse mapping
+ * in `src/host/attemptCompiler.ts`.
+ */
+const inferComposerMode = (spec: AttemptSpec): ComposerMode => {
+  if (spec.permissions.allowAllTools) {
+    return "autopilot";
+  }
+  if (spec.mode === "plan") {
+    return "plan";
+  }
+  return "standard";
+};
+
+const PROFILE_NAME: Record<ComposerMode, string> = {
+  standard: "standard",
+  plan: "plan",
+  autopilot: "autopilot",
+};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -101,6 +125,25 @@ export const executeAttempt = async (
       }),
     );
 
+    const composerMode = inferComposerMode(spec);
+    const started = await recordProvenanceStart({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId: spec.attemptId,
+      repoRoot: spec.cwd,
+      workerEngine: spec.execution.engine,
+      composerMode,
+      taskMode: spec.mode,
+      agentProfile: {
+        name: PROFILE_NAME[composerMode],
+        autopilot: composerMode === "autopilot",
+      },
+      permissionRulesSnapshot: spec.permissions.rules,
+      envAllowlist: [],
+    });
+    await writer.append(started.envelope);
+
     const execution = await runner.runAttempt(
       spec,
       {
@@ -126,13 +169,29 @@ export const executeAttempt = async (
     const executionResult = toAttemptExecutionResult(spec, execution);
     const reviewed = reviewAttemptResult(spec, executionResult);
 
-    await writer.append(
-      buildReviewStartedEnvelope({ sessionId, turnId, attemptId: spec.attemptId }),
-    );
-
     const dispatchCommand = Array.isArray(execution.metadata?.cmd)
       ? execution.metadata.cmd.map((entry) => String(entry))
       : undefined;
+
+    const finalized = await recordProvenanceFinalize({
+      storageRoot,
+      prior: started.record,
+      ...(dispatchCommand !== undefined ? { dispatchCommand } : {}),
+      ...(typeof execution.metadata?.taskId === "string"
+        ? { sandboxTaskId: execution.metadata.taskId }
+        : {}),
+      exit: {
+        exitCode: execution.result.exitCode ?? null,
+        exitSignal: null,
+        timedOut: false,
+        elapsedMs: execution.result.durationMs ?? 0,
+      },
+    });
+    await writer.append(finalized.envelope);
+
+    await writer.append(
+      buildReviewStartedEnvelope({ sessionId, turnId, attemptId: spec.attemptId }),
+    );
     await sessionStore.upsertAttempt(sessionId, turnId, {
       attemptId: spec.attemptId,
       status: execution.result.status,

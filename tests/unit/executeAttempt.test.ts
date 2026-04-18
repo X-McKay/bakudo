@@ -224,8 +224,16 @@ test("executeAttempt: lifecycle envelopes emitted in correct sequence", async ()
     assert.equal(reviewed.outcome, "success");
     assert.equal(executionResult.schemaVersion, 3);
     assert.equal(executionResult.status, "succeeded");
-    assert.equal(captured.length, 6);
+    // Phase 4 PR2 added provenance_started (after dispatch_started) and
+    // provenance_finalized (before review_started), extending the lifecycle
+    // envelope sequence from 6 to 8.
+    assert.equal(captured.length, 8);
     assert.equal(captured[0]!.kind, "host.dispatch_started");
+    assert.equal(captured[1]!.kind, "host.provenance_started");
+    assert.equal(
+      captured.some((env) => env.kind === "host.provenance_finalized"),
+      true,
+    );
     assert.equal(captured[captured.length - 1]!.kind, "host.review_completed");
   } finally {
     await rm(rootDir, { recursive: true, force: true });
