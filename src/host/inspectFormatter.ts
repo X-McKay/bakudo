@@ -1,5 +1,7 @@
+import type { AttemptSpec } from "../attemptProtocol.js";
 import type { ArtifactStore } from "../artifactStore.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
+import { synthesizeLegacySpec } from "../sessionMigration.js";
 import type {
   SessionAttemptRecord,
   SessionRecord,
@@ -26,6 +28,23 @@ const modeOf = (attempt: SessionAttemptRecord): string =>
 
 const sandboxOf = (attempt: SessionAttemptRecord): string =>
   typeof attempt.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
+
+/**
+ * Resolve the {@link AttemptSpec} for display. Returns the persisted spec when
+ * available, or synthesizes a read-only legacy spec for v2 sessions.
+ */
+const resolveAttemptSpec = (
+  attempt: SessionAttemptRecord | undefined,
+  turn: SessionTurnRecord | undefined,
+): Partial<AttemptSpec> | undefined => {
+  if (attempt?.attemptSpec !== undefined) {
+    return attempt.attemptSpec;
+  }
+  if (attempt !== undefined && turn !== undefined) {
+    return synthesizeLegacySpec(attempt, turn);
+  }
+  return undefined;
+};
 
 const dispatchCommandOf = (attempt: SessionAttemptRecord): string[] | undefined => {
   if (Array.isArray(attempt.dispatchCommand) && attempt.dispatchCommand.length > 0) {
@@ -98,6 +117,13 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
       renderKv("Attempt", `${attempt.attemptId} mode=${modeOf(attempt)} status=${attempt.status}`),
     );
     lines.push(renderKv("Sandbox", sandboxOf(attempt)));
+  }
+  const spec = resolveAttemptSpec(attempt, turn);
+  if (spec?.taskKind !== undefined) {
+    lines.push(renderKv("TaskKind", spec.taskKind));
+  }
+  if (spec?.execution?.engine !== undefined) {
+    lines.push(renderKv("Engine", spec.execution.engine));
   }
   lines.push(renderKv("State", session.status));
   lines.push(renderKv("Updated", formatUtc(session.updatedAt)));
