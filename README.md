@@ -4,6 +4,10 @@
 
 > Current status: the interactive shell is transcript-first with persisted active-session continuity. Plain text continues the active session by default; explicit slash commands manage sessions, modes, inspection, and approvals. Legacy `--goal` mode still exists as a compatibility path.
 
+### On-disk layout
+
+Bakudo splits its on-disk state between repo-local and user-global locations. Repo-local state stays under `<repo>/.bakudo/` (config overlay, per-repo session store, host state, durable approvals). User-global state — local-only OTel spans, time-delta logs, startup profiles, heap snapshots — lives under `$XDG_DATA_HOME/bakudo/log/` (defaults to `~/.local/share/bakudo/log/`). On first launch bakudo runs a one-way migration that moves any legacy `~/.bakudo/log/`, `~/.bakudo/spans/`, or `<repo>/.bakudo/log/` directory into the XDG location and stamps a marker (`.migrated-v1-to-v2`) so subsequent launches are no-ops. The migration is logged once via `host.migration_v1_to_v2` (on the `host.event_skipped` envelope). `bakudo doctor` reports the active layout under `storage.layout`.
+
 ## Core Features
 
 - **Planner → Executor Contract**: Explicit step contracts with dependencies and acceptance metadata to ensure predictable execution.

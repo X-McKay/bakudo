@@ -1,3 +1,7 @@
+import { appendFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+
+import type { SessionEventEnvelope } from "../protocol.js";
 import { loadConfigCascade, type BakudoConfig } from "./config.js";
 import { setExperimentalConfigResolver } from "./flags.js";
 import { HOST_STATE_SCHEMA_VERSION, loadHostState } from "./hostStateStore.js";
@@ -14,6 +18,8 @@ import {
   type HeapWatchdogHandle,
 } from "./telemetry/heapWatchdog.js";
 import { resolveLogLevel, type LogLevel } from "./telemetry/logLevel.js";
+import { bakudoLogDir } from "./telemetry/xdgPaths.js";
+import { migrateToXdg, realMigrationFs, type MigrationPaths } from "./xdgMigration.js";
 
 export type AboxCapabilityProbe = {
   /** Stubbed until Phase 6 Workstream 3 wires the real probe. */
@@ -153,6 +159,50 @@ const probeAboxCapabilities = async (): Promise<AboxCapabilityProbe> =>
   ({ kind: "stub" });
 
 /**
+ * Phase 6 Wave 6e PR16 — append the migration envelope to a dedicated
+ * `bootstrap-events.ndjson` sibling to the time-delta logs. Separate file
+ * (not a session log) because the migration happens pre-session. Emission
+ * failures must never block bootstrap — diagnostic is fire-and-forget.
+ */
+const appendBootstrapEvent = async (
+  logDir: string,
+  envelope: SessionEventEnvelope,
+): Promise<void> => {
+  try {
+    await mkdir(logDir, { recursive: true });
+    await appendFile(`${logDir}/bootstrap-events.ndjson`, `${JSON.stringify(envelope)}\n`, "utf8");
+  } catch {
+    /* swallow — diagnostic emission MUST NOT break bootstrap */
+  }
+};
+
+/**
+ * Phase 6 Wave 6e PR16 — one-way `.bakudo/` → XDG migration. Runs before
+ * config/state reads so the first legitimate consumer sees the new layout.
+ * Idempotent after the marker lands. Failure must not wedge startup.
+ */
+const runXdgMigrationIfNeeded = async (repoRoot: string): Promise<void> => {
+  const logDir = bakudoLogDir();
+  const paths: MigrationPaths = {
+    repoRoot,
+    home: homedir(),
+    xdgLogDir: logDir,
+  };
+  try {
+    await migrateToXdg({
+      fs: realMigrationFs({ mutate: true }),
+      paths,
+      emit: (env) => {
+        void appendBootstrapEvent(logDir, env);
+      },
+    });
+  } catch {
+    // A hard failure here must NOT wedge every bakudo invocation. The
+    // marker remains unwritten and the next launch retries.
+  }
+};
+
+/**
  * preAction bootstrap. Loads the minimum state needed before a subcommand
  * runs, registers graceful-shutdown handlers, and kicks off async prefetches
  * so the first real call doesn't pay their latency. Heavy work is deferred.
@@ -165,6 +215,10 @@ export const initHost = memoize(async (): Promise<HostBootstrap> => {
 
   const repoRoot = repoRootFor(undefined);
   applySafeEnv();
+  // Wave 6e PR16 — one-way `.bakudo/` → XDG migration. Runs BEFORE the
+  // async fan-out so the first config/state read sees the new layout.
+  // Idempotent after first success.
+  await runXdgMigrationIfNeeded(repoRoot);
   // Wave 6c PR7 (A6.6): start the opt-in heap watchdog BEFORE the async
   // fan-out so a long-blocking fs.stat during config load is visible on
   // the watchdog's RSS samples. Disposal cleans it up.
