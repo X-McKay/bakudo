@@ -184,8 +184,9 @@ test("one-shot: terminal line is error envelope on dispatch failure", () => {
   const lines = stdout.tape().trimEnd().split("\n");
   assert.equal(lines.length, 2);
   const last = JSON.parse(lines[lines.length - 1]!) as JsonErrorEnvelope;
+  assert.equal(last.ok, false);
   assert.equal(last.kind, "error");
-  assert.equal(last.code, "worker_execution");
+  assert.equal(last.error.code, "worker_execution");
   // The expected taxonomy matches `buildJsonErrorEnvelope` output byte-for-byte.
   assert.deepEqual(
     last,

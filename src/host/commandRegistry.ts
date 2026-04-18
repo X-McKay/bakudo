@@ -1,4 +1,5 @@
 import type { HostAppState } from "./appState.js";
+import { classifyError, type RenderedError } from "./errors.js";
 import type { InteractiveResolution, TickDeps } from "./interactiveRenderLoop.js";
 
 /**
@@ -12,6 +13,21 @@ export const isExitResolution = (value: unknown): value is ExitResolution =>
   value !== null &&
   (value as { kind?: unknown }).kind === "exit" &&
   typeof (value as { code?: unknown }).code === "number";
+
+/**
+ * Phase 6 W9: dispatch outcome when a handler surfaces a typed error. The
+ * shell consumes this to print a plain-text error and exit with the stable
+ * exit code from the error taxonomy (`host/errors.ts`). Kept thin — the
+ * classification itself happens in `classifyError`, which is the single
+ * entry point to the multi-tier classifier (A6.3).
+ */
+export type ErrorResolution = { kind: "error"; rendered: RenderedError };
+
+/** Wrap any thrown value as an {@link ErrorResolution}. */
+export const errorResolutionFor = (error: unknown): ErrorResolution => ({
+  kind: "error",
+  rendered: classifyError(error),
+});
 
 /**
  * A command handler can:
