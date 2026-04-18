@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { withBootstrap } from "./host/bootstrap.js";
+import { applyCopilotSideEffects } from "./host/copilotFlags.js";
 import { isMainModule } from "./mainModule.js";
 import { stderrWrite } from "./host/io.js";
 import { dispatchHostCommand, runInteractiveShell } from "./host/interactive.js";
@@ -26,7 +27,15 @@ export const runHostCli = async (argv: string[]): Promise<number> => {
       return runInteractiveShell();
     }
     const args = parseHostArgs(argv);
-    return dispatchHostCommand(args);
+    // Phase 5 PR11 — apply Copilot-parity side-effect flags
+    // (`--no-ask-user`, `--plain-diff`) before dispatch, and unwind them
+    // on the way out so state does not leak between invocations.
+    const dispose = applyCopilotSideEffects(args.copilot);
+    try {
+      return await dispatchHostCommand(args);
+    } finally {
+      dispose();
+    }
   });
 };
 

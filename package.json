@@ -15,8 +15,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepare": "pnpm build",
-    "test": "pnpm build && node --test dist/tests/**/*.test.js",
-    "test:unit": "pnpm build && node --test dist/tests/unit/*.test.js",
+    "test": "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/integration/*.test.js dist/tests/regression/*.test.js",
+    "test:unit": "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js",
     "test:integration": "pnpm build && node --test dist/tests/integration/*.test.js",
     "test:regression": "pnpm build && node --test dist/tests/regression/*.test.js",
     "start": "pnpm build && node dist/src/cli.js",

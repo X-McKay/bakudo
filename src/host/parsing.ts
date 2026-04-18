@@ -1,3 +1,4 @@
+import { tryConsumeCopilotFlag } from "./copilotFlagParser.js";
 import type { TaskMode } from "../protocol.js";
 
 export type HostCommand =
@@ -15,25 +16,40 @@ export type HostCommand =
   | "help";
 
 /**
- * Copilot-parity flag namespace (2026-04-14 reference additions). PR4 only
- * wires the parsers so the flags are recognized without erroring. Full
- * semantics land in Phase 5 (prompt plumbing, streaming toggles, JSON output,
- * permission policy, non-interactive automation).
+ * Copilot-parity flag namespace. Phase 1 PR4 reserved the names; Phase 5 PR11
+ * wires the semantics through all three backends.
+ *
+ * Parity status (see `plans/bakudo-ux/05-rich-tui-and-distribution-hardening.md:441-464`):
+ *
+ * | Flag | Parity |
+ * | --- | --- |
+ * | `-p`, `--prompt` | Confirmed Copilot parity (one-shot). |
+ * | `--output-format=json` | Confirmed Copilot parity (JSONL stream). |
+ * | `--allow-all-tools` | Confirmed Copilot parity (autopilot shortcut). |
+ * | `--stream=off` | Bakudo-specific reframe (unverified in public Copilot). |
+ * | `--plain-diff` | Bakudo-specific reframe (unverified in public Copilot). |
+ * | `--no-ask-user` | Bakudo-specific reframe (unverified in public Copilot). |
+ * | `--max-autopilot-continues=N` | Bakudo-original (cap on unattended chains). |
  */
 export type CopilotParityFlags = {
-  /** `-p`, `--prompt` — alternate source for the goal prompt. Reserved. */
+  /** `-p`, `--prompt` — one-shot goal source. Confirmed Copilot parity. */
   prompt?: string;
-  /** `--stream=off` — disable live streaming in favor of buffered output. */
+  /** `--stream=off` — buffer until completion. Bakudo-specific. */
   streamOff?: boolean;
-  /** `--plain-diff` — emit diffs in plain text rather than ansi. */
+  /** `--plain-diff` — strip ANSI from diff artifacts. Bakudo-specific. */
   plainDiff?: boolean;
-  /** `--output-format=json` — machine-readable summary output. */
+  /** `--output-format=json` — machine-readable JSONL stream. Confirmed parity. */
   outputFormat?: "json" | "text";
-  /** `--allow-all-tools` — Phase 5 permission bypass (autopilot CI mode). */
+  /** `--allow-all-tools` — forces ComposerMode to "autopilot". Confirmed parity. */
   allowAllTools?: boolean;
-  /** `--no-ask-user` — fail instead of prompting when user input is needed. */
+  /** `--no-ask-user` — `launchApprovalDialog` throws instead of prompting. Bakudo-specific. */
   noAskUser?: boolean;
+  /** `--max-autopilot-continues=N` — bound on unattended continue chains. Bakudo-original. */
+  maxAutopilotContinues?: number;
 };
+
+/** Default cap on unattended Autopilot continue chains when the flag is unset. */
+export const DEFAULT_MAX_AUTOPILOT_CONTINUES = 10 as const;
 
 export type HostCliArgs = {
   command: HostCommand;
@@ -142,6 +158,14 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     }
     index = 1;
   } else if (argv.includes("--goal") || argv.some((arg) => arg.startsWith("--goal="))) {
+    result.command = "run";
+  } else if (
+    // `-p` / `--prompt` is Copilot-parity one-shot mode: bakudo runs the
+    // prompt and exits. Treat it like `run` when no explicit command preceded.
+    argv.includes("-p") ||
+    argv.includes("--prompt") ||
+    argv.some((arg) => arg.startsWith("--prompt="))
+  ) {
     result.command = "run";
   } else if (argv.length > 0 && !argv[0]?.startsWith("--")) {
     result.command = "run";
@@ -260,55 +284,11 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       continue;
     }
 
-    // Copilot-parity namespace — recognized but not yet consumed. Phase 5.
-    if (arg === "-p" || arg === "--prompt" || arg.startsWith("--prompt=")) {
-      const flag = arg === "-p" ? "-p" : "--prompt";
-      if (flag === "-p") {
-        const next = argv[i + 1];
-        if (next === undefined || next.startsWith("--")) {
-          throw new Error(`missing value for ${flag}`);
-        }
-        result.copilot.prompt = next;
-        i += 1;
-      } else {
-        const { value, consumed } = readLongFlag(argv, i, "--prompt");
-        result.copilot.prompt = value;
-        i += consumed - 1;
-      }
-      continue;
-    }
-    if (arg === "--stream" || arg.startsWith("--stream=")) {
-      const { value, consumed } = readLongFlag(argv, i, "--stream");
-      if (value !== "on" && value !== "off") {
-        throw new Error("invalid --stream: expected on or off");
-      }
-      result.copilot.streamOff = value === "off";
-      i += consumed - 1;
-      continue;
-    }
-    if (arg === "--plain-diff") {
-      result.copilot.plainDiff = true;
-      continue;
-    }
-    if (arg === "--json") {
-      result.copilot.outputFormat = "json";
-      continue;
-    }
-    if (arg === "--output-format" || arg.startsWith("--output-format=")) {
-      const { value, consumed } = readLongFlag(argv, i, "--output-format");
-      if (value !== "json" && value !== "text") {
-        throw new Error("invalid --output-format: expected json or text");
-      }
-      result.copilot.outputFormat = value;
-      i += consumed - 1;
-      continue;
-    }
-    if (arg === "--allow-all-tools") {
-      result.copilot.allowAllTools = true;
-      continue;
-    }
-    if (arg === "--no-ask-user") {
-      result.copilot.noAskUser = true;
+    // Copilot-parity namespace (Phase 5 PR11). Delegated to keep this file
+    // under the 400-line cap.
+    const copilotConsumed = tryConsumeCopilotFlag(argv, i, result.copilot);
+    if (copilotConsumed.consumed > 0) {
+      i += copilotConsumed.consumed - 1;
       continue;
     }
 
@@ -390,7 +370,10 @@ export const shouldUseHostCli = (argv: string[]): boolean => {
     HOST_COMMANDS.has(first as HostCommand) ||
     (!first.startsWith("--") && !first.includes("=")) ||
     argv.includes("--session-id") ||
-    argv.includes("--task-id")
+    argv.includes("--task-id") ||
+    argv.includes("-p") ||
+    argv.includes("--prompt") ||
+    argv.some((arg) => arg.startsWith("--prompt="))
   );
 };
 

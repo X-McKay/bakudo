@@ -12,7 +12,7 @@ import {
   saveHostState,
   type HostStateRecord,
 } from "./hostStateStore.js";
-import { runtimeIo, stdoutWrite, withCapturedStdout, type TextWriter } from "./io.js";
+import { runtimeIo, withCapturedStdout, type TextWriter } from "./io.js";
 import { runInit } from "./init.js";
 import {
   deriveShellContext,
@@ -31,23 +31,15 @@ import {
   resolveSessionScopedInteractiveCommand,
   sessionPromptLabel,
 } from "./interactiveResolvers.js";
-import {
-  promptForApproval,
-  repoRootFor,
-  requiresSandboxApproval,
-  resumeSession,
-  storageRootFor,
-} from "./orchestration.js";
+import { repoRootFor, resumeSession, storageRootFor } from "./orchestration.js";
 import { parseHostArgs, tokenizeCommand, type HostCliArgs } from "./parsing.js";
 import {
   printLogs,
   printReview,
-  printRunSummary,
   printSandbox,
   printSessions,
   printStatus,
   printTasks,
-  reviewedOutcomeExitCode,
 } from "./printers.js";
 import {
   answerPrompt,
@@ -69,25 +61,10 @@ export { buildInteractiveRunResolution, createInteractiveSessionIdentity };
 export { rememberInteractiveContext, renderPrompt, resolveInteractiveInput, sessionPromptLabel };
 export { resolveSessionScopedInteractiveCommand };
 
-/** Non-interactive one-shot: routes through the v2 sessionController pipeline. */
-export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<number> => {
-  if (requiresSandboxApproval(args) && !args.yes) {
-    const approved = await promptForApproval(
-      `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
-    );
-    if (!approved) {
-      stdoutWrite("Dispatch cancelled.\n");
-      return 2;
-    }
-  }
-  const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const withSession: HostCliArgs = { ...args, sessionId };
-  const storageRoot = storageRootFor(withSession.repo, withSession.storageRoot);
-  await emitUserTurnSubmitted(storageRoot, sessionId, args.goal ?? "", args.mode);
-  const result = await createAndRunFirstTurn(args.goal ?? "", withSession);
-  printRunSummary(result.session, result.reviewed);
-  return reviewedOutcomeExitCode(result.reviewed);
-};
+// Phase 5 PR11 — one-shot dispatch extracted to `./oneShotRun.ts` so this
+// file stays under the 400-line cap. Re-exported for backward compatibility.
+import { runNonInteractiveOneShot } from "./oneShotRun.js";
+export { runNonInteractiveOneShot };
 
 export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
   if (args.command === "help") {

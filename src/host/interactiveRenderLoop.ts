@@ -1,14 +1,12 @@
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../protocol.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
-import { supportsAnsi } from "./ansi.js";
 import type { ComposerMode, HostAppState } from "./appState.js";
 import type { BakudoConfig } from "./config.js";
 import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
-import { renderTranscriptFramePlain } from "./renderers/plainRenderer.js";
-import { renderTranscriptFrame } from "./renderers/transcriptRenderer.js";
+import { selectRendererBackend, type RendererStdout } from "./rendererBackend.js";
 import type { TextWriter } from "./io.js";
 
 /**
@@ -60,25 +58,9 @@ export type TickDeps = {
   config?: BakudoConfig;
 };
 
-const renderFrameLines = (
-  state: HostAppState,
-  transcript: TranscriptItem[],
-  repoLabel?: string,
-): string[] => {
-  const frame = selectRenderFrame({
-    state,
-    transcript,
-    ...(repoLabel !== undefined ? { repoLabel } : {}),
-  });
-  return supportsAnsi() ? renderTranscriptFrame(frame) : renderTranscriptFramePlain(frame);
-};
-
-const writeFrame = (lines: string[]): void => {
-  const output = getBaseStdout();
-  if (supportsAnsi()) {
-    void output.write("\x1Bc");
-  }
-  void output.write(`${lines.join("\n")}\n`);
+const stdoutAsRendererStdout = (): RendererStdout => {
+  const output = getBaseStdout() as unknown as RendererStdout;
+  return output;
 };
 
 const createSilentCapture = (): { writer: TextWriter; lines: string[]; flush: () => void } => {
@@ -143,8 +125,44 @@ const exitCodeToReviewItem = (code: number): TranscriptItem => {
 const isExecCommand = (command: string): boolean =>
   command === "run" || command === "build" || command === "plan" || command === "resume";
 
+/**
+ * Factory: build a tick renderer bound to a single {@link RendererBackend}.
+ * Call once at the top of the interactive loop, then reuse the returned
+ * function for every tick. The backend is chosen by {@link selectRendererBackend}
+ * based on the current stdout + optional flag overrides.
+ *
+ * The non-factory {@link tickRender} below creates a backend per call for
+ * backward compatibility with existing callers and to preserve the old
+ * per-tick `supportsAnsi()` dispatch behavior (TTY state re-checked each tick).
+ */
+export const createTickRenderer = (
+  options: { useJson?: boolean; forcePlain?: boolean } = {},
+): ((deps: TickDeps) => void) => {
+  const stdout = stdoutAsRendererStdout();
+  const backend = selectRendererBackend({
+    stdout,
+    ...(options.useJson !== undefined ? { useJson: options.useJson } : {}),
+    ...(options.forcePlain !== undefined ? { forcePlain: options.forcePlain } : {}),
+  });
+  return (deps: TickDeps): void => {
+    const frame = selectRenderFrame({
+      state: deps.appState,
+      transcript: deps.transcript,
+      ...(deps.repoLabel !== undefined ? { repoLabel: deps.repoLabel } : {}),
+    });
+    backend.render(frame);
+  };
+};
+
 export const tickRender = (deps: TickDeps): void => {
-  writeFrame(renderFrameLines(deps.appState, deps.transcript, deps.repoLabel));
+  const frame = selectRenderFrame({
+    state: deps.appState,
+    transcript: deps.transcript,
+    ...(deps.repoLabel !== undefined ? { repoLabel: deps.repoLabel } : {}),
+  });
+  const stdout = stdoutAsRendererStdout();
+  const backend = selectRendererBackend({ stdout });
+  backend.render(frame);
 };
 
 export type ExecuteDeps = {

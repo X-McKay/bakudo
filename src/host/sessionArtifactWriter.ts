@@ -5,6 +5,7 @@ import type { ArtifactStore } from "../artifactStore.js";
 import { createSessionEvent, type SessionEventKind, type TaskResult } from "../protocol.js";
 import { createSessionPaths, sanitizePathSegment } from "../sessionStore.js";
 import type { SessionReviewAction, SessionReviewOutcome } from "../sessionTypes.js";
+import { stripAnsi } from "./ansi.js";
 import {
   appendArtifactRecord,
   ARTIFACT_RECORD_SCHEMA_VERSION,
@@ -13,6 +14,34 @@ import {
   artifactIdFor,
 } from "./artifactStore.js";
 import { emitSessionEvent } from "./eventLogWriter.js";
+
+/**
+ * Module-scoped flag backing the `--plain-diff` CLI option (Phase 5 PR11).
+ * When `true`, diff-kind artifacts are stripped of ANSI escape sequences
+ * before persistence so downstream copies (e.g. `bakudo review --json`)
+ * produce clean plain text. Reset between one-shot invocations with
+ * {@link resetPlainDiff}.
+ */
+let plainDiffEnabled = false;
+
+export const setPlainDiff = (enabled: boolean): void => {
+  plainDiffEnabled = enabled;
+};
+
+export const isPlainDiffEnabled = (): boolean => plainDiffEnabled;
+
+export const resetPlainDiff = (): void => {
+  plainDiffEnabled = false;
+};
+
+/**
+ * Apply the `--plain-diff` transformation when (a) the flag is active and
+ * (b) the artifact kind is `"diff"`. Other kinds pass through unchanged.
+ * Extracted as a pure helper so unit tests can assert on the text shape
+ * without touching the filesystem.
+ */
+export const applyPlainDiffTransform = (kind: ArtifactKind, contents: string): string =>
+  plainDiffEnabled && kind === "diff" ? stripAnsi(contents) : contents;
 
 /**
  * Persist a single artifact file alongside (1) the legacy JSON-array
@@ -40,7 +69,9 @@ export const writeSessionArtifact = async (
   await mkdir(artifactsDir, { recursive: true });
   const safeName = `${sanitizePathSegment(attemptId)}-${name}`;
   const filePath = join(artifactsDir, safeName);
-  await writeFile(filePath, contents, "utf8");
+  // `--plain-diff` only touches diff-kind artifacts; other kinds pass through.
+  const effectiveContents = applyPlainDiffTransform(kind, contents);
+  await writeFile(filePath, effectiveContents, "utf8");
 
   // Legacy JSON-array registry (Phase 1) — absolute path retained for
   // backward compatibility with consumers that still read
