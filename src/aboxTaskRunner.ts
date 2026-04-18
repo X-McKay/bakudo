@@ -248,6 +248,24 @@ export const attemptSpecToWorkerSpec = (spec: AttemptSpec): WorkerTaskSpec => {
 export type WorkerCapabilitiesProvider = (bin: string) => Promise<ProbeOutcome>;
 
 /**
+ * Wave 6c PR9 carryover #6 — the runner-scoped probe-failure emitter.
+ * Receives the probe outcome, the bin path, and the attempt spec currently
+ * being dispatched; called at most ONCE per {@link ABoxTaskRunner} instance
+ * (runner-instance = session scope) on the first `runAttempt` whose probe
+ * fell back. Production wiring pipes the call to the session event log
+ * writer; tests capture the invocation.
+ *
+ * Kept sync — the runner calls the emitter fire-and-forget so dispatch
+ * latency is unaffected. Implementations that need to write I/O should use
+ * `void` on an async operation inside the callback.
+ */
+export type ProbeFailureEmitter = (input: {
+  outcome: ProbeOutcome;
+  bin: string;
+  spec: AttemptSpec;
+}) => void;
+
+/**
  * Phase 6 W5 — snapshot of `process.env` used when the runner is constructed
  * without an explicit env source. Kept as a getter so tests can stub the
  * node global without a module-load race.
@@ -260,6 +278,15 @@ const hostEnvSnapshot = (): Readonly<Record<string, string | undefined>> => {
 };
 
 export class ABoxTaskRunner {
+  /**
+   * Wave 6c PR9 carryover #6 — ensures {@link ProbeFailureEmitter} fires at
+   * most once per runner-instance lifetime. Runner instances map 1:1 to a
+   * session (see `sessionController.buildRunnerContext` and the two
+   * runner-construction sites in `sessionLifecycle`); once-per-runner ≡
+   * once-per-session per probe failure, satisfying the scope rule.
+   */
+  private probeFailureEmitted = false;
+
   public constructor(
     private readonly adapter: ABoxAdapter,
     private readonly capabilitiesProvider: WorkerCapabilitiesProvider = (bin) =>
@@ -279,6 +306,14 @@ export class ABoxTaskRunner {
     private readonly envSource: () => Readonly<
       Record<string, string | undefined>
     > = hostEnvSnapshot,
+    /**
+     * Wave 6c PR9 carryover #6 — optional emitter invoked once per runner
+     * lifetime on probe failure. Production callers pipe this to the event
+     * log writer so observers see a `host.event_skipped` envelope with
+     * `payload.skippedKind = "worker.capability_probe_failed"`. Omit the
+     * emitter to disable the diagnostic (legacy behaviour).
+     */
+    private readonly probeFailureEmitter?: ProbeFailureEmitter,
   ) {}
 
   public async runTask(
@@ -340,6 +375,27 @@ export class ABoxTaskRunner {
     handlers: TaskRunnerHandlers = {},
   ): Promise<TaskExecutionRecord> {
     const probe = await this.capabilitiesProvider(this.adapter.binPath);
+    // Wave 6c PR9 carryover #6 — emit the deferred diagnostic envelope when
+    // the probe fell back. Fires AT MOST ONCE per runner lifetime (a session
+    // typically creates one runner, so this dedupes to once-per-session-per-
+    // probe-failure). Successful probes never reach this branch, preserving
+    // the "no emit when probe succeeds" invariant.
+    if (
+      !this.probeFailureEmitted &&
+      this.probeFailureEmitter !== undefined &&
+      probe.capabilities.source === "fallback_host_default" &&
+      probe.fallbackReason !== undefined &&
+      probe.fallbackReason.length > 0
+    ) {
+      this.probeFailureEmitted = true;
+      try {
+        this.probeFailureEmitter({ outcome: probe, bin: this.adapter.binPath, spec });
+      } catch {
+        // Diagnostic emission MUST NOT break dispatch. A failing emitter is
+        // the observability layer's problem; the fallback itself is still
+        // applied below.
+      }
+    }
     negotiateAttemptAgainstCapabilities({
       spec,
       capabilities: probe.capabilities,
