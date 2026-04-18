@@ -9,17 +9,49 @@ export type ReviewedOutcome =
 
 export type ReviewAction = "accept" | "retry" | "ask_user" | "halt" | "follow_up";
 
+/**
+ * Phase 4 PR5 review confidence grade. Summarizes how much corroborating
+ * evidence the classifier has for its verdict. Downstream surfaces (inspect,
+ * narration) render this as a human-readable chip next to the outcome.
+ *
+ * - `high`: clean success with no recent retry/ask/deny signals.
+ * - `low`: execution failed/blocked, an approval was denied on this turn, or
+ *   the turn is already several retries deep.
+ * - `medium`: the ambiguous middle — success with minor friction, or a
+ *   failure without strong retry-loop signals.
+ */
+export type ReviewConfidence = "low" | "medium" | "high";
+
 export type ReviewClassification = {
   outcome: ReviewedOutcome;
   action: ReviewAction;
   reason: string;
   retryable: boolean;
   needsUser: boolean;
+  /**
+   * Phase 4 PR5: coarse-grained grade on the classification. Populated by
+   * {@link classifyReviewedOutcome} with a default of `"medium"` for
+   * callers that do not pass corroborating evidence (approvals, lineage).
+   * Callers that have richer inputs should prefer
+   * {@link import("./reviewer.js").reviewAttemptWithInputs} which refines
+   * the confidence grade from evidence.
+   */
+  confidence: ReviewConfidence;
 };
 
 export type ReviewClassifierHints = {
   policyDenied?: boolean;
   retryableExitCodes?: readonly number[];
+  /**
+   * Phase 4 PR5 (optional): explicit override for the
+   * {@link ReviewClassification.confidence} field. Callers with richer
+   * context (approvals, lineage) can pre-compute a grade and pass it in
+   * rather than accepting the classifier's default heuristic. Existing
+   * callers that omit it get `"medium"` on any non-success outcome and
+   * `"high"` on a clean `success` — neither of which requires them to
+   * change their call sites.
+   */
+  confidence?: ReviewConfidence;
 };
 
 const DEFAULT_RETRYABLE_EXIT_CODES = new Set([124, 137, 143]);
@@ -102,6 +134,22 @@ const retryableExitCodes = (hints: ReviewClassifierHints): ReadonlySet<number> =
   return new Set(hints.retryableExitCodes);
 };
 
+/**
+ * Default {@link ReviewConfidence} for a classification result. Callers that
+ * pass `hints.confidence` win. Otherwise a clean `success` is `"high"` and
+ * everything else is `"medium"` — the reviewer layer refines `"low"` cases
+ * where it has richer evidence (approvals, lineage).
+ */
+const defaultConfidenceFor = (
+  outcome: ReviewedOutcome,
+  hints: ReviewClassifierHints,
+): ReviewConfidence => {
+  if (hints.confidence !== undefined) {
+    return hints.confidence;
+  }
+  return outcome === "success" ? "high" : "medium";
+};
+
 export const classifyReviewedOutcome = (
   result: TaskResult,
   hints: ReviewClassifierHints = {},
@@ -116,6 +164,7 @@ export const classifyReviewedOutcome = (
       reason: "task was denied by policy",
       retryable: false,
       needsUser: false,
+      confidence: defaultConfidenceFor("policy_denied", hints),
     };
   }
 
@@ -126,6 +175,7 @@ export const classifyReviewedOutcome = (
       reason: "task is blocked and needs user input or approval",
       retryable: false,
       needsUser: true,
+      confidence: defaultConfidenceFor("blocked_needs_user", hints),
     };
   }
 
@@ -136,6 +186,7 @@ export const classifyReviewedOutcome = (
       reason: "task completed successfully",
       retryable: false,
       needsUser: false,
+      confidence: defaultConfidenceFor("success", hints),
     };
   }
 
@@ -151,6 +202,7 @@ export const classifyReviewedOutcome = (
         reason: "task stopped before completion, but the failure looks retryable",
         retryable: true,
         needsUser: false,
+        confidence: defaultConfidenceFor("retryable_failure", hints),
       };
     }
 
@@ -160,6 +212,7 @@ export const classifyReviewedOutcome = (
       reason: "task did not finish and needs follow-up",
       retryable: false,
       needsUser: false,
+      confidence: defaultConfidenceFor("incomplete_needs_follow_up", hints),
     };
   }
 
@@ -174,6 +227,7 @@ export const classifyReviewedOutcome = (
       reason: "task result looks incomplete and needs follow-up",
       retryable: false,
       needsUser: false,
+      confidence: defaultConfidenceFor("incomplete_needs_follow_up", hints),
     };
   }
 
@@ -184,6 +238,7 @@ export const classifyReviewedOutcome = (
       reason: "task failed, but the signal looks retryable",
       retryable: true,
       needsUser: false,
+      confidence: defaultConfidenceFor("retryable_failure", hints),
     };
   }
 
@@ -193,5 +248,6 @@ export const classifyReviewedOutcome = (
     reason: "task failed",
     retryable: true,
     needsUser: false,
+    confidence: defaultConfidenceFor("retryable_failure", hints),
   };
 };

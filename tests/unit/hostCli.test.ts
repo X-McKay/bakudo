@@ -135,6 +135,7 @@ test("reviewed outcome exit codes are stable", () => {
       reason: "ok",
       retryable: false,
       needsUser: false,
+      confidence: "high",
     }),
     0,
   );
@@ -145,6 +146,7 @@ test("reviewed outcome exit codes are stable", () => {
       reason: "approval needed",
       retryable: false,
       needsUser: true,
+      confidence: "medium",
     }),
     2,
   );
