@@ -34,12 +34,14 @@ export type PermissionEffect = "allow" | "ask" | "deny";
 export type KnownPermissionTool = "shell" | "write" | "network" | "edit" | "task";
 export type PermissionTool = KnownPermissionTool | (string & {});
 export type PermissionSource = "agent_profile" | "user_interactive" | "repo_config" | "user_config";
+export type PermissionRuleScope = "once" | "session" | "always";
 
 export type PermissionRule = {
+  ruleId: string;
   effect: PermissionEffect;
   tool: PermissionTool;
   pattern: string;
-  scope?: string;
+  scope: PermissionRuleScope;
   source: PermissionSource;
 };
 
@@ -143,16 +145,64 @@ const PermissionSourceSchema = z.enum([
   "repo_config",
   "user_config",
 ]);
+const PermissionRuleScopeSchema = z.enum(["once", "session", "always"]);
 
+/**
+ * Raw on-disk / over-the-wire shape — `ruleId` and `scope` are tolerant on
+ * read so legacy rules written before the Phase 4 tightening still load.
+ * Use {@link hydratePermissionRule} to fill the defaults and return a strict
+ * {@link PermissionRule}.
+ */
 export const PermissionRuleSchema = z
   .object({
+    ruleId: z.string().optional(),
     effect: PermissionEffectSchema,
     tool: z.string(),
     pattern: z.string(),
-    scope: z.string().optional(),
+    scope: PermissionRuleScopeSchema.optional(),
     source: PermissionSourceSchema,
   })
   .strip();
+
+export type RawPermissionRule = z.infer<typeof PermissionRuleSchema>;
+
+/**
+ * Deterministic ID for a legacy rule loaded without one. Same tool/pattern/
+ * effect/source always hashes to the same `rule-<hex>` so inspect/approval
+ * tables stay stable across loads.
+ */
+export const synthesizePermissionRuleId = (raw: {
+  effect: PermissionEffect;
+  tool: string;
+  pattern: string;
+  source: PermissionSource;
+}): string => {
+  const payload = `${raw.effect}|${raw.tool}|${raw.pattern}|${raw.source}`;
+  // Small deterministic hash (FNV-1a 32-bit). 8 hex chars is enough for
+  // practical uniqueness across a handful of rules per session and avoids
+  // pulling crypto into a pure-data helper.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < payload.length; i += 1) {
+    hash ^= payload.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `rule-${hash.toString(16).padStart(8, "0")}`;
+};
+
+/**
+ * Promote a tolerantly-parsed {@link RawPermissionRule} to the strict
+ * {@link PermissionRule}. Missing `ruleId` gets a deterministic synthesis;
+ * missing `scope` defaults to `"session"` (rules loaded from agent profiles
+ * are session-scoped unless the user has explicitly marked them `always`).
+ */
+export const hydratePermissionRule = (raw: RawPermissionRule): PermissionRule => ({
+  ruleId: raw.ruleId ?? synthesizePermissionRuleId(raw),
+  effect: raw.effect,
+  tool: raw.tool,
+  pattern: raw.pattern,
+  scope: raw.scope ?? "session",
+  source: raw.source,
+});
 
 const AcceptanceCheckSchema = z
   .object({

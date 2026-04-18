@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type {
-  AttemptExecutionResult,
-  AttemptSpec,
-  PermissionRule,
+import {
+  hydratePermissionRule,
+  type AttemptExecutionResult,
+  type AttemptSpec,
+  type PermissionRule,
 } from "../../src/attemptProtocol.js";
 import { BakudoConfigDefaults } from "../../src/host/config.js";
 import { evaluatePermission } from "../../src/host/permissionEvaluator.js";
@@ -219,8 +220,18 @@ test("phase3: autopilot mode → allowAllTools, noAskUser, all-allow", () => {
 
 test("phase3: deny-precedence — deny overrides autopilot allow", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "shell", pattern: "*", source: "agent_profile" },
-    { effect: "deny", tool: "shell", pattern: "rm -rf *", source: "repo_config" },
+    hydratePermissionRule({
+      effect: "allow",
+      tool: "shell",
+      pattern: "*",
+      source: "agent_profile",
+    }),
+    hydratePermissionRule({
+      effect: "deny",
+      tool: "shell",
+      pattern: "rm -rf *",
+      source: "repo_config",
+    }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "rm -rf *"), "deny");
   assert.equal(evaluatePermission(rules, "shell", "echo hi"), "allow");

@@ -83,14 +83,29 @@ test("TurnIntentSchema accepts optional tokenBudget", () => {
 
 test("PermissionRuleSchema accepts valid rule", () => {
   const rule: PermissionRule = {
+    ruleId: "rule-deny-shell-rm",
     effect: "deny",
     tool: "shell",
     pattern: "rm -rf *",
+    scope: "session",
     source: "agent_profile",
   };
   const parsed = PermissionRuleSchema.parse(rule);
   assert.equal(parsed.effect, "deny");
   assert.equal(parsed.source, "agent_profile");
+  assert.equal(parsed.scope, "session");
+  assert.equal(parsed.ruleId, "rule-deny-shell-rm");
+});
+
+test("PermissionRuleSchema is tolerant — missing ruleId and scope parse OK", () => {
+  const parsed = PermissionRuleSchema.parse({
+    effect: "allow",
+    tool: "shell",
+    pattern: "*",
+    source: "agent_profile",
+  });
+  assert.equal(parsed.ruleId, undefined);
+  assert.equal(parsed.scope, undefined);
 });
 
 test("PermissionRuleSchema accepts all four sources", () => {

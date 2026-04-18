@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { PermissionRule } from "../../src/attemptProtocol.js";
+import {
+  hydratePermissionRule,
+  type PermissionRule,
+  type RawPermissionRule,
+} from "../../src/attemptProtocol.js";
 import {
   compileProfilePermissions,
   evaluatePermission,
   matchGlob,
 } from "../../src/host/permissionEvaluator.js";
+
+/**
+ * Small test helper — the evaluator cares about `tool`, `pattern`, `effect`,
+ * `source`; `ruleId` and `scope` get synthesized by the hydrator. Keeping
+ * these literals short keeps the test matrix readable.
+ */
+const r = (raw: RawPermissionRule): PermissionRule => hydratePermissionRule(raw);
 
 // ---------------------------------------------------------------------------
 // matchGlob
@@ -45,30 +56,30 @@ test("matchGlob: git:* pattern (shell tool grammar)", () => {
 
 test("deny rule overrides allow for same tool+target", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "shell", pattern: "*", source: "agent_profile" },
-    { effect: "deny", tool: "shell", pattern: "rm **", source: "repo_config" },
+    r({ effect: "allow", tool: "shell", pattern: "*", source: "agent_profile" }),
+    r({ effect: "deny", tool: "shell", pattern: "rm **", source: "repo_config" }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "rm -rf /"), "deny");
 });
 
 test("deny wins even when an allow-all rule precedes it", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "*", pattern: "*", source: "user_config" },
-    { effect: "deny", tool: "network", pattern: "*", source: "repo_config" },
+    r({ effect: "allow", tool: "*", pattern: "*", source: "user_config" }),
+    r({ effect: "deny", tool: "network", pattern: "*", source: "repo_config" }),
   ];
   assert.equal(evaluatePermission(rules, "network", "https://evil.com"), "deny");
 });
 
 test("no matching rules returns ask (safe default)", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "write", pattern: "*.ts", source: "agent_profile" },
+    r({ effect: "allow", tool: "write", pattern: "*.ts", source: "agent_profile" }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "ls"), "ask");
 });
 
 test("wildcard * pattern matches everything for a tool", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "shell", pattern: "*", source: "agent_profile" },
+    r({ effect: "allow", tool: "shell", pattern: "*", source: "agent_profile" }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "git commit"), "allow");
   assert.equal(evaluatePermission(rules, "shell", "npm install"), "allow");
@@ -76,7 +87,7 @@ test("wildcard * pattern matches everything for a tool", () => {
 
 test("** glob matches nested paths (src/foo/bar.ts matches src/**/*.ts)", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "write", pattern: "src/**/*.ts", source: "agent_profile" },
+    r({ effect: "allow", tool: "write", pattern: "src/**/*.ts", source: "agent_profile" }),
   ];
   assert.equal(evaluatePermission(rules, "write", "src/foo/bar.ts"), "allow");
   assert.equal(evaluatePermission(rules, "write", "lib/foo.ts"), "ask");
@@ -84,7 +95,7 @@ test("** glob matches nested paths (src/foo/bar.ts matches src/**/*.ts)", () => 
 
 test("shell(git:*) grammar: tool=shell, pattern=git:* matches git:commit but not npm:install", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "shell", pattern: "git:*", source: "agent_profile" },
+    r({ effect: "allow", tool: "shell", pattern: "git:*", source: "agent_profile" }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "git:commit"), "allow");
   assert.equal(evaluatePermission(rules, "shell", "npm:install"), "ask");
@@ -92,7 +103,7 @@ test("shell(git:*) grammar: tool=shell, pattern=git:* matches git:commit but not
 
 test("tool: * rule matches any tool", () => {
   const rules: PermissionRule[] = [
-    { effect: "deny", tool: "*", pattern: "*.exe", source: "repo_config" },
+    r({ effect: "deny", tool: "*", pattern: "*.exe", source: "repo_config" }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "malware.exe"), "deny");
   assert.equal(evaluatePermission(rules, "write", "binary.exe"), "deny");
@@ -105,22 +116,22 @@ test("empty rules array returns ask", () => {
 
 test("allow takes priority over ask when both match", () => {
   const rules: PermissionRule[] = [
-    { effect: "ask", tool: "shell", pattern: "*", source: "agent_profile" },
-    { effect: "allow", tool: "shell", pattern: "git:*", source: "user_config" },
+    r({ effect: "ask", tool: "shell", pattern: "*", source: "agent_profile" }),
+    r({ effect: "allow", tool: "shell", pattern: "git:*", source: "user_config" }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "git:status"), "allow");
 });
 
 test("ask returned when only ask rules match", () => {
   const rules: PermissionRule[] = [
-    { effect: "ask", tool: "write", pattern: "*", source: "agent_profile" },
+    r({ effect: "ask", tool: "write", pattern: "*", source: "agent_profile" }),
   ];
   assert.equal(evaluatePermission(rules, "write", "README.md"), "ask");
 });
 
 test("non-matching tool rules are ignored", () => {
   const rules: PermissionRule[] = [
-    { effect: "allow", tool: "network", pattern: "*", source: "agent_profile" },
+    r({ effect: "allow", tool: "network", pattern: "*", source: "agent_profile" }),
   ];
   assert.equal(evaluatePermission(rules, "shell", "curl http://example.com"), "ask");
 });
