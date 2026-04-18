@@ -24,7 +24,15 @@ export type TurnStatus =
   | "reviewing"
   | "completed"
   | "awaiting_user"
-  | "failed";
+  | "failed"
+  /**
+   * Phase 4 PR6: user halted the turn via `applyFollowUpAction({ kind: "halt" })`.
+   * Distinct from `failed` so inspect/timeline can show "user halted" separately
+   * from a worker failure. Existing migrations that coerced task status
+   * "cancelled" → turn "failed" continue to produce "failed"; only the explicit
+   * host-side halt path writes "cancelled".
+   */
+  | "cancelled";
 
 export type AttemptStatus = TaskStatus;
 
@@ -122,6 +130,14 @@ export type SessionTurnRecord = {
    * Set at turn creation; worker-side enforcement is deferred to Phase 3.
    */
   tokenBudget?: number;
+  /**
+   * Phase 4 PR4 lineage: predecessor turn when this turn was created by a
+   * `/timeline` rewind (`user_rewind`). Undefined for turns that were
+   * appended normally rather than branched from an earlier turn. Additive —
+   * older persisted records and tolerant reads must treat absence as "not a
+   * rewind".
+   */
+  parentTurnId?: string;
 };
 
 export type SessionRecord = {

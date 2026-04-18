@@ -58,6 +58,9 @@ const deriveOverlay = (prompt: PromptEntry | undefined): HostOverlay | undefined
   if (prompt.kind === "command_palette") {
     return { kind: "command_palette" };
   }
+  if (prompt.kind === "timeline_picker") {
+    return { kind: "timeline_picker" };
+  }
   return { kind: "session_picker" };
 };
 
