@@ -214,3 +214,84 @@ export const summarizeRedactionPolicy = (
   envDenyPatternCount: policy.envDenyPatterns.length,
   textPatternCount: policy.textSecretPatterns.length,
 });
+
+// ---------------------------------------------------------------------------
+// Effective-policy factory (W6c PR7 carryover #7/#8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Input to {@link resolveEffectiveRedactionPolicy}. Both arrays are the
+ * user-supplied pattern strings from the config cascade
+ * (`redaction.extraTextPatterns`, `redaction.extraEnvDenyPatterns`).
+ * Invalid regexes are dropped silently — the surface matches the
+ * tolerant-merge pattern used elsewhere in the config layer.
+ */
+export type RedactionConfigExtra = {
+  extraTextPatterns?: ReadonlyArray<string> | undefined;
+  extraEnvDenyPatterns?: ReadonlyArray<string> | undefined;
+};
+
+const compilePatterns = (
+  raw: ReadonlyArray<string>,
+  flags: string,
+): { ok: RegExp[]; rejected: string[] } => {
+  const ok: RegExp[] = [];
+  const rejected: string[] = [];
+  for (const source of raw) {
+    if (typeof source !== "string" || source.length === 0) {
+      rejected.push(source);
+      continue;
+    }
+    try {
+      ok.push(new RegExp(source, flags));
+    } catch {
+      rejected.push(source);
+    }
+  }
+  return { ok, rejected };
+};
+
+/**
+ * Build the EFFECTIVE redaction policy: the default + any user-configured
+ * `extraTextPatterns` / `extraEnvDenyPatterns` compiled as regexes.
+ *
+ * Plan 06 §W5 and Wave 6c carryover #7: the Zod schema already accepts
+ * these fields. Before this factory the schema-accepted strings were
+ * silently discarded by `artifactStore` and `inspectFormatter`, which
+ * hard-coded `DEFAULT_REDACTION_POLICY`. This factory is the single seam
+ * — callers pass the merged policy into `redactRecord` / `redactText` so
+ * user overrides take effect end-to-end.
+ *
+ * Pattern-flag convention:
+ *   - `extraTextPatterns` get `giu` so they match every occurrence,
+ *     case-insensitively, with Unicode semantics — matches the spirit of
+ *     {@link DEFAULT_TEXT_SECRET_PATTERNS}.
+ *   - `extraEnvDenyPatterns` get `iu` (no global flag — name matching
+ *     is membership-style, not substring-replacement).
+ */
+export const resolveEffectiveRedactionPolicy = (
+  extra?: RedactionConfigExtra | undefined,
+): RedactionPolicy => {
+  if (
+    extra === undefined ||
+    (extra.extraTextPatterns === undefined && extra.extraEnvDenyPatterns === undefined)
+  ) {
+    return DEFAULT_REDACTION_POLICY;
+  }
+  const extraText = compilePatterns(extra.extraTextPatterns ?? [], "giu").ok;
+  const extraEnv = compilePatterns(extra.extraEnvDenyPatterns ?? [], "iu").ok;
+  return {
+    envAllowlist: [...DEFAULT_REDACTION_POLICY.envAllowlist],
+    envDenyPatterns: [...DEFAULT_REDACTION_POLICY.envDenyPatterns, ...extraEnv],
+    textSecretPatterns: [...DEFAULT_REDACTION_POLICY.textSecretPatterns, ...extraText],
+  };
+};
+
+/**
+ * Host-side convenience mirroring `resolveEnvPolicyForHost` (lock-in 26):
+ * resolve the effective redaction policy from a loaded config layer so
+ * runner-construction sites never hard-code `DEFAULT_REDACTION_POLICY`.
+ */
+export const resolveRedactionPolicyForHost = (input: {
+  configExtra?: RedactionConfigExtra | undefined;
+}): RedactionPolicy => resolveEffectiveRedactionPolicy(input.configExtra);

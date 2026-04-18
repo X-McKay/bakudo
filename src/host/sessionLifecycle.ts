@@ -10,6 +10,7 @@ import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
 import { loadConfigCascade } from "./config.js";
 import { resolveEnvPolicyForHost } from "./envPolicy.js";
+import { resolveRedactionPolicyForHost } from "./redaction.js";
 import { stdoutWrite } from "./io.js";
 import {
   createTaskSpec,
@@ -42,15 +43,20 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
   const assumeDangerousSkipPermissions =
     args.mode === "build" ? runtimeConfig.assumeDangerousSkipPermissions : false;
   const sessionStore = new SessionStore(rootDir);
-  const artifactStore = new ArtifactStore(rootDir);
   // Phase 6 W5: resolve env-passthrough policy from the host config cascade
-  // + BAKUDO_ENV_ALLOWLIST override (plan Default Rule 362).
+  // + BAKUDO_ENV_ALLOWLIST override (plan Default Rule 362). Wave 6c PR7:
+  // also resolve the effective redaction policy (carryover #7) and pass it
+  // into the artifact store so user-configured patterns are honored.
   const { merged: hostConfig } = await loadConfigCascade(repoRootFor(args.repo), {});
   const envPolicy = resolveEnvPolicyForHost(
     hostConfig.envPolicy?.allowlist !== undefined
       ? { configAllowlist: hostConfig.envPolicy.allowlist }
       : {},
   );
+  const redactionPolicy = resolveRedactionPolicyForHost({
+    ...(hostConfig.redaction !== undefined ? { configExtra: hostConfig.redaction } : {}),
+  });
+  const artifactStore = new ArtifactStore(rootDir, redactionPolicy);
   const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo), undefined, envPolicy);
 
   if (requiresSandboxApproval(args) && !args.yes) {
@@ -115,7 +121,17 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
 export const resumeSession = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const sessionStore = new SessionStore(rootDir);
-  const artifactStore = new ArtifactStore(rootDir);
+  // Wave 6c PR7 carryover #7: effective redaction policy resolved up-front
+  // so the artifact store scrubs per the user's configured patterns. The
+  // env-passthrough resolution is kept co-located below to preserve the
+  // existing call-ordering shape.
+  const { merged: resumeHostConfigEarly } = await loadConfigCascade(repoRootFor(args.repo), {});
+  const redactionPolicyResume = resolveRedactionPolicyForHost({
+    ...(resumeHostConfigEarly.redaction !== undefined
+      ? { configExtra: resumeHostConfigEarly.redaction }
+      : {}),
+  });
+  const artifactStore = new ArtifactStore(rootDir, redactionPolicyResume);
   const session = await sessionStore.loadSession(args.sessionId ?? "");
   if (session === null) {
     throw new Error(`unknown session: ${args.sessionId}`);
@@ -151,10 +167,11 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
   }
 
   // Phase 6 W5: same env-policy resolution as the new-session entry above.
-  const { merged: hostConfigResume } = await loadConfigCascade(repoRootFor(args.repo), {});
+  // Reuse the cascade loaded earlier for the redaction policy so the two
+  // factories see the same merged config layer.
   const envPolicyResume = resolveEnvPolicyForHost(
-    hostConfigResume.envPolicy?.allowlist !== undefined
-      ? { configAllowlist: hostConfigResume.envPolicy.allowlist }
+    resumeHostConfigEarly.envPolicy?.allowlist !== undefined
+      ? { configAllowlist: resumeHostConfigEarly.envPolicy.allowlist }
       : {},
   );
   const runner = new ABoxTaskRunner(

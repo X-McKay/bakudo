@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { ArtifactPersistenceError } from "./host/errors.js";
-import { DEFAULT_REDACTION_POLICY, redactRecord } from "./host/redaction.js";
+import { DEFAULT_REDACTION_POLICY, redactRecord, type RedactionPolicy } from "./host/redaction.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "./protocol.js";
 import { createSessionArtifactsFilePath, createSessionPaths } from "./sessionStore.js";
 
@@ -66,7 +66,17 @@ const normalizeArtifactRecord = (
 });
 
 export class ArtifactStore {
-  public constructor(public readonly rootDir: string) {}
+  private readonly redactionPolicy: RedactionPolicy;
+
+  public constructor(
+    public readonly rootDir: string,
+    redactionPolicy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
+  ) {
+    // Wave 6c PR7 carryover #7: runner-construction sites pass the
+    // effective (default + user-extra) redaction policy so cascade config
+    // overrides take effect end-to-end.
+    this.redactionPolicy = redactionPolicy;
+  }
 
   public artifactFile(sessionId: string): string {
     return createSessionArtifactsFilePath(this.rootDir, sessionId);
@@ -91,7 +101,7 @@ export class ArtifactStore {
 
     // Phase 6 W5 hard rule 382 — redact before persisting so obvious secrets
     // in artifact names / metadata never hit disk verbatim.
-    const redacted = redactRecord(record, DEFAULT_REDACTION_POLICY);
+    const redacted = redactRecord(record, this.redactionPolicy);
 
     const existing = await this.listArtifacts(input.sessionId);
     const nextArtifacts = [...existing];

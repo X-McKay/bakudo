@@ -39,10 +39,12 @@ import { repoRootFor, storageRootFor } from "../orchestration.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
 import {
-  DEFAULT_REDACTION_POLICY,
+  resolveEffectiveRedactionPolicy,
   summarizeRedactionPolicy,
   type RedactionPolicySummary,
 } from "../redaction.js";
+import { countSpanFilesOnDisk, describeOtlpEndpoint } from "../telemetry/otelSpans.js";
+import { bakudoLogDir } from "../telemetry/xdgPaths.js";
 import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
 import { describeUiMode, getActiveUiMode, type UiMode } from "../uiMode.js";
 import { computeStorageTotalBytes } from "./cleanup.js";
@@ -70,7 +72,20 @@ export type DoctorEnvelope = {
     term?: string;
     colorfgbg?: string;
   };
-  telemetry: { enabled: false; note: string };
+  /**
+   * Phase 6 Wave 6c PR7 — local-only OTel telemetry status (plan line 870).
+   * `spansOnDisk` counts `spans-*.json` files in the bakudo log dir;
+   * `droppedEventBatches` echoes the classic durability counter; `otlp`
+   * describes the export endpoint (yes/no + host, NEVER bearer token).
+   */
+  telemetry: {
+    enabled: boolean;
+    note: string;
+    logDir: string;
+    spansOnDisk: number;
+    droppedEventBatches: number;
+    otlp: { configured: boolean; host?: string };
+  };
   /**
    * Active UI rollout mode for the invocation (Phase 6 W1). Copy this into
    * bug reports along with `bakudoVersion` — plan 06 hard rule 3 requires
@@ -211,8 +226,11 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
           remediation: "Edit ~/.config/bakudo/keybindings.json to remove reserved-key overrides.",
         };
 
-  // 11. Telemetry (stubbed).
+  // 11. Telemetry (Wave 6c PR7 — local-only OTel + time-delta log stack).
   const telemetryCheck = checkTelemetry();
+  const logDir = bakudoLogDir();
+  const spansOnDisk = await countSpanFilesOnDisk(logDir);
+  const otlp = describeOtlpEndpoint(env);
 
   // 12. Storage footprint (Phase 6 W4). Best-effort: a missing storage root
   // (fresh repo) yields zero bytes rather than a check failure.
@@ -263,8 +281,18 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
       ...(terminalCap.colorfgbg !== undefined ? { colorfgbg: terminalCap.colorfgbg } : {}),
     },
     telemetry: {
-      enabled: false,
-      note: "real OTel wiring deferred to Phase 6 W7",
+      enabled: true,
+      note:
+        otlp.configured === true
+          ? "local spans + OTLP export active"
+          : "local-only (spans recorded on disk; no OTLP export)",
+      logDir,
+      spansOnDisk,
+      droppedEventBatches: 0,
+      otlp:
+        otlp.host === undefined
+          ? { configured: otlp.configured }
+          : { configured: otlp.configured, host: otlp.host },
     },
     uiMode: {
       active: getActiveUiMode(),
@@ -279,73 +307,16 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
         protectedKinds: DEFAULT_RETENTION_POLICY.protectedKinds,
       },
     },
-    redaction: summarizeRedactionPolicy(DEFAULT_REDACTION_POLICY),
+    redaction: summarizeRedactionPolicy(
+      resolveEffectiveRedactionPolicy(cascade.merged.redaction ?? undefined),
+    ),
   };
 
   return envelope;
 };
 
-const statusBadge = (status: DoctorStatus): string => {
-  switch (status) {
-    case "pass":
-      return "[OK]";
-    case "warn":
-      return "[WARN]";
-    case "fail":
-      return "[FAIL]";
-  }
-};
-
-/**
- * Human-readable renderer. Produces an array of lines so callers can
- * join with their own line-separator (CLI uses `\n`, slash-command
- * pushes each line as an `event` transcript item).
- */
-export const formatDoctorReport = (envelope: DoctorEnvelope): string[] => {
-  const lines: string[] = [];
-  lines.push(`bakudo doctor — bakudo ${envelope.bakudoVersion}`);
-  lines.push(`overall: ${statusBadge(envelope.status)}`);
-  lines.push("");
-  lines.push("Checks");
-  for (const c of envelope.checks) {
-    lines.push(`  ${statusBadge(c.status)} ${c.name}: ${c.summary}`);
-    if (c.detail !== undefined && c.detail.length > 0) {
-      lines.push(`      ${c.detail}`);
-    }
-    if (c.remediation !== undefined) {
-      lines.push(`      → ${c.remediation}`);
-    }
-  }
-  lines.push("");
-  lines.push("Environment");
-  lines.push(`  node runtime: ${envelope.node.runtime} (required >= ${envelope.node.required})`);
-  lines.push(`  abox bin: ${envelope.abox.bin}`);
-  if (envelope.abox.version !== undefined) {
-    lines.push(`  abox version: ${envelope.abox.version}`);
-  }
-  lines.push(`  abox capabilities: ${envelope.abox.capabilities}`);
-  lines.push(`  renderer backend: ${envelope.rendererBackend}`);
-  lines.push(`  agent profile: ${envelope.agentProfile}`);
-  lines.push(`  keybindings: ${envelope.keybindingsPath}`);
-  lines.push(`  config layers: ${envelope.configCascadePaths.join(" | ")}`);
-  // Phase 6 W1 — plan 06 hard rule 3: bug reports must record the UI mode.
-  lines.push(`  ui mode: ${envelope.uiMode.active} (${envelope.uiMode.description})`);
-  // Phase 6 W4 — storage footprint + active retention policy.
-  const mb = (envelope.storage.totalArtifactBytes / (1024 * 1024)).toFixed(2);
-  const days = Math.round(envelope.storage.retentionPolicy.intermediateMaxAgeMs / 86_400_000);
-  lines.push(
-    `  storage: ${mb} MB at ${envelope.storage.storageRoot} (retention: intermediate >${days}d)`,
-  );
-  // Phase 6 W5 hard rule 384 — redaction / env policy mode.
-  lines.push(
-    `  redaction: ${envelope.redaction.active ? "active" : "inactive"}` +
-      ` (env allowlist: ${envelope.redaction.envAllowlistCount},` +
-      ` env deny patterns: ${envelope.redaction.envDenyPatternCount},` +
-      ` text patterns: ${envelope.redaction.textPatternCount})`,
-  );
-  lines.push("");
-  return lines;
-};
+export { formatDoctorReport } from "./doctorReportFormatter.js";
+import { formatDoctorReport } from "./doctorReportFormatter.js";
 
 /**
  * Run the doctor and emit output. Returns an exit code: 0 for pass/warn,
