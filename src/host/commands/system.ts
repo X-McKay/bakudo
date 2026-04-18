@@ -5,7 +5,15 @@ import {
   writeDurableAllowlist,
 } from "../approvalStore.js";
 import type { HostCommandRegistry, HostCommandSpec } from "../commandRegistry.js";
+import { isKnownHelpTopic, loadHelpTopic, unknownTopicMessage } from "../helpTopicLoader.js";
 import { repoRootFor } from "../orchestration.js";
+import {
+  getActiveThemeVariant,
+  isThemeVariant,
+  setActiveTheme,
+  THEME_VARIANTS,
+  type ThemeVariant,
+} from "../themes/index.js";
 
 /**
  * The mandatory warning printed on every `/allow-all on` invocation. Kept
@@ -119,6 +127,53 @@ export const runAllowAllCommand = async (input: {
   }
 };
 
+const themeUsage = [
+  "/theme show — print the currently active theme variant.",
+  `/theme set <variant> — set the active theme. Variants: ${THEME_VARIANTS.join(", ")}.`,
+];
+
+/**
+ * Handler for `/theme show|set <variant>`. Extracted for test parity with
+ * `runAllowAllCommand`. The reducer doesn't persist theme state — setting
+ * the theme mutates the module-level singleton in `themes/index.ts` which
+ * the next render reads.
+ */
+export const runThemeCommand = (input: { args: string[]; print: (line: string) => void }): void => {
+  const { args, print } = input;
+  const subcommand = args[0];
+
+  if (subcommand === undefined || subcommand === "show") {
+    print(`/theme show: active variant is "${getActiveThemeVariant()}".`);
+    return;
+  }
+
+  if (subcommand === "set") {
+    const requested = args[1];
+    if (requested === undefined) {
+      print("/theme set: missing variant argument.");
+      for (const line of themeUsage) {
+        print(`  ${line}`);
+      }
+      return;
+    }
+    if (!isThemeVariant(requested)) {
+      print(`/theme set: unknown variant "${requested}".`);
+      print(`  Valid variants: ${THEME_VARIANTS.join(", ")}.`);
+      return;
+    }
+    const variant: ThemeVariant = requested;
+    setActiveTheme(variant);
+    print(`/theme set: active variant is now "${variant}".`);
+    return;
+  }
+
+  print(`Unknown /theme subcommand: ${subcommand}`);
+  print("Usage:");
+  for (const line of themeUsage) {
+    print(`  ${line}`);
+  }
+};
+
 /**
  * Build the system command specs. The `registry` parameter is injected at
  * construction time so that `/help` can enumerate commands dynamically without
@@ -128,13 +183,29 @@ export const buildSystemCommands = (registry: HostCommandRegistry): readonly Hos
   {
     name: "help",
     group: "system",
-    description: "Show available commands.",
-    handler: ({ deps }) => {
-      // Dynamically generate the help list from the registry so it stays in
-      // sync as commands are added, removed, or changed. Commands with
-      // visible() predicates are filtered against the current app state so
-      // only contextually relevant commands are shown. Hidden commands are
-      // excluded. The prompt usage hint is prepended as a preamble.
+    description: "Show available commands. /help <topic> reads a bundled topic.",
+    handler: async ({ args, deps }) => {
+      // `/help <topic>` routes to the Phase 5 PR12 help-topic surface when
+      // the first argument matches a known topic (config, hooks, permissions,
+      // monitoring, sandbox). Anything else falls through to the default
+      // command listing.
+      const maybeTopic = args[0];
+      if (maybeTopic !== undefined && isKnownHelpTopic(maybeTopic)) {
+        const loaded = await loadHelpTopic(maybeTopic);
+        if (loaded === null) {
+          deps.transcript.push({
+            kind: "assistant",
+            text: `${unknownTopicMessage(maybeTopic)} (file missing — reinstall bakudo)`,
+            tone: "error",
+          });
+          return;
+        }
+        for (const line of loaded.content.split("\n")) {
+          deps.transcript.push({ kind: "event", label: "help", detail: line });
+        }
+        return;
+      }
+      // Default: list registered commands.
       const visibleSpecs = registry.list(deps.appState).filter((spec) => spec.hidden !== true);
       deps.transcript.push({
         kind: "event",
@@ -178,6 +249,20 @@ export const buildSystemCommands = (registry: HostCommandRegistry): readonly Hos
         repoRoot: repoRootFor(undefined),
         print: (line) => {
           deps.transcript.push({ kind: "event", label: "allow-all", detail: line });
+        },
+      });
+    },
+  },
+  {
+    name: "theme",
+    group: "system",
+    description:
+      "Show or set the active color theme (show|set <variant>). Overrides BAKUDO_THEME for this session.",
+    handler: ({ args, deps }) => {
+      runThemeCommand({
+        args,
+        print: (line) => {
+          deps.transcript.push({ kind: "event", label: "theme", detail: line });
         },
       });
     },

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "taskId": "1:session-1776168453757-67162ef3:task-1",
+  "sessionId": "session-1776168453757-67162ef3",
+  "status": "failed",
+  "summary": "worker finished without a structured result envelope",
+  "finishedAt": "2026-04-14T12:07:33.764Z",
+  "exitCode": 1,
+  "command": "bash /workspace/.bakudo-ux-briefs/run-pr1.sh",
+  "cwd": ".",
+  "shell": "bash",
+  "timeoutSeconds": 1800,
+  "durationMs": 0,
+  "exitSignal": "",
+  "stdout": "Error: Failed to load policy from /home/al/.abox/policies/default.toml\n\nCaused by:\n    0: Parsing /home/al/.abox/policies/default.toml\n    1: TOML parse error at line 96, column 1\n          |\n       96 | [[egress]]\n          | ^^^^^^^^^^\n       missing field `env_var`\n       \n",
+  "stderr": "",
+  "stdoutTruncated": false,
+  "stderrTruncated": false,
+  "timedOut": false,
+  "assumeDangerousSkipPermissions": true
+}
