@@ -88,6 +88,20 @@ export type SessionAttemptRecord = {
    * the Phase 3 dispatch pipeline; absent for legacy/v1 attempts.
    */
   attemptSpec?: AttemptSpec;
+  /**
+   * Phase 4 PR3 lineage: predecessor attempt in the same turn when this
+   * attempt was produced by a retry. Undefined for the first attempt of a
+   * turn. Additive — older persisted records omit this field.
+   */
+  parentAttemptId?: string;
+  /**
+   * Phase 4 PR3 lineage: free-text rationale captured at retry submit time
+   * (e.g. "tests failed, retrying with verbose"). The structured enum lives
+   * on {@link TurnTransition.reason}; this field carries the author-supplied
+   * free text that the enum cannot express. Additive — absent on older
+   * persisted records and on non-retry attempts.
+   */
+  retryReason?: string;
 };
 
 export type SessionTurnRecord = {
