@@ -23,8 +23,11 @@ import {
   type CapabilitiesExecFn,
 } from "../../src/host/workerCapabilities.js";
 import {
+  BAKUDO_HOST_EXECUTION_ENGINES,
+  BAKUDO_HOST_PROTOCOL_VERSIONS,
   BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION,
-  v1FallbackWorkerCapabilities,
+  BAKUDO_HOST_TASK_KINDS,
+  hostDefaultFallbackCapabilities,
 } from "../../src/protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -81,7 +84,7 @@ test("probeWorkerCapabilities: parses a well-formed JSON capabilities reply", as
   assert.equal(outcome.fallbackReason, undefined);
 });
 
-test("probeWorkerCapabilities: nonzero exit → v1 fallback with reason (A6 fallback)", async () => {
+test("probeWorkerCapabilities: nonzero exit → host-default fallback with diagnostic reason", async () => {
   const execFn = stubExec(async () => {
     const error = Object.assign(new Error("Command failed: abox --capabilities"), {
       code: 2,
@@ -91,24 +94,24 @@ test("probeWorkerCapabilities: nonzero exit → v1 fallback with reason (A6 fall
 
   const outcome = await probeWorkerCapabilities({ bin: "abox", execFn });
 
-  assert.equal(outcome.capabilities.source, "fallback_v1");
-  assert.deepEqual(outcome.capabilities.protocolVersions, [1]);
-  assert.deepEqual(outcome.capabilities.taskKinds, ["explicit_command"]);
-  assert.deepEqual(outcome.capabilities.executionEngines, ["shell"]);
+  assert.equal(outcome.capabilities.source, "fallback_host_default");
+  assert.deepEqual(outcome.capabilities.protocolVersions, [...BAKUDO_HOST_PROTOCOL_VERSIONS]);
+  assert.deepEqual(outcome.capabilities.taskKinds, [...BAKUDO_HOST_TASK_KINDS]);
+  assert.deepEqual(outcome.capabilities.executionEngines, [...BAKUDO_HOST_EXECUTION_ENGINES]);
   assert.match(outcome.fallbackReason ?? "", /probe failed/);
 });
 
 test("probeWorkerCapabilities: empty stdout → fallback with empty-output reason", async () => {
   const execFn = stubExec(async () => ({ stdout: "  \n", stderr: "" }));
   const outcome = await probeWorkerCapabilities({ bin: "abox", execFn });
-  assert.equal(outcome.capabilities.source, "fallback_v1");
+  assert.equal(outcome.capabilities.source, "fallback_host_default");
   assert.match(outcome.fallbackReason ?? "", /empty stdout/);
 });
 
 test("probeWorkerCapabilities: non-JSON stdout → fallback with parse reason", async () => {
   const execFn = stubExec(async () => ({ stdout: "not json", stderr: "" }));
   const outcome = await probeWorkerCapabilities({ bin: "abox", execFn });
-  assert.equal(outcome.capabilities.source, "fallback_v1");
+  assert.equal(outcome.capabilities.source, "fallback_host_default");
   assert.match(outcome.fallbackReason ?? "", /not JSON/);
   assert.equal(outcome.rawOutput, "not json");
 });
@@ -119,7 +122,7 @@ test("probeWorkerCapabilities: JSON missing required arrays → fallback", async
     stderr: "",
   }));
   const outcome = await probeWorkerCapabilities({ bin: "abox", execFn });
-  assert.equal(outcome.capabilities.source, "fallback_v1");
+  assert.equal(outcome.capabilities.source, "fallback_host_default");
   assert.match(outcome.fallbackReason ?? "", /missing/);
 });
 
@@ -133,7 +136,7 @@ test("probeWorkerCapabilities: array elements with wrong type → fallback", asy
     stderr: "",
   }));
   const outcome = await probeWorkerCapabilities({ bin: "abox", execFn });
-  assert.equal(outcome.capabilities.source, "fallback_v1");
+  assert.equal(outcome.capabilities.source, "fallback_host_default");
 });
 
 // ---------------------------------------------------------------------------
@@ -238,49 +241,42 @@ test("negotiate: unsupported task kind → WorkerProtocolMismatchError (task_kin
   );
 });
 
-test("negotiate: v1-fallback details include the diagnostic reason from the probe", () => {
-  // Plan A6.6: when the probe fails, the fallback diagnostic must travel
-  // with the mismatch error so post-mortem surfaces (`inspect`, JSON
-  // envelope) carry the operator-actionable "why".
-  const spec = buildSpec();
+test("negotiate: host-default fallback lets assistant_job dispatch proceed (2026-04-18 amendment)", () => {
+  // Plan amendment (see phase-6-w3-capability-probe-finding.md): when the
+  // probe fails, the host falls back to its own declared capability set.
+  // Dispatch proceeds; the fallback diagnostic is still carried for
+  // operator visibility if a *later* check surfaces an issue.
+  const spec = buildSpec({ taskKind: "assistant_job" });
+  assert.doesNotThrow(() =>
+    negotiateAttemptAgainstCapabilities({
+      spec,
+      capabilities: hostDefaultFallbackCapabilities(),
+      fallbackReason: "worker --capabilities probe failed: ENOENT",
+    }),
+  );
+});
+
+test("negotiate: host-default fallback still rejects specs with an unknown task kind", () => {
+  // Guard against a future drift where the spec references a task kind the
+  // host itself doesn't advertise — the fallback is permissive, not blind.
+  // Cast: the spec type constrains taskKind to the compile-time union, but
+  // the negotiator defends at runtime against drift.
+  const spec = buildSpec({ taskKind: "not_a_real_kind" as AttemptSpec["taskKind"] });
   assert.throws(
     () =>
       negotiateAttemptAgainstCapabilities({
         spec,
-        capabilities: v1FallbackWorkerCapabilities(),
+        capabilities: hostDefaultFallbackCapabilities(),
         fallbackReason: "worker --capabilities probe failed: ENOENT",
       }),
     (err: unknown) => {
       assert.ok(err instanceof WorkerProtocolMismatchError);
       const rendered = err.toRendered();
-      assert.equal(rendered.details?.workerCapabilitiesSource, "fallback_v1");
+      assert.equal(rendered.details?.workerCapabilitiesSource, "fallback_host_default");
       assert.equal(rendered.details?.fallbackReason, "worker --capabilities probe failed: ENOENT");
-      // Fallback hint mentions explicit_command as the v1-safe option.
-      assert.match(rendered.recoveryHint ?? "", /explicit_command/);
+      assert.match(rendered.recoveryHint ?? "", /rebuild the rootfs/);
       return true;
     },
-  );
-});
-
-test("negotiate: explicit_command task survives the v1 fallback (A6 hard rule)", () => {
-  const spec = buildSpec({
-    taskKind: "explicit_command",
-    execution: { engine: "shell", command: ["bash", "-c", "ls"] },
-  });
-  // The host's required protocol is v3; the v1 fallback advertises only
-  // [1]. So `explicit_command` still fails on the *protocol* check unless we
-  // re-frame: the host sends a v3 spec, so even with explicit_command the
-  // v1 worker is incompatible. This is the contract the plan documents at
-  // 824-826: "Dispatch proceeds only for task kinds compatible with v1".
-  // We assert the *protocol* is what blocks, surfacing the same code so
-  // operators see a uniform diagnostic.
-  assert.throws(
-    () =>
-      negotiateAttemptAgainstCapabilities({
-        spec,
-        capabilities: v1FallbackWorkerCapabilities(),
-      }),
-    (err: unknown) => err instanceof WorkerProtocolMismatchError,
   );
 });
 

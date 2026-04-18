@@ -236,16 +236,20 @@ test("formatInspectSummary: renders the W3 protocol-mismatch decoration when pre
       assumeDangerousSkipPermissions: true,
     },
     metadata: {
+      // Synthetic fixture: a future abox that advertises a restrictive
+      // capabilities shape via --capabilities would produce this metadata.
+      // The host-default fallback (2026-04-18 amendment) does not itself
+      // trigger a protocol_version mismatch for the standard spec; the
+      // rendering assertions below apply to any source string.
       protocolMismatch: {
         code: "worker_protocol_mismatch",
         message: "Host requires protocol v3 but worker advertises [1].",
-        recoveryHint:
-          "Upgrade abox so it advertises capabilities via `abox --capabilities`, or restrict the task to `explicit_command`.",
+        recoveryHint: "Upgrade abox or downgrade bakudo so the protocol versions overlap.",
         details: {
           mismatchKind: "protocol_version",
           hostProtocolVersion: 3,
           workerProtocolVersions: [1],
-          workerCapabilitiesSource: "fallback_v1",
+          workerCapabilitiesSource: "probe",
         },
       },
     },
@@ -264,7 +268,7 @@ test("formatInspectSummary: renders the W3 protocol-mismatch decoration when pre
   assert.match(joined, /Mismatch.*Host requires protocol v3.*\[1\]/);
   assert.match(joined, /Hint.*Upgrade abox/);
   assert.match(joined, /mismatchKind=protocol_version/);
-  assert.match(joined, /workerCapabilitiesSource=fallback_v1/);
+  assert.match(joined, /workerCapabilitiesSource=probe/);
 });
 
 test("formatInspectSummary: omits W3 protocol-mismatch lines when metadata is absent", () => {

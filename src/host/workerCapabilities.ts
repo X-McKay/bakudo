@@ -12,12 +12,15 @@
  * {@link WorkerProtocolMismatchError} (exit code 4) at the negotiation seam
  * inside {@link ABoxTaskRunner.runAttempt}.
  *
- * A6 fallback (plan 820–828): if the probe exits non-zero or its stdout
- * fails to parse as the {@link WorkerCapabilities} JSON shape, the host
- * assumes a protocol-v1 worker (`taskKinds: ["explicit_command"]`,
- * `executionEngines: ["shell"]`). Non-compatible task kinds then surface
- * the same `WorkerProtocolMismatchError` so the operator gets a clean,
- * actionable diagnostic instead of a mysterious mid-execution failure.
+ * Fallback (plan 820–828, amended 2026-04-18 — see
+ * `plans/bakudo-ux/phase-6-w3-capability-probe-finding.md`): if the probe
+ * exits non-zero or its stdout fails to parse as the
+ * {@link WorkerCapabilities} JSON shape, the host falls back to its own
+ * declared capability set. This reflects the invariant that bakudo ships
+ * both host and worker-in-rootfs today — what the host can compile, the
+ * shipped worker can accept. Successful probes returning a restrictive
+ * shape still take precedence, so mismatches remain detectable whenever
+ * they are observable.
  */
 
 import { execFile, type ExecFileOptions } from "node:child_process";
@@ -26,7 +29,7 @@ import { promisify } from "node:util";
 import type { AttemptSpec } from "../attemptProtocol.js";
 import {
   BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION,
-  v1FallbackWorkerCapabilities,
+  hostDefaultFallbackCapabilities,
   type WorkerCapabilities,
 } from "../protocol.js";
 import { WorkerProtocolMismatchError } from "./errors.js";
@@ -59,7 +62,7 @@ export type ProbeOutcome = {
    * so logs still carry the reason.
    */
   fallbackReason?: string;
-  /** Raw stdout for debugging when parse fails (`source === "fallback_v1"`). */
+  /** Raw stdout for debugging when parse fails (`source === "fallback_host_default"`). */
   rawOutput?: string;
 };
 
@@ -118,7 +121,7 @@ export const probeWorkerCapabilities = async (
     const text = String(stdout).trim();
     if (text.length === 0) {
       return {
-        capabilities: v1FallbackWorkerCapabilities(),
+        capabilities: hostDefaultFallbackCapabilities(),
         fallbackReason: "worker --capabilities produced empty stdout",
         rawOutput: "",
       };
@@ -129,7 +132,7 @@ export const probeWorkerCapabilities = async (
     } catch (parseError) {
       const message = parseError instanceof Error ? parseError.message : String(parseError);
       return {
-        capabilities: v1FallbackWorkerCapabilities(),
+        capabilities: hostDefaultFallbackCapabilities(),
         fallbackReason: `worker --capabilities stdout is not JSON: ${message}`,
         rawOutput: text,
       };
@@ -137,7 +140,7 @@ export const probeWorkerCapabilities = async (
     const validated = validateCapabilitiesJson(parsed);
     if (validated === null) {
       return {
-        capabilities: v1FallbackWorkerCapabilities(),
+        capabilities: hostDefaultFallbackCapabilities(),
         fallbackReason:
           "worker --capabilities JSON is missing protocolVersions/taskKinds/executionEngines",
         rawOutput: text,
@@ -147,7 +150,7 @@ export const probeWorkerCapabilities = async (
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
-      capabilities: v1FallbackWorkerCapabilities(),
+      capabilities: hostDefaultFallbackCapabilities(),
       fallbackReason: `worker --capabilities probe failed: ${message}`,
     };
   }
@@ -218,8 +221,8 @@ const intersect = <T>(a: readonly T[], b: readonly T[]): T[] => {
  * surfaces both render it verbatim.
  */
 const suggestResolution = (capabilities: WorkerCapabilities): string => {
-  if (capabilities.source === "fallback_v1") {
-    return "Upgrade abox so it advertises capabilities via `abox --capabilities`, or restrict the task to `explicit_command` (the v1 baseline).";
+  if (capabilities.source === "fallback_host_default") {
+    return "Worker did not advertise capabilities via `--capabilities`; host fell back to its declared set. If dispatch still rejects the spec, the shipped worker has drifted from the host — rebuild the rootfs (`just rebuild-rootfs`) or align bakudo versions.";
   }
   return "Upgrade abox or downgrade bakudo so the protocol versions overlap.";
 };

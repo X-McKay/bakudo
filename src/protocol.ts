@@ -39,35 +39,34 @@ export const BAKUDO_HOST_TASK_KINDS: readonly string[] = [
 export const BAKUDO_HOST_EXECUTION_ENGINES: readonly string[] = ["agent_cli", "shell"] as const;
 
 /**
- * The v1 baseline a worker is assumed to support when the capability probe
- * fails. Per the A6 fallback (plan 820–828) this restricts dispatch to
- * `explicit_command` only — the only kind the legacy contract guarantees.
- */
-export const BAKUDO_WORKER_V1_BASELINE_TASK_KINDS: readonly string[] = [
-  "explicit_command",
-] as const;
-export const BAKUDO_WORKER_V1_BASELINE_ENGINES: readonly string[] = ["shell"] as const;
-
-/**
  * Capabilities a worker advertises in response to a `--capabilities` probe.
  * Shape mirrors the plan's suggested JSON (lines 239–262); the three core
  * arrays are required so the parser can validate before dispatch. `source`
  * is host-side metadata — `"probe"` when the worker emitted JSON,
- * `"fallback_v1"` when the probe failed and the host assumed the v1 baseline.
+ * `"fallback_host_default"` when the probe failed and the host fell back
+ * to its own declared capability set (per the 2026-04-18 plan amendment;
+ * see `plans/bakudo-ux/phase-6-w3-capability-probe-finding.md`).
  */
 export type WorkerCapabilities = {
   protocolVersions: number[];
   taskKinds: string[];
   executionEngines: string[];
-  source: "probe" | "fallback_v1";
+  source: "probe" | "fallback_host_default";
 };
 
-/** Compose the v1 fallback capabilities (A6, plan 820–828). */
-export const v1FallbackWorkerCapabilities = (): WorkerCapabilities => ({
-  protocolVersions: [1],
-  taskKinds: [...BAKUDO_WORKER_V1_BASELINE_TASK_KINDS],
-  executionEngines: [...BAKUDO_WORKER_V1_BASELINE_ENGINES],
-  source: "fallback_v1",
+/**
+ * Compose the host-default fallback capabilities used when the worker
+ * capability probe fails. Reflects the invariant that bakudo ships both
+ * host and worker-in-rootfs today — what the host can compile, the
+ * shipped worker can accept. A successful probe returning a restrictive
+ * shape still takes precedence, so mismatches remain detectable whenever
+ * they are observable.
+ */
+export const hostDefaultFallbackCapabilities = (): WorkerCapabilities => ({
+  protocolVersions: [...BAKUDO_HOST_PROTOCOL_VERSIONS],
+  taskKinds: [...BAKUDO_HOST_TASK_KINDS],
+  executionEngines: [...BAKUDO_HOST_EXECUTION_ENGINES],
+  source: "fallback_host_default",
 });
 
 export type TaskStatus =

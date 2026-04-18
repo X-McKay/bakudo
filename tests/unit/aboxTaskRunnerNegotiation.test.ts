@@ -15,7 +15,7 @@ import { ABoxTaskRunner } from "../../src/aboxTaskRunner.js";
 import type { AttemptSpec } from "../../src/attemptProtocol.js";
 import { WorkerProtocolMismatchError } from "../../src/host/errors.js";
 import type { ProbeOutcome } from "../../src/host/workerCapabilities.js";
-import { v1FallbackWorkerCapabilities } from "../../src/protocol.js";
+import { hostDefaultFallbackCapabilities } from "../../src/protocol.js";
 
 const buildSpec = (overrides: Partial<AttemptSpec> = {}): AttemptSpec => ({
   schemaVersion: 3,
@@ -37,7 +37,43 @@ const buildSpec = (overrides: Partial<AttemptSpec> = {}): AttemptSpec => ({
   ...overrides,
 });
 
-test("runAttempt: throws WorkerProtocolMismatchError before spawning when probe is v1-fallback and spec is non-baseline", async () => {
+test("runAttempt: probe-fail fallback still dispatches (2026-04-18 plan amendment)", async () => {
+  // Plan amendment: when the probe fails, the host falls back to its own
+  // declared capability set and dispatch proceeds. Mismatches still fire
+  // synchronously when a successful probe returns a restrictive shape
+  // (see the next test).
+  let spawnCalls = 0;
+  const spawnFn = ((_file: string) => {
+    spawnCalls += 1;
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: () => void;
+      exitCode: number | null;
+      signalCode: string | null;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = () => undefined;
+    queueMicrotask(() => child.emit("close", 0, null));
+    return child;
+  }) as never;
+
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, spawnFn);
+  const provider = async (): Promise<ProbeOutcome> => ({
+    capabilities: hostDefaultFallbackCapabilities(),
+    fallbackReason: "abox does not support --capabilities",
+  });
+  const runner = new ABoxTaskRunner(adapter, provider);
+
+  const result = await runner.runAttempt(buildSpec());
+  assert.equal(spawnCalls, 1, "host-default fallback must not block dispatch");
+  assert.equal(result.ok, true);
+});
+
+test("runAttempt: restrictive successful probe still rejects synchronously (hard rule 267)", async () => {
   let spawnCalls = 0;
   const spawnFn = (() => {
     spawnCalls += 1;
@@ -54,8 +90,14 @@ test("runAttempt: throws WorkerProtocolMismatchError before spawning when probe 
 
   const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, spawnFn);
   const provider = async (): Promise<ProbeOutcome> => ({
-    capabilities: v1FallbackWorkerCapabilities(),
-    fallbackReason: "abox does not support --capabilities",
+    // Hypothetical future abox that advertises a restrictive shape over
+    // --capabilities. Mismatch detection must still fire before dispatch.
+    capabilities: {
+      protocolVersions: [1],
+      taskKinds: ["explicit_command"],
+      executionEngines: ["shell"],
+      source: "probe",
+    },
   });
   const runner = new ABoxTaskRunner(adapter, provider);
 
@@ -65,11 +107,11 @@ test("runAttempt: throws WorkerProtocolMismatchError before spawning when probe 
       assert.ok(err instanceof WorkerProtocolMismatchError);
       assert.equal(err.exitCode, 4);
       const rendered = err.toRendered();
-      assert.equal(rendered.details?.workerCapabilitiesSource, "fallback_v1");
+      assert.equal(rendered.details?.workerCapabilitiesSource, "probe");
       return true;
     },
   );
-  assert.equal(spawnCalls, 0, "must NOT spawn when negotiation rejects");
+  assert.equal(spawnCalls, 0, "must NOT spawn when a successful probe surfaces a mismatch");
 });
 
 test("runAttempt: proceeds to spawn when capabilities cover the spec", async () => {
