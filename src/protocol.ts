@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import type { PermissionRule } from "./attemptProtocol.js";
+
 export * from "./attemptProtocol.js";
 
 export const BAKUDO_PROTOCOL_SCHEMA_VERSION = 1 as const;
@@ -177,6 +179,40 @@ export type SessionEventPayloadMap = {
     goal: string;
     mode: TaskMode;
     assumeDangerousSkipPermissions: boolean;
+  };
+  "host.approval_requested": {
+    approvalId: string;
+    request: {
+      tool: string;
+      argument: string;
+      displayCommand: string;
+    };
+    /**
+     * `composerMode` and `autopilot` inlined as string literals rather than
+     * importing `ComposerMode` from `src/host/appState.ts` — keeps the
+     * protocol module free of host-side imports (see the comment on
+     * `host.artifact_registered` for the same pattern).
+     */
+    policySnapshot: {
+      agent: string;
+      composerMode: "standard" | "plan" | "autopilot";
+      autopilot: boolean;
+    };
+    requestedAt: string;
+  };
+  "host.approval_resolved": {
+    approvalId: string;
+    decision: "approved" | "denied" | "auto_approved" | "auto_denied";
+    decidedBy: "user_prompt" | "hook_sync" | "autopilot" | "recorded_rule";
+    /**
+     * Denormalised PermissionRule shape — mirrors {@link PermissionRule}
+     * from `./attemptProtocol.ts` (which `protocol.ts` already re-exports
+     * at the top of this module).
+     */
+    matchedRule: PermissionRule;
+    persistedRule?: PermissionRule;
+    rationale: string;
+    decidedAt: string;
   };
   "worker.attempt_started": {
     attemptId: string;
