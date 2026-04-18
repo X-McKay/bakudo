@@ -1,4 +1,10 @@
-import type { ComposerMode, HostAppState, HostOverlay, PromptEntry } from "./appState.js";
+import type {
+  ApprovalPromptRequest,
+  ComposerMode,
+  HostAppState,
+  HostOverlay,
+  PromptEntry,
+} from "./appState.js";
 
 export type FrameMode = "prompt" | "transcript";
 
@@ -49,6 +55,13 @@ const deriveOverlay = (prompt: PromptEntry | undefined): HostOverlay | undefined
     const payload = prompt.payload as { message?: unknown } | null;
     const message = typeof payload?.message === "string" ? payload.message : "";
     return { kind: "approval", message };
+  }
+  if (prompt.kind === "approval_prompt") {
+    // No defensive fallback: enqueueing an `approval_prompt` without a
+    // well-formed payload is a programming error (see `dialogLauncher.ts`
+    // where the only producer lives).
+    const request = prompt.payload as ApprovalPromptRequest;
+    return { kind: "approval_prompt", request };
   }
   if (prompt.kind === "resume_confirm") {
     const payload = prompt.payload as { message?: unknown } | null;
