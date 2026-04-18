@@ -11,7 +11,8 @@ import type { SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import type { ComposerMode } from "./appState.js";
-import { BakudoConfigDefaults } from "./config.js";
+import { BakudoConfigDefaults, loadConfigCascade } from "./config.js";
+import { resolveEnvPolicyForHost } from "./envPolicy.js";
 import { emitSessionEvent, readSessionEventLog, type JsonEventSink } from "./eventLogWriter.js";
 import { executeAttempt } from "./executeAttempt.js";
 import { SessionLockBusyError, acquireSessionLock, type SessionLockHandle } from "./lockFile.js";
@@ -44,17 +45,31 @@ export type SessionDispatchResult = {
 
 const nowIso = (): string => new Date().toISOString();
 
-const buildRunnerContext = (
+const buildRunnerContext = async (
   args: HostCliArgs,
-): { sessionStore: SessionStore; artifactStore: ArtifactStore; runner: ABoxTaskRunner } => {
+): Promise<{
+  sessionStore: SessionStore;
+  artifactStore: ArtifactStore;
+  runner: ABoxTaskRunner;
+}> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
+  // Phase 6 W5: resolve the env-passthrough policy from the config cascade
+  // + BAKUDO_ENV_ALLOWLIST override so plan Default Rule 362 (explicit
+  // opt-in for env passthrough) works end-to-end. A missing config file
+  // yields an empty allowlist — the safe default.
+  const { merged: hostConfig } = await loadConfigCascade(repoRootFor(args.repo), {});
+  const envPolicy = resolveEnvPolicyForHost(
+    hostConfig.envPolicy?.allowlist !== undefined
+      ? { configAllowlist: hostConfig.envPolicy.allowlist }
+      : {},
+  );
   return {
     // Production entry points enforce the per-session lock; tests that
     // instantiate `SessionStore` directly continue to see the legacy
     // default (`enforceLock: false`). See plan Hard Rule 1.
     sessionStore: new SessionStore(rootDir, { enforceLock: true }),
     artifactStore: new ArtifactStore(rootDir),
-    runner: new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo)),
+    runner: new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo), undefined, envPolicy),
   };
 };
 
@@ -213,7 +228,7 @@ export const createAndRunFirstTurn = async (
   args: HostCliArgs,
   options: SessionDispatchOptions = {},
 ): Promise<SessionDispatchResult> => {
-  const { sessionStore, artifactStore, runner } = buildRunnerContext(args);
+  const { sessionStore, artifactStore, runner } = await buildRunnerContext(args);
   const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const assumeDangerousSkipPermissions = await resolveAssumeDangerous(args);
   const turnId = "turn-1";
@@ -314,7 +329,7 @@ export const appendTurnToActiveSession = async (
   args: HostCliArgs,
   options: SessionDispatchOptions = {},
 ): Promise<SessionDispatchResult> => {
-  const { sessionStore, artifactStore, runner } = buildRunnerContext(args);
+  const { sessionStore, artifactStore, runner } = await buildRunnerContext(args);
   const storageRoot = storageRootFor(args.repo, args.storageRoot);
 
   // Recovery gate — runs BEFORE we acquire the lock. If the prior host
@@ -421,7 +436,7 @@ export const resumeNamedSession = async (
   sessionId: string,
   args: HostCliArgs,
 ): Promise<SessionRecord | null> => {
-  const { sessionStore } = buildRunnerContext(args);
+  const { sessionStore } = await buildRunnerContext(args);
   const storageRoot = storageRootFor(args.repo, args.storageRoot);
   // Recovery gate: run BEFORE handing the session back to the caller so the
   // caller never sees a session that must be inspected before further writes.

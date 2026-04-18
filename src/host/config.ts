@@ -43,6 +43,30 @@ export const BakudoConfigSchema = z
           .strip(),
       )
       .optional(),
+    /**
+     * Phase 6 W5 — env-passthrough policy. Users opt specific host env vars
+     * in via `envPolicy.allowlist`; the default is empty (no passthrough).
+     * `BAKUDO_ENV_ALLOWLIST=FOO,BAR` adds to whatever config declares.
+     */
+    envPolicy: z
+      .object({
+        allowlist: z.array(z.string()).optional(),
+      })
+      .strip()
+      .optional(),
+    /**
+     * Phase 6 W5 — redaction overrides. Users may supply extra regex sources
+     * as strings; patterns compile with the global + case-insensitive flags
+     * used throughout the default policy. Invalid patterns are dropped with
+     * a single stderr warning from {@link validateConfigLayer}.
+     */
+    redaction: z
+      .object({
+        extraTextPatterns: z.array(z.string()).optional(),
+        extraEnvDenyPatterns: z.array(z.string()).optional(),
+      })
+      .strip()
+      .optional(),
   })
   .strip();
 
@@ -57,6 +81,8 @@ export const BakudoConfigDefaults: Required<BakudoConfig> = {
   flushSizeThreshold: 4096,
   retryDelays: [50, 100, 200, 400, 800],
   agents: undefined,
+  envPolicy: undefined,
+  redaction: undefined,
 };
 
 /**
