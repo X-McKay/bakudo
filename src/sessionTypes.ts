@@ -58,6 +58,12 @@ export type SessionReviewAction = "accept" | "retry" | "ask_user" | "halt" | "fo
 export type SessionReviewRecord = {
   reviewId: string;
   attemptId: string;
+  /**
+   * Phase 3 intent ID linking the review back to the intent that produced
+   * the attempt. Present when the attempt was created by the Phase 3
+   * planner; absent for legacy attempts.
+   */
+  intentId?: string;
   outcome: SessionReviewOutcome;
   action: SessionReviewAction;
   reason?: string;

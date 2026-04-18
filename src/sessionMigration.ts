@@ -95,9 +95,11 @@ export const coerceLooseReviewRecord = (
       ? record.reviewId
       : createReviewId();
   const reason = typeof record.reason === "string" ? record.reason : undefined;
+  const intentId = typeof record.intentId === "string" ? record.intentId : undefined;
   return {
     reviewId,
     attemptId,
+    ...(intentId === undefined ? {} : { intentId }),
     outcome: coerceSessionReviewOutcome(record.outcome),
     action: coerceSessionReviewAction(record.action),
     ...(reason === undefined ? {} : { reason }),
