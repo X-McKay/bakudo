@@ -12,8 +12,16 @@ import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import type { ComposerMode } from "./appState.js";
 import { BakudoConfigDefaults } from "./config.js";
-import { emitSessionEvent, type JsonEventSink } from "./eventLogWriter.js";
+import { emitSessionEvent, readSessionEventLog, type JsonEventSink } from "./eventLogWriter.js";
 import { executeAttempt } from "./executeAttempt.js";
+import { SessionLockBusyError, acquireSessionLock, type SessionLockHandle } from "./lockFile.js";
+import {
+  buildEventKindLoader,
+  logRecoveryNotice,
+  recoverState,
+  type RecoveryReport,
+} from "./recovery.js";
+import { registerCleanupHandler } from "./signalHandlers.js";
 import {
   type EventLogWriterFactory,
   makeInitialTurn,
@@ -41,11 +49,116 @@ const buildRunnerContext = (
 ): { sessionStore: SessionStore; artifactStore: ArtifactStore; runner: ABoxTaskRunner } => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   return {
-    sessionStore: new SessionStore(rootDir),
+    // Production entry points enforce the per-session lock; tests that
+    // instantiate `SessionStore` directly continue to see the legacy
+    // default (`enforceLock: false`). See plan Hard Rule 1.
+    sessionStore: new SessionStore(rootDir, { enforceLock: true }),
     artifactStore: new ArtifactStore(rootDir),
     runner: new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo)),
   };
 };
+
+/**
+ * Acquire the per-session lock + wire crash release + register the handle
+ * with `sessionStore` so writes on this turn pass the `assertLockHeld`
+ * guard. Returns a disposer that releases the lock and unregisters cleanup.
+ *
+ * The disposer is idempotent. Callers MUST invoke it from a `finally` block
+ * so graceful-shutdown writes still run. On a fatal signal, the
+ * `signalHandlers` LIFO chain invokes the lock-release handler that this
+ * function registers, so the on-disk `.lock` is removed even if the caller
+ * never runs its `finally`.
+ */
+const withAcquiredLock = async (
+  sessionStore: SessionStore,
+  sessionId: string,
+): Promise<{ handle: SessionLockHandle; release: () => Promise<void> }> => {
+  const sessionDir = sessionStore.paths(sessionId).sessionDir;
+  let handle: SessionLockHandle;
+  try {
+    handle = await acquireSessionLock(sessionId, sessionDir);
+  } catch (error) {
+    if (error instanceof SessionLockBusyError) {
+      // Re-throw with a slightly richer message; W9 will wrap this in the
+      // error taxonomy (`session_locked`, exit code 5).
+      throw error;
+    }
+    throw error;
+  }
+  const unregister = sessionStore.registerLock(handle);
+  let released = false;
+  const release = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    unregister();
+    await handle.release();
+  };
+  // Crash release: `signalHandlers.ts` runs this LIFO on SIGINT/SIGTERM/
+  // uncaught so a hard crash still removes the `.lock`. The returned
+  // uninstaller is called from `release` so a graceful dispose does not
+  // leave the cleanup list growing.
+  const uninstall = registerCleanupHandler(async () => {
+    await release();
+  });
+  const wrappedRelease = async (): Promise<void> => {
+    uninstall();
+    await release();
+  };
+  return { handle, release: wrappedRelease };
+};
+
+/**
+ * Run `recoverState()` and decide whether to proceed, clear a stale lock, or
+ * block resume. Logs a single recovery notice via stderr (interim surface
+ * until new envelope kinds are authorized — see `recovery.ts` module docstring).
+ *
+ * Returns `null` when it is safe to proceed. Throws when resume must be
+ * blocked (`running_incomplete`). Currently, `finished_no_review` and
+ * `queued_no_attempt` are informational — the caller continues after the
+ * log line is emitted, which aligns with plan 207-210's intent that
+ * "queued_no_attempt → safe to resume" and "finished_no_review → run
+ * review recovery before resume" (the review recovery is performed by the
+ * normal dispatch pipeline re-entering the attempt; a no-op until the
+ * review pass completes).
+ */
+const runRecoveryGate = async (
+  sessionStore: SessionStore,
+  sessionId: string,
+  storageRoot: string,
+): Promise<RecoveryReport | null> => {
+  const session = await sessionStore.loadSession(sessionId);
+  if (session === null) {
+    return null;
+  }
+  const sessionDir = sessionStore.paths(sessionId).sessionDir;
+  const loadEventKinds = buildEventKindLoader((sid) => readSessionEventLog(storageRoot, sid));
+  const report = await recoverState(session, sessionDir, { loadEventKinds });
+  if (
+    report.verdict.kind === "healthy" &&
+    report.lock.kind !== "stale" &&
+    report.lock.kind !== "corrupt"
+  ) {
+    return null;
+  }
+  logRecoveryNotice(report);
+  if (report.blocksResume) {
+    throw new SessionResumeBlockedError(report);
+  }
+  return report;
+};
+
+/** Thrown when `recoverState` classifies the session as `running_incomplete`. */
+export class SessionResumeBlockedError extends Error {
+  public readonly report: RecoveryReport;
+  public constructor(report: RecoveryReport) {
+    super(
+      `session ${report.sessionId} cannot be resumed: ${report.code} — ` +
+        `run bakudo inspect --session ${report.sessionId} to review`,
+    );
+    this.name = "SessionResumeBlockedError";
+    this.report = report;
+  }
+}
 
 const nextTurnId = (session: SessionRecord): string => `turn-${session.turns.length + 1}`;
 
@@ -115,75 +228,84 @@ export const createAndRunFirstTurn = async (
   }
   // TODO(Phase 3): worker-side budget enforcement — stop at limit, prompt "continue?".
 
-  const session = await sessionStore.createSession({
-    sessionId,
-    goal: effectivePrompt,
-    repoRoot: repoRootFor(args.repo),
-    assumeDangerousSkipPermissions,
-    status: "running",
-    turns: [initialTurn],
-  });
+  // Acquire the per-session lock before the first write. For a freshly-created
+  // session there is no prior holder, so this call is always uncontended; it
+  // wires the crash-release hook and registers the handle with the store so
+  // subsequent writes in this function pass the lock guard.
+  const { release: releaseLock } = await withAcquiredLock(sessionStore, sessionId);
+  try {
+    const session = await sessionStore.createSession({
+      sessionId,
+      goal: effectivePrompt,
+      repoRoot: repoRootFor(args.repo),
+      assumeDangerousSkipPermissions,
+      status: "running",
+      turns: [initialTurn],
+    });
 
-  const storageRoot = storageRootFor(args.repo, args.storageRoot);
-  await emitTurnTransition({
-    storageRoot,
-    sessionId: session.sessionId,
-    turnId,
-    fromStatus: "queued",
-    toStatus: "queued",
-    reason: "next_turn",
-  });
-  await emitSessionEvent(
-    storageRoot,
-    session.sessionId,
-    createSessionEvent({
-      kind: "host.turn_queued",
+    const storageRoot = storageRootFor(args.repo, args.storageRoot);
+    await emitTurnTransition({
+      storageRoot,
       sessionId: session.sessionId,
       turnId,
-      actor: "host",
-      payload: { turnId, prompt: effectivePrompt, mode: args.mode },
-    }),
-    options.sink,
-  );
+      fromStatus: "queued",
+      toStatus: "queued",
+      reason: "next_turn",
+    });
+    await emitSessionEvent(
+      storageRoot,
+      session.sessionId,
+      createSessionEvent({
+        kind: "host.turn_queued",
+        sessionId: session.sessionId,
+        turnId,
+        actor: "host",
+        payload: { turnId, prompt: effectivePrompt, mode: args.mode },
+      }),
+      options.sink,
+    );
 
-  const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
-  const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
-  const repoRoot = repoRootFor(args.repo);
-  const plannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
-  const { spec } = planAttempt(
-    effectivePrompt,
-    composerMode,
-    {
+    const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
+    const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
+    const repoRoot = repoRootFor(args.repo);
+    const plannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
+    const { spec } = planAttempt(
+      effectivePrompt,
+      composerMode,
+      {
+        sessionId: session.sessionId,
+        turnId,
+        attemptId,
+        taskId: attemptId,
+        repoRoot,
+        config: BakudoConfigDefaults,
+      },
+      plannerOpts,
+    );
+
+    const { reviewed } = await executeAttempt({
+      sessionStore,
+      artifactStore,
+      runner,
       sessionId: session.sessionId,
       turnId,
-      attemptId,
-      taskId: attemptId,
-      repoRoot,
-      config: BakudoConfigDefaults,
-    },
-    plannerOpts,
-  );
+      spec,
+      args,
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+      ...(options.eventLogWriterFactory
+        ? { eventLogWriterFactory: options.eventLogWriterFactory }
+        : {}),
+    });
 
-  const { reviewed } = await executeAttempt({
-    sessionStore,
-    artifactStore,
-    runner,
-    sessionId: session.sessionId,
-    turnId,
-    spec,
-    args,
-    ...(options.onProgress ? { onProgress: options.onProgress } : {}),
-    ...(options.eventLogWriterFactory
-      ? { eventLogWriterFactory: options.eventLogWriterFactory }
-      : {}),
-  });
+    const updated = await sessionStore.saveSession({
+      ...(await sessionStore.loadSession(session.sessionId))!,
+      status: sessionStatusFromReview(reviewed),
+    });
 
-  const updated = await sessionStore.saveSession({
-    ...(await sessionStore.loadSession(session.sessionId))!,
-    status: sessionStatusFromReview(reviewed),
-  });
-
-  return { sessionId: updated.sessionId, turnId, attemptId, reviewed, session: updated };
+    return { sessionId: updated.sessionId, turnId, attemptId, reviewed, session: updated };
+  } finally {
+    await releaseLock();
+  }
 };
 
 export const appendTurnToActiveSession = async (
@@ -193,95 +315,106 @@ export const appendTurnToActiveSession = async (
   options: SessionDispatchOptions = {},
 ): Promise<SessionDispatchResult> => {
   const { sessionStore, artifactStore, runner } = buildRunnerContext(args);
-  const existing = await sessionStore.loadSession(sessionId);
-  if (existing === null) {
-    throw new Error(`cannot append turn: unknown session ${sessionId}`);
-  }
-
-  const turnId = nextTurnId(existing);
-  const previousTurn = existing.turns.at(-1);
-
-  // Parse inline token budget.
-  const { budget, cleanedPrompt } = parseTokenBudget(prompt);
-  const effectivePrompt = budget !== null ? cleanedPrompt : prompt;
-  // TODO(Phase 3): worker-side budget enforcement — stop at limit, prompt "continue?".
-
-  const turn: SessionTurnRecord = {
-    turnId,
-    prompt: effectivePrompt,
-    mode: args.mode,
-    status: "queued",
-    attempts: [],
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    ...(budget !== null ? { tokenBudget: budget.tokens } : {}),
-  };
-  await sessionStore.upsertTurn(sessionId, turn);
   const storageRoot = storageRootFor(args.repo, args.storageRoot);
-  await emitTurnTransition({
-    storageRoot,
-    sessionId,
-    turnId,
-    fromStatus: previousTurn?.status ?? "queued",
-    toStatus: "queued",
-    reason: "next_turn",
-  });
-  await emitSessionEvent(
-    storageRoot,
-    sessionId,
-    createSessionEvent({
-      kind: "host.turn_queued",
+
+  // Recovery gate — runs BEFORE we acquire the lock. If the prior host
+  // crashed in the middle of a dispatch, we must surface the verdict (and
+  // possibly block resume) before the append path overwrites any state.
+  await runRecoveryGate(sessionStore, sessionId, storageRoot);
+
+  const { release: releaseLock } = await withAcquiredLock(sessionStore, sessionId);
+  try {
+    const existing = await sessionStore.loadSession(sessionId);
+    if (existing === null) {
+      throw new Error(`cannot append turn: unknown session ${sessionId}`);
+    }
+
+    const turnId = nextTurnId(existing);
+    const previousTurn = existing.turns.at(-1);
+
+    // Parse inline token budget.
+    const { budget, cleanedPrompt } = parseTokenBudget(prompt);
+    const effectivePrompt = budget !== null ? cleanedPrompt : prompt;
+    // TODO(Phase 3): worker-side budget enforcement — stop at limit, prompt "continue?".
+
+    const turn: SessionTurnRecord = {
+      turnId,
+      prompt: effectivePrompt,
+      mode: args.mode,
+      status: "queued",
+      attempts: [],
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      ...(budget !== null ? { tokenBudget: budget.tokens } : {}),
+    };
+    await sessionStore.upsertTurn(sessionId, turn);
+    await emitTurnTransition({
+      storageRoot,
       sessionId,
       turnId,
-      actor: "host",
-      payload: { turnId, prompt: effectivePrompt, mode: args.mode },
-    }),
-    options.sink,
-  );
+      fromStatus: previousTurn?.status ?? "queued",
+      toStatus: "queued",
+      reason: "next_turn",
+    });
+    await emitSessionEvent(
+      storageRoot,
+      sessionId,
+      createSessionEvent({
+        kind: "host.turn_queued",
+        sessionId,
+        turnId,
+        actor: "host",
+        payload: { turnId, prompt: effectivePrompt, mode: args.mode },
+      }),
+      options.sink,
+    );
 
-  const withTurn = await sessionStore.loadSession(sessionId);
-  if (withTurn === null) {
-    throw new Error(`session disappeared during turn append: ${sessionId}`);
+    const withTurn = await sessionStore.loadSession(sessionId);
+    if (withTurn === null) {
+      throw new Error(`session disappeared during turn append: ${sessionId}`);
+    }
+    const attemptId = nextAttemptId(withTurn, turnId);
+    const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
+    const repoRoot = repoRootFor(args.repo);
+    const appendPlannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
+    const { spec } = planAttempt(
+      effectivePrompt,
+      composerMode,
+      {
+        sessionId,
+        turnId,
+        attemptId,
+        taskId: attemptId,
+        repoRoot,
+        config: BakudoConfigDefaults,
+      },
+      appendPlannerOpts,
+    );
+
+    await sessionStore.saveSession({ ...withTurn, status: "running" });
+    const { reviewed } = await executeAttempt({
+      sessionStore,
+      artifactStore,
+      runner,
+      sessionId,
+      turnId,
+      spec,
+      args,
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+      ...(options.eventLogWriterFactory
+        ? { eventLogWriterFactory: options.eventLogWriterFactory }
+        : {}),
+    });
+
+    const updated = await sessionStore.saveSession({
+      ...(await sessionStore.loadSession(sessionId))!,
+      status: sessionStatusFromReview(reviewed),
+    });
+
+    return { sessionId, turnId, attemptId, reviewed, session: updated };
+  } finally {
+    await releaseLock();
   }
-  const attemptId = nextAttemptId(withTurn, turnId);
-  const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
-  const repoRoot = repoRootFor(args.repo);
-  const appendPlannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
-  const { spec } = planAttempt(
-    effectivePrompt,
-    composerMode,
-    {
-      sessionId,
-      turnId,
-      attemptId,
-      taskId: attemptId,
-      repoRoot,
-      config: BakudoConfigDefaults,
-    },
-    appendPlannerOpts,
-  );
-
-  await sessionStore.saveSession({ ...withTurn, status: "running" });
-  const { reviewed } = await executeAttempt({
-    sessionStore,
-    artifactStore,
-    runner,
-    sessionId,
-    turnId,
-    spec,
-    args,
-    ...(options.onProgress ? { onProgress: options.onProgress } : {}),
-    ...(options.eventLogWriterFactory
-      ? { eventLogWriterFactory: options.eventLogWriterFactory }
-      : {}),
-  });
-
-  const updated = await sessionStore.saveSession({
-    ...(await sessionStore.loadSession(sessionId))!,
-    status: sessionStatusFromReview(reviewed),
-  });
-
-  return { sessionId, turnId, attemptId, reviewed, session: updated };
 };
 
 export const resumeNamedSession = async (
@@ -289,5 +422,10 @@ export const resumeNamedSession = async (
   args: HostCliArgs,
 ): Promise<SessionRecord | null> => {
   const { sessionStore } = buildRunnerContext(args);
+  const storageRoot = storageRootFor(args.repo, args.storageRoot);
+  // Recovery gate: run BEFORE handing the session back to the caller so the
+  // caller never sees a session that must be inspected before further writes.
+  // A blocked-resume verdict throws `SessionResumeBlockedError` here.
+  await runRecoveryGate(sessionStore, sessionId, storageRoot);
   return sessionStore.loadSession(sessionId);
 };
