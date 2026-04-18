@@ -324,6 +324,52 @@ the rollout reaches Stage C (plan 06, hard rule 2). `--ui` values are
 validated at parse time — invalid values fail with exit code 2 before any
 sandbox work begins.
 
+## Operations
+
+Day-to-day operator commands delivered in Phase 6. See also
+[`plans/bakudo-ux/phase-6-rollout-checklist.md`](../plans/bakudo-ux/phase-6-rollout-checklist.md).
+
+### Pruning stale artifacts (`bakudo cleanup`)
+
+`bakudo cleanup` walks every session under the repo's storage root and
+removes intermediate artifacts older than the retention window. Protected
+kinds (`result`, `summary`, `report`) and per-session record files
+(`session.json`, `events.ndjson`, `transitions.ndjson`, `provenance.ndjson`,
+`approvals.ndjson`, `artifacts.ndjson`, `cleanup.ndjson`, `session.lock`)
+are never pruned regardless of age (plan 06, hard rule 3).
+
+```bash
+bakudo cleanup [--dry-run] [--older-than <duration>] [--session <id>]
+```
+
+- `--dry-run` — report what *would* be removed without touching disk. Always
+  run this first.
+- `--older-than <dur>` — override the default 30-day retention window.
+  Accepts `30d`, `7d`, `6h`, `45m`.
+- `--session <id>` — scope the pass to a single session.
+
+Every real deletion appends a line to the session's `cleanup.ndjson` so
+`/inspect` and `bakudo chronicle` surface pruned artifacts as "deleted under
+policy" rather than "missing".
+
+### Crash and interruption recovery
+
+bakudo holds an exclusive lock on the session directory across every write.
+When a session resumes, the recovery gate classifies the prior state:
+
+| Verdict | Meaning | Resumable? |
+| --- | --- | --- |
+| `running_incomplete` | An attempt started but never recorded a terminal event (crash mid-dispatch). | No — blocks resume until cleared. |
+| `finished_no_review` | An attempt finished but no review verdict was stored. | Yes, informational. |
+| `stale_lock` | Prior `session.lock` is older than the liveness threshold and its owner is gone. | Yes — the lock is cleared automatically. |
+
+Stable exit codes (plan 06 §Exit Semantics): `0` success, `1` failure,
+`2` blocked, `3` policy-denied, `4` worker-protocol-mismatch,
+`5` session-corruption (includes live-lock contention against another
+running bakudo), `130` SIGINT (`Ctrl+C`).
+
+Run `bakudo doctor` for the aggregate health picture across every session.
+
 ## Development and Testing
 
 `Bakudo` maintains a high bar for code quality through automated linting, formatting, and a multi-layered testing strategy.
