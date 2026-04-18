@@ -1,6 +1,7 @@
 import type { AttemptSpec } from "../attemptProtocol.js";
 import type { ArtifactStore } from "../artifactStore.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
+import type { ReviewConfidence } from "../resultClassifier.js";
 import { synthesizeLegacySpec } from "../sessionMigration.js";
 import type {
   SessionAttemptRecord,
@@ -131,10 +132,25 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
   return lines;
 };
 
+/**
+ * Reviewed payload accepted by {@link formatInspectReview}. The formatter
+ * reads the base classification fields ({@link ReviewedTaskResult.outcome},
+ * {@link ReviewedTaskResult.action}, {@link ReviewedTaskResult.reason}) and
+ * surfaces the PR5 additions — `confidence`, `userExplanation`, and
+ * `remediationHint` — when they are present. The PR5 fields are optional so
+ * legacy callers that still hand in a {@link ReviewedTaskResult} (which gets
+ * `confidence` for free via the classifier) continue to work unchanged.
+ */
+export type InspectReviewPayload = ReviewedTaskResult & {
+  confidence?: ReviewConfidence;
+  userExplanation?: string;
+  remediationHint?: string;
+};
+
 export type InspectReviewInput = {
   session: SessionRecord;
   attempt: SessionAttemptRecord;
-  reviewed: ReviewedTaskResult;
+  reviewed: InspectReviewPayload;
   artifacts: ArtifactRow[];
 };
 
@@ -150,8 +166,17 @@ export const formatInspectReview = (input: InspectReviewInput): string[] => {
     renderKv("Status", attempt.status),
     renderKv("Outcome", reviewed.outcome),
     renderKv("Action", reviewed.action),
-    renderKv("Reason", reviewed.reason),
   ];
+  if (reviewed.confidence !== undefined) {
+    lines.push(renderKv("Confidence", reviewed.confidence));
+  }
+  if (reviewed.userExplanation !== undefined && reviewed.userExplanation.length > 0) {
+    lines.push(renderKv("Explain", reviewed.userExplanation));
+  }
+  lines.push(renderKv("Reason", reviewed.reason));
+  if (reviewed.remediationHint !== undefined && reviewed.remediationHint.length > 0) {
+    lines.push(renderKv("Remedy", reviewed.remediationHint));
+  }
   if (result) {
     lines.push(renderKv("Summary", result.summary));
     if (result.exitCode !== undefined && result.exitCode !== null) {

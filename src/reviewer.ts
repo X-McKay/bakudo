@@ -1,10 +1,22 @@
-import type { AttemptExecutionResult, AttemptSpec, CheckResult } from "./attemptProtocol.js";
+import type {
+  AttemptExecutionResult,
+  AttemptSpec,
+  CheckResult,
+  PermissionRule,
+} from "./attemptProtocol.js";
+import type { ArtifactRecord } from "./host/artifactStore.js";
+import type { ApprovalRecord } from "./host/approvalStore.js";
+import type { AttemptLineage } from "./host/attemptLineage.js";
 import type { TaskResult } from "./protocol.js";
 import {
   classifyReviewedOutcome,
   type ReviewClassification,
   type ReviewClassifierHints,
+  type ReviewConfidence,
 } from "./resultClassifier.js";
+import type { SessionAttemptRecord } from "./sessionTypes.js";
+
+export type { ReviewConfidence } from "./resultClassifier.js";
 
 export type ReviewedTaskResult = ReviewClassification & {
   taskId: string;
@@ -79,6 +91,7 @@ export const reviewAttemptResult = (
       reason: "all acceptance checks passed and exit code is 0",
       retryable: false,
       needsUser: false,
+      confidence: hints.confidence ?? "high",
       attemptId: spec.attemptId,
       intentId: spec.intentId,
       status: executionResult.status,
@@ -105,5 +118,223 @@ export const reviewAttemptResult = (
     intentId: spec.intentId,
     status: executionResult.status,
     ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Phase 4 PR5 — structured ReviewInputs + confidence/remediation outputs
+// ---------------------------------------------------------------------------
+
+/**
+ * Rich review inputs for {@link reviewAttemptWithInputs}. Bundles everything
+ * the reviewer needs to grade confidence and draft a user-facing explanation:
+ * the persisted attempt, the spec it ran against, the raw execution result,
+ * the artifacts it produced, the approvals recorded on this turn, and the
+ * derived retry lineage.
+ *
+ * NOTE: `provenance` is intentionally omitted. PR2's `ProvenanceRecord` type
+ * is not on `main` yet; a follow-up can extend this record with an optional
+ * `provenance?: ProvenanceRecord` once PR2 merges. Adding a new optional
+ * field is not a breaking change.
+ */
+export type ReviewInputs = {
+  attempt: SessionAttemptRecord;
+  attemptSpec: AttemptSpec;
+  executionResult: AttemptExecutionResult;
+  artifacts: ArtifactRecord[];
+  approvals: ApprovalRecord[];
+  lineage: AttemptLineage;
+};
+
+/**
+ * Extended review output that layers PR5's confidence grade, plain-language
+ * explanation, and (when retry is suggested) a remediation hint on top of the
+ * existing {@link ReviewedAttemptResult}. The existing fields keep their
+ * shape so callers that don't care about the PR5 additions can ignore them.
+ */
+export type ReviewedOutputs = ReviewedAttemptResult & {
+  /** PR5 confidence grade — see {@link ReviewConfidence}. */
+  confidence: ReviewConfidence;
+  /** 1-3 sentence plain-language summary for inspect/narration surfaces. */
+  userExplanation: string;
+  /** Present only when `action === "retry"` (or a future `"retry_refine"`). */
+  remediationHint?: string;
+};
+
+/** Denied-ish approval decisions. */
+const isDeniedApproval = (record: ApprovalRecord): boolean =>
+  record.decision === "denied" || record.decision === "auto_denied";
+
+/** Ask-ish approval decisions. */
+const isAskApproval = (record: ApprovalRecord): boolean =>
+  record.decidedBy === "user_prompt" || record.decidedBy === "hook_sync";
+
+/**
+ * Grade review confidence from structured inputs. See the type doc for the
+ * rules. Order matters: low > high > medium (any low-confidence signal wins).
+ */
+const gradeConfidence = (
+  classification: ReviewClassification,
+  inputs: ReviewInputs,
+): ReviewConfidence => {
+  const { executionResult, approvals, lineage } = inputs;
+  const hasDenied = approvals.some(isDeniedApproval);
+  const execFailed = executionResult.status === "failed" || executionResult.status === "blocked";
+  if (execFailed || hasDenied || lineage.depth > 2) {
+    return "low";
+  }
+  const allChecksOk =
+    classification.outcome === "success" &&
+    (executionResult.checkResults === undefined ||
+      executionResult.checkResults.every((check) => check.passed));
+  const hasAskThisTurn = approvals.some(isAskApproval);
+  if (allChecksOk && !hasAskThisTurn && lineage.depth === 0) {
+    return "high";
+  }
+  return "medium";
+};
+
+/** Find the first failing check, if any. */
+const firstFailingCheck = (executionResult: AttemptExecutionResult): CheckResult | undefined =>
+  (executionResult.checkResults ?? []).find((check) => !check.passed);
+
+/** Find the deny rule surfaced on this turn, if any. */
+const deniedRule = (approvals: ApprovalRecord[]): PermissionRule | undefined => {
+  const denied = approvals.find(isDeniedApproval);
+  return denied?.matchedRule;
+};
+
+/**
+ * Best-effort log-artifact name for a failing check. Prefers an artifact
+ * whose name references the check's checkId/label; falls back to the first
+ * `log` kind artifact; finally returns a conventional placeholder.
+ */
+const logArtifactName = (check: CheckResult | undefined, artifacts: ArtifactRecord[]): string => {
+  const checkId = check?.checkId;
+  if (checkId !== undefined) {
+    const match = artifacts.find(
+      (artifact) => artifact.kind === "log" && artifact.name.includes(checkId),
+    );
+    if (match !== undefined) {
+      return match.name;
+    }
+  }
+  const anyLog = artifacts.find((artifact) => artifact.kind === "log");
+  if (anyLog !== undefined) {
+    return anyLog.name;
+  }
+  return "worker-output.log";
+};
+
+/** Render a command array (or single string) for inclusion in text. */
+const formatCommand = (command: readonly string[] | undefined): string => {
+  if (command === undefined || command.length === 0) {
+    return "the acceptance check";
+  }
+  return command.join(" ");
+};
+
+/**
+ * Build the 1-3 sentence user explanation for a review. Templated from the
+ * classification outcome + structured evidence. See the PR brief for the
+ * phrasing rules.
+ */
+const buildUserExplanation = (
+  classification: ReviewClassification,
+  inputs: ReviewInputs,
+): string => {
+  const { executionResult, attemptSpec, approvals } = inputs;
+  switch (classification.outcome) {
+    case "success": {
+      const total = attemptSpec.acceptanceChecks.length;
+      const passed = (executionResult.checkResults ?? []).filter((check) => check.passed).length;
+      const reportedPassed = executionResult.checkResults === undefined ? total : passed;
+      return `Attempt completed. Checks passed: ${reportedPassed}/${total}.`;
+    }
+    case "policy_denied": {
+      const rule = deniedRule(approvals);
+      const pattern = rule?.pattern ?? classification.reason;
+      return `Blocked: ${pattern} matched.`;
+    }
+    case "blocked_needs_user": {
+      return "Waiting on user input.";
+    }
+    case "retryable_failure":
+    case "incomplete_needs_follow_up": {
+      const failing = firstFailingCheck(executionResult);
+      const label =
+        failing !== undefined
+          ? (attemptSpec.acceptanceChecks.find((check) => check.checkId === failing.checkId)
+              ?.label ?? failing.checkId)
+          : "execution";
+      const exitCode =
+        failing?.exitCode ??
+        (typeof executionResult.exitCode === "number" ? executionResult.exitCode : undefined);
+      const exitText = exitCode === undefined ? "" : ` (exit ${exitCode})`;
+      return `Attempt failed at ${label}${exitText}. ${classification.reason}.`;
+    }
+    default: {
+      return classification.reason;
+    }
+  }
+};
+
+/**
+ * Build the optional remediation hint. Surfaced whenever the review implies
+ * the user needs to act on a signal they can influence:
+ *
+ * 1. A denied approval — regardless of classifier action — produces the
+ *    approval-denied hint so the user knows which rule pattern to avoid.
+ * 2. A retry-style action with a failing acceptance check produces the
+ *    "rerun the check, read the log" hint.
+ *
+ * All other cases (clean success, plain blocked_needs_user, incomplete
+ * follow-ups without a failing check) return `undefined`.
+ */
+const buildRemediationHint = (
+  classification: ReviewClassification,
+  inputs: ReviewInputs,
+): string | undefined => {
+  const deniedApproval = inputs.approvals.find(isDeniedApproval);
+  if (deniedApproval !== undefined) {
+    return `Approval was denied for \`${deniedApproval.matchedRule.pattern}\`. Rework the approach to avoid that pattern.`;
+  }
+  if (classification.action !== "retry") {
+    return undefined;
+  }
+  const failing = firstFailingCheck(inputs.executionResult);
+  if (failing !== undefined) {
+    const specCheck = inputs.attemptSpec.acceptanceChecks.find(
+      (check) => check.checkId === failing.checkId,
+    );
+    const commandText = formatCommand(specCheck?.command);
+    const logName = logArtifactName(failing, inputs.artifacts);
+    return `Rerun \`${commandText}\` and investigate the output in artifact \`${logName}\`.`;
+  }
+  return undefined;
+};
+
+/**
+ * Phase 4 PR5 entry point. Given a structured {@link ReviewInputs} bundle,
+ * run the Phase 3 {@link reviewAttemptResult} logic, then refine the
+ * confidence grade from approvals + lineage and attach a user-facing
+ * explanation plus an optional remediation hint.
+ *
+ * Callers that only have the Phase 3 inputs should keep using
+ * {@link reviewAttemptResult}; the new API is additive for now and PR4/PR7
+ * will switch the dispatch path over once the inspect tabs are built.
+ */
+export const reviewAttemptWithInputs = (inputs: ReviewInputs): ReviewedOutputs => {
+  const policyDenied = inputs.approvals.some(isDeniedApproval);
+  const hints: ReviewClassifierHints = policyDenied ? { policyDenied: true } : {};
+  const base = reviewAttemptResult(inputs.attemptSpec, inputs.executionResult, hints);
+  const confidence = gradeConfidence(base, inputs);
+  const userExplanation = buildUserExplanation(base, inputs);
+  const remediationHint = buildRemediationHint(base, inputs);
+  return {
+    ...base,
+    confidence,
+    userExplanation,
+    ...(remediationHint === undefined ? {} : { remediationHint }),
   };
 };
