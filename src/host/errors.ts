@@ -1,37 +1,21 @@
 /**
  * Phase 6 Workstream 9 — Error Taxonomy and Exit Semantics.
  *
- * Single source of truth for bakudo's user-visible error classes, stable
+ * Single source of truth for bakudo's 9 user-visible error classes, stable
  * exit codes, and the JSON error envelope shape. Every caller surfacing an
- * error to stdout/stderr — transcript, inspect, plain mode, JSON mode —
- * routes through this module so the hard rule holds:
+ * error routes through this module so the hard rule holds:
+ *   same error → stable exit code → stable JSON → stable plain-text.
  *
- *   Same underlying error →
- *     stable exit code → stable JSON error shape → stable plain-text line.
+ * Exit-code policy (plan 529-537, 766-780): 0 success, 1 failure, 2 blocked,
+ * 3 policy-denied, 4 protocol-mismatch, 5 session-corruption, 130 SIGINT.
  *
- * Exit-code policy (plan lines 529-537, 766-780):
- *
- *   0    success (incl. auto-approved)
- *   1    generic execution failure (worker failed, disk I/O etc.)
- *   2    blocked / approval denied / hook block
- *   3    policy denied (deny-rule matched)
- *   4    protocol mismatch / incompatible environment
- *   5    session corruption / recovery required
- *   130  Ctrl+C (POSIX SIGINT convention)
- *
- * Extensibility hooks (not fully built in W9):
- *
- *   - A6.3 multi-tier classifier: {@link classifyError} walks Tier 1 today;
- *     the implementation leaves Tier 2 (errno) / Tier 3 (error.name) /
- *     Tier 4 (fallback) as explicit branches so later waves can extend it
- *     without reshaping the call sites.
- *   - A6.4 RenderedError component: {@link RenderedError} is the canonical
- *     data shape a future `<ErrorPane>` TUI component will consume. Plain
- *     mode renders it as text today; JSON mode serializes the envelope.
- *   - A6.12 OTel source vocabulary: every error carries an {@link OtelSource}
- *     slot so telemetry (Wave 6c) can correlate decisions without a second
- *     classifier walk.
+ * Extensibility hooks: {@link classifyError} is the multi-tier A6.3 entry;
+ * {@link RenderedError} is the A6.4 component shape; {@link OtelSource} is
+ * the A6.12 vocabulary. Sharp-edge copy is tightened in `errorCopy.ts` and
+ * applied at the rendering seam (Wave 6d A6.10).
  */
+
+import { tightenRenderedError } from "./errorCopy.js";
 
 /**
  * Stable exit codes. Numeric constants are the single source of truth; the
@@ -147,13 +131,19 @@ export const buildJsonErrorEnvelope = (input: JsonErrorEnvelopeInput): JsonError
   },
 });
 
-/** Build the envelope from an already-classified {@link RenderedError}. */
-export const jsonErrorEnvelopeFrom = (rendered: RenderedError): JsonErrorEnvelope =>
-  buildJsonErrorEnvelope({
-    code: rendered.code,
-    message: rendered.message,
-    ...(rendered.details !== undefined ? { details: rendered.details } : {}),
+/**
+ * Build the envelope from an already-classified {@link RenderedError}.
+ * Phase 6 Wave 6d A6.10: message is tightened via {@link tightenRenderedError}
+ * at the rendering seam; lock-in 19 envelope shape stays unchanged.
+ */
+export const jsonErrorEnvelopeFrom = (rendered: RenderedError): JsonErrorEnvelope => {
+  const tight = tightenRenderedError(rendered);
+  return buildJsonErrorEnvelope({
+    code: tight.code,
+    message: tight.message,
+    ...(tight.details !== undefined ? { details: tight.details } : {}),
   });
+};
 
 // ---------------------------------------------------------------------------
 // Base class + options
@@ -393,7 +383,9 @@ export const exitCodeFor = (error: unknown): ExitCode => classifyError(error).ex
  *   Hint: <recoveryHint>
  */
 export const renderErrorPlain = (rendered: RenderedError): string => {
-  const head = `Error [${rendered.code}]: ${rendered.message}`;
-  const hint = rendered.recoveryHint;
+  // Wave 6d A6.10: tighten at the rendering seam; taxonomy is untouched.
+  const tight = tightenRenderedError(rendered);
+  const head = `Error [${tight.code}]: ${tight.message}`;
+  const hint = tight.recoveryHint;
   return hint === undefined ? head : `${head}\nHint: ${hint}`;
 };

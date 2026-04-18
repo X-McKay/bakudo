@@ -90,7 +90,13 @@ export const describeUiMode = (mode: UiMode): string => {
     case "legacy":
       return "legacy --goal surface as an escape hatch (stages B-C)";
     case "hidden":
-      return "alias for `default`; legacy hidden from help (stage C)";
+      // Phase 6 Wave 6d carryover #1 (from phase-6-mid handoff): this is
+      // NOT an alias for `default` — selecting `--ui hidden` is the stage-C
+      // marker that the legacy surface is hidden from help while the
+      // `legacy` code path itself remains resolvable (plan 129 +
+      // lock-in 27). The flag marks the stage-C rollout checkpoint, not a
+      // default-UX shortcut.
+      return "stage-C marker: legacy surface is hidden from --help, but `--ui legacy` still resolves (plan line 129)";
   }
 };
 

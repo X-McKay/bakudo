@@ -17,7 +17,7 @@ import { resolveRedactionPolicyForHost } from "./redaction.js";
 import { emitSessionEvent, readSessionEventLog, type JsonEventSink } from "./eventLogWriter.js";
 import { executeAttempt } from "./executeAttempt.js";
 import { createSessionProbeFailureEmitter } from "./workerCapabilities.js";
-import { SessionLockBusyError, acquireSessionLock, type SessionLockHandle } from "./lockFile.js";
+import { acquireSessionLock, type SessionLockHandle } from "./lockFile.js";
 import {
   buildEventKindLoader,
   logRecoveryNotice,
@@ -115,17 +115,11 @@ const withAcquiredLock = async (
   sessionId: string,
 ): Promise<{ handle: SessionLockHandle; release: () => Promise<void> }> => {
   const sessionDir = sessionStore.paths(sessionId).sessionDir;
-  let handle: SessionLockHandle;
-  try {
-    handle = await acquireSessionLock(sessionId, sessionDir);
-  } catch (error) {
-    if (error instanceof SessionLockBusyError) {
-      // Re-throw with a slightly richer message; W9 will wrap this in the
-      // error taxonomy (`session_locked`, exit code 5).
-      throw error;
-    }
-    throw error;
-  }
+  // Wave 6d carryover #3: the prior try/catch here only re-threw
+  // `SessionLockBusyError` (and every other error) verbatim, so it added no
+  // behavior. Let `acquireSessionLock` throw naturally — callers classify
+  // via `errors.ts` at the dispatch boundary (W9 taxonomy) anyway.
+  const handle: SessionLockHandle = await acquireSessionLock(sessionId, sessionDir);
   const unregister = sessionStore.registerLock(handle);
   let released = false;
   const release = async (): Promise<void> => {

@@ -15,6 +15,11 @@ import { readFile } from "node:fs/promises";
 import { BAKUDO_VERSION } from "../../version.js";
 import type { HostCommandSpec } from "../commandRegistry.js";
 import { loadConfigCascade } from "../config.js";
+import {
+  parseExplainConfigFlag,
+  runExplainConfig,
+  runExplainConfigForSlash,
+} from "../explainConfig.js";
 import { aboxProbeToChecks, probeAbox, type AboxProbe } from "../doctorAboxProbe.js";
 import {
   checkAgentProfile,
@@ -72,12 +77,7 @@ export type DoctorEnvelope = {
     term?: string;
     colorfgbg?: string;
   };
-  /**
-   * Phase 6 Wave 6c PR7 — local-only OTel telemetry status (plan line 870).
-   * `spansOnDisk` counts `spans-*.json` files in the bakudo log dir;
-   * `droppedEventBatches` echoes the classic durability counter; `otlp`
-   * describes the export endpoint (yes/no + host, NEVER bearer token).
-   */
+  /** Wave 6c PR7 — local-only OTel status (plan 870). `otlp.host` never carries the bearer token. */
   telemetry: {
     enabled: boolean;
     note: string;
@@ -86,18 +86,9 @@ export type DoctorEnvelope = {
     droppedEventBatches: number;
     otlp: { configured: boolean; host?: string };
   };
-  /**
-   * Active UI rollout mode for the invocation (Phase 6 W1). Copy this into
-   * bug reports along with `bakudoVersion` — plan 06 hard rule 3 requires
-   * the mode be recorded so a report specifies which surface the user hit.
-   */
+  /** W1: active UI mode + description (plan hard rule 3, bug-report surface). */
   uiMode: { active: UiMode; description: string };
-  /**
-   * Phase 6 W4 — storage footprint + active retention policy snapshot.
-   * Surfaced in `bakudo doctor` so operators can spot growth without
-   * running a full `bakudo cleanup --dry-run`. Additive — older automation
-   * that does not know about this field continues to parse cleanly.
-   */
+  /** W4: storage footprint + retention policy snapshot. Additive field. */
   storage: {
     storageRoot: string;
     totalArtifactBytes: number;
@@ -107,12 +98,7 @@ export type DoctorEnvelope = {
       protectedKinds: ReadonlyArray<string>;
     };
   };
-  /**
-   * Phase 6 W5 hard rule 384 — the active redaction / env-allowlist policy
-   * summary so operators can tell at a glance whether secret scrubbing is
-   * enabled. Counts only; pattern bodies are not surfaced (the patterns
-   * themselves are not secret but users don't benefit from seeing them).
-   */
+  /** W5 hard rule 384: effective redaction/env-allowlist summary (counts only). */
   redaction: RedactionPolicySummary;
 };
 
@@ -349,6 +335,15 @@ export const runDoctorCommand = async (input: {
     (globalThis as unknown as { process?: { env?: Record<string, string | undefined> } }).process
       ?.env ??
     {};
+  // Wave 6d A6.10 edge #4 — `--explain-config <key>` short-circuits the full
+  // doctor run (it is a focused query, not a health check). Exit 0 for a
+  // well-formed lookup; a missing key is a no-op here.
+  const explainKey = parseExplainConfigFlag(input.args);
+  if (explainKey !== null) {
+    await runExplainConfig({ repoRoot, key: explainKey, useJson });
+    const synth = { name: "bakudo-doctor", status: "pass" } as unknown as DoctorEnvelope;
+    return { envelope: synth, exitCode: 0 };
+  }
   const envelope = await runDoctorChecks({
     repoRoot,
     ...(input.aboxBin !== undefined ? { aboxBin: input.aboxBin } : {}),
@@ -370,6 +365,13 @@ export const doctorCommandSpec: HostCommandSpec = {
   description: "Diagnose the bakudo environment (node, abox, renderer, config, keybindings).",
   handler: async ({ args, deps }) => {
     const useJson = args.includes("--output-format=json") || args.includes("--json");
+    // Wave 6d A6.10 #4 — `/doctor --explain-config <key>` slash variant.
+    const handled = await runExplainConfigForSlash({
+      args,
+      useJson,
+      pushLine: (line) => deps.transcript.push({ kind: "event", label: "doctor", detail: line }),
+    });
+    if (handled !== null) return;
     const envelope = await runDoctorChecks({
       repoRoot: repoRootFor(undefined),
       env:

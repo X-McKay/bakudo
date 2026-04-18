@@ -113,3 +113,24 @@ test("uiMode: resetActiveUiMode restores the default", () => {
   resetActiveUiMode();
   assert.equal(getActiveUiMode(), DEFAULT_UI_MODE);
 });
+
+test("uiMode carryover #1: describeUiMode('hidden') does not claim alias-for-default behavior", () => {
+  // Phase 6 Wave 6d PR13 — handoff carryover #1. The prior copy said "alias
+  // for `default`" which is factually wrong: selecting `--ui hidden` marks
+  // the stage-C rollout checkpoint (legacy surface hidden from help) while
+  // the `legacy` code path itself remains resolvable (plan line 129 +
+  // lock-in 27). This test pins the corrected wording so the regression is
+  // observable if the string drifts back.
+  const description = describeUiMode("hidden");
+  assert.doesNotMatch(
+    description,
+    /alias for/iu,
+    "describeUiMode('hidden') must no longer claim to be an alias for `default`",
+  );
+  assert.match(description, /hidden/iu, "description must reference the hidden-from-help semantic");
+  assert.match(
+    description,
+    /legacy/iu,
+    "description must reference the still-resolvable legacy path (plan line 129)",
+  );
+});

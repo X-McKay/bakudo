@@ -16,14 +16,26 @@ export const isExitResolution = (value: unknown): value is ExitResolution =>
 
 /**
  * Phase 6 W9: dispatch outcome when a handler surfaces a typed error. The
- * shell consumes this to print a plain-text error and exit with the stable
- * exit code from the error taxonomy (`host/errors.ts`). Kept thin — the
- * classification itself happens in `classifyError`, which is the single
- * entry point to the multi-tier classifier (A6.3).
+ * shell would consume this to print a plain-text error and exit with the
+ * stable exit code from the error taxonomy (`host/errors.ts`). Kept thin —
+ * classification happens in `classifyError` (A6.3 entry point).
+ *
+ * Reserved for Wave 11 (interactive command-dispatch wiring). No live call
+ * sites today; several subcommand modules (`chronicle.ts`, `usage.ts`,
+ * `cleanupSupport.ts`, `chronicleSupport.ts`) already name this type in
+ * their jsdoc as the anticipated typed-error return shape, so it stays
+ * exported but is otherwise dormant. See phase-6-mid handoff carryover #5.
+ *
+ * @deprecated-unused — remove or consume in Wave 11 when interactive
+ *   dispatch grows a typed-error path; dead code today.
  */
 export type ErrorResolution = { kind: "error"; rendered: RenderedError };
 
-/** Wrap any thrown value as an {@link ErrorResolution}. */
+/**
+ * Wrap any thrown value as an {@link ErrorResolution}. Reserved for Wave 11
+ * — no live call sites today. See the note on {@link ErrorResolution}.
+ * @deprecated-unused
+ */
 export const errorResolutionFor = (error: unknown): ErrorResolution => ({
   kind: "error",
   rendered: classifyError(error),
