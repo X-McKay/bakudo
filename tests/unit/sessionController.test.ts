@@ -20,6 +20,8 @@ import type { EventLogWriter } from "../../src/host/eventLogWriter.js";
 import { emitSessionEvent, readSessionEventLog } from "../../src/host/eventLogWriter.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
 import { resumeNamedSession } from "../../src/host/sessionController.js";
+import { planAttempt } from "../../src/host/planner.js";
+import { BakudoConfigDefaults } from "../../src/host/config.js";
 
 const createTempRoot = async (): Promise<string> => mkdtemp(join(tmpdir(), "bakudo-ctrl-"));
 
@@ -252,4 +254,47 @@ test("createAndRunFirstTurn: DI seam captures envelopes without a real runner", 
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: planAttempt pipeline produces correct AttemptSpec (PR11)
+// ---------------------------------------------------------------------------
+
+const plannerCtx = (sessionId: string) => ({
+  sessionId,
+  turnId: "turn-1",
+  attemptId: "attempt-1",
+  taskId: "task-1",
+  repoRoot: "/tmp",
+  config: BakudoConfigDefaults,
+});
+
+test("planAttempt: implement_change prompt produces assistant_job spec", () => {
+  const { intent, spec } = planAttempt("fix the login bug", "standard", plannerCtx("s1"));
+  assert.equal(intent.kind, "implement_change");
+  assert.equal(spec.taskKind, "assistant_job");
+  assert.equal(spec.execution.engine, "agent_cli");
+  assert.equal(spec.mode, "build");
+  assert.ok(spec.intentId.length > 0);
+});
+
+test("planAttempt: plan mode classifies as inspect_repository", () => {
+  const { intent, spec } = planAttempt("summarize the repo", "plan", plannerCtx("s2"));
+  assert.equal(intent.kind, "inspect_repository");
+  assert.equal(spec.taskKind, "assistant_job");
+  assert.equal(spec.mode, "plan");
+});
+
+test("planAttempt: check-like prompt produces verification_check spec", () => {
+  const { intent, spec } = planAttempt("run tests", "standard", plannerCtx("s3"));
+  assert.equal(intent.kind, "run_check");
+  assert.equal(spec.taskKind, "verification_check");
+  assert.equal(spec.execution.engine, "shell");
+  assert.ok(spec.execution.command);
+});
+
+test("planAttempt: attemptSpec has acceptance checks", () => {
+  const { spec } = planAttempt("add feature X", "standard", plannerCtx("s4"));
+  assert.ok(spec.acceptanceChecks.length > 0);
+  assert.ok(spec.acceptanceChecks[0]!.checkId);
 });
