@@ -75,6 +75,8 @@ export type HostCliArgs = {
   heartbeatIntervalMs: number;
   killGraceMs: number;
   copilot: CopilotParityFlags;
+  /** `--experimental` (Phase 5 PR13): session-scoped cluster gate, no persistence. */
+  experimental?: boolean;
 };
 
 export const HOST_COMMANDS = new Set<HostCommand>([
@@ -156,6 +158,7 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     heartbeatIntervalMs: 5000,
     killGraceMs: 2000,
     copilot: {},
+    experimental: false,
   };
   let explicitMode = false;
 
@@ -290,6 +293,10 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       const { value, consumed } = readLongFlag(argv, i, "--kill-grace-ms");
       result.killGraceMs = parsePositiveInteger(value, "--kill-grace-ms", result.killGraceMs);
       i += consumed - 1;
+      continue;
+    }
+    if (arg === "--experimental") {
+      result.experimental = true; // Phase 5 PR13: session-scoped cluster gate.
       continue;
     }
 

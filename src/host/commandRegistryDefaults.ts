@@ -2,6 +2,7 @@ import { createCommandRegistry, type HostCommandRegistry } from "./commandRegist
 import { composerCommands } from "./commands/composer.js";
 import { buildConfigCommands } from "./commands/config.js";
 import { doctorCommandSpec } from "./commands/doctor.js";
+import { buildExperimentalCommands } from "./commands/experimental.js";
 import { helpTopicCommandSpec } from "./commands/help.js";
 import { inspectCommands } from "./commands/inspect.js";
 import { legacyCommands } from "./commands/legacy.js";
@@ -23,12 +24,14 @@ export const buildDefaultCommandRegistry = (
   const registry = createCommandRegistry();
   const configCommands =
     options.getConfig !== undefined ? buildConfigCommands(options.getConfig) : [];
+  const experimentalCommands = buildExperimentalCommands(options.getConfig);
   for (const spec of [
     ...sessionCommands,
     timelineCommandSpec,
     ...inspectCommands,
     ...composerCommands,
     ...configCommands,
+    ...experimentalCommands,
     versionCommandSpec,
     doctorCommandSpec,
     helpTopicCommandSpec,

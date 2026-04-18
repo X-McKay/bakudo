@@ -2,6 +2,7 @@
 
 import { withBootstrap } from "./host/bootstrap.js";
 import { applyCopilotSideEffects } from "./host/copilotFlags.js";
+import { resetSessionExperimentalCluster, setSessionExperimentalCluster } from "./host/flags.js";
 import { isMainModule } from "./mainModule.js";
 import { stderrWrite } from "./host/io.js";
 import { dispatchHostCommand, runInteractiveShell } from "./host/interactive.js";
@@ -31,9 +32,18 @@ export const runHostCli = async (argv: string[]): Promise<number> => {
     // (`--no-ask-user`, `--plain-diff`) before dispatch, and unwind them
     // on the way out so state does not leak between invocations.
     const dispose = applyCopilotSideEffects(args.copilot);
+    // Phase 5 PR13 — `--experimental` turns on the cluster for this session
+    // without persisting. Reset on the way out so test harnesses that reuse
+    // the process do not leak state into later invocations.
+    if (args.experimental) {
+      setSessionExperimentalCluster(true);
+    }
     try {
       return await dispatchHostCommand(args);
     } finally {
+      if (args.experimental) {
+        resetSessionExperimentalCluster();
+      }
       dispose();
     }
   });

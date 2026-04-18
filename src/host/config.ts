@@ -19,7 +19,14 @@ export const BakudoConfigSchema = z
     mode: z.enum(["standard", "plan", "autopilot"]).optional(),
     autoApprove: z.boolean().optional(),
     logLevel: z.enum(["none", "error", "warning", "info", "debug", "all", "default"]).optional(),
-    experimental: z.boolean().optional(),
+    /**
+     * Experimental-feature gate. Historically a bare boolean ("enable the
+     * whole cluster"); Phase 5 PR13 additionally accepts a per-feature
+     * record keyed by flag name (see `src/host/flags.ts`). Both shapes
+     * round-trip through {@link validateConfigLayer} unchanged — readers
+     * must handle the union via `experimental(flagName)`.
+     */
+    experimental: z.union([z.boolean(), z.record(z.string(), z.boolean())]).optional(),
     flushIntervalMs: z.number().optional(),
     flushSizeThreshold: z.number().optional(),
     retryDelays: z.array(z.number()).optional(),
