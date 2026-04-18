@@ -1,4 +1,5 @@
 import { tryConsumeCopilotFlag } from "./copilotFlagParser.js";
+import { tryConsumeUiFlag, type UiMode } from "./uiMode.js";
 import type { TaskMode } from "../protocol.js";
 
 export type HostCommand =
@@ -77,6 +78,8 @@ export type HostCliArgs = {
   copilot: CopilotParityFlags;
   /** `--experimental` (Phase 5 PR13): session-scoped cluster gate, no persistence. */
   experimental?: boolean;
+  /** `--ui <mode>` (Phase 6 W1). `undefined` = caller falls back to `DEFAULT_UI_MODE`. */
+  uiMode?: UiMode;
 };
 
 export const HOST_COMMANDS = new Set<HostCommand>([
@@ -297,6 +300,13 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     }
     if (arg === "--experimental") {
       result.experimental = true; // Phase 5 PR13: session-scoped cluster gate.
+      continue;
+    }
+    // Phase 6 W1 — `--ui` rollout selector delegated to keep this file small.
+    const uiConsumed = tryConsumeUiFlag(argv, i);
+    if (uiConsumed.consumed > 0) {
+      if (uiConsumed.uiMode !== undefined) result.uiMode = uiConsumed.uiMode;
+      i += uiConsumed.consumed - 1;
       continue;
     }
 

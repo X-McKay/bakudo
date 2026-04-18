@@ -250,6 +250,26 @@ Or run directly via Node:
 node dist/src/cli.js --goal "your goal here" --config config/default.json --streams s1,s2 --repo /path/to/repo
 ```
 
+### UI rollout mode (`--ui`)
+
+Phase 6 Workstream 1 stages the UX migration as explicit, reversible rollout
+states. The active state is selected with `--ui <mode>` and reported by
+`bakudo doctor` under `ui mode`. Full checklist:
+[`plans/bakudo-ux/phase-6-rollout-checklist.md`](../plans/bakudo-ux/phase-6-rollout-checklist.md).
+
+| Mode | Stage | Purpose |
+| --- | --- | --- |
+| `preview` | A | Opt-in preview of the new host UX. |
+| `default` | B | New UX is the default (current stage). |
+| `legacy` | B → C | Escape hatch to the legacy `--goal` surface. |
+| `hidden` | C | Alias for `default`; legacy hidden from help. |
+
+Rollback: `bakudo --ui legacy …` invokes the legacy surface for a single
+invocation. The flag remains functional for at least one release cycle after
+the rollout reaches Stage C (plan 06, hard rule 2). `--ui` values are
+validated at parse time — invalid values fail with exit code 2 before any
+sandbox work begins.
+
 ## Development and Testing
 
 `Bakudo` maintains a high bar for code quality through automated linting, formatting, and a multi-layered testing strategy.

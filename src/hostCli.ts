@@ -7,6 +7,7 @@ import { isMainModule } from "./mainModule.js";
 import { stderrWrite } from "./host/io.js";
 import { dispatchHostCommand, runInteractiveShell } from "./host/interactive.js";
 import { parseHostArgs } from "./host/parsing.js";
+import { DEFAULT_UI_MODE, resetActiveUiMode, setActiveUiMode } from "./host/uiMode.js";
 import { printUsage } from "./host/usage.js";
 
 export { reviewedOutcomeExitCode } from "./host/printers.js";
@@ -38,12 +39,17 @@ export const runHostCli = async (argv: string[]): Promise<number> => {
     if (args.experimental) {
       setSessionExperimentalCluster(true);
     }
+    // Phase 6 W1 — record the staged-rollout UI mode for the invocation so
+    // `bakudo doctor` and future bug-report capture can surface it. Reset on
+    // teardown so a reused process doesn't leak a prior flag's value.
+    setActiveUiMode(args.uiMode ?? DEFAULT_UI_MODE);
     try {
       return await dispatchHostCommand(args);
     } finally {
       if (args.experimental) {
         resetSessionExperimentalCluster();
       }
+      resetActiveUiMode();
       dispose();
     }
   });

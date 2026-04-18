@@ -1,6 +1,7 @@
 import { dim, renderCommandHint, renderSection, renderTitle } from "./ansi.js";
 import { buildDefaultCommandRegistry } from "./commandRegistryDefaults.js";
 import { stdoutWrite } from "./io.js";
+import { LEGACY_HIDDEN_IN_HELP } from "./uiMode.js";
 
 const interactiveUsageLines = (): string[] => {
   const registry = buildDefaultCommandRegistry();
@@ -65,12 +66,32 @@ export const buildUsageLines = (): string[] => {
     "  --no-ask-user             Fail instead of prompting; exit code 2 on gate.",
     "  --max-autopilot-continues=N  Cap unattended Autopilot chains (default 10).",
     "",
+    renderSection("Rollout"),
+    ...buildRolloutHelpLines(),
+    "",
     renderSection("Install"),
     "  pnpm install:cli",
     "  bakudo",
     "",
     dim("Legacy mode remains available with: bakudo --goal <command>"),
   ];
+};
+
+/**
+ * Phase 6 W1 — `--ui` help block. Whether `legacy` is listed is gated by
+ * {@link LEGACY_HIDDEN_IN_HELP}: Stage B (current) lists it as the
+ * documented rollback flag; Stage C flips the constant to `true` so help
+ * stops advertising the mode while keeping the flag functional.
+ */
+const buildRolloutHelpLines = (): string[] => {
+  const lines: string[] = [
+    "  --ui preview              Opt-in preview of the new host UX (stage A).",
+    "  --ui default              Use the new host UX (stage B default).",
+  ];
+  if (!LEGACY_HIDDEN_IN_HELP) {
+    lines.push("  --ui legacy               Fall back to the legacy --goal surface.");
+  }
+  return lines;
 };
 
 export const printUsage = (): void => {
