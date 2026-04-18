@@ -38,6 +38,7 @@ import { validateBindings } from "../keybindings/validate.js";
 import { repoRootFor } from "../orchestration.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
+import { describeUiMode, getActiveUiMode, type UiMode } from "../uiMode.js";
 
 /**
  * Envelope produced by `bakudo doctor --output-format=json`. Key names
@@ -63,6 +64,12 @@ export type DoctorEnvelope = {
     colorfgbg?: string;
   };
   telemetry: { enabled: false; note: string };
+  /**
+   * Active UI rollout mode for the invocation (Phase 6 W1). Copy this into
+   * bug reports along with `bakudoVersion` — plan 06 hard rule 3 requires
+   * the mode be recorded so a report specifies which surface the user hit.
+   */
+  uiMode: { active: UiMode; description: string };
 };
 
 export type DoctorContext = {
@@ -219,6 +226,10 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
       enabled: false,
       note: "real OTel wiring deferred to Phase 6 W7",
     },
+    uiMode: {
+      active: getActiveUiMode(),
+      description: describeUiMode(getActiveUiMode()),
+    },
   };
 
   return envelope;
@@ -267,6 +278,8 @@ export const formatDoctorReport = (envelope: DoctorEnvelope): string[] => {
   lines.push(`  agent profile: ${envelope.agentProfile}`);
   lines.push(`  keybindings: ${envelope.keybindingsPath}`);
   lines.push(`  config layers: ${envelope.configCascadePaths.join(" | ")}`);
+  // Phase 6 W1 — plan 06 hard rule 3: bug reports must record the UI mode.
+  lines.push(`  ui mode: ${envelope.uiMode.active} (${envelope.uiMode.description})`);
   lines.push("");
   return lines;
 };

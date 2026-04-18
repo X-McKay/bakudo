@@ -11,6 +11,7 @@ import {
   runDoctorCommand,
   type DoctorEnvelope,
 } from "../../src/host/commands/doctor.js";
+import { DEFAULT_UI_MODE, resetActiveUiMode, setActiveUiMode } from "../../src/host/uiMode.js";
 
 const capture = (): { writer: { write: (chunk: string) => boolean }; chunks: string[] } => {
   const chunks: string[] = [];
@@ -237,6 +238,103 @@ test("runDoctorCommand (json): writes a single JSON line matching the envelope s
     assert.ok("configCascadePaths" in parsed);
     assert.ok("keybindingsPath" in parsed);
     assert.ok("keybindingsConflicts" in parsed);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 6 W1 — UI mode is recorded in the envelope + human report.
+// Plan 06 hard rule 3: the current UI mode MUST appear in doctor output so
+// bug reports can record which surface the user hit.
+// ---------------------------------------------------------------------------
+
+test("runDoctorChecks: envelope.uiMode reflects the active mode (default)", async () => {
+  await withTempRepo(async (repoRoot) => {
+    resetActiveUiMode();
+    const env = await runDoctorChecks({
+      repoRoot,
+      env: {},
+      nodeRuntime: "v22.0.0",
+      stdout: { isTTY: false, write: () => true },
+    });
+    assert.equal(env.uiMode.active, DEFAULT_UI_MODE);
+    assert.equal(typeof env.uiMode.description, "string");
+    assert.ok(env.uiMode.description.length > 0);
+  });
+});
+
+test("runDoctorChecks: envelope.uiMode reflects --ui legacy after setActiveUiMode", async () => {
+  await withTempRepo(async (repoRoot) => {
+    setActiveUiMode("legacy");
+    try {
+      const env = await runDoctorChecks({
+        repoRoot,
+        env: {},
+        nodeRuntime: "v22.0.0",
+        stdout: { isTTY: false, write: () => true },
+      });
+      assert.equal(env.uiMode.active, "legacy");
+      assert.match(env.uiMode.description, /legacy/iu);
+    } finally {
+      resetActiveUiMode();
+    }
+  });
+});
+
+test("runDoctorChecks: envelope.uiMode reflects --ui preview (stage A)", async () => {
+  await withTempRepo(async (repoRoot) => {
+    setActiveUiMode("preview");
+    try {
+      const env = await runDoctorChecks({
+        repoRoot,
+        env: {},
+        nodeRuntime: "v22.0.0",
+        stdout: { isTTY: false, write: () => true },
+      });
+      assert.equal(env.uiMode.active, "preview");
+    } finally {
+      resetActiveUiMode();
+    }
+  });
+});
+
+test("formatDoctorReport: human report includes a 'ui mode:' line", async () => {
+  await withTempRepo(async (repoRoot) => {
+    setActiveUiMode("preview");
+    try {
+      const env = await runDoctorChecks({
+        repoRoot,
+        env: {},
+        nodeRuntime: "v22.0.0",
+        stdout: { isTTY: false, write: () => true },
+      });
+      const body = formatDoctorReport(env).join("\n");
+      assert.match(body, /ui mode: preview/u);
+    } finally {
+      resetActiveUiMode();
+    }
+  });
+});
+
+test("runDoctorCommand (json): ui mode is present in the JSON envelope", async () => {
+  await withTempRepo(async (repoRoot) => {
+    setActiveUiMode("legacy");
+    try {
+      const cap = capture();
+      await withCapturedStdout(cap.writer, () =>
+        runDoctorCommand({
+          args: ["--output-format=json"],
+          repoRoot,
+          env: {},
+          nodeRuntime: "v22.0.0",
+          stdout: { isTTY: false, write: () => true },
+        }),
+      );
+      const parsed = JSON.parse(cap.chunks.join("").trim()) as DoctorEnvelope;
+      assert.equal(parsed.uiMode.active, "legacy");
+      assert.equal(typeof parsed.uiMode.description, "string");
+    } finally {
+      resetActiveUiMode();
+    }
   });
 });
 
