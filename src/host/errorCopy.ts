@@ -191,6 +191,13 @@ const SESSION_FLAVOR_HINT: Record<SessionFailureFlavor, string> = {
  * hint pass through unchanged so legacy call sites (and the W9 taxonomy
  * fixture tests that do not supply `details`) keep their pre-hardening
  * copy.
+ *
+ * **Caller-supplied `recoveryHint` override note (W6E cleanup #23):** when a
+ * known flavor is detected this helper REPLACES any caller-supplied
+ * `recoveryHint` with the flavor-specific guidance. This is intentional —
+ * the flavor hints are more precise than any caller-default — but callers
+ * with a hand-tuned hint should be aware that passing a known flavor cause
+ * silently overrides their text.
  */
 export const renderSessionFailureCopy = (
   rendered: RenderedError,

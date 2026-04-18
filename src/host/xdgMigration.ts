@@ -161,7 +161,7 @@ export const migrateToXdg = async (input: MigrateInput): Promise<MigrationResult
   const moved: string[] = [];
   let suffixCounter = 0;
   for (const src of legacyPaths) {
-    const baseName = suggestDestName(src);
+    const baseName = suggestDestName(src, paths);
     let dstName = baseName;
     for (let i = 0; i < 1000; i += 1) {
       const candidate = posixPath.join(destDir, dstName);
@@ -178,7 +178,10 @@ export const migrateToXdg = async (input: MigrateInput): Promise<MigrationResult
   await fs.writeFile(markerPath, "");
 
   const envelope = buildMigrationEventEnvelope({
-    sessionId: input.sessionId ?? "bakudo-bootstrap",
+    // Synthetic sentinel — pre-session event never resolves against the real
+    // session store. `__bootstrap__` makes the "not a real session id" intent
+    // explicit for automation that inspects the envelope.
+    sessionId: input.sessionId ?? "__bootstrap__",
     migratedPaths: moved,
     destDir,
     ...(input.timestamp !== undefined ? { timestamp: input.timestamp } : {}),
@@ -199,21 +202,26 @@ export const migrateToXdg = async (input: MigrateInput): Promise<MigrationResult
  * Operators scanning `bakudoLogDir()` can tell at a glance which source
  * each entry came from.
  */
-const suggestDestName = (src: string): string => {
+const suggestDestName = (src: string, paths: MigrationPaths): string => {
   if (src.endsWith("/.bakudo/spans")) {
     return "spans-legacy";
   }
-  const segments = src.split("/").filter((s) => s.length > 0);
-  const bakudoIdx = segments.lastIndexOf(".bakudo");
-  if (bakudoIdx <= 0) {
-    return "legacy-log";
-  }
-  const parentSegment = segments[bakudoIdx - 1] ?? "";
-  const trailing = segments[segments.length - 1] ?? "log";
-  const looksLikeHome = segments[0] === "home" && bakudoIdx === 2;
+  const trailing =
+    src
+      .split("/")
+      .filter((s) => s.length > 0)
+      .pop() ?? "log";
+  // "Looks like home" = source sits directly under the user's home dir.
+  // Platform-independent — works for `/home/<u>/`, `/Users/<u>/` (macOS),
+  // custom XDG hosts, etc. — compared to `paths.home` which is already
+  // resolved via `homedir()` at the call site.
+  const looksLikeHome = src.startsWith(`${paths.home}/.bakudo/`);
   if (looksLikeHome) {
     return `${trailing}-legacy`;
   }
+  const segments = src.split("/").filter((s) => s.length > 0);
+  const bakudoIdx = segments.lastIndexOf(".bakudo");
+  const parentSegment = bakudoIdx > 0 ? (segments[bakudoIdx - 1] ?? "") : "";
   return `repo-${parentSegment}-${trailing}`;
 };
 

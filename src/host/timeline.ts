@@ -6,6 +6,7 @@ import { SessionStore } from "../sessionStore.js";
 import { eventLogFilePath, readSessionEventLog } from "./eventLogWriter.js";
 import { listArtifactRecords, type ArtifactRecord } from "./artifactStore.js";
 import type { SessionSummaryView } from "./sessionIndex.js";
+import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 import { type AttemptLineage, deriveAttemptLineage } from "./attemptLineage.js";
 import {
   listTurnTransitions,
@@ -83,7 +84,15 @@ export { readSessionEventLog };
  */
 export const listSessionSummaries = async (storageRoot: string): Promise<SessionSummaryView[]> => {
   const store = new SessionStore(storageRoot);
-  return store.listSessions();
+  const t0 = Date.now();
+  try {
+    return await store.listSessions();
+  } finally {
+    // Wave 6e cleanup (#16) — session.list_ms producer. Wired at the
+    // single call site that `bakudo sessions` / timeline picker / doctor
+    // all route through.
+    getMetricsRecorder().record("session.list_ms", Date.now() - t0);
+  }
 };
 
 /**

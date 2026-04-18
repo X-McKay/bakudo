@@ -204,7 +204,7 @@ test(
       const { loadSession } = await import("../../src/host/timeline.js");
       const result = await runBenchmark({
         name: "inspect-summary",
-        metric: "render.ttfr_ms",
+        metric: "inspect.render_ms",
         warmup: 3,
         samples: 10,
         run: async () => {

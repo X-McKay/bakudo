@@ -18,3 +18,13 @@ test("golden/inspect-summary.tty.txt: self-match", async () => {
   const fixture = await loadFixture("inspect-summary.tty.txt");
   assert.equal(diffAgainstFixture(fixture, fixture.bytes).kind, "equal");
 });
+
+// W6E cleanup PR15-NB5 — content-level anchors guard against fixture drift
+// regenerating past a tab-layout change without a human noticing. The
+// priority-order label set comes from Phase 1 W5 / Phase 4 W4.
+test("golden/inspect-summary.tty.txt: renders priority-order section anchors", async () => {
+  const fixture = await loadFixture("inspect-summary.tty.txt");
+  for (const anchor of ["Prompt:", "Outcome:", "Attempt:", "Artifacts:"]) {
+    assert.ok(fixture.bytes.includes(anchor), `summary fixture missing "${anchor}" anchor`);
+  }
+});

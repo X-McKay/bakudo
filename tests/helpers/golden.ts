@@ -63,6 +63,8 @@ export const STABLE_SESSION_ID = "ses_deterministic_0000000000";
 export const STABLE_TURN_ID = "turn_deterministic_00000000000";
 export const STABLE_ATTEMPT_ID = "attempt_deterministic_00000000";
 export const STABLE_EVENT_ID = "evt_deterministic_0000000000";
+export const STABLE_APPROVAL_ID = "apr_deterministic_0000000000";
+export const STABLE_ARTIFACT_ID = "art_deterministic_0000000000";
 
 /**
  * Walk up from the compiled test file location until the parent workspace
@@ -123,6 +125,13 @@ export const decodeLiteralEscapes = (text: string): string => {
 
 /**
  * Re-render control bytes back to the fixtures' literal form for diffs.
+ *
+ * Intentionally NOT a bijective inverse of {@link decodeLiteralEscapes}:
+ * `\n` and `\uXXXX` sequences decode on load but are NOT re-encoded here —
+ * newlines stay as real bytes so multi-line diffs remain readable. The
+ * asymmetry is a readability-over-round-trip-fidelity choice. Fixture
+ * authors who add literal `\n` or `\uXXXX` should be aware the characters
+ * are silently collapsed on regeneration.
  */
 export const encodeLiteralEscapes = (bytes: string): string => {
   return bytes
@@ -142,7 +151,9 @@ export const normalizeDynamicFields = (text: string): string => {
     .replace(/evt_[A-Z0-9]{4,}/gu, STABLE_EVENT_ID)
     .replace(/ses_[A-Z0-9]{4,}/gu, STABLE_SESSION_ID)
     .replace(/turn_[A-Z0-9]{4,}/gu, STABLE_TURN_ID)
-    .replace(/attempt_[A-Z0-9]{4,}/gu, STABLE_ATTEMPT_ID);
+    .replace(/attempt_[A-Z0-9]{4,}/gu, STABLE_ATTEMPT_ID)
+    .replace(/apr_[A-Z0-9]{4,}/gu, STABLE_APPROVAL_ID)
+    .replace(/art_[A-Z0-9]{4,}/gu, STABLE_ARTIFACT_ID);
 };
 
 export type LoadedFixture = {
@@ -173,7 +184,12 @@ export type DiffResult =
       kind: "mismatch";
       expectedLiteral: string;
       actualLiteral: string;
-      firstDivergenceByteIndex: number;
+      /**
+       * Byte index into the NORMALIZED DECODED form (before
+       * `encodeLiteralEscapes` runs for the `*Literal` fields). Does not
+       * point into `expectedLiteral`/`actualLiteral` — those are re-encoded.
+       */
+      firstDivergenceByteIndexInDecodedForm: number;
     };
 
 export const diffAgainstFixture = (fixture: LoadedFixture, capturedBytes: string): DiffResult => {
@@ -191,7 +207,7 @@ export const diffAgainstFixture = (fixture: LoadedFixture, capturedBytes: string
     kind: "mismatch",
     expectedLiteral: encodeLiteralEscapes(expected),
     actualLiteral: encodeLiteralEscapes(actual),
-    firstDivergenceByteIndex: i,
+    firstDivergenceByteIndexInDecodedForm: i,
   };
 };
 
