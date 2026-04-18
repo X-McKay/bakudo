@@ -127,6 +127,26 @@ test("host cli dispatches status and init commands", async () => {
   assert.match(agents, /Bakudo Workflow/);
 });
 
+// Phase 6 W4 — `bakudo cleanup` reaches its own parser via cleanupArgs.
+test("host cli accepts `cleanup` and forwards --dry-run / --older-than / --session", () => {
+  const a = parseHostArgs(["cleanup"]);
+  assert.equal(a.command, "cleanup");
+  assert.deepEqual(a.cleanupArgs, undefined);
+
+  const b = parseHostArgs(["cleanup", "--dry-run"]);
+  assert.deepEqual(b.cleanupArgs, ["--dry-run"]);
+
+  const c = parseHostArgs(["cleanup", "--older-than", "30d"]);
+  assert.deepEqual(c.cleanupArgs, ["--older-than", "30d"]);
+
+  const d = parseHostArgs(["cleanup", "--session", "session-x"]);
+  assert.deepEqual(d.cleanupArgs, ["--session", "session-x"]);
+});
+
+test("host cli rejects positional args on cleanup", () => {
+  assert.throws(() => parseHostArgs(["cleanup", "extra"]));
+});
+
 test("reviewed outcome exit codes are stable", () => {
   assert.equal(
     reviewedOutcomeExitCode({

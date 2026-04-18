@@ -46,3 +46,18 @@ export const dispatchDoctorCommand = async (args: HostCliArgs): Promise<number> 
         });
   return result.exitCode;
 };
+
+/**
+ * Phase 6 W4 — dispatch path for `bakudo cleanup`. Forwards the raw
+ * cleanup-flag tokens captured by `parseHostArgs` to the command's own
+ * parser. Mirrors {@link dispatchDoctorCommand}'s lazy-import pattern.
+ */
+export const dispatchCleanupCommand = async (args: HostCliArgs): Promise<number> => {
+  const { runCleanupCommand } = await import("./commands/cleanup.js");
+  const result = await runCleanupCommand({
+    args: args.cleanupArgs ?? [],
+    repoRoot: repoRootFor(args.repo),
+    ...(args.storageRoot !== undefined ? { storageRoot: args.storageRoot } : {}),
+  });
+  return result.exitCode;
+};

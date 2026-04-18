@@ -355,3 +355,41 @@ test("runDoctorCommand (json with --json alias): matches --output-format=json", 
     assert.equal(parsed.name, "bakudo-doctor");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 6 W4 — `storage` section surfaces total bytes + active retention.
+// Plan 06 lines 276-327. The doctor envelope must carry the section so
+// operators can spot growth without running `bakudo cleanup --dry-run`.
+// ---------------------------------------------------------------------------
+
+test("runDoctorChecks: envelope.storage carries totalArtifactBytes + retentionPolicy", async () => {
+  await withTempRepo(async (repoRoot) => {
+    const env = await runDoctorChecks({
+      repoRoot,
+      env: {},
+      nodeRuntime: "v22.0.0",
+      stdout: { isTTY: false, write: () => true },
+    });
+    assert.equal(typeof env.storage.totalArtifactBytes, "number");
+    assert.ok(env.storage.totalArtifactBytes >= 0);
+    assert.equal(typeof env.storage.storageRoot, "string");
+    assert.ok(env.storage.storageRoot.length > 0);
+    assert.ok(env.storage.retentionPolicy.intermediateMaxAgeMs > 0);
+    assert.ok(env.storage.retentionPolicy.intermediateKinds.length > 0);
+    assert.ok(env.storage.retentionPolicy.protectedKinds.length > 0);
+  });
+});
+
+test("formatDoctorReport: human report includes a 'storage:' line", async () => {
+  await withTempRepo(async (repoRoot) => {
+    const env = await runDoctorChecks({
+      repoRoot,
+      env: {},
+      nodeRuntime: "v22.0.0",
+      stdout: { isTTY: false, write: () => true },
+    });
+    const body = formatDoctorReport(env).join("\n");
+    assert.match(body, /storage:.*MB/u);
+    assert.match(body, /retention: intermediate >\d+d/u);
+  });
+});

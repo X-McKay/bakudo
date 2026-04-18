@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
+import { ArtifactPersistenceError } from "./host/errors.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "./protocol.js";
 import { createSessionArtifactsFilePath, createSessionPaths } from "./sessionStore.js";
 
@@ -111,5 +112,46 @@ export class ArtifactStore {
   public async listTaskArtifacts(sessionId: string, taskId: string): Promise<ArtifactRecord[]> {
     const records = await this.listArtifacts(sessionId);
     return records.filter((record) => record.taskId === taskId);
+  }
+
+  /**
+   * Phase 6 W4 read API: alias for {@link listArtifacts} so callers reading
+   * the legacy v1 registry by session can do so via a verb-shaped name. Kept
+   * additive — existing callers of `listArtifacts` keep working unchanged.
+   * The cleanup driver (`host/cleanup.ts`) reads through this method so a
+   * future read-side reshape lands in one place.
+   */
+  public async listArtifactsForSession(sessionId: string): Promise<ArtifactRecord[]> {
+    return this.listArtifacts(sessionId);
+  }
+
+  /**
+   * Phase 6 W4 remove API: unlink the on-disk artifact file at `absolutePath`
+   * and prune the matching entry from the legacy v1 index for `sessionId`.
+   *
+   * Wraps any underlying I/O failure in {@link ArtifactPersistenceError} so
+   * the cleanup command can surface a stable exit-code-1 envelope per the
+   * Wave 6a error taxonomy. ENOENT during unlink is tolerated — the index
+   * entry is still pruned so the registry self-heals against orphan rows.
+   */
+  public async removeArtifact(sessionId: string, absolutePath: string): Promise<void> {
+    try {
+      try {
+        await unlink(absolutePath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") throw error;
+      }
+      const existing = await this.listArtifacts(sessionId);
+      const remaining = existing.filter((record) => record.path !== absolutePath);
+      if (remaining.length !== existing.length) {
+        await writeJsonAtomic(this.artifactFile(sessionId), remaining);
+      }
+    } catch (error) {
+      throw new ArtifactPersistenceError(`failed to remove artifact at ${absolutePath}`, {
+        cause: error,
+        details: { sessionId, path: absolutePath },
+      });
+    }
   }
 }

@@ -16,6 +16,7 @@ export type HostCommand =
   | "init"
   | "help"
   | "doctor"
+  | "cleanup"
   | "version";
 
 /**
@@ -80,6 +81,13 @@ export type HostCliArgs = {
   experimental?: boolean;
   /** `--ui <mode>` (Phase 6 W1). `undefined` = caller falls back to `DEFAULT_UI_MODE`. */
   uiMode?: UiMode;
+  /**
+   * Phase 6 W4 — raw flag/value tokens forwarded to the `cleanup` command's
+   * own parser (`--dry-run`, `--older-than <dur>`, `--session <id>`). Empty
+   * for every other command. Kept opaque so the cleanup module owns its own
+   * surface without polluting the top-level shape.
+   */
+  cleanupArgs?: string[];
 };
 
 export const HOST_COMMANDS = new Set<HostCommand>([
@@ -96,6 +104,7 @@ export const HOST_COMMANDS = new Set<HostCommand>([
   "init",
   "help",
   "doctor",
+  "cleanup",
   "version",
 ]);
 
@@ -318,6 +327,28 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       continue;
     }
 
+    // Phase 6 W4 — `bakudo cleanup` forwards its own flag namespace
+    // (`--dry-run`, `--older-than`, `--session`) to `parseCleanupArgs`. Pass
+    // the raw tokens through rather than re-parsing here so the cleanup
+    // module owns the contract.
+    if (
+      result.command === "cleanup" &&
+      (arg === "--dry-run" ||
+        arg === "--older-than" ||
+        arg.startsWith("--older-than=") ||
+        arg === "--session" ||
+        arg.startsWith("--session="))
+    ) {
+      result.cleanupArgs = result.cleanupArgs ?? [];
+      result.cleanupArgs.push(arg);
+      // `--older-than` and `--session` take a follow-up value (non-`=` form).
+      if ((arg === "--older-than" || arg === "--session") && argv[i + 1] !== undefined) {
+        result.cleanupArgs.push(argv[i + 1] as string);
+        i += 1;
+      }
+      continue;
+    }
+
     if (arg.startsWith("--")) {
       throw new Error(`unknown option: ${arg}`);
     }
@@ -392,6 +423,10 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
   } else if (result.command === "doctor") {
     if (positionals.length > 0) {
       throw new Error("doctor does not accept positional arguments");
+    }
+  } else if (result.command === "cleanup") {
+    if (positionals.length > 0) {
+      throw new Error("cleanup does not accept positional arguments");
     }
   }
 

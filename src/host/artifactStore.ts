@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { createSessionPaths } from "../sessionStore.js";
+import { ArtifactPersistenceError } from "./errors.js";
 
 /**
  * First-class artifact record v2 — artifacts become durable records keyed by
@@ -102,5 +103,66 @@ export const listArtifactRecords = async (
       return [];
     }
     throw error;
+  }
+};
+
+/**
+ * Phase 6 W4: alias for {@link listArtifactRecords} matching the verb-shaped
+ * read API name the cleanup driver expects. Kept additive — every existing
+ * caller continues to use {@link listArtifactRecords} unchanged.
+ */
+export const listArtifactsForSession = listArtifactRecords;
+
+/**
+ * Phase 6 W4: prune one or more entries (matched by `artifactId`) from the
+ * per-session NDJSON log via atomic rewrite. Append-only is preserved for
+ * concurrent writers within the same process — this rewrite is gated on the
+ * cleanup command holding the session lock.
+ *
+ * Wraps I/O failures in {@link ArtifactPersistenceError} so callers surface a
+ * stable exit-1 envelope per the Wave 6a error taxonomy.
+ */
+export const removeArtifactRecords = async (
+  storageRoot: string,
+  sessionId: string,
+  artifactIds: ReadonlyArray<string>,
+): Promise<void> => {
+  if (artifactIds.length === 0) return;
+  const filePath = artifactsFilePath(storageRoot, sessionId);
+  try {
+    const existing = await listArtifactRecords(storageRoot, sessionId);
+    if (existing.length === 0) return; // Nothing on disk to prune.
+    const remaining = existing.filter((record) => !artifactIds.includes(record.artifactId));
+    if (remaining.length === existing.length) return; // No-op when nothing matched.
+    const tempPath = `${filePath}.tmp-${Date.now()}-${randomUUID()}`;
+    await mkdir(dirname(filePath), { recursive: true });
+    const body =
+      remaining.length === 0 ? "" : `${remaining.map((rec) => JSON.stringify(rec)).join("\n")}\n`;
+    await writeFile(tempPath, body, "utf8");
+    await rename(tempPath, filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new ArtifactPersistenceError(`failed to prune artifact records for ${sessionId}`, {
+      cause: error,
+      details: { sessionId, removedIds: artifactIds.length },
+    });
+  }
+};
+
+/**
+ * Phase 6 W4: unlink an artifact file at `absolutePath`. Tolerates ENOENT so
+ * a missing file does not break the dry-run/delete iteration. Other errors
+ * surface as {@link ArtifactPersistenceError}.
+ */
+export const removeArtifactFile = async (absolutePath: string): Promise<void> => {
+  try {
+    await unlink(absolutePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return;
+    throw new ArtifactPersistenceError(`failed to remove artifact file at ${absolutePath}`, {
+      cause: error,
+      details: { path: absolutePath },
+    });
   }
 };
