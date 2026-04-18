@@ -14,10 +14,12 @@
  */
 
 import type { HostCommandSpec } from "../commandRegistry.js";
+import { buildJsonErrorEnvelope } from "../errors.js";
 import { stdoutWrite } from "../io.js";
 import { storageRootFor, repoRootFor } from "../orchestration.js";
 import { listSessionSummaries, readSessionEventLog } from "../timeline.js";
 import type { SessionEventEnvelope } from "../../protocol.js";
+import { argvRequestsJson } from "./jsonFormatDetection.js";
 import {
   filterChronicle,
   formatChronicleRow,
@@ -136,7 +138,17 @@ export const runChronicleCommand = async (
 ): Promise<RunChronicleCommandResult> => {
   const parsed = parseChronicleArgs(input.args);
   if (!parsed.ok) {
-    stdoutWrite(`chronicle: ${parsed.error}\n`);
+    // Wave 6c PR8 review (lock-in 19) — when the caller requested
+    // `--format=json` (or is running non-TTY which implies machine-readable
+    // per lock-in 12), surface the parse error through the canonical
+    // `{ok:false, kind:"error", error:{...}}` envelope instead of the plain
+    // line. The plain-text path is preserved for interactive TTY callers.
+    if (argvRequestsJson(input.args, input.stdoutIsTty)) {
+      const envelope = buildJsonErrorEnvelope({ code: "user_input", message: parsed.error });
+      stdoutWrite(`${JSON.stringify(envelope)}\n`);
+    } else {
+      stdoutWrite(`chronicle: ${parsed.error}\n`);
+    }
     return { exitCode: 2, error: parsed.error };
   }
   const storageRoot = storageRootFor(input.repoRoot, input.storageRoot);

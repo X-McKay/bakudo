@@ -57,6 +57,18 @@ export const parseUsageArgs = (argv: ReadonlyArray<string>): ParseUsageArgsResul
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === undefined) continue;
+    if (arg === "--session-id" || arg.startsWith("--session-id=")) {
+      // Wave 6c PR8 review — reject the top-level `--session-id` flag here
+      // with a hint so users who confuse it with `--session` see a clear
+      // correction instead of having the value silently swallowed. The
+      // surface (plain text or JSON envelope) is identical to every other
+      // parse error for this subcommand.
+      return {
+        ok: false,
+        error:
+          "bakudo usage: --session-id is not a supported flag for this subcommand; did you mean --session?",
+      };
+    }
     if (arg === "--session" || arg.startsWith("--session=")) {
       const value = readValue(arg, argv[i + 1], "--session");
       if (value === null) return { ok: false, error: "--session requires a session id" };

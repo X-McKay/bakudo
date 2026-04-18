@@ -277,6 +277,26 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       continue;
     }
     if (arg === "--session-id" || arg.startsWith("--session-id=")) {
+      // Phase 6 Wave 6c PR8 — `bakudo usage` / `bakudo chronicle` do not take
+      // `--session-id`; their session selector is `--session`. Instead of
+      // silently swallowing the value into `result.sessionId` (which the
+      // dispatchers ignore for these commands), forward the tokens to the
+      // subcommand passthrough list. The subcommand parser recognises
+      // `--session-id` and returns a helpful "did you mean --session" error
+      // so the parse-error surface (plain text or JSON envelope) is shared
+      // with every other subcommand-arg validation failure.
+      if (result.command === "usage" || result.command === "chronicle") {
+        const target: string[] =
+          result.command === "usage"
+            ? (result.usageArgs = result.usageArgs ?? [])
+            : (result.chronicleArgs = result.chronicleArgs ?? []);
+        target.push(arg);
+        if (!arg.includes("=") && argv[i + 1] !== undefined) {
+          target.push(argv[i + 1] as string);
+          i += 1;
+        }
+        continue;
+      }
       const { value, consumed } = readLongFlag(argv, i, "--session-id");
       result.sessionId = value;
       i += consumed - 1;
