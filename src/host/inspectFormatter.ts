@@ -31,6 +31,55 @@ const sandboxOf = (attempt: SessionAttemptRecord): string =>
   typeof attempt.metadata?.sandboxTaskId === "string" ? attempt.metadata.sandboxTaskId : "n/a";
 
 /**
+ * Phase 6 W3 — extract the protocol-mismatch decoration left by
+ * `executeAttempt.persistProtocolMismatchAttempt` when the worker capability
+ * negotiation rejected dispatch. Returns a render-friendly view (or `null`
+ * when the attempt failed for unrelated reasons).
+ */
+type ProtocolMismatchView = {
+  message: string;
+  recoveryHint?: string;
+  details?: Record<string, unknown>;
+};
+
+const protocolMismatchOf = (
+  attempt: SessionAttemptRecord | undefined,
+): ProtocolMismatchView | null => {
+  const raw = attempt?.metadata?.protocolMismatch;
+  if (raw === undefined || raw === null || typeof raw !== "object") {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.message !== "string") {
+    return null;
+  }
+  const view: ProtocolMismatchView = { message: obj.message };
+  if (typeof obj.recoveryHint === "string") {
+    view.recoveryHint = obj.recoveryHint;
+  }
+  if (obj.details !== undefined && typeof obj.details === "object" && obj.details !== null) {
+    view.details = obj.details as Record<string, unknown>;
+  }
+  return view;
+};
+
+const renderProtocolMismatchLines = (view: ProtocolMismatchView): string[] => {
+  const lines: string[] = [renderKv("Mismatch", view.message)];
+  if (view.recoveryHint !== undefined) {
+    lines.push(renderKv("Hint", view.recoveryHint));
+  }
+  if (view.details !== undefined) {
+    const detailLine = Object.entries(view.details)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(" ");
+    if (detailLine.length > 0) {
+      lines.push(renderKv("Detail", detailLine));
+    }
+  }
+  return lines;
+};
+
+/**
  * Resolve the {@link AttemptSpec} for display. Returns the persisted spec when
  * available, or synthesizes a read-only legacy spec for v2 sessions.
  */
@@ -125,6 +174,10 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
   }
   if (spec?.execution?.engine !== undefined) {
     lines.push(renderKv("Engine", spec.execution.engine));
+  }
+  const mismatch = protocolMismatchOf(attempt);
+  if (mismatch !== null) {
+    lines.push(...renderProtocolMismatchLines(mismatch));
   }
   lines.push(renderKv("State", session.status));
   lines.push(renderKv("Updated", formatUtc(session.updatedAt)));

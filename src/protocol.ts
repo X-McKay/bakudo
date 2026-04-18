@@ -9,6 +9,66 @@ export const BAKUDO_PROTOCOL_SCHEMA_VERSION = 1 as const;
 export type ProtocolSchemaVersion = typeof BAKUDO_PROTOCOL_SCHEMA_VERSION;
 export type TaskMode = "build" | "plan";
 
+// ---------------------------------------------------------------------------
+// Phase 6 W3 — Host/Worker Version Negotiation surface
+// ---------------------------------------------------------------------------
+
+/**
+ * Protocol versions the host can speak when dispatching to a worker. The host
+ * compiles {@link AttemptSpec} v3 (the Phase 3 contract that supersedes the
+ * legacy {@link TaskRequest} v1), so it advertises both. A worker must include
+ * at least one of these in its `protocolVersions` to accept dispatch.
+ */
+export const BAKUDO_HOST_PROTOCOL_VERSIONS: readonly number[] = [1, 3] as const;
+
+/**
+ * Highest protocol the host knows how to compile. Used in
+ * {@link WorkerProtocolMismatchError} messages so operators can read the
+ * "host wants v3, worker offers [1]" line directly.
+ */
+export const BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION = 3 as const;
+
+/** Task kinds the host can compile {@link AttemptSpec}s for. */
+export const BAKUDO_HOST_TASK_KINDS: readonly string[] = [
+  "assistant_job",
+  "explicit_command",
+  "verification_check",
+] as const;
+
+/** Execution engines the host knows how to dispatch through. */
+export const BAKUDO_HOST_EXECUTION_ENGINES: readonly string[] = ["agent_cli", "shell"] as const;
+
+/**
+ * Capabilities a worker advertises in response to a `--capabilities` probe.
+ * Shape mirrors the plan's suggested JSON (lines 239–262); the three core
+ * arrays are required so the parser can validate before dispatch. `source`
+ * is host-side metadata — `"probe"` when the worker emitted JSON,
+ * `"fallback_host_default"` when the probe failed and the host fell back
+ * to its own declared capability set (per the 2026-04-18 plan amendment;
+ * see `plans/bakudo-ux/phase-6-w3-capability-probe-finding.md`).
+ */
+export type WorkerCapabilities = {
+  protocolVersions: number[];
+  taskKinds: string[];
+  executionEngines: string[];
+  source: "probe" | "fallback_host_default";
+};
+
+/**
+ * Compose the host-default fallback capabilities used when the worker
+ * capability probe fails. Reflects the invariant that bakudo ships both
+ * host and worker-in-rootfs today — what the host can compile, the
+ * shipped worker can accept. A successful probe returning a restrictive
+ * shape still takes precedence, so mismatches remain detectable whenever
+ * they are observable.
+ */
+export const hostDefaultFallbackCapabilities = (): WorkerCapabilities => ({
+  protocolVersions: [...BAKUDO_HOST_PROTOCOL_VERSIONS],
+  taskKinds: [...BAKUDO_HOST_TASK_KINDS],
+  executionEngines: [...BAKUDO_HOST_EXECUTION_ENGINES],
+  source: "fallback_host_default",
+});
+
 export type TaskStatus =
   | "queued"
   | "running"

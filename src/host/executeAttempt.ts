@@ -30,6 +30,8 @@ import {
 import type { HostCliArgs } from "./parsing.js";
 import { recordProvenanceFinalize, recordProvenanceStart } from "./provenanceProducer.js";
 import { writeExecutionArtifacts } from "./sessionArtifactWriter.js";
+import { WorkerProtocolMismatchError } from "./errors.js";
+import { persistProtocolMismatchAttempt } from "./protocolMismatchPersist.js";
 
 /**
  * Infer the host-level {@link ComposerMode} from the worker-level AttemptSpec.
@@ -174,27 +176,38 @@ export const executeAttempt = async (
     });
     await writer.append(started.envelope);
 
-    const execution = await runner.runAttempt(
-      spec,
-      {
-        shell: args.shell,
-        timeoutSeconds: spec.budget.timeoutSeconds,
-        maxOutputBytes: spec.budget.maxOutputBytes,
-        heartbeatIntervalMs: spec.budget.heartbeatIntervalMs,
-        killGraceMs: args.killGraceMs,
-      },
-      {
-        onEvent: (event) => {
-          onProgress?.(event);
-          void writer.append(projectLegacyWorkerEvent(sessionId, turnId, spec.attemptId, event));
-          stdoutWrite(formatProgressLine(event));
+    let execution: TaskExecutionRecord;
+    try {
+      execution = await runner.runAttempt(
+        spec,
+        {
+          shell: args.shell,
+          timeoutSeconds: spec.budget.timeoutSeconds,
+          maxOutputBytes: spec.budget.maxOutputBytes,
+          heartbeatIntervalMs: spec.budget.heartbeatIntervalMs,
+          killGraceMs: args.killGraceMs,
         },
-        onWorkerError: (error) => {
-          const message = typeof error.message === "string" ? error.message : JSON.stringify(error);
-          stdoutWrite(`[worker-error] ${message}\n`);
+        {
+          onEvent: (event) => {
+            onProgress?.(event);
+            void writer.append(projectLegacyWorkerEvent(sessionId, turnId, spec.attemptId, event));
+            stdoutWrite(formatProgressLine(event));
+          },
+          onWorkerError: (error) => {
+            const message =
+              typeof error.message === "string" ? error.message : JSON.stringify(error);
+            stdoutWrite(`[worker-error] ${message}\n`);
+          },
         },
-      },
-    );
+      );
+    } catch (error) {
+      // W3 — persist the protocol-mismatch decoration before re-throw so
+      // `inspect` renders cleanly. See `persistProtocolMismatchAttempt`.
+      if (error instanceof WorkerProtocolMismatchError) {
+        await persistProtocolMismatchAttempt({ sessionStore, sessionId, turnId, spec, error });
+      }
+      throw error;
+    }
 
     const executionResult = toAttemptExecutionResult(spec, execution);
     const reviewed = reviewAttemptResult(spec, executionResult);

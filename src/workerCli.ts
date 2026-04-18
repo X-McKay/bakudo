@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
 import {
+  BAKUDO_HOST_EXECUTION_ENGINES,
+  BAKUDO_HOST_PROTOCOL_VERSIONS,
+  BAKUDO_HOST_TASK_KINDS,
+  type WorkerCapabilities,
+} from "./protocol.js";
+import {
   parseWorkerTaskSpec,
   runWorkerTask,
   serializeWorkerError,
@@ -17,7 +23,22 @@ export type WorkerCliArgs = {
   heartbeatIntervalMs: number;
   killGraceMs: number;
   help: boolean;
+  capabilities: boolean;
 };
+
+/**
+ * Capabilities the in-VM `bakudo-worker` self-reports when invoked with
+ * `--capabilities`. Mirrors the host's compile surface (Phase 6 W3) since
+ * the worker runtime understands every kind/engine the host emits. Kept
+ * stable as a JSON shape — the host's negotiation parser
+ * (`probeWorkerCapabilities`) accepts exactly this layout.
+ */
+export const workerSelfCapabilities = (): WorkerCapabilities => ({
+  protocolVersions: [...BAKUDO_HOST_PROTOCOL_VERSIONS],
+  taskKinds: [...BAKUDO_HOST_TASK_KINDS],
+  executionEngines: [...BAKUDO_HOST_EXECUTION_ENGINES],
+  source: "probe",
+});
 
 const parsePositiveInteger = (
   value: string | undefined,
@@ -70,6 +91,7 @@ export const parseWorkerArgs = (argv: string[]): WorkerCliArgs => {
     heartbeatIntervalMs: 5000,
     killGraceMs: 2000,
     help: false,
+    capabilities: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -80,6 +102,11 @@ export const parseWorkerArgs = (argv: string[]): WorkerCliArgs => {
 
     if (arg === "--help" || arg === "-h") {
       result.help = true;
+      continue;
+    }
+
+    if (arg === "--capabilities") {
+      result.capabilities = true;
       continue;
     }
 
@@ -148,6 +175,7 @@ const printUsage = (): void => {
     [
       "Usage: bakudo-worker --task-spec-b64 <base64-json> [--shell bash] [--timeout-seconds N]",
       "                     [--max-output-bytes N] [--heartbeat-ms N] [--kill-grace-ms N]",
+      "       bakudo-worker --capabilities",
       "",
       "Required task spec fields: schemaVersion, taskId, sessionId, goal, assumeDangerousSkipPermissions",
     ].join("\n") + "\n",
@@ -158,6 +186,13 @@ export const runWorkerCli = async (argv: string[]): Promise<number> => {
   const args = parseWorkerArgs(argv);
   if (args.help) {
     printUsage();
+    return 0;
+  }
+
+  if (args.capabilities) {
+    // Phase 6 W3: emit capability JSON the host's `probeWorkerCapabilities`
+    // can validate. Single-line so callers can parse stdout directly.
+    process.stdout.write(`${JSON.stringify(workerSelfCapabilities())}\n`);
     return 0;
   }
 

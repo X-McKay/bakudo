@@ -221,3 +221,68 @@ test("formatInspectLogs: filters by attempt.attemptId when attempt provided", ()
   assert.match(joined, /task\.started/);
   assert.doesNotMatch(joined, /task\.completed/);
 });
+
+test("formatInspectSummary: renders the W3 protocol-mismatch decoration when present", () => {
+  const session = buildSession({ status: "failed" });
+  const attempt: SessionAttemptRecord = {
+    attemptId: "attempt-mm",
+    status: "failed",
+    request: {
+      schemaVersion: 1,
+      taskId: "attempt-mm",
+      sessionId: "session-sample",
+      goal: "the goal",
+      mode: "build",
+      assumeDangerousSkipPermissions: true,
+    },
+    metadata: {
+      // Synthetic fixture: a future abox that advertises a restrictive
+      // capabilities shape via --capabilities would produce this metadata.
+      // The host-default fallback (2026-04-18 amendment) does not itself
+      // trigger a protocol_version mismatch for the standard spec; the
+      // rendering assertions below apply to any source string.
+      protocolMismatch: {
+        code: "worker_protocol_mismatch",
+        message: "Host requires protocol v3 but worker advertises [1].",
+        recoveryHint: "Upgrade abox or downgrade bakudo so the protocol versions overlap.",
+        details: {
+          mismatchKind: "protocol_version",
+          hostProtocolVersion: 3,
+          workerProtocolVersions: [1],
+          workerCapabilitiesSource: "probe",
+        },
+      },
+    },
+  };
+  const turn = {
+    turnId: "turn-1",
+    prompt: "the goal",
+    mode: "build",
+    status: "failed" as const,
+    attempts: [attempt],
+    createdAt: "2026-04-14T12:00:00.000Z",
+    updatedAt: "2026-04-14T12:05:00.000Z",
+  };
+  const lines = formatInspectSummary({ session, turn, attempt });
+  const joined = lines.join("\n");
+  assert.match(joined, /Mismatch.*Host requires protocol v3.*\[1\]/);
+  assert.match(joined, /Hint.*Upgrade abox/);
+  assert.match(joined, /mismatchKind=protocol_version/);
+  assert.match(joined, /workerCapabilitiesSource=probe/);
+});
+
+test("formatInspectSummary: omits W3 protocol-mismatch lines when metadata is absent", () => {
+  const session = buildSession();
+  const attempt = buildAttempt();
+  const turn = {
+    turnId: "turn-1",
+    prompt: "the goal",
+    mode: "build",
+    status: "completed" as const,
+    attempts: [attempt],
+    createdAt: "2026-04-14T12:00:00.000Z",
+    updatedAt: "2026-04-14T12:05:00.000Z",
+  };
+  const joined = formatInspectSummary({ session, turn, attempt }).join("\n");
+  assert.doesNotMatch(joined, /Mismatch/);
+});

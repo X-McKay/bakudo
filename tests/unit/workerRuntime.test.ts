@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { AttemptSpec } from "../../src/attemptProtocol.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../../src/protocol.js";
-import { parseWorkerArgs } from "../../src/workerCli.js";
+import { parseWorkerArgs, workerSelfCapabilities } from "../../src/workerCli.js";
 import {
   decodeWorkerTaskSpec,
   encodeWorkerEnvelope,
@@ -47,6 +47,25 @@ test("worker cli parses the base64 task spec transport", () => {
   assert.equal(args.maxOutputBytes, 4096);
   assert.equal(args.heartbeatIntervalMs, 25);
   assert.equal(args.killGraceMs, 300);
+  assert.equal(args.capabilities, false);
+});
+
+test("worker cli parses --capabilities and the self-report shape covers the host's compile surface", () => {
+  // Phase 6 W3: a `bakudo-worker --capabilities` invocation produces a
+  // JSON document whose protocolVersions/taskKinds/executionEngines align
+  // with what the host advertises in protocol.ts. The probe parser on the
+  // host side rejects anything narrower without falling back to v1.
+  const args = parseWorkerArgs(["--capabilities"]);
+  assert.equal(args.capabilities, true);
+
+  const caps = workerSelfCapabilities();
+  assert.equal(caps.source, "probe");
+  assert.ok(caps.protocolVersions.includes(3), "advertises v3 (current host contract)");
+  assert.ok(caps.taskKinds.includes("assistant_job"));
+  assert.ok(caps.taskKinds.includes("explicit_command"));
+  assert.ok(caps.taskKinds.includes("verification_check"));
+  assert.ok(caps.executionEngines.includes("agent_cli"));
+  assert.ok(caps.executionEngines.includes("shell"));
 });
 
 test("worker runtime decodes task specs and emits machine-parsable envelopes", () => {
