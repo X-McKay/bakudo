@@ -44,3 +44,29 @@ Legacy path (`createTaskSpec` -> `executeTask`) is deprecated (Phase 6 removal).
 ### Permission invariant
 
 Deny always wins. Even in autopilot mode, a `deny` rule overrides any `allow`. See `evaluatePermission` in `src/host/permissionEvaluator.ts`.
+
+## Phase 4 Host Surfaces
+
+Phase 4 adds four user-visible host-owned surfaces, all durable:
+
+1. **Approvals** (`src/host/approvalProducer.ts`, `src/host/dialogLauncher.ts`): every
+   approval — interactive, hook-sourced, or deny-rule short-circuit — writes an
+   `ApprovalRecord` to `<storage>/<session>/approvals.ndjson` plus
+   `host.approval_requested` + `host.approval_resolved` envelopes. `allow always`
+   appends a `PermissionRule` to `<repo>/.bakudo/approvals.jsonl` that survives
+   across sessions. The interactive prompt uses promise-based launchers via
+   `launchApprovalDialog` — see the A4.1 brief.
+2. **Provenance** (`src/host/provenance.ts`, `src/host/provenanceProducer.ts`):
+   every dispatch writes a `ProvenanceRecord` to `<storage>/<session>/provenance.ndjson`
+   with agent profile, attempt spec, dispatch command, env allowlist, and exit
+   details. The `/inspect provenance` tab surfaces it.
+3. **Retry lineage** (`src/host/transitionStore.ts`, `src/sessionTypes.ts`):
+   attempts and turns link through `TurnTransition` entries so
+   `/inspect summary` and `/timeline` render the complete retry chain.
+4. **Follow-up actions** (`src/host/followUpActions.ts`): the reviewer's
+   `accept|retry|ask_user|halt|follow_up` recommendation is explicitly host-owned;
+   `/retry` and `/halt` give the user the final say.
+
+Rule of thumb: if a fact needs to survive past the current process, it lives in a
+record under `<storage>/<session>/` (per-session) or under `<repo>/.bakudo/`
+(workspace-durable). Raw log parsing is never the fallback.
