@@ -5,6 +5,7 @@ import { doctorCommandSpec } from "./commands/doctor.js";
 import { helpTopicCommandSpec } from "./commands/help.js";
 import { inspectCommands } from "./commands/inspect.js";
 import { legacyCommands } from "./commands/legacy.js";
+import { buildPaletteCommands } from "./commands/palette.js";
 import { runCommandSpec } from "./commands/runCommand.js";
 import { sessionCommands } from "./commands/session.js";
 import { buildSystemCommands } from "./commands/system.js";
@@ -34,6 +35,9 @@ export const buildDefaultCommandRegistry = (
     // System commands receive the registry so /help can enumerate commands
     // dynamically without a circular import.
     ...buildSystemCommands(registry),
+    // Palette takes the registry too so it can enumerate commands to pick
+    // from. Registered last so every other command is already visible.
+    ...buildPaletteCommands(registry),
     ...legacyCommands,
     runCommandSpec,
   ]) {

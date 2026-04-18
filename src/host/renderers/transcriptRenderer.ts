@@ -1,5 +1,7 @@
 import { bold, dim, gray, renderModeChip, tone } from "../ansi.js";
 import { renderApprovalPromptLines } from "./approvalPromptCopy.js";
+import { renderCommandPaletteOverlayLines } from "./commandPaletteOverlay.js";
+import { renderSessionPickerOverlayLines } from "./sessionPickerOverlay.js";
 import type { RenderFrame, TranscriptItem } from "../renderModel.js";
 
 const toneWrap = (
@@ -59,12 +61,12 @@ const renderOverlay = (frame: RenderFrame): string[] => {
     return [tone.warning(`[resume?] ${overlay.message} [y/N]`)];
   }
   if (overlay.kind === "command_palette") {
-    return [tone.info("[command palette]")];
+    return renderCommandPaletteOverlayLines(overlay.request).map((line) => tone.info(line));
   }
   if (overlay.kind === "timeline_picker") {
     return [tone.info("[timeline picker]")];
   }
-  return [tone.info("[session picker]")];
+  return renderSessionPickerOverlayLines(overlay.request).map((line) => tone.info(line));
 };
 
 export const renderTranscriptFrame = (frame: RenderFrame): string[] => {

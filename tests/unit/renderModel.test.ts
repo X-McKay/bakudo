@@ -12,13 +12,24 @@ test("selectRenderFrame: frame.mode is prompt on transcript screen with no overl
 });
 
 test("selectRenderFrame: frame.mode is transcript when promptQueue is non-empty", () => {
+  // Phase 5 PR7 — palette overlay carries a structured payload (items,
+  // input, selectedIndex) instead of being a shape-less sentinel. Use the
+  // minimal well-formed request so the renderModel projection stays a pure
+  // pass-through of the payload fields.
   const state = reduceHost(initialHostAppState(), {
     type: "enqueue_prompt",
-    prompt: { id: "p1", kind: "command_palette", payload: null },
+    prompt: {
+      id: "p1",
+      kind: "command_palette",
+      payload: { items: [], input: "", selectedIndex: 0 },
+    },
   });
   const frame = selectRenderFrame({ state, transcript: [] });
   assert.equal(frame.mode, "transcript");
-  assert.deepEqual(frame.overlay, { kind: "command_palette" });
+  assert.deepEqual(frame.overlay, {
+    kind: "command_palette",
+    request: { items: [], input: "", selectedIndex: 0 },
+  });
 });
 
 test("selectRenderFrame: frame.mode is transcript when screen is inspect", () => {

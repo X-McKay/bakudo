@@ -109,6 +109,7 @@ test("default registry: registers expected commands and aliases", () => {
     "sandbox",
     "logs",
     "run-command",
+    "palette",
   ]) {
     assert.ok(registry.get(name), `expected /${name} registered`);
   }
