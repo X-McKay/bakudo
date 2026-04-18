@@ -143,3 +143,24 @@ export const resolveEnvPolicy = (input: {
     redactionPolicy: input.redactionPolicy ?? DEFAULT_REDACTION_POLICY,
   };
 };
+
+/**
+ * Host-side convenience: resolve an {@link EnvPolicy} from a loaded
+ * {@link BakudoConfig} cascade plus the live `BAKUDO_ENV_ALLOWLIST` env
+ * override. Production runner-construction sites call this to honour plan
+ * Recommended Default 362 ("explicit opt-in for passing nonstandard env
+ * vars to workers") end-to-end. Tests keep using {@link resolveEnvPolicy}
+ * directly for deterministic inputs.
+ */
+export const resolveEnvPolicyForHost = (input: {
+  configAllowlist?: ReadonlyArray<string>;
+  env?: Readonly<Record<string, string | undefined>>;
+}): EnvPolicy => {
+  const env =
+    input.env ??
+    (globalThis as unknown as { process: { env: Record<string, string | undefined> } }).process.env;
+  return resolveEnvPolicy({
+    ...(input.configAllowlist !== undefined ? { configAllowlist: input.configAllowlist } : {}),
+    ...(env.BAKUDO_ENV_ALLOWLIST !== undefined ? { overrideRaw: env.BAKUDO_ENV_ALLOWLIST } : {}),
+  });
+};

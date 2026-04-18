@@ -8,6 +8,8 @@ import { reviewTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskSpec } from "../workerRuntime.js";
+import { loadConfigCascade } from "./config.js";
+import { resolveEnvPolicyForHost } from "./envPolicy.js";
 import { stdoutWrite } from "./io.js";
 import {
   createTaskSpec,
@@ -41,7 +43,15 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
     args.mode === "build" ? runtimeConfig.assumeDangerousSkipPermissions : false;
   const sessionStore = new SessionStore(rootDir);
   const artifactStore = new ArtifactStore(rootDir);
-  const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo));
+  // Phase 6 W5: resolve env-passthrough policy from the host config cascade
+  // + BAKUDO_ENV_ALLOWLIST override (plan Default Rule 362).
+  const { merged: hostConfig } = await loadConfigCascade(repoRootFor(args.repo), {});
+  const envPolicy = resolveEnvPolicyForHost(
+    hostConfig.envPolicy?.allowlist !== undefined
+      ? { configAllowlist: hostConfig.envPolicy.allowlist }
+      : {},
+  );
+  const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo), undefined, envPolicy);
 
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
@@ -140,7 +150,18 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
     }
   }
 
-  const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo));
+  // Phase 6 W5: same env-policy resolution as the new-session entry above.
+  const { merged: hostConfigResume } = await loadConfigCascade(repoRootFor(args.repo), {});
+  const envPolicyResume = resolveEnvPolicyForHost(
+    hostConfigResume.envPolicy?.allowlist !== undefined
+      ? { configAllowlist: hostConfigResume.envPolicy.allowlist }
+      : {},
+  );
+  const runner = new ABoxTaskRunner(
+    new ABoxAdapter(args.aboxBin, args.repo),
+    undefined,
+    envPolicyResume,
+  );
   const retryId = createSessionTaskKey(session.sessionId, `retry-${turn.attempts.length + 1}`);
   const request: WorkerTaskSpec = {
     ...attempt.request,

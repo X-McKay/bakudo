@@ -14,6 +14,7 @@ import {
   filterEnv,
   parseEnvAllowlistOverride,
   resolveEnvPolicy,
+  resolveEnvPolicyForHost,
   validateEnvAllowlist,
 } from "../../src/host/envPolicy.js";
 
@@ -124,6 +125,19 @@ test("resolveEnvPolicy falls back to default redaction policy", () => {
 
 test("resolveEnvPolicy with nothing set yields an empty allowlist", () => {
   const policy = resolveEnvPolicy({});
+  assert.deepEqual(policy.allowlist, []);
+});
+
+test("resolveEnvPolicyForHost wires config + BAKUDO_ENV_ALLOWLIST from injected env", () => {
+  const policy = resolveEnvPolicyForHost({
+    configAllowlist: ["MY_VAR"],
+    env: { BAKUDO_ENV_ALLOWLIST: "EXTRA_ONE,EXTRA_TWO" },
+  });
+  assert.deepEqual([...policy.allowlist].sort(), ["EXTRA_ONE", "EXTRA_TWO", "MY_VAR"]);
+});
+
+test("resolveEnvPolicyForHost with no config + no env override = empty allowlist", () => {
+  const policy = resolveEnvPolicyForHost({ env: {} });
   assert.deepEqual(policy.allowlist, []);
 });
 
