@@ -93,7 +93,11 @@ const buildWorkerLaunchCommand = async (
     'tmpdir="$(mktemp -d)"',
     renderHereDoc('"$tmpdir/package.json"', `${sources.packageJson}\n`, "BAKUDO_PACKAGE_JSON"),
     renderHereDoc('"$tmpdir/protocol.js"', sources.protocolJs, "BAKUDO_PROTOCOL_JS"),
-    renderHereDoc('"$tmpdir/workerRuntime.js"', sources.workerRuntimeJs, "BAKUDO_WORKER_RUNTIME_JS"),
+    renderHereDoc(
+      '"$tmpdir/workerRuntime.js"',
+      sources.workerRuntimeJs,
+      "BAKUDO_WORKER_RUNTIME_JS",
+    ),
     renderHereDoc('"$tmpdir/workerCli.js"', sources.workerCliJs, "BAKUDO_WORKER_CLI_JS"),
     commandArgs,
   ].join("\n");
@@ -130,7 +134,9 @@ const synthesizeResult = (
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
   const summary =
     errorMessages[0] ??
-    (rawOutput.trim().length > 0 ? "worker finished without a structured result envelope" : "worker produced no output");
+    (rawOutput.trim().length > 0
+      ? "worker finished without a structured result envelope"
+      : "worker produced no output");
 
   return {
     schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,

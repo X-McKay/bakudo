@@ -52,12 +52,15 @@ test("reviewTaskResult classifies blocked work as needing the user", () => {
 });
 
 test("reviewTaskResult classifies policy denials via hints or evidence", () => {
-  const hinted = reviewTaskResult({
-    ...baseResult,
-    status: "failed",
-    exitCode: 1,
-    summary: "operation refused",
-  }, { policyDenied: true });
+  const hinted = reviewTaskResult(
+    {
+      ...baseResult,
+      status: "failed",
+      exitCode: 1,
+      summary: "operation refused",
+    },
+    { policyDenied: true },
+  );
 
   assert.equal(hinted.outcome, "policy_denied");
   assert.equal(hinted.action, "halt");

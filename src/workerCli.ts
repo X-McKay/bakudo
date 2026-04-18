@@ -7,6 +7,7 @@ import {
   serializeWorkerEvent,
   serializeWorkerResult,
 } from "./workerRuntime.js";
+import { isMainModule } from "./mainModule.js";
 
 export type WorkerCliArgs = {
   taskSpecB64: string;
@@ -18,7 +19,11 @@ export type WorkerCliArgs = {
   help: boolean;
 };
 
-const parsePositiveInteger = (value: string | undefined, fallback: number, name: string): number => {
+const parsePositiveInteger = (
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number => {
   if (value === undefined) {
     return fallback;
   }
@@ -31,7 +36,11 @@ const parsePositiveInteger = (value: string | undefined, fallback: number, name:
   return parsed;
 };
 
-const readLongFlag = (argv: string[], index: number, flag: string): { value: string; consumed: number } => {
+const readLongFlag = (
+  argv: string[],
+  index: number,
+  flag: string,
+): { value: string; consumed: number } => {
   const arg = argv[index];
   if (typeof arg !== "string") {
     throw new Error(`missing argument for ${flag}`);
@@ -90,21 +99,33 @@ export const parseWorkerArgs = (argv: string[]): WorkerCliArgs => {
 
     if (arg === "--timeout-seconds" || arg.startsWith("--timeout-seconds=")) {
       const { value, consumed } = readLongFlag(argv, i, "--timeout-seconds");
-      result.timeoutSeconds = parsePositiveInteger(value, result.timeoutSeconds, "--timeout-seconds");
+      result.timeoutSeconds = parsePositiveInteger(
+        value,
+        result.timeoutSeconds,
+        "--timeout-seconds",
+      );
       i += consumed - 1;
       continue;
     }
 
     if (arg === "--max-output-bytes" || arg.startsWith("--max-output-bytes=")) {
       const { value, consumed } = readLongFlag(argv, i, "--max-output-bytes");
-      result.maxOutputBytes = parsePositiveInteger(value, result.maxOutputBytes, "--max-output-bytes");
+      result.maxOutputBytes = parsePositiveInteger(
+        value,
+        result.maxOutputBytes,
+        "--max-output-bytes",
+      );
       i += consumed - 1;
       continue;
     }
 
     if (arg === "--heartbeat-ms" || arg.startsWith("--heartbeat-ms=")) {
       const { value, consumed } = readLongFlag(argv, i, "--heartbeat-ms");
-      result.heartbeatIntervalMs = parsePositiveInteger(value, result.heartbeatIntervalMs, "--heartbeat-ms");
+      result.heartbeatIntervalMs = parsePositiveInteger(
+        value,
+        result.heartbeatIntervalMs,
+        "--heartbeat-ms",
+      );
       i += consumed - 1;
       continue;
     }
@@ -165,7 +186,7 @@ const printWorkerError = (message: string, details?: Record<string, unknown>): v
   process.stdout.write(`${serializeWorkerError(message, details)}\n`);
 };
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   runWorkerCli(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;

@@ -146,12 +146,13 @@ export class ABoxAdapter {
 
   private buildInvocation(streamId: string, command: string): { taskId: string; cmd: string[] } {
     const taskId = this.nextTaskId(streamId);
+    const ephemeral = process.env.BAKUDO_EPHEMERAL !== "0";
     const cmd = [
       ...(this.repoPath ? ["--repo", this.repoPath] : []),
       "run",
       "--task",
       taskId,
-      "--ephemeral",
+      ...(ephemeral ? ["--ephemeral"] : []),
       "--",
       "bash",
       "-lc",

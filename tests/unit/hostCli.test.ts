@@ -4,7 +4,12 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parseHostArgs, reviewedOutcomeExitCode, runHostCli, shouldUseHostCli } from "../../src/hostCli.js";
+import {
+  parseHostArgs,
+  reviewedOutcomeExitCode,
+  runHostCli,
+  shouldUseHostCli,
+} from "../../src/hostCli.js";
 
 test("host cli parses run commands and common overrides", () => {
   const args = parseHostArgs([
@@ -75,6 +80,8 @@ test("host cli parses review and resume commands", () => {
 test("host cli command detection prefers the host surface", () => {
   assert.equal(shouldUseHostCli([]), true);
   assert.equal(shouldUseHostCli(["help"]), true);
+  assert.equal(shouldUseHostCli(["--help"]), true);
+  assert.equal(shouldUseHostCli(["-h"]), true);
   assert.equal(shouldUseHostCli(["build", "fix it"]), true);
   assert.equal(shouldUseHostCli(["plan", "review architecture"]), true);
   assert.equal(shouldUseHostCli(["run", "fix it"]), true);
@@ -113,7 +120,7 @@ test("host cli dispatches status and init commands", async () => {
   }
 
   const output = writes.join("");
-  assert.match(output, /No sessions found\./);
+  assert.match(output, /No sessions found yet\./);
   assert.match(output, /Wrote .*AGENTS\.md/);
 
   const agents = await readFile(join(workspace, "AGENTS.md"), "utf8");

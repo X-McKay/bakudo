@@ -163,7 +163,11 @@ export const classifyReviewedOutcome = (
     };
   }
 
-  if (includesAny(evidence, INCOMPLETE_MARKERS) || result.exitCode === 126 || result.exitCode === 127) {
+  if (
+    includesAny(evidence, INCOMPLETE_MARKERS) ||
+    result.exitCode === 126 ||
+    result.exitCode === 127
+  ) {
     return {
       outcome: "incomplete_needs_follow_up",
       action: "follow_up",

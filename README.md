@@ -2,7 +2,7 @@
 
 `Bakudo` is a lightweight, robust custom agent harness designed for high-autonomy operation within `abox` sandboxing environments. Built with TypeScript and a focus on functional programming, it provides a secure and scalable foundation for building autonomous agents.
 
-> Current status: the host/worker split is now being introduced, and the CLI is starting to move toward a more assistant-like terminal UX. The host CLI now supports an interactive shell, persisted sessions, and a structured sandbox worker through `abox`, while legacy `--goal` mode still exists as a compatibility path.
+> Current status: the interactive shell is transcript-first with persisted active-session continuity. Plain text continues the active session by default; explicit slash commands manage sessions, modes, inspection, and approvals. Legacy `--goal` mode still exists as a compatibility path.
 
 ## Core Features
 
@@ -39,6 +39,14 @@
 pnpm install
 ```
 
+Install the CLI into your local environment so you can launch it as `bakudo`:
+
+```bash
+pnpm install:cli
+bakudo
+bakudo --help
+```
+
 ### Usage
 
 Run the new host CLI with explicit host intent:
@@ -51,26 +59,44 @@ pnpm start -- build "add a richer review screen for sandbox results" --repo /pat
 Start the interactive shell:
 
 ```bash
-pnpm start --
+bakudo
 ```
 
-Inside the interactive shell you can use assistant-style commands such as:
+Inside the interactive shell, plain text continues the active session as a new turn. Slash commands manage session state, mode, and inspection:
 
 ```text
-/build <goal>
-/plan <goal>
-/run <goal>
-/mode build
-/mode plan
-/approve auto
-/status [session-id]
-/sessions
-/tasks <session-id>
-/sandbox <session-id> [task-id]
-/review <session-id> [task-id]
-/logs <session-id> [task-id]
-/resume <session-id> [task-id]
-/init
+/new                                    # start a fresh session
+/resume [session-id]                    # resume the most recent (or named) session
+/sessions                               # browse saved sessions
+/inspect [summary|review|sandbox|artifacts|logs]
+/mode [standard|plan|autopilot]         # composer mode; standard = code-changing
+/autopilot [on|off]                     # equivalent to /mode autopilot
+/compact                                # summarize older turns (Phase 2)
+/clear                                  # clear the on-screen transcript
+/init                                   # write repo-local AGENTS.md template
+/help                                   # contextual command list
+/exit                                   # exit the shell
+
+# Legacy compatibility aliases (still functional):
+/run /build /plan /status /tasks /review /sandbox /logs /approve
+```
+
+A bare prompt is interpreted as a goal for the active session. There is no "new session per prompt" — a new session is created only on first launch (when none exists) or after `/new`.
+
+Example transcript:
+
+```text
+Bakudo  STANDARD  session 8ab12cd3  bakudo
+
+You: add a richer review surface for sandbox results
+Bakudo: Queued sandbox attempt.
+Bakudo: Sandbox worker started.
+Bakudo: Worker is producing output.
+Bakudo: Worker completed. Reviewing result.
+Review: accepted — 3 files changed and targeted tests passed.
+
+[inspect]  [help]
+>
 ```
 
 Inspect a saved session:
@@ -87,12 +113,13 @@ node dist/src/cli.js resume <session-id>
 node dist/src/cli.js init --repo /path/to/repo --yes
 ```
 
-`Bakudo` now tries to make the host/worker split explicit in the terminal UX:
+`Bakudo` makes the host/worker split explicit in the terminal UX:
 
-- `plan` is for discovery, review, and exploration.
-- `build` is for code-changing work dispatched into an ephemeral `abox` sandbox.
-- `status`, `review`, `logs`, and `sandbox` are separate views so the host can show progress, judgment, and sandbox provenance independently.
-- The interactive shell keeps track of the most recent session so follow-up commands can stay session-oriented instead of feeling like a thin command wrapper.
+- **Modes**: `standard` for code-changing work, `plan` for read-only discovery, `autopilot` for unattended execution that bypasses approval prompts.
+- **Sessions** are conversation-oriented: each turn appends to the active session, with one or more sandbox attempts per turn. The active session is persisted at `<repo>/.bakudo/host-state.json` and restored on the next shell launch.
+- **`/inspect`** unifies the previously separate `review`, `sandbox`, `artifacts`, and `logs` surfaces. Raw event streams are still available via `/inspect logs`; the default summary highlights reviewed outcome and provenance.
+- **Worker narration**: the shell shows assistant-style status lines (`Worker is producing output.`) instead of raw event names. Full event detail is available in `/inspect logs`.
+- **Provenance** stays first-class: every attempt records its sandbox task ID, dispatch command, and artifact paths, accessible via `/inspect sandbox` and `/inspect artifacts`.
 
 Legacy compatibility mode is still available:
 

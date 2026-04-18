@@ -7,6 +7,7 @@ import test from "node:test";
 import { ArtifactStore } from "../../src/artifactStore.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../../src/protocol.js";
 import { SessionStore } from "../../src/sessionStore.js";
+import { CURRENT_SESSION_SCHEMA_VERSION } from "../../src/sessionTypes.js";
 import type { TaskProgressEvent, TaskResult } from "../../src/protocol.js";
 
 const createTempRoot = async (): Promise<string> => mkdtemp(join(tmpdir(), "bakudo-store-"));
@@ -28,12 +29,13 @@ test("SessionStore computes a stable layout and persists session state", async (
     const created = await store.createSession({
       sessionId,
       goal: "ship the host-side persistence scaffold",
+      repoRoot: ".",
       assumeDangerousSkipPermissions: true,
       status: "planned",
       createdAt: "2026-04-13T10:00:00.000Z",
     });
 
-    assert.equal(created.schemaVersion, BAKUDO_PROTOCOL_SCHEMA_VERSION);
+    assert.equal(created.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
     assert.equal(created.goal, "ship the host-side persistence scaffold");
     assert.equal(created.status, "planned");
 
@@ -83,9 +85,10 @@ test("SessionStore computes a stable layout and persists session state", async (
     const loaded = await store.loadSession(sessionId);
     assert.ok(loaded);
     assert.equal(loaded.sessionId, sessionId);
-    assert.equal(loaded.tasks.length, 1);
-    assert.equal(loaded.tasks[0]?.status, "succeeded");
-    assert.equal(loaded.tasks[0]?.result?.summary, "implemented the scaffold");
+    assert.equal(loaded.turns.length, 1);
+    assert.equal(loaded.turns[0]?.attempts.length, 1);
+    assert.equal(loaded.turns[0]?.attempts[0]?.status, "succeeded");
+    assert.equal(loaded.turns[0]?.attempts[0]?.result?.summary, "implemented the scaffold");
 
     const events = await store.readTaskEvents(sessionId);
     assert.deepEqual(events, [eventOne, eventTwo]);
@@ -109,6 +112,7 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
     await store.createSession({
       sessionId: "session/old",
       goal: "oldest session",
+      repoRoot: ".",
       assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T09:00:00.000Z",
       updatedAt: "2026-04-13T10:00:00.000Z",
@@ -116,6 +120,7 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
     await store.createSession({
       sessionId: "session/tie-z",
       goal: "same timestamp, later id",
+      repoRoot: ".",
       assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T11:00:00.000Z",
       updatedAt: "2026-04-13T11:00:00.000Z",
@@ -123,6 +128,7 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
     await store.createSession({
       sessionId: "session/tie-a",
       goal: "same timestamp, earlier id",
+      repoRoot: ".",
       assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T11:00:00.000Z",
       updatedAt: "2026-04-13T11:00:00.000Z",
@@ -130,6 +136,7 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
     await store.createSession({
       sessionId: "session/latest",
       goal: "most recent session",
+      repoRoot: ".",
       assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T12:00:00.000Z",
       updatedAt: "2026-04-13T12:30:00.000Z",
@@ -137,12 +144,10 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
 
     const sessions = await store.listSessions();
 
-    assert.deepEqual(sessions.map((session) => session.sessionId), [
-      "session/latest",
-      "session/tie-a",
-      "session/tie-z",
-      "session/old",
-    ]);
+    assert.deepEqual(
+      sessions.map((session) => session.sessionId),
+      ["session/latest", "session/tie-a", "session/tie-z", "session/old"],
+    );
     assert.equal(sessions[0]?.updatedAt, "2026-04-13T12:30:00.000Z");
     assert.equal(sessions[1]?.updatedAt, "2026-04-13T11:00:00.000Z");
     assert.equal(sessions[2]?.updatedAt, "2026-04-13T11:00:00.000Z");

@@ -19,7 +19,8 @@ const createMockChildProcess = (): MockChildProcess => {
   child.exitCode = null;
   child.signalCode = null;
   child.kill = (signal?: string | number) => {
-    child.signalCode = typeof signal === "string" ? signal : signal === undefined ? null : String(signal);
+    child.signalCode =
+      typeof signal === "string" ? signal : signal === undefined ? null : String(signal);
     return true;
   };
   return child;

@@ -17,7 +17,13 @@ import {
 
 test("protocol scaffolding exposes the expected schema and helper shapes", () => {
   assert.equal(BAKUDO_PROTOCOL_SCHEMA_VERSION, 1);
-  assert.deepEqual(terminalTaskStatuses, ["succeeded", "failed", "blocked", "cancelled", "needs_review"]);
+  assert.deepEqual(terminalTaskStatuses, [
+    "succeeded",
+    "failed",
+    "blocked",
+    "cancelled",
+    "needs_review",
+  ]);
   assert.deepEqual(taskProgressEventKinds, [
     "task.queued",
     "task.started",
