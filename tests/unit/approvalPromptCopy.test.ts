@@ -126,20 +126,17 @@ test("approval prompt copy: agent name flows from policy snapshot", () => {
   assert.equal(agentLine, "Bakudo: This matches no existing allow rule in agent=custom-profile.");
 });
 
-test("approval prompt copy: cursor pins to [1] (Shift+Tab deferred to Phase 5)", () => {
+test("approval prompt copy: default cursor pins to [1]", () => {
   const lines = renderLines(shellRequest("ls"), "plain");
   const cursorLine = lines.find((line) => line.includes("\u276F"));
   assert.ok(cursorLine !== undefined);
   assert.equal(cursorLine, "  \u276F [1] allow once");
 });
 
-test("approval prompt copy: approvalPromptCopy module carries the Phase 5 TODO comment", async () => {
-  // Smoke check that the deferral is documented as requested by the PR
-  // scope. Keeps future contributors from silently dropping the note.
-  // Look up the source via several candidate roots so the test works both
-  // when invoked from `dist/` (pnpm test) and directly against `src/`.
-  // Resolve the source via `import.meta.url` so this works whether the test
-  // file is loaded from `src/` (direct invocation) or `dist/` (pnpm test).
+test("approval prompt copy: Phase 5 PR8 removed the TODO(phase5) marker", async () => {
+  // The Phase 4 deferral note shipped as a TODO(phase5). PR8 implements
+  // Shift+Tab cursor navigation, so the TODO must be gone — this test
+  // guards against silent reintroduction of the deferral comment.
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     join(here, "../../src/host/renderers/approvalPromptCopy.ts"),
@@ -154,5 +151,8 @@ test("approval prompt copy: approvalPromptCopy module carries the Phase 5 TODO c
     }
   }
   assert.ok(source.length > 0, `approvalPromptCopy.ts source not found from ${here}`);
-  assert.ok(/TODO\(phase5\)/.test(source), "expected TODO(phase5) marker in approvalPromptCopy.ts");
+  assert.ok(
+    !/TODO\(phase5\)/.test(source),
+    "TODO(phase5) should have been removed when Shift+Tab cursor landed",
+  );
 });

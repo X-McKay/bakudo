@@ -1,4 +1,4 @@
-import type { ApprovalPromptRequest } from "../appState.js";
+import { APPROVAL_DIALOG_CURSOR_COUNT, type ApprovalPromptRequest } from "../appState.js";
 import { renderPermissionDisplayCommand, suggestAllowAlwaysPattern } from "../approvalPolicy.js";
 
 /**
@@ -24,27 +24,45 @@ import { renderPermissionDisplayCommand, suggestAllowAlwaysPattern } from "../ap
  *   the evaluator returns `"ask"`, which cannot happen under autopilot's
  *   `allow`-everything profile. Including it would suggest the user can
  *   toggle autopilot from this prompt, which they cannot.
- * - Cursor pins to `[1]`. Shift+Tab navigation is a Phase 5 keybinding
- *   concern (see TODO below).
+ * - Phase 5 PR8 wires Shift+Tab to cycle the ❯ cursor through the four
+ *   options. The caller drives `cursorIndex` (0 = [1] allow once, 1 = [2]
+ *   allow always, 2 = [3] deny, 3 = [4] show context). Defaults to `0` so
+ *   pre-PR8 callers keep the same output shape.
  */
-// TODO(phase5): wire Shift+Tab to cycle the ❯ cursor through [1][2][3][4].
-//   Phase 4 ships the cursor at the default position; keybinding plumbing
-//   belongs with the rest of the rich-TUI work in Phase 5.
-export const renderApprovalPromptLines = (request: ApprovalPromptRequest): string[] => {
+export const renderApprovalPromptLines = (
+  request: ApprovalPromptRequest,
+  cursorIndex: number = 0,
+): string[] => {
   const displayCommand = renderPermissionDisplayCommand(request.tool, request.argument);
   // `PermissionTool = KnownPermissionTool | (string & {})` so `request.tool`
   // is structurally assignable without a cast.
   const pattern = suggestAllowAlwaysPattern(request.tool, request.argument);
   const agent = request.policySnapshot.agent;
+  const normalized = normalizeCursor(cursorIndex);
+  const marker = (idx: number): string => (idx === normalized ? "  \u276F " : "    ");
   return [
     `Bakudo: Worker wants to run: ${displayCommand}`,
     `Bakudo: This matches no existing allow rule in agent=${agent}.`,
     "",
-    "  \u276F [1] allow once",
-    `    [2] allow always for ${request.tool}(${pattern})`,
-    "    [3] deny",
-    "    [4] show context (inspect attempt spec)",
+    `${marker(0)}[1] allow once`,
+    `${marker(1)}[2] allow always for ${request.tool}(${pattern})`,
+    `${marker(2)}[3] deny`,
+    `${marker(3)}[4] show context (inspect attempt spec)`,
     "",
     "Choice [1/2/3/4] (Shift+Tab to go back):",
   ];
+};
+
+const normalizeCursor = (value: number): number => {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const floored = Math.floor(value);
+  if (floored < 0) {
+    return 0;
+  }
+  if (floored >= APPROVAL_DIALOG_CURSOR_COUNT) {
+    return APPROVAL_DIALOG_CURSOR_COUNT - 1;
+  }
+  return floored;
 };

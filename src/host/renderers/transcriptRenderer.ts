@@ -55,7 +55,7 @@ const renderOverlay = (frame: RenderFrame): string[] => {
   if (overlay.kind === "approval_prompt") {
     // VERBATIM copy per Phase 4 spec (04-provenance-first-inspection-and-approval.md
     // §Approval Prompt UX). No tone wrapping — must match byte-for-byte.
-    return renderApprovalPromptLines(overlay.request);
+    return renderApprovalPromptLines(overlay.request, overlay.cursorIndex);
   }
   if (overlay.kind === "resume_confirm") {
     return [tone.warning(`[resume?] ${overlay.message} [y/N]`)];

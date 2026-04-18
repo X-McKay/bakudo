@@ -10,6 +10,7 @@ import {
   formatInspectSummary,
   type InspectReviewPayload,
 } from "./inspectFormatter.js";
+import { applyInspectWindow } from "./inspectScroll.js";
 import type { ProvenanceRecord } from "./provenance.js";
 
 /**
@@ -317,13 +318,15 @@ export type InspectTabName =
   | "logs";
 
 /**
- * Route an {@link InspectTabName} to its renderer. Each tab is a pure
- * function returning `string[]` — callers push the lines into the transcript
- * or stdout as they see fit. The legacy `"sandbox"` tab alias is handled at
- * the command layer (in `commands/inspect.ts`) so it still resolves to
- * `formatInspectSandbox` for backward compatibility.
+ * Window-slicing options for {@link formatInspectTab}. When `window` is
+ * provided, the returned lines are clipped to the viewport (see
+ * `inspectScroll.ts`). Omitted → full content returned (backward-compatible).
  */
-export const formatInspectTab = (tab: InspectTabName, input: InspectTabDispatchInput): string[] => {
+export type FormatInspectTabOptions = {
+  window?: { offset: number; height: number };
+};
+
+const dispatchInspectTab = (tab: InspectTabName, input: InspectTabDispatchInput): string[] => {
   const { session, turn, attempt, artifacts, events, reviewed, provenance, approvals, envelopes } =
     input;
   switch (tab) {
@@ -350,11 +353,7 @@ export const formatInspectTab = (tab: InspectTabName, input: InspectTabDispatchI
         ...(envelopes ? { events: envelopes } : {}),
       });
     case "artifacts":
-      return formatInspectArtifacts({
-        session,
-        ...(attempt ? { attempt } : {}),
-        artifacts,
-      });
+      return formatInspectArtifacts({ session, ...(attempt ? { attempt } : {}), artifacts });
     case "approvals":
       return formatInspectApprovals({
         session,
@@ -363,12 +362,28 @@ export const formatInspectTab = (tab: InspectTabName, input: InspectTabDispatchI
         ...(envelopes ? { events: envelopes } : {}),
       });
     case "logs":
-      return formatInspectLogs({
-        session,
-        ...(attempt ? { attempt } : {}),
-        events,
-      });
+      return formatInspectLogs({ session, ...(attempt ? { attempt } : {}), events });
   }
+};
+
+/**
+ * Route an {@link InspectTabName} to its renderer. Phase 5 PR8 adds
+ * `options.window` for viewport-sized slicing.
+ */
+export const formatInspectTab = (
+  tab: InspectTabName,
+  input: InspectTabDispatchInput,
+  options?: FormatInspectTabOptions,
+): string[] => {
+  const lines = dispatchInspectTab(tab, input);
+  if (options?.window === undefined) {
+    return lines;
+  }
+  return applyInspectWindow({
+    lines,
+    offset: options.window.offset,
+    height: options.window.height,
+  }).lines;
 };
 
 // Legacy alias. The pre-PR4 `sandbox` tab is now a thin wrapper around the

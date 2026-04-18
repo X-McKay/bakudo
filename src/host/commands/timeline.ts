@@ -8,6 +8,7 @@ import type { HostCommandSpec } from "../commandRegistry.js";
 import { readSessionEventLog } from "../eventLogWriter.js";
 import { listTurnApprovals } from "../approvalStore.js";
 import { formatInspectTab } from "../inspectTabs.js";
+import { registerKeybinding } from "../keybindings/hooks.js";
 import { storageRootFor } from "../orchestration.js";
 import { awaitPrompt, newPromptId } from "../promptResolvers.js";
 import { reduceHost } from "../reducer.js";
@@ -17,6 +18,13 @@ import {
   findLatestTurnTransition,
   type TurnTransition,
 } from "../transitionStore.js";
+
+/**
+ * Phase 5 PR8 — Double-Esc chord in Composer opens the timeline picker.
+ * This constant is the action ID the keybindings registry looks up; the
+ * `/timeline` slash command dispatches into the same handler.
+ */
+export const TIMELINE_PICKER_ACTION_ID = "app:timelinePicker" as const;
 
 /**
  * Phase 4 PR4 `/timeline` picker.
@@ -210,8 +218,9 @@ export const timelineCommandSpec: HostCommandSpec = {
   group: "session",
   description:
     "Open the timeline picker: browse turns, inspect read-only, or restart from a prior turn.",
-  // Double-Esc binding for the same picker is deferred to Phase 5
-  // (reserved-shortcuts workstream); only the slash command is wired today.
+  // Phase 5 PR8: Double-Esc (Composer context) is also bound to
+  // `app:timelinePicker`, wired via `launchTimelinePicker`. The slash
+  // command and the chord funnel into the same handler.
   handler: async ({ deps }) => {
     const sessionId = deps.appState.activeSessionId;
     if (sessionId === undefined) {
@@ -302,3 +311,15 @@ export const timelineCommandSpec: HostCommandSpec = {
     });
   },
 };
+
+/**
+ * Register the default `app:timelinePicker` keybinding handler — reached
+ * via Double-Esc in the Composer context. Mirrors the palette launcher:
+ * the handler is a trampoline the interactive loop calls when the chord
+ * fires. Raw-key plumbing lives in the render loop; this module owns the
+ * registration surface so tests can assert on it without a real loop.
+ *
+ * Returns a disposer — callers use it in cleanup paths and tests.
+ */
+export const launchTimelinePicker = (handler: () => void): (() => void) =>
+  registerKeybinding("Composer", TIMELINE_PICKER_ACTION_ID, handler);

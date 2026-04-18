@@ -49,7 +49,10 @@ export type FrameInputs = {
 const sessionLabelFor = (activeSessionId: string | undefined): string =>
   activeSessionId ? `session ${activeSessionId.slice(0, 8)}` : "no active session";
 
-const deriveOverlay = (prompt: PromptEntry | undefined): HostOverlay | undefined => {
+const deriveOverlay = (
+  prompt: PromptEntry | undefined,
+  state: HostAppState,
+): HostOverlay | undefined => {
   if (prompt === undefined) {
     return undefined;
   }
@@ -63,7 +66,11 @@ const deriveOverlay = (prompt: PromptEntry | undefined): HostOverlay | undefined
     // well-formed payload is a programming error (see `dialogLauncher.ts`
     // where the only producer lives).
     const request = prompt.payload as ApprovalPromptRequest;
-    return { kind: "approval_prompt", request };
+    return {
+      kind: "approval_prompt",
+      request,
+      cursorIndex: state.approvalDialogCursor,
+    };
   }
   if (prompt.kind === "resume_confirm") {
     const payload = prompt.payload as { message?: unknown } | null;
@@ -86,7 +93,7 @@ const deriveOverlay = (prompt: PromptEntry | undefined): HostOverlay | undefined
 export const selectRenderFrame = (inputs: FrameInputs): RenderFrame => {
   const { state, transcript, repoLabel } = inputs;
   const head = state.promptQueue[0];
-  const overlay = deriveOverlay(head);
+  const overlay = deriveOverlay(head, state);
   const hasOverlay = overlay !== undefined;
   const offTranscript = state.screen !== "transcript";
   const mode: FrameMode = hasOverlay || offTranscript ? "transcript" : "prompt";
