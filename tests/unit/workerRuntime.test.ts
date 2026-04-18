@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { AttemptSpec } from "../../src/attemptProtocol.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../../src/protocol.js";
 import { parseWorkerArgs } from "../../src/workerCli.js";
 import {
@@ -9,6 +10,7 @@ import {
   runWorkerTask,
   serializeWorkerResult,
   WORKER_EVENT_PREFIX,
+  type WorkerTaskSpec,
 } from "../../src/workerRuntime.js";
 
 const encodeTaskSpec = (spec: Record<string, unknown>): string =>
@@ -132,4 +134,89 @@ test("worker runtime executes a bounded shell goal and returns structured output
   assert.equal(result.assumeDangerousSkipPermissions, true);
   assert.equal(result.artifacts?.includes("stdout"), true);
   assert.equal(result.artifacts?.includes("stderr"), true);
+});
+
+// ---------------------------------------------------------------------------
+// Task-kind dispatch (Commit 2 — AttemptSpec dispatch + legacy fallback)
+// ---------------------------------------------------------------------------
+
+const attemptSpec = (overrides: Partial<AttemptSpec> = {}): AttemptSpec => ({
+  schemaVersion: 3,
+  sessionId: "session-dispatch",
+  turnId: "turn-1",
+  attemptId: "attempt-1",
+  taskId: "task-dispatch",
+  intentId: "intent-1",
+  mode: "build",
+  taskKind: "explicit_command",
+  prompt: "echo dispatched",
+  instructions: [],
+  cwd: testCwd,
+  execution: { engine: "shell", command: ["printf", "dispatched"] },
+  permissions: { rules: [], allowAllTools: false, noAskUser: false },
+  budget: { timeoutSeconds: 10, maxOutputBytes: 4096, heartbeatIntervalMs: 5000 },
+  acceptanceChecks: [],
+  artifactRequests: [],
+  ...overrides,
+});
+
+test("workerRuntime dispatches explicit_command via task-kind when taskKind present", async () => {
+  const spec = attemptSpec();
+  // Pass the AttemptSpec as a WorkerTaskSpec (duck-typed via the runtime check)
+  const events: string[] = [];
+  const result = await runWorkerTask(spec as unknown as WorkerTaskSpec, {
+    timeoutSeconds: 10,
+    maxOutputBytes: 4096,
+    heartbeatIntervalMs: 25,
+    killGraceMs: 100,
+    emit: (event) => {
+      events.push(`${event.kind}:${event.status}`);
+    },
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.trim(), "dispatched");
+  assert.ok(events.includes("task.completed:succeeded"));
+});
+
+test("workerRuntime falls back to legacy bash -lc when no taskKind present", async () => {
+  const legacySpec = decodeWorkerTaskSpec(
+    encodeTaskSpec({
+      schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
+      taskId: "task-legacy",
+      sessionId: "session-legacy",
+      goal: "printf 'legacy path'",
+      cwd: testCwd,
+      assumeDangerousSkipPermissions: true,
+    }),
+  );
+
+  const result = await runWorkerTask(legacySpec, {
+    shell: "bash",
+    timeoutSeconds: 10,
+    maxOutputBytes: 4096,
+    heartbeatIntervalMs: 25,
+    killGraceMs: 100,
+    emit: () => undefined,
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.stdout.trim(), "legacy path");
+  assert.equal(result.command, "printf 'legacy path'");
+});
+
+test("workerRuntime uses budget.timeoutSeconds from AttemptSpec", async () => {
+  const spec = attemptSpec({
+    execution: { engine: "shell", command: ["printf", "budget-test"] },
+    budget: { timeoutSeconds: 5, maxOutputBytes: 2048, heartbeatIntervalMs: 1000 },
+  });
+
+  const result = await runWorkerTask(spec as unknown as WorkerTaskSpec, {
+    killGraceMs: 100,
+    emit: () => undefined,
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.timeoutSeconds, 5);
 });

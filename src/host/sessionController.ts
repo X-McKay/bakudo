@@ -5,30 +5,32 @@ import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "../config.js";
 import { createSessionEvent } from "../protocol.js";
-import { type ReviewedTaskResult } from "../reviewer.js";
+import type { ReviewClassification } from "../resultClassifier.js";
 import { SessionStore } from "../sessionStore.js";
 import type { SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
+import type { ComposerMode } from "./appState.js";
+import { BakudoConfigDefaults } from "./config.js";
 import { emitSessionEvent } from "./eventLogWriter.js";
-import { parseTokenBudget } from "./tokenBudget.js";
+import { executeAttempt } from "./executeAttempt.js";
 import {
-  createTaskSpec,
   type EventLogWriterFactory,
-  executeTask,
   makeInitialTurn,
   repoRootFor,
   sessionStatusFromReview,
   storageRootFor,
 } from "./orchestration.js";
 import type { HostCliArgs } from "./parsing.js";
+import { planAttempt } from "./planner.js";
+import { parseTokenBudget } from "./tokenBudget.js";
 import { emitTurnTransition } from "./transitionStore.js";
 
 export type SessionDispatchResult = {
   sessionId: string;
   turnId: string;
   attemptId: string;
-  reviewed: ReviewedTaskResult;
+  reviewed: ReviewClassification;
   session: SessionRecord;
 };
 
@@ -63,6 +65,12 @@ const resolveAssumeDangerous = async (args: HostCliArgs): Promise<boolean> => {
   const fileConfig = await loadConfig(args.config);
   const runtimeConfig = buildRuntimeConfig(fileConfig);
   return runtimeConfig.assumeDangerousSkipPermissions;
+};
+
+/** Map the worker-facing TaskMode back to a ComposerMode for the planner. */
+const taskModeToComposerMode = (mode: string, autoApprove: boolean): ComposerMode => {
+  if (mode === "plan") return "plan";
+  return autoApprove ? "autopilot" : "standard";
 };
 
 export type SessionDispatchOptions = {
@@ -121,20 +129,30 @@ export const createAndRunFirstTurn = async (
   );
 
   const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
-  const request = createTaskSpec(
-    session.sessionId,
-    attemptId,
+  const composerMode = taskModeToComposerMode(args.mode, args.yes ?? false);
+  const repoRoot = repoRootFor(args.repo);
+  const plannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
+  const { spec } = planAttempt(
     effectivePrompt,
-    assumeDangerousSkipPermissions,
-    args,
+    composerMode,
+    {
+      sessionId: session.sessionId,
+      turnId,
+      attemptId,
+      taskId: attemptId,
+      repoRoot,
+      config: BakudoConfigDefaults,
+    },
+    plannerOpts,
   );
-  const reviewed = await executeTask({
+
+  const { reviewed } = await executeAttempt({
     sessionStore,
     artifactStore,
     runner,
     sessionId: session.sessionId,
     turnId,
-    request,
+    spec,
     args,
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
     ...(options.eventLogWriterFactory
@@ -162,7 +180,6 @@ export const appendTurnToActiveSession = async (
     throw new Error(`cannot append turn: unknown session ${sessionId}`);
   }
 
-  const assumeDangerousSkipPermissions = await resolveAssumeDangerous(args);
   const turnId = nextTurnId(existing);
   const previousTurn = existing.turns.at(-1);
 
@@ -208,21 +225,31 @@ export const appendTurnToActiveSession = async (
     throw new Error(`session disappeared during turn append: ${sessionId}`);
   }
   const attemptId = nextAttemptId(withTurn, turnId);
-  const request = createTaskSpec(
-    sessionId,
-    attemptId,
+  const composerMode = taskModeToComposerMode(args.mode, args.yes ?? false);
+  const repoRoot = repoRootFor(args.repo);
+  const appendPlannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
+  const { spec } = planAttempt(
     effectivePrompt,
-    assumeDangerousSkipPermissions,
-    args,
+    composerMode,
+    {
+      sessionId,
+      turnId,
+      attemptId,
+      taskId: attemptId,
+      repoRoot,
+      config: BakudoConfigDefaults,
+    },
+    appendPlannerOpts,
   );
+
   await sessionStore.saveSession({ ...withTurn, status: "running" });
-  const reviewed = await executeTask({
+  const { reviewed } = await executeAttempt({
     sessionStore,
     artifactStore,
     runner,
     sessionId,
     turnId,
-    request,
+    spec,
     args,
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),
     ...(options.eventLogWriterFactory

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { AttemptSpec } from "./attemptProtocol.js";
 import type {
   SessionAttemptRecord,
   SessionRecord,
@@ -95,9 +96,11 @@ export const coerceLooseReviewRecord = (
       ? record.reviewId
       : createReviewId();
   const reason = typeof record.reason === "string" ? record.reason : undefined;
+  const intentId = typeof record.intentId === "string" ? record.intentId : undefined;
   return {
     reviewId,
     attemptId,
+    ...(intentId === undefined ? {} : { intentId }),
     outcome: coerceSessionReviewOutcome(record.outcome),
     action: coerceSessionReviewAction(record.action),
     ...(reason === undefined ? {} : { reason }),
@@ -249,3 +252,27 @@ export const loadSessionRecord = (raw: unknown): SessionRecord => {
   }
   throw new Error("unrecognized session record shape");
 };
+
+// ---------------------------------------------------------------------------
+// Legacy spec synthesizer — display-only, never re-dispatched
+// ---------------------------------------------------------------------------
+
+/**
+ * Synthesize a read-only partial {@link AttemptSpec} from a v2
+ * {@link SessionAttemptRecord} that lacks an `attemptSpec`. This lets the
+ * `/inspect` surface render spec-style metadata for sessions created before
+ * the Phase 3 planner existed.
+ *
+ * The returned spec is intentionally `Partial<AttemptSpec>` — fields like
+ * `permissions`, `budget`, `acceptanceChecks`, and `artifactRequests` are
+ * absent because legacy attempts did not record them.
+ */
+export const synthesizeLegacySpec = (
+  attempt: SessionAttemptRecord,
+  turn: SessionTurnRecord,
+): Partial<AttemptSpec> => ({
+  taskKind: "explicit_command",
+  prompt: turn.prompt,
+  mode: (attempt.request?.mode ?? "build") as "build" | "plan",
+  execution: { engine: "shell", command: ["bash", "-lc", turn.prompt] },
+});

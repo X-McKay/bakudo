@@ -1,15 +1,22 @@
 import { spawn } from "node:child_process";
 
+import type { AttemptSpec } from "./attemptProtocol.js";
 import {
   BAKUDO_PROTOCOL_SCHEMA_VERSION,
   type TaskProgressEvent,
   type TaskRequest,
 } from "./protocol.js";
+import { dispatchTaskKind } from "./worker/taskKinds.js";
 
 export const WORKER_EVENT_PREFIX = "BAKUDO_WORKER_EVENT";
 export const WORKER_RESULT_PREFIX = "BAKUDO_WORKER_RESULT";
 export const WORKER_ERROR_PREFIX = "BAKUDO_WORKER_ERROR";
 
+/**
+ * @deprecated Replaced by {@link AttemptSpec} in the planAttempt → executeAttempt
+ * pipeline (Phase 3). Kept for backward compatibility with legacy executeTask
+ * callers. Remove in Phase 6.
+ */
 export type WorkerTaskSpec = TaskRequest & {
   timeoutSeconds?: number;
   maxOutputBytes?: number;
@@ -116,6 +123,33 @@ const captureToString = (capture: ByteCapture): string =>
 const formatMessage = (goal: string): string => {
   const trimmed = goal.trim().replace(/\s+/g, " ");
   return trimmed.length <= 96 ? trimmed : `${trimmed.slice(0, 93)}...`;
+};
+
+/** Resolved spawn args + budget overrides from either AttemptSpec or legacy spec. */
+type ResolvedCommand = {
+  spawnArgs: [string, string[]];
+  goalLabel: string;
+  timeoutSeconds?: number;
+  maxOutputBytes?: number;
+  heartbeatIntervalMs?: number;
+};
+
+/** Detect taskKind → AttemptSpec dispatch; else legacy bash -lc goal. */
+const resolveCommand = (spec: WorkerTaskSpec, shell: string): ResolvedCommand => {
+  const raw = spec as Record<string, unknown>;
+  if (typeof raw.taskKind === "string") {
+    const as = raw as unknown as AttemptSpec;
+    const cmd = dispatchTaskKind(as);
+    const [exe = shell, ...args] = cmd.command;
+    return {
+      spawnArgs: [exe, args],
+      goalLabel: cmd.command.join(" "),
+      timeoutSeconds: as.budget.timeoutSeconds,
+      maxOutputBytes: as.budget.maxOutputBytes,
+      heartbeatIntervalMs: as.budget.heartbeatIntervalMs,
+    };
+  }
+  return { spawnArgs: [shell, ["-lc", spec.goal]], goalLabel: spec.goal };
 };
 
 const nowIso = (now?: () => Date): string => (now ?? (() => new Date()))().toISOString();
@@ -239,16 +273,26 @@ export const runWorkerTask = async (
   };
   const emit = options.emit ?? (() => undefined);
   const shell = options.shell ?? "bash";
+  const resolved = resolveCommand(spec, shell);
   const timeoutSeconds = clampPositiveInteger(
-    options.timeoutSeconds ?? spec.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+    options.timeoutSeconds ??
+      resolved.timeoutSeconds ??
+      spec.timeoutSeconds ??
+      DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
   );
   const maxOutputBytes = clampPositiveInteger(
-    options.maxOutputBytes ?? spec.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
+    options.maxOutputBytes ??
+      resolved.maxOutputBytes ??
+      spec.maxOutputBytes ??
+      DEFAULT_MAX_OUTPUT_BYTES,
     DEFAULT_MAX_OUTPUT_BYTES,
   );
   const heartbeatIntervalMs = clampPositiveInteger(
-    options.heartbeatIntervalMs ?? spec.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+    options.heartbeatIntervalMs ??
+      resolved.heartbeatIntervalMs ??
+      spec.heartbeatIntervalMs ??
+      DEFAULT_HEARTBEAT_INTERVAL_MS,
     DEFAULT_HEARTBEAT_INTERVAL_MS,
   );
   const killGraceMs = clampPositiveInteger(
@@ -261,7 +305,13 @@ export const runWorkerTask = async (
   emitProgress(emit, spec, "task.queued", "queued", "task accepted for execution", {
     percentComplete: 0,
   });
-  emitProgress(emit, spec, "task.started", "running", `running ${formatMessage(spec.goal)}`);
+  emitProgress(
+    emit,
+    spec,
+    "task.started",
+    "running",
+    `running ${formatMessage(resolved.goalLabel)}`,
+  );
 
   const stdoutCapture = makeCapture();
   const stderrCapture = makeCapture();
@@ -270,7 +320,7 @@ export const runWorkerTask = async (
   let timedOut = false;
   let failedToSpawn: Error | null = null;
 
-  const child = spawn(shell, ["-lc", spec.goal], {
+  const child = spawn(resolved.spawnArgs[0], resolved.spawnArgs[1], {
     cwd,
     env: runtimeProcess.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -349,7 +399,7 @@ export const runWorkerTask = async (
   const finishedAt = nowIso(options.now);
   const stdout = captureToString(stdoutCapture);
   const stderr = captureToString(stderrCapture);
-  const command = spec.goal;
+  const command = resolved.goalLabel;
   const status = failedToSpawn ? "failed" : workerResultStatusFromExitCode(exitCode, timedOut);
 
   const summary = failedToSpawn

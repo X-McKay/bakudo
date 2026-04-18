@@ -1,5 +1,5 @@
 import { createSessionEvent, type SessionEventEnvelope, type TaskMode } from "../protocol.js";
-import type { ReviewedTaskResult } from "../reviewer.js";
+import type { ReviewClassification } from "../resultClassifier.js";
 import type { SessionReviewRecord } from "../sessionTypes.js";
 import type { SessionStore } from "../sessionStore.js";
 import type { WorkerTaskProgressEvent, WorkerTaskSpec } from "../workerRuntime.js";
@@ -84,7 +84,7 @@ export const buildReviewCompletedEnvelope = (args: {
   sessionId: string;
   turnId: string;
   attemptId: string;
-  reviewed: ReviewedTaskResult;
+  reviewed: ReviewClassification;
 }): SessionEventEnvelope =>
   createSessionEvent({
     kind: "host.review_completed",

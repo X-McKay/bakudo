@@ -108,12 +108,14 @@ test("default registry: registers expected commands and aliases", () => {
     "review",
     "sandbox",
     "logs",
+    "run-command",
   ]) {
     assert.ok(registry.get(name), `expected /${name} registered`);
   }
   assert.ok(registry.get("quit"), "expected /quit alias");
   assert.ok(registry.get("approve"), "expected /approve alias for /autopilot");
   assert.ok(registry.get("continue"), "expected /continue alias for /resume");
+  assert.ok(registry.get("rc"), "expected /rc alias for /run-command");
 });
 
 test("default registry: /compact emits 'not yet available' stub event", async () => {

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+export * from "./attemptProtocol.js";
+
 export const BAKUDO_PROTOCOL_SCHEMA_VERSION = 1 as const;
 
 export type ProtocolSchemaVersion = typeof BAKUDO_PROTOCOL_SCHEMA_VERSION;

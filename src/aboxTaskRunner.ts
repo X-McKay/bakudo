@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { ABoxAdapter } from "./aboxAdapter.js";
+import type { AttemptSpec } from "./attemptProtocol.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskResult } from "./protocol.js";
 import {
   WORKER_ERROR_PREFIX,
@@ -203,6 +204,35 @@ const parseExecutionOutput = (
   };
 };
 
+/**
+ * Convert an {@link AttemptSpec} to a {@link WorkerTaskSpec} so the existing
+ * worker launch pipeline (heredocs, workerCli.js, workerRuntime.js) can
+ * execute it. The worker runtime inspects `taskKind` to decide the
+ * task-kind dispatch path (PR10); specs without `taskKind` fall through to
+ * the legacy `goal`-as-command path.
+ */
+export const attemptSpecToWorkerSpec = (spec: AttemptSpec): WorkerTaskSpec => {
+  const base: WorkerTaskSpec = {
+    schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
+    taskId: spec.taskId,
+    sessionId: spec.sessionId,
+    goal: spec.prompt,
+    mode: spec.mode,
+    cwd: spec.cwd,
+    timeoutSeconds: spec.budget.timeoutSeconds,
+    maxOutputBytes: spec.budget.maxOutputBytes,
+    heartbeatIntervalMs: spec.budget.heartbeatIntervalMs,
+    assumeDangerousSkipPermissions: spec.permissions.allowAllTools,
+  };
+  // Phase 3 v3 fields — workerRuntime reads `taskKind` + `attemptSpec` via
+  // duck-typing for task-kind dispatch. Not on the TS type (legacy shape)
+  // so we assign post-construction.
+  const extended = base as WorkerTaskSpec & { taskKind: string; attemptSpec: AttemptSpec };
+  extended.taskKind = spec.taskKind;
+  extended.attemptSpec = spec;
+  return extended;
+};
+
 export class ABoxTaskRunner {
   public constructor(private readonly adapter: ABoxAdapter) {}
 
@@ -231,6 +261,25 @@ export class ABoxTaskRunner {
     });
     const output = rawOutput.length > 0 ? rawOutput : execution.output;
     return parseExecutionOutput(spec, output, execution.ok, execution.metadata, handlers);
+  }
+
+  /**
+   * Run an {@link AttemptSpec} through the worker pipeline. Converts the
+   * spec to a {@link WorkerTaskSpec}, delegates to {@link runTask}.
+   */
+  public async runAttempt(
+    spec: AttemptSpec,
+    overrides: {
+      shell?: string;
+      timeoutSeconds?: number;
+      maxOutputBytes?: number;
+      heartbeatIntervalMs?: number;
+      killGraceMs?: number;
+    } = {},
+    handlers: TaskRunnerHandlers = {},
+  ): Promise<TaskExecutionRecord> {
+    const workerSpec = attemptSpecToWorkerSpec(spec);
+    return this.runTask(workerSpec, overrides, handlers);
   }
 }
 

@@ -5,6 +5,7 @@ import { createInterface } from "node:readline/promises";
 import type { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import type { ArtifactStore } from "../artifactStore.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskMode, type TaskRequest } from "../protocol.js";
+import type { ReviewClassification } from "../resultClassifier.js";
 import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
 import type { SessionAttemptRecord, SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
@@ -32,7 +33,7 @@ export const storageRootFor = (
 
 export const repoRootFor = (repo: string | undefined): string => resolve(repo ?? ".");
 
-export const sessionStatusFromReview = (reviewed: ReviewedTaskResult): SessionStatus => {
+export const sessionStatusFromReview = (reviewed: ReviewClassification): SessionStatus => {
   if (reviewed.outcome === "success") {
     return "completed";
   }
@@ -75,6 +76,10 @@ export const composerModeToTaskMode = (mode: TaskMode | string): TaskMode => {
   return "build";
 };
 
+/**
+ * @deprecated Replaced by planAttempt → executeAttempt pipeline (Phase 3).
+ * Remove in Phase 6.
+ */
 export const createTaskSpec = (
   sessionId: string,
   taskId: string,
@@ -125,6 +130,10 @@ export type ExecuteTaskContext = {
   onProgress?: (event: import("../workerRuntime.js").WorkerTaskProgressEvent) => void;
 };
 
+/**
+ * @deprecated Replaced by planAttempt → executeAttempt pipeline (Phase 3).
+ * Remove in Phase 6.
+ */
 export const executeTask = async (ctx: ExecuteTaskContext): Promise<ReviewedTaskResult> => {
   const { sessionStore, artifactStore, runner, sessionId, turnId, request, args, onProgress } = ctx;
   const storageRoot = sessionStore.rootDir;

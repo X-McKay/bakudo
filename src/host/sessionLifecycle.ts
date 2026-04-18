@@ -28,6 +28,9 @@ import { emitTurnTransition, findLatestTurnTransition } from "./transitionStore.
  * session with a single turn and runs one attempt through `executeTask`.
  * Split out of `orchestration.ts` so the file can stay within the 400-line
  * cap while growing the PR4 DI + artifact writer surface.
+ *
+ * @deprecated Uses the legacy createTaskSpec → executeTask path. Phase 6
+ * should migrate this to planAttempt → executeAttempt.
  */
 export const runNewSession = async (args: HostCliArgs): Promise<number> => {
   const fileConfig = await loadConfig(args.config);
@@ -95,6 +98,10 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
   return reviewedOutcomeExitCode(reviewed);
 };
 
+/**
+ * @deprecated Uses the legacy executeTask path. Phase 6 should migrate this
+ * to planAttempt → executeAttempt.
+ */
 export const resumeSession = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const sessionStore = new SessionStore(rootDir);
