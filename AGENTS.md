@@ -28,3 +28,19 @@ When modifying `src/host/**`:
 2. Never assign to a nested property of `appState` directly.
 3. `deps.transcript.push(...)` is allowed — transcript is an append-only mutable log.
 4. The reducer (`src/host/reducer.ts`) MUST remain a pure function: no side effects, always returns a new object via spread.
+
+## Phase 3 Dispatch Pipeline
+
+User prompts flow through: `intentClassifier` -> `attemptCompiler` -> `executeAttempt` -> `reviewAttemptResult`.
+
+- **Intent classifier** (`src/host/intentClassifier.ts`): deterministic, no LLM. Four kinds: `implement_change`, `inspect_repository`, `run_check`, `run_explicit_command`.
+- **Attempt compiler** (`src/host/attemptCompiler.ts`): produces `AttemptSpec` (schema v3) with permissions, budget, acceptance checks.
+- **Planner** (`src/host/planner.ts`): single entry point `planAttempt(prompt, mode, context)`.
+- **Executor** (`src/host/executeAttempt.ts`): dispatches to abox, persists `attemptSpec` on `SessionAttemptRecord`.
+- **Reviewer** (`src/reviewer.ts`): `reviewAttemptResult` uses structured `checkResults` for accept/reject.
+
+Legacy path (`createTaskSpec` -> `executeTask`) is deprecated (Phase 6 removal). `WorkerTaskSpec` is deprecated in favor of `AttemptSpec`.
+
+### Permission invariant
+
+Deny always wins. Even in autopilot mode, a `deny` rule overrides any `allow`. See `evaluatePermission` in `src/host/permissionEvaluator.ts`.

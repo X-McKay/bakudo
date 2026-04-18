@@ -84,7 +84,6 @@ export const attemptModeLabel = (attempt: SessionAttemptRecord): string =>
 
 export const latestTurn = (session: SessionRecord): SessionTurnRecord | undefined =>
   session.turns.at(-1);
-
 export const latestAttempt = (
   turn: SessionTurnRecord,
   attemptId?: string,

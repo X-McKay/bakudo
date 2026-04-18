@@ -12,6 +12,35 @@
 - **Durable Traces**: Detailed step-by-step traces and periodic checkpoint summaries for auditability and debugging.
 - **TypeScript First**: Aligns with modern agent ecosystems (MCP-first integrations, server/CLI UX) while maintaining a lightweight core with zero runtime dependencies.
 
+## Architecture (Phase 3)
+
+Every user prompt flows through a deterministic pipeline:
+
+```
+user prompt → intent classification → attempt compilation → bounded sandbox dispatch → structured review
+```
+
+**Intent classification** (`intentClassifier.ts`): deterministic heuristic rules classify the prompt into one of four kinds:
+
+| Intent Kind | Trigger | Task Kind | Engine |
+|---|---|---|---|
+| `implement_change` | Default for standard/autopilot mode | `assistant_job` | `agent_cli` |
+| `inspect_repository` | Plan mode prompt | `assistant_job` | `agent_cli` |
+| `run_check` | "run tests", "execute lint", etc. | `verification_check` | `shell` |
+| `run_explicit_command` | `/run-command <cmd>` | `explicit_command` | `shell` |
+
+**Attempt compilation** (`attemptCompiler.ts`): transforms the intent into an `AttemptSpec` (schema v3) with mode-derived permissions, budget constraints, acceptance checks, and artifact requests.
+
+**Dispatch** (`executeAttempt.ts`): executes the spec in an abox sandbox via `runAttempt`, persists the `attemptSpec` on the `SessionAttemptRecord`, and runs structured review.
+
+**Structured review** (`reviewer.ts` / `reviewAttemptResult`): checks `AttemptExecutionResult.checkResults` for acceptance verification. All checks passed + exit 0 = success. Otherwise falls through to the heuristic classifier.
+
+**Permission model**: deny-precedence invariant. A `deny` rule always overrides `allow`, even in autopilot mode. Permissions are compiled from the composer mode's agent profile at spec compilation time.
+
+**`/run-command` escape hatch**: bypasses intent classification, compiles directly to `explicit_command` with `engine: "shell"` and `command: ["bash", "-lc", "<raw>"]`.
+
+**Legacy compatibility**: `createTaskSpec` and `executeTask` are deprecated but preserved. Sessions created before Phase 3 lack `attemptSpec` on their attempts; the inspect surface synthesizes a display-only legacy spec via `synthesizeLegacySpec`.
+
 ## Project Structure
 
 - `src/models.ts`: Shared domain types, including `Mode`, `RiskLevel`, `PlanStep`, and autonomy budgets.
