@@ -6,6 +6,7 @@ import {
   type HostScreen,
   type InspectTab,
   type PromptEntry,
+  type QuickHelpContext,
   type SessionPickerPayload,
 } from "./appState.js";
 import { matchesFuzzy } from "./fuzzyFilter.js";
@@ -55,7 +56,9 @@ export type HostAction =
   | { type: "session_picker_select_next"; id: string }
   | { type: "session_picker_select_prev"; id: string }
   | { type: "push_notice"; notice: string }
-  | { type: "clear_notices" };
+  | { type: "clear_notices" }
+  | { type: "open_quick_help"; context: QuickHelpContext; dialogKind?: string }
+  | { type: "close_quick_help" };
 
 const withoutOptional = <T extends object, K extends keyof T>(obj: T, key: K): T => {
   if (!(key in obj)) {
@@ -370,5 +373,33 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
         return state;
       }
       return { ...state, notices: [] };
+    case "open_quick_help": {
+      // Toggle-off semantics: re-dispatching with same context+dialogKind closes.
+      const existing = state.quickHelp;
+      if (
+        existing !== undefined &&
+        existing.context === action.context &&
+        existing.dialogKind === action.dialogKind
+      ) {
+        const rest = { ...state };
+        delete (rest as { quickHelp?: unknown }).quickHelp;
+        return rest;
+      }
+      return {
+        ...state,
+        quickHelp: {
+          context: action.context,
+          ...(action.dialogKind !== undefined ? { dialogKind: action.dialogKind } : {}),
+        },
+      };
+    }
+    case "close_quick_help": {
+      if (state.quickHelp === undefined) {
+        return state;
+      }
+      const rest = { ...state };
+      delete (rest as { quickHelp?: unknown }).quickHelp;
+      return rest;
+    }
   }
 };

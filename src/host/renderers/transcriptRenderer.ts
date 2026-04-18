@@ -1,4 +1,7 @@
-import { bold, dim, gray, renderModeChip, tone } from "../ansi.js";
+import { bold, dim, gray, renderBox, renderModeChip, tone } from "../ansi.js";
+import { DEFAULT_BINDINGS } from "../keybindings/defaults.js";
+import { getKeybindingsFor } from "../keybindings/hooks.js";
+import { buildQuickHelpContents } from "../overlays/quickHelp.js";
 import { renderApprovalPromptLines } from "./approvalPromptCopy.js";
 import { renderCommandPaletteOverlayLines } from "./commandPaletteOverlay.js";
 import { renderSessionPickerOverlayLines } from "./sessionPickerOverlay.js";
@@ -65,6 +68,24 @@ const renderOverlay = (frame: RenderFrame): string[] => {
   }
   if (overlay.kind === "timeline_picker") {
     return [tone.info("[timeline picker]")];
+  }
+  if (overlay.kind === "quick_help") {
+    const registered = getKeybindingsFor(
+      overlay.context === "dialog"
+        ? "Dialog"
+        : overlay.context === "inspect"
+          ? "Inspect"
+          : overlay.context === "transcript"
+            ? "Transcript"
+            : "Composer",
+    );
+    const body = buildQuickHelpContents(
+      overlay.context,
+      DEFAULT_BINDINGS,
+      registered.size > 0 ? registered : undefined,
+      overlay.dialogKind,
+    );
+    return renderBox("?", body, 60).map((line) => tone.info(line));
   }
   return renderSessionPickerOverlayLines(overlay.request).map((line) => tone.info(line));
 };

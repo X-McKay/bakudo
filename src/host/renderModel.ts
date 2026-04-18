@@ -90,10 +90,29 @@ const deriveOverlay = (
   return { kind: "session_picker", request };
 };
 
+/**
+ * If `state.quickHelp` is set, the `?` overlay preempts whatever dialog is
+ * currently pending. The *pending dialog's kind* is carried forward as
+ * `overlay.dialogKind` so the content builder can tailor the heading.
+ */
+const promoteQuickHelp = (
+  base: HostOverlay | undefined,
+  quickHelp: HostAppState["quickHelp"],
+): HostOverlay | undefined => {
+  if (quickHelp === undefined) {
+    return base;
+  }
+  const inheritedKind = quickHelp.dialogKind ?? base?.kind;
+  return inheritedKind === undefined
+    ? { kind: "quick_help", context: quickHelp.context }
+    : { kind: "quick_help", context: quickHelp.context, dialogKind: inheritedKind };
+};
+
 export const selectRenderFrame = (inputs: FrameInputs): RenderFrame => {
   const { state, transcript, repoLabel } = inputs;
   const head = state.promptQueue[0];
-  const overlay = deriveOverlay(head, state);
+  const baseOverlay = deriveOverlay(head, state);
+  const overlay = promoteQuickHelp(baseOverlay, state.quickHelp);
   const hasOverlay = overlay !== undefined;
   const offTranscript = state.screen !== "transcript";
   const mode: FrameMode = hasOverlay || offTranscript ? "transcript" : "prompt";
