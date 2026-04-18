@@ -56,6 +56,39 @@ export type DialogDispatcher = {
 };
 
 // ---------------------------------------------------------------------------
+// Non-interactive toggle — `--no-ask-user` (Phase 5 PR11)
+// ---------------------------------------------------------------------------
+
+/**
+ * Module-scoped flag backing the `--no-ask-user` CLI option. When `true`,
+ * {@link launchApprovalDialog} throws instead of enqueuing an overlay.
+ * Exposed as a setter (rather than a dialog argument) so every caller in
+ * the approval pipeline picks up the same policy without plumbing the flag
+ * through multiple hops. Callers MUST reset it between one-shot invocations
+ * with {@link resetNoAskUser} to avoid state leaks in tests.
+ */
+let noAskUserEnabled = false;
+
+export const setNoAskUser = (enabled: boolean): void => {
+  noAskUserEnabled = enabled;
+};
+
+export const isNoAskUserEnabled = (): boolean => noAskUserEnabled;
+
+export const resetNoAskUser = (): void => {
+  noAskUserEnabled = false;
+};
+
+/**
+ * Format the error message thrown when `--no-ask-user` would otherwise open
+ * an interactive dialog. Kept as a pure helper so tests can assert on the
+ * exact string and future callers (recovery dialog, session picker) can
+ * share the format.
+ */
+export const noAskUserErrorMessage = (tool: string, argument: string): string =>
+  `--no-ask-user: approval required for ${tool}(${argument})`;
+
+// ---------------------------------------------------------------------------
 // Approval dialog — the real producer
 // ---------------------------------------------------------------------------
 
@@ -108,6 +141,12 @@ export const launchApprovalDialog = async (
   request: ApprovalRequest,
   suggestedPattern: string,
 ): Promise<ApprovalDialogChoice> => {
+  if (noAskUserEnabled) {
+    // Non-interactive mode: fail loudly with a deterministic message so
+    // downstream orchestration surfaces the approval-gate hit via exit
+    // code 2 (Phase 6 error taxonomy). No queue entry is created.
+    throw new Error(noAskUserErrorMessage(request.tool, request.argument));
+  }
   const id = newPromptId();
   // The payload IS the ApprovalPromptRequest — renderers read it verbatim.
   const entry: PromptEntry = { id, kind: "approval_prompt", payload: request };

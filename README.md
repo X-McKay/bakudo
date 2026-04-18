@@ -154,6 +154,29 @@ bakudo review <session-id> --json
 bakudo sandbox <session-id> --json
 ```
 
+### Flag compatibility
+
+Phase 5 wires the Copilot-parity flag namespace through all three renderer
+backends (TTY / plain / JSON). Three flags are confirmed parity with the
+public GitHub Copilot CLI; the remaining three are documented as
+bakudo-specific reframes because their semantics are not publicly spec'd.
+
+| Flag | Parity | Semantics |
+| --- | --- | --- |
+| `-p, --prompt <text>` | Copilot parity | One-shot: run the prompt end-to-end and exit. |
+| `--output-format=json` | Copilot parity | JSONL stream on stdout. Review summary is emitted as a `review_completed` envelope. |
+| `--allow-all-tools` | Copilot parity | Forces Autopilot mode. Deny rules still win. |
+| `--stream=off` | **Bakudo-specific** | Buffer stdout until the worker terminal event. |
+| `--plain-diff` | **Bakudo-specific** | Strip ANSI escape sequences from `kind: "diff"` artifacts before persistence. |
+| `--no-ask-user` | **Bakudo-specific** | `launchApprovalDialog` throws `--no-ask-user: approval required for <tool>(<arg>)`; exit code 2 per Phase 6 error taxonomy. |
+| `--max-autopilot-continues=N` | **Bakudo-original** | Cap unattended Autopilot continue chains (default 10). Halts with `autopilot continue limit reached`. |
+
+Example one-shot:
+
+```bash
+bakudo -p "run tests in ./cli" --output-format=json --no-ask-user
+```
+
 ### Session model
 
 Sessions follow a **session -> turns -> attempts** hierarchy:

@@ -73,6 +73,15 @@ const taskModeToComposerMode = (mode: string, autoApprove: boolean): ComposerMod
   return autoApprove ? "autopilot" : "standard";
 };
 
+/**
+ * Resolve the effective auto-approve flag, honoring `--allow-all-tools` as a
+ * Copilot-parity shortcut for Autopilot mode. Deny-precedence still wins
+ * inside `resolveApprovalBeforeDispatch` — this only collapses the composer
+ * mode so the planner emits `allowAllTools: true` on the spec.
+ */
+const resolveAutoApprove = (args: HostCliArgs): boolean =>
+  (args.yes ?? false) || args.copilot.allowAllTools === true;
+
 export type SessionDispatchOptions = {
   onProgress?: (event: WorkerTaskProgressEvent) => void;
   eventLogWriterFactory?: EventLogWriterFactory;
@@ -129,7 +138,7 @@ export const createAndRunFirstTurn = async (
   );
 
   const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
-  const composerMode = taskModeToComposerMode(args.mode, args.yes ?? false);
+  const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
   const repoRoot = repoRootFor(args.repo);
   const plannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
   const { spec } = planAttempt(
@@ -225,7 +234,7 @@ export const appendTurnToActiveSession = async (
     throw new Error(`session disappeared during turn append: ${sessionId}`);
   }
   const attemptId = nextAttemptId(withTurn, turnId);
-  const composerMode = taskModeToComposerMode(args.mode, args.yes ?? false);
+  const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
   const repoRoot = repoRootFor(args.repo);
   const appendPlannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
   const { spec } = planAttempt(
