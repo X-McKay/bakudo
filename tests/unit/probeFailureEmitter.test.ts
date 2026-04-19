@@ -131,7 +131,7 @@ test("envelope builder: returns null when fallbackReason is missing", () => {
 
 test("runner: emitter fires when probe falls back", async () => {
   const received: Array<{ outcome: ProbeOutcome; bin: string; spec: AttemptSpec }> = [];
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, noopSpawn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, noopSpawn);
   const provider = async (): Promise<ProbeOutcome> => ({
     capabilities: hostDefaultFallbackCapabilities(),
     fallbackReason: "abox does not support --capabilities",
@@ -148,7 +148,7 @@ test("runner: emitter fires when probe falls back", async () => {
 
 test("runner: emitter does NOT fire when probe succeeds", async () => {
   const received: unknown[] = [];
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, noopSpawn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, noopSpawn);
   const provider = async (): Promise<ProbeOutcome> => ({
     capabilities: {
       protocolVersions: [3],
@@ -166,7 +166,7 @@ test("runner: emitter does NOT fire when probe succeeds", async () => {
 
 test("runner: emitter fires exactly once across multiple runAttempt calls (dedupe)", async () => {
   let calls = 0;
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, noopSpawn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, noopSpawn);
   const provider = async (): Promise<ProbeOutcome> => ({
     capabilities: hostDefaultFallbackCapabilities(),
     fallbackReason: "fallback",

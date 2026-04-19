@@ -1,67 +1,33 @@
-import { randomUUID } from "node:crypto";
-
+import type { AttemptSpec, DispatchPlan } from "../attemptProtocol.js";
 import { ABoxAdapter } from "../aboxAdapter.js";
-import { ABoxTaskRunner, attemptSpecToWorkerSpec } from "../aboxTaskRunner.js";
+import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
-import { buildRuntimeConfig, loadConfig } from "../config.js";
+import type { TaskRequest } from "../protocol.js";
 import { reviewTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
-import type { WorkerTaskSpec } from "../workerRuntime.js";
-import { loadConfigCascade } from "./config.js";
+import { BakudoConfigDefaults, loadConfigCascade } from "./config.js";
 import { resolveEnvPolicyForHost } from "./envPolicy.js";
-import { resolveRedactionPolicyForHost } from "./redaction.js";
+import { executeAttempt } from "./executeAttempt.js";
 import { stdoutWrite } from "./io.js";
+import type { HostCliArgs } from "./parsing.js";
+import { planAttempt } from "./planner.js";
+import { latestAttempt, latestTurn, printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
+import { resolveRedactionPolicyForHost } from "./redaction.js";
 import {
-  createTaskSpec,
-  executeTask,
-  makeInitialTurn,
   promptForApproval,
   repoRootFor,
   requiresSandboxApproval,
   sessionStatusFromReview,
   storageRootFor,
-} from "./orchestration.js";
-import type { HostCliArgs } from "./parsing.js";
-import { latestAttempt, latestTurn, printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
+} from "./sessionRunSupport.js";
+import { createAndRunFirstTurn } from "./sessionController.js";
 import { emitTurnTransition, findLatestTurnTransition } from "./transitionStore.js";
 
-/**
- * CLI entry for non-interactive `bakudo plan/build/run` — creates a new
- * session with a single turn and runs one attempt through `executeTask`.
- * Split out of `orchestration.ts` so the file can stay within the 400-line
- * cap while growing the PR4 DI + artifact writer surface.
- *
- * @deprecated Uses the legacy createTaskSpec → executeTask path. Phase 6
- * should migrate this to planAttempt → executeAttempt.
- */
 export const runNewSession = async (args: HostCliArgs): Promise<number> => {
-  const fileConfig = await loadConfig(args.config);
-  const runtimeConfig = buildRuntimeConfig(fileConfig);
-  const rootDir = storageRootFor(args.repo, args.storageRoot);
-  const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const assumeDangerousSkipPermissions =
-    args.mode === "build" ? runtimeConfig.assumeDangerousSkipPermissions : false;
-  const sessionStore = new SessionStore(rootDir);
-  // Phase 6 W5: resolve env-passthrough policy from the host config cascade
-  // + BAKUDO_ENV_ALLOWLIST override (plan Default Rule 362). Wave 6c PR7:
-  // also resolve the effective redaction policy (carryover #7) and pass it
-  // into the artifact store so user-configured patterns are honored.
-  const { merged: hostConfig } = await loadConfigCascade(repoRootFor(args.repo), {});
-  const envPolicy = resolveEnvPolicyForHost(
-    hostConfig.envPolicy?.allowlist !== undefined
-      ? { configAllowlist: hostConfig.envPolicy.allowlist }
-      : {},
-  );
-  const redactionPolicy = resolveRedactionPolicyForHost({
-    ...(hostConfig.redaction !== undefined ? { configExtra: hostConfig.redaction } : {}),
-  });
-  const artifactStore = new ArtifactStore(rootDir, redactionPolicy);
-  const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin, args.repo), undefined, envPolicy);
-
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
-      `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+      `Dispatch a ${args.mode} attempt into an abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Dispatch cancelled.\n");
@@ -69,77 +35,103 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
     }
   }
 
-  const turnId = "turn-1";
-  const session = await sessionStore.createSession({
-    sessionId,
-    goal: args.goal ?? "",
-    repoRoot: repoRootFor(args.repo),
-    assumeDangerousSkipPermissions,
-    status: "planned",
-    turns: [makeInitialTurn(turnId, args.goal ?? "", args.mode)],
-  });
-  await emitTurnTransition({
-    storageRoot: rootDir,
-    sessionId: session.sessionId,
-    turnId,
-    fromStatus: "queued",
-    toStatus: "queued",
-    reason: "next_turn",
-  });
-
-  const taskId = createSessionTaskKey(session.sessionId, "task-1");
-  const request = createTaskSpec(
-    session.sessionId,
-    taskId,
-    args.goal ?? "",
-    assumeDangerousSkipPermissions,
-    args,
-  );
-  await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask({
-    sessionStore,
-    artifactStore,
-    runner,
-    sessionId: session.sessionId,
-    turnId,
-    request,
-    args,
-  });
-
-  const finalSession = await sessionStore.saveSession({
-    ...(await sessionStore.loadSession(session.sessionId))!,
-    status: sessionStatusFromReview(reviewed),
-  });
-  printRunSummary(finalSession, reviewed);
-  return reviewedOutcomeExitCode(reviewed);
+  const result = await createAndRunFirstTurn(args.goal ?? "", args);
+  printRunSummary(result.session, result.reviewed);
+  return reviewedOutcomeExitCode(result.reviewed);
 };
 
-/**
- * @deprecated Uses the legacy executeTask path. Phase 6 should migrate this
- * to planAttempt → executeAttempt.
- */
 export type ResumeSessionDeps = {
-  executeTaskFn?: typeof executeTask;
+  executeAttemptFn?: typeof executeAttempt;
+};
+
+const buildRetrySpec = (spec: AttemptSpec, retryId: string, args: HostCliArgs): AttemptSpec => ({
+  ...spec,
+  attemptId: retryId,
+  taskId: retryId,
+  budget: {
+    ...spec.budget,
+    timeoutSeconds: args.timeoutSeconds,
+    maxOutputBytes: args.maxOutputBytes,
+    heartbeatIntervalMs: args.heartbeatIntervalMs,
+  },
+});
+
+const composerModeFromLegacyRequest = (
+  request: TaskRequest,
+): "standard" | "plan" | "autopilot" => {
+  if (request.mode === "plan") {
+    return "plan";
+  }
+  return request.assumeDangerousSkipPermissions ? "autopilot" : "standard";
+};
+
+const buildRetryPlanFromLegacyRequest = (
+  request: TaskRequest,
+  retryId: string,
+  turnId: string,
+  args: HostCliArgs,
+): DispatchPlan => {
+  const repoRoot = repoRootFor(args.repo);
+  const { plan } = planAttempt(request.goal, composerModeFromLegacyRequest(request), {
+    sessionId: request.sessionId,
+    turnId,
+    attemptId: retryId,
+    taskId: retryId,
+    repoRoot,
+    config: BakudoConfigDefaults,
+  });
+  return {
+    ...plan,
+    spec: {
+      ...plan.spec,
+      turnId,
+      cwd: request.cwd ?? repoRoot,
+      budget: {
+        ...plan.spec.budget,
+        timeoutSeconds: args.timeoutSeconds,
+        maxOutputBytes: args.maxOutputBytes,
+        heartbeatIntervalMs: args.heartbeatIntervalMs,
+      },
+    },
+  };
+};
+
+const resolveRetryDispatch = (
+  args: HostCliArgs,
+  retryId: string,
+  turnId: string,
+  attempt: NonNullable<ReturnType<typeof latestAttempt>>,
+): { spec: AttemptSpec; plan?: DispatchPlan } => {
+  if (attempt.dispatchPlan?.spec !== undefined) {
+    const spec = buildRetrySpec(attempt.dispatchPlan.spec, retryId, args);
+    return { spec, plan: { ...attempt.dispatchPlan, spec } };
+  }
+  if (attempt.attemptSpec !== undefined) {
+    return { spec: buildRetrySpec(attempt.attemptSpec, retryId, args) };
+  }
+  if (attempt.request !== undefined) {
+    const plan = buildRetryPlanFromLegacyRequest(attempt.request, retryId, turnId, args);
+    return { spec: plan.spec, plan };
+  }
+  throw new Error(
+    `no resumable attempt found for session ${args.sessionId} (neither attemptSpec nor request is set)`,
+  );
 };
 
 export const resumeSession = async (
   args: HostCliArgs,
   deps: ResumeSessionDeps = {},
 ): Promise<number> => {
-  const executeTaskFn = deps.executeTaskFn ?? executeTask;
+  const executeAttemptFn = deps.executeAttemptFn ?? executeAttempt;
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const sessionStore = new SessionStore(rootDir);
-  // Wave 6c PR7 carryover #7: effective redaction policy resolved up-front
-  // so the artifact store scrubs per the user's configured patterns. The
-  // env-passthrough resolution is kept co-located below to preserve the
-  // existing call-ordering shape.
-  const { merged: resumeHostConfigEarly } = await loadConfigCascade(repoRootFor(args.repo), {});
-  const redactionPolicyResume = resolveRedactionPolicyForHost({
-    ...(resumeHostConfigEarly.redaction !== undefined
-      ? { configExtra: resumeHostConfigEarly.redaction }
+  const { merged: resumeHostConfig } = await loadConfigCascade(repoRootFor(args.repo), {});
+  const redactionPolicy = resolveRedactionPolicyForHost({
+    ...(resumeHostConfig.redaction !== undefined
+      ? { configExtra: resumeHostConfig.redaction }
       : {}),
   });
-  const artifactStore = new ArtifactStore(rootDir, redactionPolicyResume);
+  const artifactStore = new ArtifactStore(rootDir, redactionPolicy);
   const session = await sessionStore.loadSession(args.sessionId ?? "");
   if (session === null) {
     throw new Error(`unknown session: ${args.sessionId}`);
@@ -152,15 +144,6 @@ export const resumeSession = async (
   const attempt = latestAttempt(turn, args.taskId);
   if (attempt === undefined) {
     throw new Error(`no resumable attempt found for session ${session.sessionId}`);
-  }
-  const baseRequest =
-    attempt.attemptSpec !== undefined
-      ? attemptSpecToWorkerSpec(attempt.attemptSpec)
-      : attempt.request;
-  if (baseRequest === undefined) {
-    throw new Error(
-      `no resumable attempt found for session ${session.sessionId} (neither attemptSpec nor request is set)`,
-    );
   }
 
   const priorReview = attempt.result === undefined ? null : reviewTaskResult(attempt.result);
@@ -175,7 +158,7 @@ export const resumeSession = async (
 
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
-      `Re-dispatch task ${attempt.attemptId} into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+      `Re-dispatch attempt ${attempt.attemptId} into an abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Resume cancelled.\n");
@@ -183,27 +166,14 @@ export const resumeSession = async (
     }
   }
 
-  // Phase 6 W5: same env-policy resolution as the new-session entry above.
-  // Reuse the cascade loaded earlier for the redaction policy so the two
-  // factories see the same merged config layer.
-  const envPolicyResume = resolveEnvPolicyForHost(
-    resumeHostConfigEarly.envPolicy?.allowlist !== undefined
-      ? { configAllowlist: resumeHostConfigEarly.envPolicy.allowlist }
+  const envPolicy = resolveEnvPolicyForHost(
+    resumeHostConfig.envPolicy?.allowlist !== undefined
+      ? { configAllowlist: resumeHostConfig.envPolicy.allowlist }
       : {},
   );
-  const runner = new ABoxTaskRunner(
-    new ABoxAdapter(args.aboxBin, args.repo),
-    undefined,
-    envPolicyResume,
-  );
+  const runner = new ABoxTaskRunner(new ABoxAdapter(args.aboxBin), undefined, envPolicy);
   const retryId = createSessionTaskKey(session.sessionId, `retry-${turn.attempts.length + 1}`);
-  const request: WorkerTaskSpec = {
-    ...baseRequest,
-    taskId: retryId,
-    timeoutSeconds: args.timeoutSeconds,
-    maxOutputBytes: args.maxOutputBytes,
-    heartbeatIntervalMs: args.heartbeatIntervalMs,
-  };
+  const { spec, plan } = resolveRetryDispatch(args, retryId, turn.turnId, attempt);
 
   const previousTransition = await findLatestTurnTransition(
     rootDir,
@@ -222,15 +192,18 @@ export const resumeSession = async (
   });
 
   await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTaskFn({
-    sessionStore,
-    artifactStore,
-    runner,
-    sessionId: session.sessionId,
-    turnId: turn.turnId,
-    request,
-    args,
-  });
+  const { reviewed } = await executeAttemptFn(
+    {
+      sessionStore,
+      artifactStore,
+      runner,
+      sessionId: session.sessionId,
+      turnId: turn.turnId,
+      spec,
+      args,
+    },
+    plan,
+  );
   const updated = await sessionStore.saveSession({
     ...(await sessionStore.loadSession(session.sessionId))!,
     status: sessionStatusFromReview(reviewed),

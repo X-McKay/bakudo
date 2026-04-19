@@ -1,4 +1,4 @@
-import type { AttemptSpec } from "../attemptProtocol.js";
+import type { AttemptSpec, ExecutionProfile } from "../attemptProtocol.js";
 import type { TaskRunnerCommand } from "./taskKinds.js";
 
 /**
@@ -10,7 +10,14 @@ import type { TaskRunnerCommand } from "./taskKinds.js";
  * Because workerRuntime spawns a single process, the runner folds all check
  * commands into a single `bash -lc` invocation joined by `&&`.
  */
-export const runVerificationCheck = (spec: AttemptSpec): TaskRunnerCommand => {
+export const runVerificationCheck = (
+  spec: AttemptSpec,
+  _profile: ExecutionProfile,
+): TaskRunnerCommand => {
+  if (spec.execution.command !== undefined && spec.execution.command.length > 0) {
+    return { command: spec.execution.command };
+  }
+
   const checks = spec.acceptanceChecks.filter(
     (c) => c.command !== undefined && c.command.length > 0,
   );

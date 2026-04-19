@@ -17,7 +17,7 @@
 import type { HostCommandSpec } from "../commandRegistry.js";
 import { buildJsonErrorEnvelope } from "../errors.js";
 import { stdoutWrite } from "../io.js";
-import { storageRootFor, repoRootFor } from "../orchestration.js";
+import { storageRootFor, repoRootFor } from "../sessionRunSupport.js";
 import { listSessionSummaries, loadSession, readSessionEventLog } from "../timeline.js";
 import type { SessionEventEnvelope } from "../../protocol.js";
 import type { SessionRecord } from "../../sessionTypes.js";

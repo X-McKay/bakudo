@@ -7,6 +7,7 @@ import type {
   TurnIntent,
   TurnIntentKind,
 } from "../attemptProtocol.js";
+import { reservedGuestOutputDirForAttempt } from "../attemptProtocol.js";
 import {
   BAKUDO_HOST_EXECUTION_ENGINES,
   BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION,
@@ -159,19 +160,34 @@ const compilePermissions = (composerMode: ComposerMode, config: BakudoConfig): P
 // Acceptance checks
 // ---------------------------------------------------------------------------
 
-const buildAcceptanceChecks = (goals: string[]): AcceptanceCheck[] =>
-  goals.map((label, i) => ({
+const buildAcceptanceChecks = (intent: TurnIntent): AcceptanceCheck[] => {
+  if (intent.kind === "run_check") {
+    const command = deriveCheckCommand(intent.prompt);
+    return [
+      {
+        checkId: "check-0",
+        label: intent.acceptanceGoals[0] ?? "run requested verification check",
+        command,
+      },
+    ];
+  }
+
+  return intent.acceptanceGoals.map((label, i) => ({
     checkId: `check-${i}`,
     label,
   }));
+};
 
 // ---------------------------------------------------------------------------
 // Instructions
 // ---------------------------------------------------------------------------
 
-const buildInstructions = (intent: TurnIntent): string[] => {
+const buildInstructions = (intent: TurnIntent, attemptId: string): string[] => {
   const parts: string[] = [];
   parts.push(`User prompt: ${intent.prompt}`);
+  if (TASK_KIND_MAP[intent.kind] === "assistant_job") {
+    parts.push(`Reserved output directory: ${reservedGuestOutputDirForAttempt(attemptId)}`);
+  }
   for (const c of intent.constraints) {
     parts.push(`Constraint: ${c}`);
   }
@@ -200,8 +216,6 @@ export const compileAttemptSpec = (intent: TurnIntent, context: CompilerContext)
   let command: string[] | undefined;
   if (taskKind === "explicit_command") {
     command = extractCommand(intent.prompt);
-  } else if (taskKind === "verification_check") {
-    command = deriveCheckCommand(intent.prompt);
   }
 
   // Prompt
@@ -217,7 +231,7 @@ export const compileAttemptSpec = (intent: TurnIntent, context: CompilerContext)
     mode,
     taskKind,
     prompt,
-    instructions: buildInstructions(intent),
+    instructions: buildInstructions(intent, context.attemptId),
     cwd: context.repoRoot,
     execution: {
       engine,
@@ -234,7 +248,7 @@ export const compileAttemptSpec = (intent: TurnIntent, context: CompilerContext)
       heartbeatIntervalMs: 5000,
       ...(intent.tokenBudget !== undefined ? { tokenBudget: intent.tokenBudget } : {}),
     },
-    acceptanceChecks: buildAcceptanceChecks(intent.acceptanceGoals),
+    acceptanceChecks: buildAcceptanceChecks(intent),
     artifactRequests: ARTIFACT_REQUESTS[taskKind],
   };
 };

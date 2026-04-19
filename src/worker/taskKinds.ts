@@ -1,4 +1,4 @@
-import type { AttemptSpec, AttemptTaskKind } from "../attemptProtocol.js";
+import type { AttemptSpec, AttemptTaskKind, ExecutionProfile } from "../attemptProtocol.js";
 import { runAssistantJob } from "./assistantJobRunner.js";
 import { runExplicitCommand } from "./commandRunner.js";
 import { runVerificationCheck } from "./checkRunner.js";
@@ -14,7 +14,7 @@ export type TaskRunnerCommand = {
   stdin?: string;
 };
 
-export type TaskRunner = (spec: AttemptSpec) => TaskRunnerCommand;
+export type TaskRunner = (spec: AttemptSpec, profile: ExecutionProfile) => TaskRunnerCommand;
 
 // ---------------------------------------------------------------------------
 // Dispatch map
@@ -31,7 +31,10 @@ export const taskRunners: Record<AttemptTaskKind, TaskRunner> = {
  * spawn. The caller (workerRuntime) is responsible for process management
  * (timeout, capture, heartbeat, progress events).
  */
-export const dispatchTaskKind = (spec: AttemptSpec): TaskRunnerCommand => {
+export const dispatchTaskKind = (
+  spec: AttemptSpec,
+  profile: ExecutionProfile,
+): TaskRunnerCommand => {
   const runner = taskRunners[spec.taskKind];
-  return runner(spec);
+  return runner(spec, profile);
 };

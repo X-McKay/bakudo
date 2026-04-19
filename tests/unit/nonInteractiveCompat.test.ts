@@ -155,5 +155,5 @@ test("runHostCli: logs command succeeds with zero events on a sessionless file",
     runHostCli(["logs", sessionId, "--storage-root", storageRoot]),
   );
   assert.equal(value, 0);
-  assert.match(output, /No task events found|Logs/);
+  assert.match(output, /No log events found|Logs/);
 });

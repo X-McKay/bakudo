@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { ABoxTaskRunner, TaskExecutionRecord } from "../aboxTaskRunner.js";
 import type { ArtifactStore } from "../artifactStore.js";
-import type { AttemptExecutionResult, AttemptSpec } from "../attemptProtocol.js";
+import type { AttemptExecutionResult, AttemptSpec, DispatchPlan } from "../attemptProtocol.js";
 import type { TaskMode } from "../protocol.js";
 import { type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
@@ -19,8 +19,11 @@ import { createSessionEventLogWriter, type EventLogWriter } from "./eventLogWrit
 import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import type { HookRegistry } from "./hooks.js";
 import { startDispatchProgress } from "./dispatchProgress.js";
+import { discardSandbox, mergeSandbox } from "./mergeController.js";
 import { stdoutWrite } from "./io.js";
-import type { EventLogWriterFactory } from "./orchestration.js";
+import { harvestGuestArtifacts, writeHostArtifacts } from "./hostArtifactGenerator.js";
+import { inspectWorktree, type WorktreeInspection } from "./worktreeInspector.js";
+import { discoverWorktree } from "./worktreeDiscovery.js";
 import {
   buildDispatchStartedEnvelope,
   buildReviewCompletedEnvelope,
@@ -30,7 +33,7 @@ import {
 } from "./orchestrationSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import { recordProvenanceFinalize, recordProvenanceStart } from "./provenanceProducer.js";
-import { writeExecutionArtifacts } from "./sessionArtifactWriter.js";
+import { writeExecutionArtifacts, writeSessionArtifact } from "./sessionArtifactWriter.js";
 import { WorkerProtocolMismatchError } from "./errors.js";
 import { persistProtocolMismatchAttempt } from "./protocolMismatchPersist.js";
 
@@ -56,6 +59,23 @@ const PROFILE_NAME: Record<ComposerMode, string> = {
   autopilot: "autopilot",
 };
 
+type EventLogWriterFactory = (storageRoot: string, sessionId: string) => EventLogWriter;
+
+const attemptStatusFromReview = (
+  reviewed: ReviewedAttemptResult,
+): "succeeded" | "failed" | "blocked" | "needs_review" => {
+  if (reviewed.outcome === "success") {
+    return "succeeded";
+  }
+  if (reviewed.outcome === "blocked_needs_user" || reviewed.outcome === "policy_denied") {
+    return "blocked";
+  }
+  if (reviewed.outcome === "incomplete_needs_follow_up") {
+    return "needs_review";
+  }
+  return "failed";
+};
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -66,7 +86,7 @@ export type ExecuteAttemptContext = {
   runner: ABoxTaskRunner;
   sessionId: string;
   turnId: string;
-  spec: AttemptSpec;
+  spec?: AttemptSpec;
   args: HostCliArgs;
   eventLogWriterFactory?: EventLogWriterFactory;
   onProgress?: (event: WorkerTaskProgressEvent) => void;
@@ -118,15 +138,17 @@ export const toAttemptExecutionResult = (
 // ---------------------------------------------------------------------------
 
 /**
- * Execute an {@link AttemptSpec} through the abox worker pipeline. This is
- * the Phase 3 replacement for `executeTask` when dealing with
- * planner-produced specs. Legacy `executeTask` is preserved for backward
- * compatibility with specs that lack `taskKind`.
+ * Execute an {@link AttemptSpec} through the abox worker pipeline.
  */
 export const executeAttempt = async (
   ctx: ExecuteAttemptContext,
+  plan?: DispatchPlan,
 ): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
-  const { sessionStore, artifactStore, runner, sessionId, turnId, spec, args, onProgress } = ctx;
+  const spec = plan?.spec ?? ctx.spec;
+  if (spec === undefined) {
+    throw new Error("executeAttempt requires either plan.spec or ctx.spec");
+  }
+  const { sessionStore, artifactStore, runner, sessionId, turnId, args, onProgress } = ctx;
   const storageRoot = sessionStore.rootDir;
   const writerFactory = ctx.eventLogWriterFactory ?? createSessionEventLogWriter;
   const writer = writerFactory(storageRoot, sessionId);
@@ -136,6 +158,7 @@ export const executeAttempt = async (
       status: "queued",
       lastMessage: "queued for sandbox execution",
       attemptSpec: spec,
+      ...(plan !== undefined ? { dispatchPlan: plan } : {}),
     });
 
     const composerMode = inferComposerMode(spec);
@@ -144,9 +167,9 @@ export const executeAttempt = async (
     // so deny/ask decisions short-circuit the worker entirely. The producer
     // emits its own `host.approval_requested` / `host.approval_resolved`
     // envelopes; `host.dispatch_started` follows only on proceed.
-    const approvalOutcome = await runApprovalIfNeeded({ ctx, writer, composerMode });
+    const approvalOutcome = await runApprovalIfNeeded({ ctx, writer, composerMode, spec });
     if (approvalOutcome.status === "blocked") {
-      return handleBlockedDispatch({ ctx, writer, rationale: approvalOutcome.rationale });
+      return handleBlockedDispatch({ ctx, writer, rationale: approvalOutcome.rationale, spec });
     }
 
     await writer.append(
@@ -211,6 +234,7 @@ export const executeAttempt = async (
             stdoutWrite(`[worker-error] ${message}\n`);
           },
         },
+        plan?.profile,
       );
     } catch (error) {
       dispatchProgress.stop();
@@ -225,19 +249,56 @@ export const executeAttempt = async (
     }
 
     const executionResult = toAttemptExecutionResult(spec, execution);
-    const reviewed = reviewAttemptResult(spec, executionResult);
-
     const dispatchCommand = Array.isArray(execution.metadata?.cmd)
       ? execution.metadata.cmd.map((entry) => String(entry))
       : undefined;
+    const sandboxTaskId =
+      typeof execution.metadata?.taskId === "string" ? execution.metadata.taskId : undefined;
+    const discoveredWorktree =
+      plan?.profile.sandboxLifecycle === "preserved" && sandboxTaskId !== undefined
+        ? await discoverWorktree(spec.cwd, sandboxTaskId)
+        : null;
+    let inspection: WorktreeInspection | null = null;
+    if (discoveredWorktree !== null && sandboxTaskId !== undefined) {
+      try {
+        inspection = await inspectWorktree({
+          snapshot: discoveredWorktree,
+          taskId: sandboxTaskId,
+          attemptId: spec.attemptId,
+        });
+      } catch {
+        inspection = null;
+      }
+    }
+    const harvestedGuestArtifacts =
+      inspection === null
+        ? []
+        : await harvestGuestArtifacts({
+            artifactStore,
+            storageRoot,
+            sessionId,
+            turnId,
+            attemptId: spec.attemptId,
+            inspection,
+          });
+    const hostArtifacts =
+      inspection === null
+        ? []
+        : await writeHostArtifacts({
+            artifactStore,
+            storageRoot,
+            sessionId,
+            turnId,
+            attemptId: spec.attemptId,
+            inspection,
+          });
+    executionResult.artifacts.push(...harvestedGuestArtifacts, ...hostArtifacts);
 
     const finalized = await recordProvenanceFinalize({
       storageRoot,
       prior: started.record,
       ...(dispatchCommand !== undefined ? { dispatchCommand } : {}),
-      ...(typeof execution.metadata?.taskId === "string"
-        ? { sandboxTaskId: execution.metadata.taskId }
-        : {}),
+      ...(sandboxTaskId !== undefined ? { sandboxTaskId } : {}),
       exit: {
         exitCode: execution.result.exitCode ?? null,
         exitSignal: null,
@@ -247,17 +308,114 @@ export const executeAttempt = async (
     });
     await writer.append(finalized.envelope);
 
+    let reviewed = reviewAttemptResult(spec, executionResult, {
+      ...(plan?.profile !== undefined ? { profile: plan.profile } : {}),
+      inspection,
+    });
+    let mergeResult:
+      | {
+          merged?: boolean;
+          discarded?: boolean;
+          error?: string;
+        }
+      | null = null;
+    let sandboxLifecycleState:
+      | "ephemeral"
+      | "preserved_active"
+      | "preserved_merged"
+      | "preserved_discarded"
+      | "merge_failed" = plan?.profile.sandboxLifecycle === "preserved" ? "preserved_active" : "ephemeral";
+    const reviewedAt = new Date().toISOString();
+
+    if (plan?.profile.sandboxLifecycle === "preserved" && sandboxTaskId !== undefined) {
+      if (plan.profile.mergeStrategy === "auto" && reviewed.outcome === "success") {
+        try {
+          await mergeSandbox(args.aboxBin, spec.cwd, sandboxTaskId);
+          await discardSandbox(args.aboxBin, spec.cwd, sandboxTaskId);
+          mergeResult = { merged: true, discarded: true };
+          sandboxLifecycleState = "preserved_merged";
+        } catch (error) {
+          mergeResult = {
+            error: `auto-merge failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+          sandboxLifecycleState = "merge_failed";
+        }
+      } else if (plan.profile.mergeStrategy === "none") {
+        try {
+          await discardSandbox(args.aboxBin, spec.cwd, sandboxTaskId);
+          mergeResult = { discarded: true };
+          sandboxLifecycleState = "preserved_discarded";
+        } catch (error) {
+          mergeResult = {
+            error: `sandbox cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+          sandboxLifecycleState = "merge_failed";
+        }
+      }
+      reviewed = reviewAttemptResult(spec, executionResult, {
+        profile: plan.profile,
+        inspection,
+        ...(mergeResult === null ? {} : { mergeResult }),
+      });
+      if (mergeResult !== null) {
+        await writeSessionArtifact(
+          artifactStore,
+          storageRoot,
+          sessionId,
+          turnId,
+          spec.attemptId,
+          "merge-result.json",
+          `${JSON.stringify(mergeResult, null, 2)}\n`,
+          "report",
+          { generatedBy: "host.executeAttempt" },
+        );
+        executionResult.artifacts.push("merge-result.json");
+      }
+    }
+
     await writer.append(
       buildReviewStartedEnvelope({ sessionId, turnId, attemptId: spec.attemptId }),
     );
     await sessionStore.upsertAttempt(sessionId, turnId, {
       attemptId: spec.attemptId,
-      status: execution.result.status,
+      status: attemptStatusFromReview(reviewed),
       result: execution.result,
       lastMessage: reviewed.reason,
       attemptSpec: spec,
+      ...(plan !== undefined ? { dispatchPlan: plan } : {}),
+      sandboxLifecycleState,
+      sandbox: {
+        state: sandboxLifecycleState,
+        ...(plan?.candidateId !== undefined ? { candidateId: plan.candidateId } : {}),
+        ...(sandboxTaskId !== undefined ? { sandboxTaskId } : {}),
+        ...(discoveredWorktree?.branch !== undefined
+          ? { branchName: discoveredWorktree.branch }
+          : {}),
+        ...(discoveredWorktree?.path !== undefined ? { worktreePath: discoveredWorktree.path } : {}),
+        ...(inspection?.reservedOutputDir !== undefined
+          ? { reservedOutputDir: inspection.reservedOutputDir }
+          : {}),
+        ...(inspection?.repoChangedFiles !== undefined
+          ? { changedFiles: inspection.repoChangedFiles }
+          : {}),
+        ...(inspection?.outputArtifacts !== undefined
+          ? { outputArtifacts: inspection.outputArtifacts }
+          : {}),
+        updatedAt: reviewedAt,
+        ...(sandboxLifecycleState === "preserved_merged" ? { mergedAt: reviewedAt } : {}),
+        ...(sandboxLifecycleState === "preserved_discarded" ? { discardedAt: reviewedAt } : {}),
+        ...(mergeResult?.error !== undefined ? { mergeError: mergeResult.error } : {}),
+      },
       metadata: {
-        sandboxTaskId: execution.metadata?.taskId,
+        sandboxTaskId,
+        ...(discoveredWorktree?.path !== undefined ? { worktreePath: discoveredWorktree.path } : {}),
+        ...(discoveredWorktree?.branch !== undefined ? { branchName: discoveredWorktree.branch } : {}),
+        ...(inspection?.repoChangedFiles !== undefined
+          ? { changedFiles: inspection.repoChangedFiles }
+          : {}),
+        ...(inspection?.outputArtifacts !== undefined
+          ? { outputArtifacts: inspection.outputArtifacts }
+          : {}),
         aboxCommand: execution.metadata?.cmd,
       },
       ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
@@ -269,11 +427,17 @@ export const executeAttempt = async (
       outcome: reviewed.outcome,
       action: reviewed.action,
       reason: reviewed.reason,
-      reviewedAt: new Date().toISOString(),
+      reviewedAt,
     });
 
     await writer.append(
-      buildReviewCompletedEnvelope({ sessionId, turnId, attemptId: spec.attemptId, reviewed }),
+      buildReviewCompletedEnvelope({
+        sessionId,
+        turnId,
+        attemptId: spec.attemptId,
+        reviewed,
+        sandboxLifecycleState,
+      }),
     );
 
     await writer.flush();
@@ -313,9 +477,10 @@ const runApprovalIfNeeded = async (args: {
   ctx: ExecuteAttemptContext;
   writer: EventLogWriter;
   composerMode: ComposerMode;
+  spec: AttemptSpec;
 }): Promise<ApprovalProducerOutcome> => {
-  const { ctx, writer, composerMode } = args;
-  const operation = extractIntendedOperation(ctx.spec);
+  const { ctx, writer, composerMode, spec } = args;
+  const operation = extractIntendedOperation(spec);
   if (operation === null) {
     return { status: "proceed" };
   }
@@ -328,8 +493,8 @@ const runApprovalIfNeeded = async (args: {
 
   const input: ResolveApprovalInput = {
     storageRoot: ctx.sessionStore.rootDir,
-    repoRoot: ctx.repoRoot ?? ctx.spec.cwd,
-    spec: ctx.spec,
+    repoRoot: ctx.repoRoot ?? spec.cwd,
+    spec,
     operation,
     composerMode,
     agentProfileName: PROFILE_NAME[composerMode],
@@ -363,14 +528,15 @@ const handleBlockedDispatch = async (args: {
   ctx: ExecuteAttemptContext;
   writer: EventLogWriter;
   rationale: string;
+  spec: AttemptSpec;
 }): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
-  const { ctx, rationale } = args;
+  const { ctx, rationale, spec } = args;
   // `args.writer` is accepted for symmetry with the proceed path and so
   // future consumers can emit an additional "blocked" envelope here without
   // changing the signature — the Phase 4 producer already wrote its own
   // `host.approval_resolved` envelope before returning blocked.
   void args.writer;
-  const { spec, sessionStore, sessionId, turnId } = ctx;
+  const { sessionStore, sessionId, turnId } = ctx;
   const blockedAt = new Date().toISOString();
 
   await sessionStore.upsertAttempt(sessionId, turnId, {

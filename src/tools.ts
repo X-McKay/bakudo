@@ -1,13 +1,24 @@
 import { ABoxAdapter } from "./aboxAdapter.js";
+import type { ExecutionProfile } from "./attemptProtocol.js";
+import { buildAboxShellCommandArgs, generateSandboxTaskId } from "./host/sandboxLifecycle.js";
 import { RiskLevel, type ToolCall, type ToolResult, type ToolSpec } from "./models.js";
 
 type ToolFn = (call: ToolCall) => Promise<ToolResult>;
 
 export class ToolRuntime {
+  private static readonly TOOL_PROFILE: ExecutionProfile = {
+    agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+    sandboxLifecycle: "ephemeral",
+    mergeStrategy: "none",
+  };
+
   private readonly specs: Map<string, ToolSpec>;
   private readonly handlers: Map<string, ToolFn>;
 
-  public constructor(private readonly adapter: ABoxAdapter) {
+  public constructor(
+    private readonly adapter: ABoxAdapter,
+    private readonly repoPath?: string,
+  ) {
     this.specs = new Map<string, ToolSpec>([
       [
         "shell",
@@ -81,11 +92,26 @@ export class ToolRuntime {
       };
     }
     const timeout = this.spec(call.tool)?.timeoutSeconds ?? 120;
-    return this.adapter.runInStream(call.streamId, command, timeout);
+    const taskId = generateSandboxTaskId(call.streamId);
+    return this.adapter.exec(
+      buildAboxShellCommandArgs(taskId, command, ToolRuntime.TOOL_PROFILE, this.repoPath),
+      timeout,
+      { taskId },
+    );
   }
 
   private async gitStatus(call: ToolCall): Promise<ToolResult> {
-    return this.adapter.runInStream(call.streamId, "git status --short --branch", 120);
+    const taskId = generateSandboxTaskId(call.streamId);
+    return this.adapter.exec(
+      buildAboxShellCommandArgs(
+        taskId,
+        "git status --short --branch",
+        ToolRuntime.TOOL_PROFILE,
+        this.repoPath,
+      ),
+      120,
+      { taskId },
+    );
   }
 
   private async fetchUrl(call: ToolCall): Promise<ToolResult> {
@@ -106,6 +132,11 @@ export class ToolRuntime {
       "PY",
     ].join("\n");
 
-    return this.adapter.runInStream(call.streamId, command, 30);
+    const taskId = generateSandboxTaskId(call.streamId);
+    return this.adapter.exec(
+      buildAboxShellCommandArgs(taskId, command, ToolRuntime.TOOL_PROFILE, this.repoPath),
+      30,
+      { taskId },
+    );
   }
 }

@@ -2,11 +2,13 @@ import type {
   AttemptExecutionResult,
   AttemptSpec,
   CheckResult,
+  ExecutionProfile,
   PermissionRule,
 } from "./attemptProtocol.js";
 import type { ArtifactRecord } from "./host/artifactStore.js";
 import type { ApprovalRecord } from "./host/approvalStore.js";
 import type { AttemptLineage } from "./host/attemptLineage.js";
+import type { WorktreeInspection } from "./host/worktreeInspector.js";
 import {
   classifyError,
   type BakudoErrorCode,
@@ -70,6 +72,16 @@ export type ReviewedAttemptResult = ReviewClassification & {
   checkResults?: CheckResult[];
 };
 
+export type ReviewAttemptOptions = ReviewClassifierHints & {
+  inspection?: WorktreeInspection | null;
+  profile?: ExecutionProfile;
+  mergeResult?: {
+    merged?: boolean;
+    discarded?: boolean;
+    error?: string;
+  } | null;
+};
+
 /**
  * All checks passed (or no checks exist) AND exit code is zero/absent.
  */
@@ -91,14 +103,165 @@ const allChecksPassed = (executionResult: AttemptExecutionResult): boolean => {
 export const reviewAttemptResult = (
   spec: AttemptSpec,
   executionResult: AttemptExecutionResult,
-  hints: ReviewClassifierHints = {},
+  options: ReviewAttemptOptions = {},
 ): ReviewedAttemptResult => {
+  const { inspection, profile, mergeResult, ...hints } = options;
   // Fast path: structured checks + clean exit → success.
   const checksOk = allChecksPassed(executionResult);
   const exitOk =
     executionResult.exitCode === 0 ||
     executionResult.exitCode === null ||
     executionResult.exitCode === undefined;
+  const repoChangedFiles = inspection?.repoChangedFiles ?? [];
+  const outputArtifacts = inspection?.outputArtifacts ?? [];
+
+  if (typeof mergeResult?.error === "string" && mergeResult.error.length > 0) {
+    return {
+      outcome: "retryable_failure",
+      action: "retry",
+      reason: mergeResult.error,
+      retryable: true,
+      needsUser: false,
+      confidence: hints.confidence ?? "high",
+      attemptId: spec.attemptId,
+      intentId: spec.intentId,
+      status: "failed",
+      ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+    };
+  }
+
+  if (
+    profile?.mergeStrategy === "none" &&
+    profile.sandboxLifecycle === "preserved" &&
+    spec.taskKind === "assistant_job" &&
+    checksOk &&
+    exitOk &&
+    executionResult.status === "succeeded"
+  ) {
+    if (inspection === undefined || inspection === null) {
+      return {
+        outcome: "retryable_failure",
+        action: "retry",
+        reason: "report-only attempt finished but the preserved worktree could not be inspected",
+        retryable: true,
+        needsUser: false,
+        confidence: hints.confidence ?? "high",
+        attemptId: spec.attemptId,
+        intentId: spec.intentId,
+        status: "failed",
+        ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+      };
+    }
+    if (repoChangedFiles.length > 0) {
+      return {
+        outcome: "retryable_failure",
+        action: "retry",
+        reason: "report-only attempt modified repository files outside the reserved output directory",
+        retryable: true,
+        needsUser: false,
+        confidence: hints.confidence ?? "high",
+        attemptId: spec.attemptId,
+        intentId: spec.intentId,
+        status: "failed",
+        ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+      };
+    }
+    if (outputArtifacts.length === 0) {
+      return {
+        outcome: "incomplete_needs_follow_up",
+        action: "follow_up",
+        reason: "report-only attempt completed without any harvested output artifacts",
+        retryable: false,
+        needsUser: false,
+        confidence: hints.confidence ?? "medium",
+        attemptId: spec.attemptId,
+        intentId: spec.intentId,
+        status: executionResult.status,
+        ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+      };
+    }
+    return {
+      outcome: "success",
+      action: "accept",
+      reason: `harvested ${outputArtifacts.length} report artifact${outputArtifacts.length === 1 ? "" : "s"}`,
+      retryable: false,
+      needsUser: false,
+      confidence: hints.confidence ?? "high",
+      attemptId: spec.attemptId,
+      intentId: spec.intentId,
+      status: executionResult.status,
+      ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+    };
+  }
+
+  if (
+    profile?.sandboxLifecycle === "preserved" &&
+    profile.mergeStrategy !== "none" &&
+    checksOk &&
+    exitOk &&
+    executionResult.status === "succeeded"
+  ) {
+    if (inspection === undefined || inspection === null) {
+      return {
+        outcome: "retryable_failure",
+        action: "retry",
+        reason: "code-changing attempt finished but the preserved worktree could not be inspected",
+        retryable: true,
+        needsUser: false,
+        confidence: hints.confidence ?? "high",
+        attemptId: spec.attemptId,
+        intentId: spec.intentId,
+        status: "failed",
+        ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+      };
+    }
+    if (repoChangedFiles.length === 0) {
+      const reason =
+        outputArtifacts.length > 0
+          ? "attempt completed but only reserved-output artifacts changed; no repository files were modified"
+          : "attempt completed but no repository files were modified";
+      return {
+        outcome: "retryable_failure",
+        action: "retry",
+        reason,
+        retryable: true,
+        needsUser: false,
+        confidence: hints.confidence ?? "high",
+        attemptId: spec.attemptId,
+        intentId: spec.intentId,
+        status: "failed",
+        ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+      };
+    }
+    const changeSummary = `modified ${repoChangedFiles.length} file${repoChangedFiles.length === 1 ? "" : "s"}`;
+    if (profile.mergeStrategy === "interactive") {
+      return {
+        outcome: "blocked_needs_user",
+        action: "ask_user",
+        reason: `${changeSummary}; candidate preserved for merge or discard`,
+        retryable: false,
+        needsUser: true,
+        confidence: hints.confidence ?? "high",
+        attemptId: spec.attemptId,
+        intentId: spec.intentId,
+        status: "blocked",
+        ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+      };
+    }
+    return {
+      outcome: "success",
+      action: "accept",
+      reason: mergeResult?.merged === true ? `${changeSummary}; auto-merge succeeded` : changeSummary,
+      retryable: false,
+      needsUser: false,
+      confidence: hints.confidence ?? "high",
+      attemptId: spec.attemptId,
+      intentId: spec.intentId,
+      status: executionResult.status,
+      ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+    };
+  }
+
   if (checksOk && exitOk && executionResult.status === "succeeded") {
     return {
       outcome: "success",

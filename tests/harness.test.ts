@@ -7,8 +7,8 @@ import type { PolicyConfig } from "../src/policy.js";
 import { ToolRuntime } from "../src/tools.js";
 
 class FakeAdapter {
-  public async runInStream(streamId: string, command: string): Promise<ToolResult> {
-    return { ok: true, output: `[${streamId}] ${command}`, metadata: { errorType: "ok" } };
+  public async exec(args: readonly string[]): Promise<ToolResult> {
+    return { ok: true, output: args.join(" "), metadata: { errorType: "ok" } };
   }
 }
 

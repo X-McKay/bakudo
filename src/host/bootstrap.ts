@@ -7,7 +7,7 @@ import { setExperimentalConfigResolver } from "./flags.js";
 import { HOST_STATE_SCHEMA_VERSION, loadHostState } from "./hostStateStore.js";
 import type { HostStateRecord } from "./hostStateStore.js";
 import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
-import { repoRootFor } from "./orchestration.js";
+import { repoRootFor } from "./sessionRunSupport.js";
 import { profileCheckpoint, profileReport } from "./startupProfiler.js";
 import {
   HEAP_WATCHDOG_GATE_ENV,

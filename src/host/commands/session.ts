@@ -6,7 +6,7 @@ import {
   type SessionIndexReader,
 } from "../launchSessionPickerDialog.js";
 import { registerKeybinding } from "../keybindings/hooks.js";
-import { storageRootFor } from "../orchestration.js";
+import { storageRootFor } from "../sessionRunSupport.js";
 import { awaitPrompt, newPromptId } from "../promptResolvers.js";
 import { reduceHost } from "../reducer.js";
 import * as timeline from "../timeline.js";

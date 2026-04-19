@@ -18,19 +18,22 @@ const modeLabel = (mode: ComposerMode): string => {
   return "STANDARD";
 };
 
-const renderItem = (item: TranscriptItem): string => {
+const renderItem = (item: TranscriptItem): string[] => {
   if (item.kind === "user") {
-    return `You: ${item.text}`;
+    return [`You: ${item.text}`];
   }
   if (item.kind === "assistant") {
-    return `Bakudo: ${item.text}`;
+    return [`Bakudo: ${item.text}`];
   }
   if (item.kind === "event") {
     const detail = item.detail ? ` ${item.detail}` : "";
-    return `· ${item.label}${detail}`;
+    return [`· ${item.label}${detail}`];
+  }
+  if (item.kind === "output") {
+    return item.text.split("\n").map((line) => `  ${line}`);
   }
   const next = item.nextAction ? ` (next: ${item.nextAction})` : "";
-  return `Review: ${item.outcome} — ${item.summary}${next}`;
+  return [`Review: ${item.outcome} — ${item.summary}${next}`];
 };
 
 const renderHeader = (frame: RenderFrame): string => {
@@ -85,7 +88,7 @@ export const renderTranscriptFramePlain = (frame: RenderFrame): string[] => {
   lines.push(renderHeader(frame));
   lines.push("");
   for (const item of frame.transcript) {
-    lines.push(renderItem(item));
+    lines.push(...renderItem(item));
   }
   lines.push("");
   for (const overlayLine of renderOverlay(frame)) {

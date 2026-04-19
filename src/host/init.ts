@@ -2,7 +2,7 @@ import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { stdoutWrite } from "./io.js";
-import { promptForApproval, repoRootFor } from "./orchestration.js";
+import { promptForApproval, repoRootFor } from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 
 export const buildAgentsTemplate = (repoRoot: string): string =>
@@ -25,7 +25,7 @@ export const buildAgentsTemplate = (repoRoot: string): string =>
     "",
     "## Modes",
     "",
-    "- `standard`: code-changing work dispatched into an ephemeral abox sandbox.",
+    "- `standard`: code-changing work dispatched into an abox sandbox.",
     "  Prompts for approval before risky tool use; approvals are durable.",
     "- `plan`: read-only discovery, review, and exploration. No mutation.",
     "- `autopilot`: same as standard but auto-approves dispatch (for unattended runs).",

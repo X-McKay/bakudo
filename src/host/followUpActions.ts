@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import { SessionStore } from "../sessionStore.js";
-import type { SessionAttemptRecord, SessionTurnRecord } from "../sessionTypes.js";
+import type { SessionAttemptRecord, SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
+import { discardSandbox, mergeSandbox } from "./mergeController.js";
 import {
   emitTurnTransition,
   findLatestTurnTransition,
@@ -52,6 +53,7 @@ export type FollowUpInput = {
   sourceAttemptId: string;
   action: FollowUpAction;
   storageRoot: string;
+  aboxBin?: string;
 };
 
 /**
@@ -92,6 +94,108 @@ const loadTurnOrThrow = async (
     throw new Error(`applyFollowUpAction: unknown turn ${turnId} in session ${sessionId}`);
   }
   return turn;
+};
+
+const loadTurnAndAttemptOrThrow = async (
+  store: SessionStore,
+  sessionId: string,
+  turnId: string,
+  attemptId: string,
+): Promise<{
+  session: SessionRecord;
+  turn: SessionTurnRecord;
+  attempt: SessionAttemptRecord;
+}> => {
+  const session = await store.loadSession(sessionId);
+  if (session === null) {
+    throw new Error(`applyFollowUpAction: unknown session ${sessionId}`);
+  }
+  const turn = session.turns.find((entry) => entry.turnId === turnId);
+  if (turn === undefined) {
+    throw new Error(`applyFollowUpAction: unknown turn ${turnId} in session ${sessionId}`);
+  }
+  const attempt = turn.attempts.find((entry) => entry.attemptId === attemptId);
+  if (attempt === undefined) {
+    throw new Error(`applyFollowUpAction: unknown attempt ${attemptId} in turn ${turnId}`);
+  }
+  return { session, turn, attempt };
+};
+
+const resolvePreservedSandbox = async (args: {
+  store: SessionStore;
+  input: FollowUpInput;
+  session: SessionRecord;
+  turn: SessionTurnRecord;
+  attempt: SessionAttemptRecord;
+  decision: "accept" | "halt";
+}): Promise<"merged" | "discarded" | null> => {
+  const { store, input, session, turn, attempt, decision } = args;
+  if (attempt.sandbox?.state !== "preserved_active") {
+    return null;
+  }
+
+  const sandboxTaskId = attempt.sandbox.sandboxTaskId;
+  if (sandboxTaskId === undefined) {
+    throw new Error(
+      `applyFollowUpAction: preserved attempt ${attempt.attemptId} is missing sandboxTaskId`,
+    );
+  }
+
+  const recordedAt = nowIso();
+  const aboxBin = input.aboxBin ?? "abox";
+  try {
+    if (decision === "accept") {
+      await mergeSandbox(aboxBin, session.repoRoot, sandboxTaskId);
+      await discardSandbox(aboxBin, session.repoRoot, sandboxTaskId);
+      await store.upsertAttempt(input.sessionId, turn.turnId, {
+        ...attempt,
+        status: "succeeded",
+        lastMessage: "preserved candidate merged and cleaned up by follow-up accept",
+        sandboxLifecycleState: "preserved_merged",
+        sandbox: {
+          ...attempt.sandbox,
+          state: "preserved_merged",
+          updatedAt: recordedAt,
+          mergedAt: recordedAt,
+          discardedAt: recordedAt,
+        },
+      });
+      return "merged";
+    }
+
+    await discardSandbox(aboxBin, session.repoRoot, sandboxTaskId);
+    await store.upsertAttempt(input.sessionId, turn.turnId, {
+      ...attempt,
+      status: "cancelled",
+      lastMessage: "preserved candidate discarded by follow-up halt",
+      sandboxLifecycleState: "preserved_discarded",
+      sandbox: {
+        ...attempt.sandbox,
+        state: "preserved_discarded",
+        updatedAt: recordedAt,
+        discardedAt: recordedAt,
+      },
+    });
+    return "discarded";
+  } catch (error) {
+    const message =
+      decision === "accept"
+        ? `follow-up merge failed: ${error instanceof Error ? error.message : String(error)}`
+        : `follow-up discard failed: ${error instanceof Error ? error.message : String(error)}`;
+    await store.upsertAttempt(input.sessionId, turn.turnId, {
+      ...attempt,
+      status: "failed",
+      lastMessage: message,
+      sandboxLifecycleState: "merge_failed",
+      sandbox: {
+        ...attempt.sandbox,
+        state: "merge_failed",
+        updatedAt: recordedAt,
+        mergeError: message,
+      },
+    });
+    throw new Error(message);
+  }
 };
 
 /**
@@ -204,41 +308,82 @@ export const applyFollowUpAction = async (input: FollowUpInput): Promise<FollowU
   }
 
   if (input.action.kind === "accept") {
-    const turn = await loadTurnOrThrow(store, input.sessionId, input.turnId);
+    const { session, turn, attempt } = await loadTurnAndAttemptOrThrow(
+      store,
+      input.sessionId,
+      input.turnId,
+      input.sourceAttemptId,
+    );
     if (turn.status === "completed") {
       return {
         recordedAt: nowIso(),
         message: `Turn ${input.turnId} already accepted (status=completed).`,
       };
     }
-    await store.upsertTurn(input.sessionId, {
-      ...turn,
+    const preservedOutcome = await resolvePreservedSandbox({
+      store,
+      input,
+      session,
+      turn,
+      attempt,
+      decision: "accept",
+    });
+    const refreshedTurn = await loadTurnOrThrow(store, input.sessionId, input.turnId);
+    const updated = await store.upsertTurn(input.sessionId, {
+      ...refreshedTurn,
       status: "completed",
       updatedAt: nowIso(),
     });
+    await store.saveSession({ ...updated, status: "completed" });
     return {
       recordedAt: nowIso(),
-      message: `Turn ${input.turnId} accepted.`,
+      message:
+        preservedOutcome === "merged"
+          ? `Turn ${input.turnId} accepted and preserved sandbox merged.`
+          : `Turn ${input.turnId} accepted.`,
     };
   }
 
   // halt
-  const turn = await loadTurnOrThrow(store, input.sessionId, input.turnId);
+  const { session, turn, attempt } = await loadTurnAndAttemptOrThrow(
+    store,
+    input.sessionId,
+    input.turnId,
+    input.sourceAttemptId,
+  );
   if (turn.status === "cancelled") {
     return {
       recordedAt: nowIso(),
       message: `Turn ${input.turnId} already halted (status=cancelled).`,
     };
   }
-  const transition = await emitExtendingTransition(input, "user_halt", turn.status, "cancelled");
-  await store.upsertTurn(input.sessionId, {
-    ...turn,
+  const preservedOutcome = await resolvePreservedSandbox({
+    store,
+    input,
+    session,
+    turn,
+    attempt,
+    decision: "halt",
+  });
+  const refreshedTurn = await loadTurnOrThrow(store, input.sessionId, input.turnId);
+  const transition = await emitExtendingTransition(
+    input,
+    "user_halt",
+    refreshedTurn.status,
+    "cancelled",
+  );
+  const updated = await store.upsertTurn(input.sessionId, {
+    ...refreshedTurn,
     status: "cancelled",
     updatedAt: nowIso(),
   });
+  await store.saveSession({ ...updated, status: "cancelled" });
   return {
     recordedAt: nowIso(),
     transition,
-    message: `Turn ${input.turnId} halted.`,
+    message:
+      preservedOutcome === "discarded"
+        ? `Turn ${input.turnId} halted and preserved sandbox discarded.`
+        : `Turn ${input.turnId} halted.`,
   };
 };
