@@ -54,9 +54,10 @@ BUNDLE_DIR="${STAGE_ROOT}/bakudo-cli"
 log "building bakudo"
 (cd "${ROOT_DIR}" && pnpm build)
 
-mkdir -p "${BUNDLE_DIR}/bin" "${BUNDLE_DIR}/docs"
+mkdir -p "${BUNDLE_DIR}/bin" "${BUNDLE_DIR}/docs" "${BUNDLE_DIR}/config"
 cp -R "${ROOT_DIR}/dist" "${BUNDLE_DIR}/dist"
 cp -R "${ROOT_DIR}/docs/help" "${BUNDLE_DIR}/docs/help"
+cp "${ROOT_DIR}/config/default.json" "${BUNDLE_DIR}/config/default.json"
 cp "${ROOT_DIR}/package.json" "${ROOT_DIR}/pnpm-lock.yaml" "${ROOT_DIR}/README.md" "${ROOT_DIR}/LICENSE" "${BUNDLE_DIR}/"
 
 log "installing production dependencies into bundle"
