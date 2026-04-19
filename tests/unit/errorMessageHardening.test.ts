@@ -237,13 +237,14 @@ test("A6.10 #4: explainConfigKey falls back to defaults layer when no user overr
   }
 });
 
-test("A6.10 #4: explainConfigKey returns null layer when the key is not in any layer", async () => {
+test("A6.10 #4: explainConfigKey rejects unknown keys before walking layers", async () => {
   const tmp = await mkdtemp(join(tmpdir(), "bakudo-explain-"));
   try {
     const cascade = await loadConfigCascade(tmp, {});
-    const report = explainConfigKey(cascade.layers, "nonexistent.path");
-    assert.equal(report.layerSource, null);
-    assert.equal(report.effectiveValue, undefined);
+    assert.throws(
+      () => explainConfigKey(cascade.layers, "nonexistent.path"),
+      /unknown config key: nonexistent\.path/u,
+    );
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

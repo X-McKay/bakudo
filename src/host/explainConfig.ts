@@ -11,8 +11,11 @@
  * Kept tiny + separate so `doctor.ts` stays under the 400-LOC cap.
  */
 
+import { z } from "zod";
+
 import type { BakudoConfig, ConfigLayer } from "./config.js";
-import { loadConfigCascade } from "./config.js";
+import { BakudoConfigSchema, loadConfigCascade } from "./config.js";
+import { UserInputError } from "./errors.js";
 import { stdoutWrite } from "./io.js";
 import { repoRootFor } from "./orchestration.js";
 
@@ -31,6 +34,10 @@ export type ExplainConfigReport = {
 };
 
 const DOTTED_PATH_SEPARATOR = /\./;
+const ARRAY_INDEX_SEGMENT = /^\d+$/u;
+const LOG_LEVEL_QUERY_ALIAS = "log_level";
+const LOG_LEVEL_CANONICAL_KEY = "logLevel";
+const EXPLAIN_CONFIG_SCHEMA = BakudoConfigSchema.out;
 
 /**
  * Follow a dotted path inside a config object. Returns `undefined` when
@@ -49,6 +56,69 @@ const pathLookup = (root: unknown, path: string): unknown => {
   return current;
 };
 
+const splitConfigKey = (key: string): string[] =>
+  key.split(DOTTED_PATH_SEPARATOR).filter((segment) => segment.length > 0);
+
+const normalizeExplainConfigKey = (key: string): string => {
+  const segments = splitConfigKey(key);
+  if (segments[0] === LOG_LEVEL_QUERY_ALIAS) {
+    segments[0] = LOG_LEVEL_CANONICAL_KEY;
+  }
+  return segments.join(".");
+};
+
+const unwrapExplainConfigSchema = (schema: unknown): unknown => {
+  if (schema instanceof z.ZodOptional) {
+    return unwrapExplainConfigSchema(schema.unwrap());
+  }
+  if (schema instanceof z.ZodPipe) {
+    return unwrapExplainConfigSchema(schema.out);
+  }
+  return schema;
+};
+
+const matchesExplainConfigSchemaPath = (schema: unknown, segments: readonly string[]): boolean => {
+  const unwrapped = unwrapExplainConfigSchema(schema);
+  if (segments.length === 0) {
+    return true;
+  }
+
+  if (unwrapped instanceof z.ZodUnion) {
+    return unwrapped.options.some((option) => matchesExplainConfigSchemaPath(option, segments));
+  }
+
+  const [head, ...tail] = segments;
+  if (head === undefined) {
+    return false;
+  }
+
+  if (unwrapped instanceof z.ZodObject) {
+    const next = unwrapped.shape[head];
+    return next !== undefined && matchesExplainConfigSchemaPath(next, tail);
+  }
+
+  if (unwrapped instanceof z.ZodRecord) {
+    return matchesExplainConfigSchemaPath(unwrapped.valueType, tail);
+  }
+
+  if (unwrapped instanceof z.ZodArray) {
+    return (
+      ARRAY_INDEX_SEGMENT.test(head) && matchesExplainConfigSchemaPath(unwrapped.element, tail)
+    );
+  }
+
+  return false;
+};
+
+const resolveExplainConfigLookupKey = (key: string): string => {
+  const normalized = normalizeExplainConfigKey(key);
+  const segments = splitConfigKey(normalized);
+  if (segments.length === 0 || !matchesExplainConfigSchemaPath(EXPLAIN_CONFIG_SCHEMA, segments)) {
+    throw new UserInputError("unknown config key", { message: `unknown config key: ${key}` });
+  }
+  return normalized;
+};
+
 /**
  * Find the first (highest-precedence) layer that declares the given key.
  * Walks `layers` from the end of the array (last-merged, highest priority
@@ -62,6 +132,7 @@ const pathLookup = (root: unknown, path: string): unknown => {
  * at the returned `layerSource` string.
  */
 export const explainConfigKey = (layers: ConfigLayer[], key: string): ExplainConfigReport => {
+  const lookupKey = resolveExplainConfigLookupKey(key);
   const checked: string[] = [];
   let effectiveValue: unknown = undefined;
   let layerSource: string | null = null;
@@ -69,7 +140,7 @@ export const explainConfigKey = (layers: ConfigLayer[], key: string): ExplainCon
     const layer = layers[i];
     if (layer === undefined) continue;
     checked.push(layer.source);
-    const value = pathLookup(layer.config as BakudoConfig, key);
+    const value = pathLookup(layer.config as BakudoConfig, lookupKey);
     if (value !== undefined) {
       effectiveValue = value;
       layerSource = layer.source;
