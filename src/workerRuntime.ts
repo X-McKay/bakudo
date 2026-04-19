@@ -138,7 +138,7 @@ type ResolvedCommand = {
 const resolveCommand = (spec: WorkerTaskSpec, shell: string): ResolvedCommand => {
   const raw = spec as Record<string, unknown>;
   if (typeof raw.taskKind === "string") {
-    const as = raw as unknown as AttemptSpec;
+    const as = (isObject(raw.attemptSpec) ? raw.attemptSpec : raw) as AttemptSpec;
     const cmd = dispatchTaskKind(as);
     const [exe = shell, ...args] = cmd.command;
     return {
@@ -205,12 +205,15 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
   }
 
   const cwd = value.cwd;
+  const mode = value.mode;
   const streamId = value.streamId;
   const timeoutSeconds = value.timeoutSeconds;
   const maxOutputBytes = value.maxOutputBytes;
   const heartbeatIntervalMs = value.heartbeatIntervalMs;
+  const taskKind = value.taskKind;
+  const attemptSpec = value.attemptSpec;
 
-  return {
+  const spec: WorkerTaskSpec = {
     schemaVersion,
     taskId,
     sessionId,
@@ -218,6 +221,7 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
     assumeDangerousSkipPermissions,
     ...(typeof streamId === "string" && streamId.trim().length > 0 ? { streamId } : {}),
     ...(typeof cwd === "string" && cwd.trim().length > 0 ? { cwd } : {}),
+    ...(mode === "build" || mode === "plan" ? { mode } : {}),
     ...(typeof timeoutSeconds === "number" && Number.isFinite(timeoutSeconds)
       ? { timeoutSeconds }
       : {}),
@@ -228,6 +232,18 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
       ? { heartbeatIntervalMs }
       : {}),
   };
+
+  const extended = spec as WorkerTaskSpec & {
+    taskKind?: string;
+    attemptSpec?: Record<string, unknown>;
+  };
+  if (typeof taskKind === "string" && taskKind.trim().length > 0) {
+    extended.taskKind = taskKind;
+  }
+  if (isObject(attemptSpec)) {
+    extended.attemptSpec = attemptSpec;
+  }
+  return extended;
 };
 
 export const decodeWorkerTaskSpec = (encoded: string): WorkerTaskSpec =>

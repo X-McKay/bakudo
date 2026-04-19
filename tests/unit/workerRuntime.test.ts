@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { AttemptSpec } from "../../src/attemptProtocol.js";
+import { attemptSpecToWorkerSpec } from "../../src/aboxTaskRunner.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../../src/protocol.js";
 import { parseWorkerArgs, workerSelfCapabilities } from "../../src/workerCli.js";
 import {
@@ -197,6 +198,31 @@ test("workerRuntime dispatches explicit_command via task-kind when taskKind pres
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout.trim(), "dispatched");
   assert.ok(events.includes("task.completed:succeeded"));
+});
+
+test("workerRuntime preserves taskKind transport payload through decodeWorkerTaskSpec", async () => {
+  const transported = attemptSpecToWorkerSpec(attemptSpec({ cwd: "/tmp/host-repo" }));
+  const decoded = decodeWorkerTaskSpec(encodeTaskSpec(transported as Record<string, unknown>));
+  const raw = decoded as WorkerTaskSpec & { taskKind?: string; attemptSpec?: AttemptSpec };
+
+  assert.equal(raw.taskKind, "explicit_command");
+  assert.equal(decoded.cwd, "/workspace");
+  assert.equal(raw.attemptSpec?.cwd, "/tmp/host-repo");
+  assert.deepEqual(raw.attemptSpec?.execution.command, ["printf", "dispatched"]);
+
+  const result = await runWorkerTask(
+    { ...decoded, cwd: testCwd },
+    {
+      timeoutSeconds: 10,
+      maxOutputBytes: 4096,
+      heartbeatIntervalMs: 25,
+      killGraceMs: 100,
+      emit: () => undefined,
+    },
+  );
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.stdout.trim(), "dispatched");
 });
 
 test("workerRuntime falls back to legacy bash -lc when no taskKind present", async () => {

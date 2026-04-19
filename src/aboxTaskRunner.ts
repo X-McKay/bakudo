@@ -35,9 +35,16 @@ export type TaskRunnerHandlers = {
 type WorkerModuleSources = {
   packageJson: string;
   protocolJs: string;
+  mainModuleJs: string;
   workerRuntimeJs: string;
   workerCliJs: string;
+  workerTaskKindsJs: string;
+  workerAssistantJobRunnerJs: string;
+  workerCommandRunnerJs: string;
+  workerCheckRunnerJs: string;
 };
+
+const ABOX_GUEST_WORKSPACE_CWD = "/workspace";
 
 const shellEscape = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
@@ -62,8 +69,13 @@ const resolveDistSource = async (relativePath: string): Promise<string> => {
 const loadWorkerModuleSources = async (): Promise<WorkerModuleSources> => ({
   packageJson: JSON.stringify({ type: "module" }, null, 2),
   protocolJs: await resolveDistSource("./protocol.js"),
+  mainModuleJs: await resolveDistSource("./mainModule.js"),
   workerRuntimeJs: await resolveDistSource("./workerRuntime.js"),
   workerCliJs: await resolveDistSource("./workerCli.js"),
+  workerTaskKindsJs: await resolveDistSource("./worker/taskKinds.js"),
+  workerAssistantJobRunnerJs: await resolveDistSource("./worker/assistantJobRunner.js"),
+  workerCommandRunnerJs: await resolveDistSource("./worker/commandRunner.js"),
+  workerCheckRunnerJs: await resolveDistSource("./worker/checkRunner.js"),
 });
 
 const buildWorkerLaunchCommand = async (
@@ -98,14 +110,36 @@ const buildWorkerLaunchCommand = async (
   return [
     "set -euo pipefail",
     'tmpdir="$(mktemp -d)"',
+    'mkdir -p "$tmpdir/worker"',
     renderHereDoc('"$tmpdir/package.json"', `${sources.packageJson}\n`, "BAKUDO_PACKAGE_JSON"),
     renderHereDoc('"$tmpdir/protocol.js"', sources.protocolJs, "BAKUDO_PROTOCOL_JS"),
+    renderHereDoc('"$tmpdir/mainModule.js"', sources.mainModuleJs, "BAKUDO_MAIN_MODULE_JS"),
     renderHereDoc(
       '"$tmpdir/workerRuntime.js"',
       sources.workerRuntimeJs,
       "BAKUDO_WORKER_RUNTIME_JS",
     ),
     renderHereDoc('"$tmpdir/workerCli.js"', sources.workerCliJs, "BAKUDO_WORKER_CLI_JS"),
+    renderHereDoc(
+      '"$tmpdir/worker/taskKinds.js"',
+      sources.workerTaskKindsJs,
+      "BAKUDO_WORKER_TASK_KINDS_JS",
+    ),
+    renderHereDoc(
+      '"$tmpdir/worker/assistantJobRunner.js"',
+      sources.workerAssistantJobRunnerJs,
+      "BAKUDO_WORKER_ASSISTANT_JOB_RUNNER_JS",
+    ),
+    renderHereDoc(
+      '"$tmpdir/worker/commandRunner.js"',
+      sources.workerCommandRunnerJs,
+      "BAKUDO_WORKER_COMMAND_RUNNER_JS",
+    ),
+    renderHereDoc(
+      '"$tmpdir/worker/checkRunner.js"',
+      sources.workerCheckRunnerJs,
+      "BAKUDO_WORKER_CHECK_RUNNER_JS",
+    ),
     commandArgs,
   ].join("\n");
 };
@@ -224,7 +258,9 @@ export const attemptSpecToWorkerSpec = (spec: AttemptSpec): WorkerTaskSpec => {
     sessionId: spec.sessionId,
     goal: spec.prompt,
     mode: spec.mode,
-    cwd: spec.cwd,
+    // Attempt specs carry the host repo root for host-side bookkeeping, but
+    // the guest only sees the worktree mounted at /workspace.
+    cwd: ABOX_GUEST_WORKSPACE_CWD,
     timeoutSeconds: spec.budget.timeoutSeconds,
     maxOutputBytes: spec.budget.maxOutputBytes,
     heartbeatIntervalMs: spec.budget.heartbeatIntervalMs,

@@ -10,7 +10,7 @@ import {
   type AttemptSpec,
   type PermissionRule,
   type TurnIntent,
-} from "../../src/protocol.js";
+} from "../../src/attemptProtocol.js";
 
 // ---------------------------------------------------------------------------
 // TurnIntent

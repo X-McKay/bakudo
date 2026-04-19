@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { PermissionRule } from "./attemptProtocol.js";
 
-export * from "./attemptProtocol.js";
+export type * from "./attemptProtocol.js";
 
 export const BAKUDO_PROTOCOL_SCHEMA_VERSION = 1 as const;
 
