@@ -89,6 +89,42 @@ export type AttemptSpec = {
   artifactRequests: ArtifactRequest[];
 };
 
+export type ExecutionProfile = {
+  agentBackend: string;
+  sandboxLifecycle: "preserved" | "ephemeral";
+  mergeStrategy: "auto" | "interactive" | "none";
+};
+
+export type DispatchPlan = {
+  schemaVersion: 1;
+  candidateId?: string;
+  batchId?: string;
+  profile: ExecutionProfile;
+  spec: AttemptSpec;
+};
+
+export type BatchSpec = {
+  batchId: string;
+  intentId: string;
+  candidates: DispatchPlan[];
+};
+
+export type CandidateSet = BatchSpec;
+
+export type CandidateSetResult = {
+  batchId: string;
+  results: Record<string, AttemptExecutionResult>;
+  selectedCandidateId?: string;
+};
+
+export const sanitizeAttemptPathSegment = (value: string): string => {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return sanitized.length > 0 ? sanitized : "attempt";
+};
+
+export const reservedGuestOutputDirForAttempt = (attemptId: string): string =>
+  `/workspace/.bakudo/out/${sanitizeAttemptPathSegment(attemptId)}`;
+
 // ---------------------------------------------------------------------------
 // Execution result
 // ---------------------------------------------------------------------------
@@ -272,6 +308,24 @@ export const AttemptSpecSchema = z
   })
   .strip();
 
+export const ExecutionProfileSchema = z
+  .object({
+    agentBackend: z.string(),
+    sandboxLifecycle: z.enum(["preserved", "ephemeral"]),
+    mergeStrategy: z.enum(["auto", "interactive", "none"]),
+  })
+  .strip();
+
+export const DispatchPlanSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    candidateId: z.string().optional(),
+    batchId: z.string().optional(),
+    profile: ExecutionProfileSchema,
+    spec: AttemptSpecSchema,
+  })
+  .strip();
+
 const CheckResultSchema = z
   .object({
     checkId: z.string(),
@@ -294,5 +348,23 @@ export const AttemptExecutionResultSchema = z
     durationMs: z.number(),
     artifacts: z.array(z.string()),
     checkResults: z.array(CheckResultSchema).optional(),
+  })
+  .strip();
+
+export const BatchSpecSchema = z
+  .object({
+    batchId: z.string(),
+    intentId: z.string(),
+    candidates: z.array(DispatchPlanSchema),
+  })
+  .strip();
+
+export const CandidateSetSchema = BatchSpecSchema;
+
+export const CandidateSetResultSchema = z
+  .object({
+    batchId: z.string(),
+    results: z.record(z.string(), AttemptExecutionResultSchema),
+    selectedCandidateId: z.string().optional(),
   })
   .strip();

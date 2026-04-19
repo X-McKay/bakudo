@@ -184,3 +184,80 @@ test("reviewAttemptResult: policy denial via hints", () => {
   assert.equal(review.outcome, "policy_denied");
   assert.equal(review.action, "halt");
 });
+
+test("reviewAttemptResult: preserved interactive candidate blocks for user review", () => {
+  const review = reviewAttemptResult(baseSpec, makeExecResult(), {
+    profile: {
+      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      sandboxLifecycle: "preserved",
+      mergeStrategy: "interactive",
+    },
+    inspection: {
+      sandboxTaskId: "bakudo-attempt-1",
+      branchName: "refs/heads/agent/bakudo-attempt-1",
+      worktreePath: "/tmp/worktree",
+      reservedOutputDir: ".bakudo/out/attempt-1",
+      dirty: true,
+      changedFiles: ["src/app.ts"],
+      repoChangedFiles: ["src/app.ts"],
+      outputArtifacts: [],
+      patchDiff: "diff --git a/src/app.ts b/src/app.ts",
+      diffBytes: 32,
+    },
+  });
+  assert.equal(review.outcome, "blocked_needs_user");
+  assert.equal(review.action, "ask_user");
+  assert.equal(review.status, "blocked");
+});
+
+test("reviewAttemptResult: preserved change without repo mutation is rejected", () => {
+  const review = reviewAttemptResult(baseSpec, makeExecResult(), {
+    profile: {
+      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      sandboxLifecycle: "preserved",
+      mergeStrategy: "auto",
+    },
+    inspection: {
+      sandboxTaskId: "bakudo-attempt-1",
+      branchName: "refs/heads/agent/bakudo-attempt-1",
+      worktreePath: "/tmp/worktree",
+      reservedOutputDir: ".bakudo/out/attempt-1",
+      dirty: true,
+      changedFiles: [".bakudo/out/attempt-1/summary.md"],
+      repoChangedFiles: [],
+      outputArtifacts: ["summary.md"],
+      patchDiff: "",
+      diffBytes: 0,
+    },
+  });
+  assert.equal(review.outcome, "retryable_failure");
+  assert.equal(review.action, "retry");
+});
+
+test("reviewAttemptResult: report-only attempt rejects repo mutation", () => {
+  const review = reviewAttemptResult(
+    { ...baseSpec, mode: "plan" },
+    makeExecResult(),
+    {
+      profile: {
+        agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+        sandboxLifecycle: "preserved",
+        mergeStrategy: "none",
+      },
+      inspection: {
+        sandboxTaskId: "bakudo-attempt-1",
+        branchName: "refs/heads/agent/bakudo-attempt-1",
+        worktreePath: "/tmp/worktree",
+        reservedOutputDir: ".bakudo/out/attempt-1",
+        dirty: true,
+        changedFiles: ["README.md"],
+        repoChangedFiles: ["README.md"],
+        outputArtifacts: ["summary.md"],
+        patchDiff: "diff",
+        diffBytes: 4,
+      },
+    },
+  );
+  assert.equal(review.outcome, "retryable_failure");
+  assert.equal(review.action, "retry");
+});

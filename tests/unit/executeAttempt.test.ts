@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import {
-  attemptSpecToWorkerSpec,
   type ABoxTaskRunner,
   type TaskExecutionRecord,
   type TaskRunnerHandlers,
@@ -138,25 +137,6 @@ const seedSession = async (store: SessionStore, sessionId: string, prompt: strin
       },
     ],
   });
-
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
-
-test("attemptSpecToWorkerSpec converts AttemptSpec to WorkerTaskSpec", () => {
-  const spec = makeSpec("session-conv");
-  const ws = attemptSpecToWorkerSpec(spec);
-  assert.equal(ws.schemaVersion, BAKUDO_PROTOCOL_SCHEMA_VERSION);
-  assert.equal(ws.taskId, "task-1");
-  assert.equal(ws.sessionId, "session-conv");
-  assert.equal(ws.goal, "implement a feature");
-  assert.equal(ws.mode, "build");
-  assert.equal(ws.timeoutSeconds, 300);
-  assert.equal(ws.assumeDangerousSkipPermissions, false);
-  const ext = ws as Record<string, unknown>;
-  assert.equal(ext.taskKind, "assistant_job");
-  assert.ok(ext.attemptSpec);
-});
 
 test("toAttemptExecutionResult maps worker result to Phase 3 shape", () => {
   const spec = makeSpec("session-map-test");

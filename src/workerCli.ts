@@ -7,7 +7,8 @@ import {
   type WorkerCapabilities,
 } from "./protocol.js";
 import {
-  parseWorkerTaskSpec,
+  decodeExecutionProfile,
+  decodeWorkerInput,
   runWorkerTask,
   serializeWorkerError,
   serializeWorkerEvent,
@@ -16,7 +17,8 @@ import {
 import { isMainModule } from "./mainModule.js";
 
 export type WorkerCliArgs = {
-  taskSpecB64: string;
+  inputB64: string;
+  executionProfileB64?: string;
   shell: string;
   timeoutSeconds: number;
   maxOutputBytes: number;
@@ -84,7 +86,7 @@ const readLongFlag = (
 
 export const parseWorkerArgs = (argv: string[]): WorkerCliArgs => {
   const result: WorkerCliArgs = {
-    taskSpecB64: "",
+    inputB64: "",
     shell: "bash",
     timeoutSeconds: 120,
     maxOutputBytes: 256 * 1024,
@@ -110,9 +112,16 @@ export const parseWorkerArgs = (argv: string[]): WorkerCliArgs => {
       continue;
     }
 
-    if (arg === "--task-spec-b64" || arg.startsWith("--task-spec-b64=")) {
-      const { value, consumed } = readLongFlag(argv, i, "--task-spec-b64");
-      result.taskSpecB64 = value;
+    if (arg === "--input-b64" || arg.startsWith("--input-b64=")) {
+      const { value, consumed } = readLongFlag(argv, i, "--input-b64");
+      result.inputB64 = value;
+      i += consumed - 1;
+      continue;
+    }
+
+    if (arg === "--execution-profile-b64" || arg.startsWith("--execution-profile-b64=")) {
+      const { value, consumed } = readLongFlag(argv, i, "--execution-profile-b64");
+      result.executionProfileB64 = value;
       i += consumed - 1;
       continue;
     }
@@ -173,11 +182,12 @@ export const parseWorkerArgs = (argv: string[]): WorkerCliArgs => {
 const printUsage = (): void => {
   process.stdout.write(
     [
-      "Usage: bakudo-worker --task-spec-b64 <base64-json> [--shell bash] [--timeout-seconds N]",
+      "Usage: bakudo-worker --input-b64 <base64-json> [--execution-profile-b64 <base64-json>]",
+      "                     [--shell bash] [--timeout-seconds N]",
       "                     [--max-output-bytes N] [--heartbeat-ms N] [--kill-grace-ms N]",
       "       bakudo-worker --capabilities",
       "",
-      "Required task spec fields: schemaVersion, taskId, sessionId, goal, assumeDangerousSkipPermissions",
+      "Required input fields: schemaVersion plus either AttemptSpec v3 or legacy TaskRequest v1",
     ].join("\n") + "\n",
   );
 };
@@ -196,11 +206,15 @@ export const runWorkerCli = async (argv: string[]): Promise<number> => {
     return 0;
   }
 
-  if (args.taskSpecB64.length === 0) {
-    throw new Error("missing required argument --task-spec-b64");
+  if (args.inputB64.length === 0) {
+    throw new Error("missing required argument --input-b64");
   }
 
-  const spec = parseWorkerTaskSpec(["--task-spec-b64", args.taskSpecB64]);
+  const spec = decodeWorkerInput(args.inputB64);
+  const executionProfile =
+    args.executionProfileB64 === undefined
+      ? undefined
+      : decodeExecutionProfile(args.executionProfileB64);
 
   const result = await runWorkerTask(spec, {
     shell: args.shell,
@@ -208,6 +222,7 @@ export const runWorkerCli = async (argv: string[]): Promise<number> => {
     maxOutputBytes: args.maxOutputBytes,
     heartbeatIntervalMs: args.heartbeatIntervalMs,
     killGraceMs: args.killGraceMs,
+    ...(executionProfile === undefined ? {} : { executionProfile }),
     emit: (event) => {
       process.stdout.write(`${serializeWorkerEvent(event)}\n`);
     },

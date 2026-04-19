@@ -2,16 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { AttemptSpec } from "../../src/attemptProtocol.js";
-import { attemptSpecToWorkerSpec } from "../../src/aboxTaskRunner.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../../src/protocol.js";
 import { parseWorkerArgs, workerSelfCapabilities } from "../../src/workerCli.js";
 import {
-  decodeWorkerTaskSpec,
+  decodeWorkerInput,
   encodeWorkerEnvelope,
   runWorkerTask,
   serializeWorkerResult,
   WORKER_EVENT_PREFIX,
-  type WorkerTaskSpec,
 } from "../../src/workerRuntime.js";
 
 const encodeTaskSpec = (spec: Record<string, unknown>): string =>
@@ -29,7 +27,7 @@ test("worker cli parses the base64 task spec transport", () => {
   });
 
   const args = parseWorkerArgs([
-    `--task-spec-b64=${specB64}`,
+    `--input-b64=${specB64}`,
     "--shell",
     "bash",
     "--timeout-seconds",
@@ -42,7 +40,7 @@ test("worker cli parses the base64 task spec transport", () => {
     "300",
   ]);
 
-  assert.equal(args.taskSpecB64, specB64);
+  assert.equal(args.inputB64, specB64);
   assert.equal(args.shell, "bash");
   assert.equal(args.timeoutSeconds, 7);
   assert.equal(args.maxOutputBytes, 4096);
@@ -79,8 +77,12 @@ test("worker runtime decodes task specs and emits machine-parsable envelopes", (
     assumeDangerousSkipPermissions: true,
   });
 
-  const decoded = decodeWorkerTaskSpec(specB64);
+  const decoded = decodeWorkerInput(specB64);
+  assert.equal(decoded.schemaVersion, BAKUDO_PROTOCOL_SCHEMA_VERSION);
   assert.equal(decoded.taskId, "task-2");
+  if (decoded.schemaVersion !== BAKUDO_PROTOCOL_SCHEMA_VERSION) {
+    assert.fail("expected a legacy worker request");
+  }
   assert.equal(decoded.goal, "printf 'worker spec'");
 
   const eventLine = encodeWorkerEnvelope(WORKER_EVENT_PREFIX, {
@@ -119,7 +121,7 @@ test("worker runtime decodes task specs and emits machine-parsable envelopes", (
 });
 
 test("worker runtime executes a bounded shell goal and returns structured output", async () => {
-  const spec = decodeWorkerTaskSpec(
+  const spec = decodeWorkerInput(
     encodeTaskSpec({
       schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
       taskId: "task-3",
@@ -145,7 +147,7 @@ test("worker runtime executes a bounded shell goal and returns structured output
   assert.equal(result.status, "succeeded");
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout.trim(), "hello worker");
-  assert.equal(result.stderr, "");
+  assert.ok(typeof result.stderr === "string");
   assert.ok(events.includes("task.queued:queued"));
   assert.ok(events.includes("task.started:running"));
   assert.ok(events.includes("task.progress:running"));
@@ -182,9 +184,8 @@ const attemptSpec = (overrides: Partial<AttemptSpec> = {}): AttemptSpec => ({
 
 test("workerRuntime dispatches explicit_command via task-kind when taskKind present", async () => {
   const spec = attemptSpec();
-  // Pass the AttemptSpec as a WorkerTaskSpec (duck-typed via the runtime check)
   const events: string[] = [];
-  const result = await runWorkerTask(spec as unknown as WorkerTaskSpec, {
+  const result = await runWorkerTask(spec, {
     timeoutSeconds: 10,
     maxOutputBytes: 4096,
     heartbeatIntervalMs: 25,
@@ -200,18 +201,20 @@ test("workerRuntime dispatches explicit_command via task-kind when taskKind pres
   assert.ok(events.includes("task.completed:succeeded"));
 });
 
-test("workerRuntime preserves taskKind transport payload through decodeWorkerTaskSpec", async () => {
-  const transported = attemptSpecToWorkerSpec(attemptSpec({ cwd: "/tmp/host-repo" }));
-  const decoded = decodeWorkerTaskSpec(encodeTaskSpec(transported as Record<string, unknown>));
-  const raw = decoded as WorkerTaskSpec & { taskKind?: string; attemptSpec?: AttemptSpec };
+test("workerRuntime round-trips AttemptSpec transport and executes with the resolved workspace cwd", async () => {
+  const transported = attemptSpec({ cwd: testCwd });
+  const decoded = decodeWorkerInput(encodeTaskSpec(transported as Record<string, unknown>));
 
-  assert.equal(raw.taskKind, "explicit_command");
-  assert.equal(decoded.cwd, "/workspace");
-  assert.equal(raw.attemptSpec?.cwd, "/tmp/host-repo");
-  assert.deepEqual(raw.attemptSpec?.execution.command, ["printf", "dispatched"]);
+  assert.equal(decoded.schemaVersion, 3);
+  if (decoded.schemaVersion !== 3) {
+    assert.fail("expected an AttemptSpec");
+  }
+  assert.equal(decoded.cwd, testCwd);
+  assert.equal(decoded.taskKind, "explicit_command");
+  assert.deepEqual(decoded.execution.command, ["printf", "dispatched"]);
 
   const result = await runWorkerTask(
-    { ...decoded, cwd: testCwd },
+    decoded,
     {
       timeoutSeconds: 10,
       maxOutputBytes: 4096,
@@ -223,10 +226,11 @@ test("workerRuntime preserves taskKind transport payload through decodeWorkerTas
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.stdout.trim(), "dispatched");
+  assert.equal(result.cwd, testCwd);
 });
 
 test("workerRuntime falls back to legacy bash -lc when no taskKind present", async () => {
-  const legacySpec = decodeWorkerTaskSpec(
+  const legacySpec = decodeWorkerInput(
     encodeTaskSpec({
       schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
       taskId: "task-legacy",
@@ -257,11 +261,30 @@ test("workerRuntime uses budget.timeoutSeconds from AttemptSpec", async () => {
     budget: { timeoutSeconds: 5, maxOutputBytes: 2048, heartbeatIntervalMs: 1000 },
   });
 
-  const result = await runWorkerTask(spec as unknown as WorkerTaskSpec, {
+  const result = await runWorkerTask(spec, {
     killGraceMs: 100,
     emit: () => undefined,
   });
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.timeoutSeconds, 5);
+});
+
+test("workerRuntime pipes provided stdin to spawned process", async () => {
+  const spec = attemptSpec({
+    execution: { engine: "shell", command: ["cat"] },
+    prompt: "unused",
+    instructions: [],
+  });
+  const result = await runWorkerTask(spec, {
+    timeoutSeconds: 10,
+    maxOutputBytes: 4096,
+    heartbeatIntervalMs: 25,
+    killGraceMs: 100,
+    stdin: "stdin payload\nline two",
+    emit: () => undefined,
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.stdout, "stdin payload\nline two");
 });

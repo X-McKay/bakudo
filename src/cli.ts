@@ -84,7 +84,7 @@ export const runCli = async (argv: string[]): Promise<number> => {
   const fileConfig = await loadConfig(args.config);
   const runtimeConfig = buildRuntimeConfig(fileConfig);
 
-  const runtime = new ToolRuntime(new ABoxAdapter(args.aboxBin, args.repo));
+  const runtime = new ToolRuntime(new ABoxAdapter(args.aboxBin), args.repo);
   const policy = buildPolicy(
     buildPolicyConfig(fileConfig, runtimeConfig.mode, runtimeConfig.assumeDangerousSkipPermissions),
   );

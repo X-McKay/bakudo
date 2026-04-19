@@ -1,4 +1,5 @@
 import { ArtifactStore } from "../artifactStore.js";
+import type { SessionEventEnvelope } from "../protocol.js";
 import type { ReviewClassification } from "../resultClassifier.js";
 import { reviewTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
@@ -16,7 +17,7 @@ import {
 } from "./ansi.js";
 import { formatInspectReview, formatInspectSandbox } from "./inspectFormatter.js";
 import { stdoutWrite } from "./io.js";
-import { storageRootFor } from "./orchestration.js";
+import { storageRootFor } from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import type { SessionSummaryView } from "./sessionIndex.js";
 import * as timeline from "./timeline.js";
@@ -57,13 +58,19 @@ export const formatUtcTimestamp = (value: string | undefined): string => {
     : date.toISOString().replace("T", " ").replace(".000Z", "Z");
 };
 
-export const nextActionHint = (reviewed: { action: string }): string => {
+export const nextActionHint = (
+  reviewed: { action: string },
+  attempt?: SessionAttemptRecord,
+): string => {
   switch (reviewed.action) {
     case "accept":
       return "No follow-up needed.";
     case "retry":
       return "Use `bakudo resume <session-id> [task-id]` to retry with the current host settings.";
     case "ask_user":
+      if (attempt?.sandboxLifecycleState === "preserved_active") {
+        return "Inspect `bakudo review` and `bakudo sandbox`, then accept to merge or halt to discard the preserved candidate.";
+      }
       return "Inspect `bakudo review` and `bakudo sandbox` before deciding whether to retry or adjust scope.";
     case "follow_up":
       return "Review worker logs and artifacts, then decide whether the host should retry or narrow the task.";
@@ -302,7 +309,7 @@ export const printStatus = async (args: HostCliArgs): Promise<number> => {
     if (reviewed) {
       lines.push(kv("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`));
       lines.push(kv("Action", reviewed.action));
-      lines.push(kv("Next", nextActionHint(reviewed)));
+      lines.push(kv("Next", nextActionHint(reviewed, attempt)));
     }
   }
   stdoutWrite(lines.join("\n") + "\n");
@@ -360,41 +367,207 @@ export const printReview = async (args: HostCliArgs): Promise<number> => {
   const artifactStore = new ArtifactStore(rootDir);
   const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, attempt.attemptId);
   const lines = formatInspectReview({ session, attempt, reviewed, artifacts });
-  lines.push(`Next       ${nextActionHint(reviewed)}`);
+  lines.push(`Next       ${nextActionHint(reviewed, attempt)}`);
   stdoutWrite(`${renderSection("Review")}\n${lines.slice(1).join("\n")}\n`);
   return reviewedOutcomeExitCode(reviewed);
+};
+
+const truncateLogValue = (value: string, max: number): string =>
+  value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
+
+const stringField = (value: unknown): string | undefined =>
+  typeof value === "string" && value.length > 0 ? value : undefined;
+
+const numberField = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const booleanField = (value: unknown): boolean | undefined =>
+  typeof value === "boolean" ? value : undefined;
+
+const joinLogDetails = (parts: Array<string | undefined>): string =>
+  parts.filter((part): part is string => part !== undefined && part.length > 0).join(" ");
+
+const envelopeAttemptId = (envelope: SessionEventEnvelope): string | undefined => {
+  const payload = envelope.payload as Record<string, unknown>;
+  return envelope.attemptId ?? stringField(payload.attemptId);
+};
+
+const envelopeTurnId = (envelope: SessionEventEnvelope): string | undefined => {
+  const payload = envelope.payload as Record<string, unknown>;
+  return envelope.turnId ?? stringField(payload.turnId);
+};
+
+const envelopeStatus = (envelope: SessionEventEnvelope): string | undefined => {
+  const payload = envelope.payload as Record<string, unknown>;
+  return stringField(payload.status);
+};
+
+const commandDetail = (value: unknown): string | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const command = value.filter((part): part is string => typeof part === "string").join(" ");
+  return command.length > 0 ? truncateLogValue(command, 120) : undefined;
+};
+
+const fallbackPayloadDetail = (payload: Record<string, unknown>): string => {
+  const message = stringField(payload.message);
+  if (message !== undefined) {
+    return `message=${truncateLogValue(message, 120)}`;
+  }
+  const serialized = JSON.stringify(payload);
+  return serialized === "{}" ? "" : truncateLogValue(serialized, 160);
+};
+
+const envelopeDetail = (envelope: SessionEventEnvelope): string => {
+  const payload = envelope.payload as Record<string, unknown>;
+  switch (envelope.kind) {
+    case "user.turn_submitted":
+    case "host.turn_queued":
+      return joinLogDetails([
+        stringField(payload.mode) ? `mode=${stringField(payload.mode)}` : undefined,
+        stringField(payload.prompt)
+          ? `prompt=${truncateLogValue(stringField(payload.prompt)!, 100)}`
+          : undefined,
+      ]);
+    case "host.plan_started":
+    case "host.plan_completed":
+    case "host.dispatch_started":
+      return joinLogDetails([
+        stringField(payload.mode) ? `mode=${stringField(payload.mode)}` : undefined,
+        stringField(payload.goal)
+          ? `goal=${truncateLogValue(stringField(payload.goal)!, 100)}`
+          : undefined,
+      ]);
+    case "host.provenance_started":
+      return joinLogDetails([
+        stringField(payload.provenanceId)
+          ? `provenance=${stringField(payload.provenanceId)}`
+          : undefined,
+        stringField(payload.sandboxTaskId)
+          ? `sandbox=${stringField(payload.sandboxTaskId)}`
+          : undefined,
+        commandDetail(payload.dispatchCommand)
+          ? `cmd=${commandDetail(payload.dispatchCommand)}`
+          : undefined,
+      ]);
+    case "host.provenance_finalized":
+      return joinLogDetails([
+        stringField(payload.provenanceId)
+          ? `provenance=${stringField(payload.provenanceId)}`
+          : undefined,
+        numberField(payload.exitCode) !== undefined
+          ? `exit=${String(numberField(payload.exitCode))}`
+          : undefined,
+        booleanField(payload.timedOut) === true ? "timedOut=true" : undefined,
+        numberField(payload.elapsedMs) !== undefined
+          ? `elapsedMs=${String(numberField(payload.elapsedMs))}`
+          : undefined,
+      ]);
+    case "host.approval_requested": {
+      const request =
+        payload.request !== null && typeof payload.request === "object"
+          ? (payload.request as Record<string, unknown>)
+          : undefined;
+      return joinLogDetails([
+        stringField(request?.tool) ? `tool=${stringField(request?.tool)}` : undefined,
+        stringField(request?.displayCommand)
+          ? `cmd=${truncateLogValue(stringField(request?.displayCommand)!, 120)}`
+          : undefined,
+      ]);
+    }
+    case "host.approval_resolved":
+      return joinLogDetails([
+        stringField(payload.decision) ? `decision=${stringField(payload.decision)}` : undefined,
+        stringField(payload.decidedBy) ? `by=${stringField(payload.decidedBy)}` : undefined,
+        stringField(payload.rationale)
+          ? `why=${truncateLogValue(stringField(payload.rationale)!, 120)}`
+          : undefined,
+      ]);
+    case "worker.attempt_started":
+    case "worker.attempt_progress":
+    case "worker.attempt_completed":
+    case "worker.attempt_failed":
+      return joinLogDetails([
+        stringField(payload.status) ? `status=${stringField(payload.status)}` : undefined,
+        numberField(payload.percentComplete) !== undefined
+          ? `percent=${String(numberField(payload.percentComplete))}`
+          : undefined,
+        numberField(payload.exitCode) !== undefined
+          ? `exit=${String(numberField(payload.exitCode))}`
+          : undefined,
+        stringField(payload.exitSignal) ? `signal=${stringField(payload.exitSignal)}` : undefined,
+        booleanField(payload.timedOut) === true ? "timedOut=true" : undefined,
+        numberField(payload.elapsedMs) !== undefined
+          ? `elapsedMs=${String(numberField(payload.elapsedMs))}`
+          : undefined,
+        numberField(payload.outputBytes) !== undefined
+          ? `outputBytes=${String(numberField(payload.outputBytes))}`
+          : undefined,
+        stringField(payload.subKind) ? `subKind=${stringField(payload.subKind)}` : undefined,
+        stringField(payload.message)
+          ? `message=${truncateLogValue(stringField(payload.message)!, 120)}`
+          : undefined,
+      ]);
+    case "host.review_started":
+      return joinLogDetails([
+        stringField(payload.attemptId) ? `attempt=${stringField(payload.attemptId)}` : undefined,
+      ]);
+    case "host.review_completed":
+      return joinLogDetails([
+        stringField(payload.outcome) ? `outcome=${stringField(payload.outcome)}` : undefined,
+        stringField(payload.action) ? `action=${stringField(payload.action)}` : undefined,
+        stringField(payload.reason)
+          ? `reason=${truncateLogValue(stringField(payload.reason)!, 120)}`
+          : undefined,
+      ]);
+    case "host.artifact_registered":
+      return joinLogDetails([
+        stringField(payload.kind) ? `kind=${stringField(payload.kind)}` : undefined,
+        stringField(payload.name) ? `name=${stringField(payload.name)}` : undefined,
+      ]);
+    default:
+      return fallbackPayloadDetail(payload);
+  }
+};
+
+const formatLogEnvelope = (envelope: SessionEventEnvelope): string => {
+  const status = envelopeStatus(envelope);
+  const badge = status === undefined ? gray("[LOG]") : statusBadge(status);
+  const turnId = envelopeTurnId(envelope) ?? "-";
+  const attemptId = envelopeAttemptId(envelope) ?? "-";
+  const detail = envelopeDetail(envelope);
+  return `${formatUtcTimestamp(envelope.timestamp)} ${badge} ${envelope.kind} turn=${turnId} attempt=${attemptId}${detail.length > 0 ? ` ${detail}` : ""}`;
 };
 
 export const printLogs = async (args: HostCliArgs): Promise<number> => {
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const json = args.copilot.outputFormat === "json";
+  await loadSessionOrThrow(rootDir, args.sessionId ?? "");
+  const { envelopes, malformedLineCount } = await timeline.loadEventLog(
+    rootDir,
+    args.sessionId ?? "",
+  );
+  const filtered =
+    args.taskId === undefined
+      ? envelopes
+      : envelopes.filter((envelope) => envelopeAttemptId(envelope) === args.taskId);
 
   if (json) {
-    const { envelopes } = await timeline.loadEventLog(rootDir, args.sessionId ?? "");
-    const filtered =
-      args.taskId === undefined
-        ? envelopes
-        : envelopes.filter((envelope) => envelope.attemptId === args.taskId);
     for (const envelope of filtered) {
       stdoutWrite(`${JSON.stringify(envelope)}\n`);
     }
     return 0;
   }
 
-  const sessionStore = new SessionStore(rootDir);
-  const session = await loadSessionOrThrow(rootDir, args.sessionId ?? "");
-
-  const events = await sessionStore.readTaskEvents(session.sessionId);
-  const lines = events
-    .filter((event) => args.taskId === undefined || event.taskId === args.taskId)
-    .map(
-      (event) =>
-        `${event.timestamp} ${statusBadge(event.status)} ${event.taskId} ${event.kind} ${event.status}${event.message ? ` ${event.message}` : ""}`,
-    );
-  if (lines.length === 0) {
-    stdoutWrite("No task events found.\n");
+  if (filtered.length === 0 && malformedLineCount === 0) {
+    stdoutWrite("No log events found.\n");
     return 0;
   }
-  stdoutWrite(`${renderSection("Logs")}\n${lines.join("\n")}\n`);
+  const lines = [renderSection("Logs"), ...filtered.map(formatLogEnvelope)];
+  if (malformedLineCount > 0) {
+    lines.push(dim(`Skipped ${malformedLineCount} malformed event log line(s).`));
+  }
+  stdoutWrite(`${lines.join("\n")}\n`);
   return 0;
 };

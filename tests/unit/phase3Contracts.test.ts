@@ -189,8 +189,8 @@ test("phase3: check-like prompt → run_check / verification_check", () => {
   assert.equal(intent.kind, "run_check");
   assert.equal(spec.taskKind, "verification_check");
   assert.equal(spec.execution.engine, "shell");
-  assert.ok(Array.isArray(spec.execution.command));
-  assert.equal(spec.execution.command![0], "bash");
+  assert.equal(spec.execution.command, undefined);
+  assert.deepEqual(spec.acceptanceChecks[0]?.command, ["bash", "-lc", "tests"]);
 });
 
 // -- 4. Plan mode → inspect_repository, shell/write denied -------------------

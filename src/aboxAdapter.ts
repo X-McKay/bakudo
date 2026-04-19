@@ -20,13 +20,13 @@ export type StreamHandlers = {
  * opted in to.
  */
 export type SpawnEnv = Readonly<Record<string, string>> | undefined;
+export type ABoxInvocationMetadata = {
+  taskId?: string;
+};
 
 export class ABoxAdapter {
-  private sequence = 0;
-
   public constructor(
     private readonly aboxBin: string = "abox",
-    private readonly repoPath?: string,
     private readonly execFn: ExecFileFn = execFileAsync,
     private readonly spawnFn: SpawnFn = spawn,
   ) {}
@@ -40,14 +40,13 @@ export class ABoxAdapter {
     return this.aboxBin;
   }
 
-  public async runInStream(
-    streamId: string,
-    command: string,
+  public async exec(
+    args: readonly string[],
     timeoutSeconds = 120,
+    metadata: ABoxInvocationMetadata = {},
   ): Promise<ToolResult> {
-    const { taskId, cmd } = this.buildInvocation(streamId, command);
     try {
-      const { stdout, stderr } = await this.execFn(this.aboxBin, cmd, {
+      const { stdout, stderr } = await this.execFn(this.aboxBin, args, {
         timeout: timeoutSeconds * 1000,
         windowsHide: true,
       });
@@ -55,7 +54,11 @@ export class ABoxAdapter {
       return {
         ok: true,
         output,
-        metadata: { errorType: "ok", cmd: [this.aboxBin, ...cmd], taskId },
+        metadata: {
+          errorType: "ok",
+          cmd: [this.aboxBin, ...args],
+          ...(metadata.taskId === undefined ? {} : { taskId: metadata.taskId }),
+        },
       };
     } catch (error) {
       const err = error as {
@@ -77,21 +80,20 @@ export class ABoxAdapter {
           errorType: timeout ? "timeout" : "nonzero_exit",
           code: String(err.code ?? "unknown"),
           signal: err.signal ?? "",
-          cmd: [this.aboxBin, ...cmd],
-          taskId,
+          cmd: [this.aboxBin, ...args],
+          ...(metadata.taskId === undefined ? {} : { taskId: metadata.taskId }),
         },
       };
     }
   }
 
-  public async runInStreamLive(
-    streamId: string,
-    command: string,
+  public async spawnLive(
+    args: readonly string[],
     timeoutSeconds = 120,
     handlers: StreamHandlers = {},
     env?: SpawnEnv,
+    metadata: ABoxInvocationMetadata = {},
   ): Promise<ToolResult> {
-    const { taskId, cmd } = this.buildInvocation(streamId, command);
     const spawnEnv = this.resolveSpawnEnv(env);
     // Phase 6 W5 — when `env` is supplied, we pass ONLY those vars (plus the
     // ephemeral-opt-out signal the adapter inspects below); without `env` we
@@ -103,7 +105,7 @@ export class ABoxAdapter {
       stdio: ["ignore", "pipe", "pipe"],
       ...(spawnEnv === undefined ? {} : { env: spawnEnv }),
     };
-    const child = this.spawnFn(this.aboxBin, cmd, spawnOptions);
+    const child = this.spawnFn(this.aboxBin, args, spawnOptions);
 
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
@@ -144,8 +146,8 @@ export class ABoxAdapter {
             errorType: timedOut ? "timeout" : "spawn_error",
             code: "spawn_error",
             signal: "",
-            cmd: [this.aboxBin, ...cmd],
-            taskId,
+            cmd: [this.aboxBin, ...args],
+            ...(metadata.taskId === undefined ? {} : { taskId: metadata.taskId }),
           },
         });
       });
@@ -163,29 +165,12 @@ export class ABoxAdapter {
             errorType: ok ? "ok" : timedOut ? "timeout" : "nonzero_exit",
             code: String(code ?? "unknown"),
             signal: signal ?? "",
-            cmd: [this.aboxBin, ...cmd],
-            taskId,
+            cmd: [this.aboxBin, ...args],
+            ...(metadata.taskId === undefined ? {} : { taskId: metadata.taskId }),
           },
         });
       });
     });
-  }
-
-  private buildInvocation(streamId: string, command: string): { taskId: string; cmd: string[] } {
-    const taskId = this.nextTaskId(streamId);
-    const ephemeral = process.env.BAKUDO_EPHEMERAL !== "0";
-    const cmd = [
-      ...(this.repoPath ? ["--repo", this.repoPath] : []),
-      "run",
-      "--task",
-      taskId,
-      ...(ephemeral ? ["--ephemeral"] : []),
-      "--",
-      "bash",
-      "-lc",
-      command,
-    ];
-    return { taskId, cmd };
   }
 
   private resolveSpawnEnv(env: SpawnEnv): Record<string, string> | undefined {
@@ -198,12 +183,5 @@ export class ABoxAdapter {
       spawnEnv.PATH = process.env.PATH;
     }
     return spawnEnv;
-  }
-
-  private nextTaskId(streamId: string): string {
-    this.sequence += 1;
-    const sanitized = streamId.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-    const prefix = sanitized.length > 0 ? sanitized : "stream";
-    return `bakudo-${prefix}-${this.sequence}`;
   }
 }

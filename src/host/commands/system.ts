@@ -6,7 +6,7 @@ import {
 } from "../approvalStore.js";
 import type { HostCommandRegistry, HostCommandSpec } from "../commandRegistry.js";
 import { isKnownHelpTopic, loadHelpTopic, unknownTopicMessage } from "../helpTopicLoader.js";
-import { repoRootFor } from "../orchestration.js";
+import { repoRootFor } from "../sessionRunSupport.js";
 import {
   getActiveThemeVariant,
   isThemeVariant,

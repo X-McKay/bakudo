@@ -6,6 +6,7 @@
   "type": "module",
   "files": [
     "dist",
+    "config/default.json",
     "README.md",
     "docs/help",
     "scripts/install.sh"

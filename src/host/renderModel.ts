@@ -14,6 +14,7 @@ export type TranscriptItem =
   | { kind: "user"; text: string; timestamp?: string }
   | { kind: "assistant"; text: string; tone?: "info" | "success" | "warning" | "error" }
   | { kind: "event"; label: string; detail?: string }
+  | { kind: "output"; text: string }
   | { kind: "review"; outcome: string; summary: string; nextAction?: string };
 
 export type RenderFrame = {

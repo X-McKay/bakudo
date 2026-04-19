@@ -43,7 +43,8 @@ import {
   sessionPromptLabel,
 } from "./interactiveResolvers.js";
 import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
-import { repoRootFor, resumeSession, storageRootFor } from "./orchestration.js";
+import { resumeSession } from "./sessionLifecycle.js";
+import { repoRootFor, storageRootFor } from "./sessionRunSupport.js";
 import { parseHostArgs, tokenizeCommand, type HostCliArgs } from "./parsing.js";
 import {
   printLogs,
@@ -188,7 +189,7 @@ const composerModeToTaskMode = (mode: ComposerMode): "build" | "plan" =>
 
 // Discards bytes written to stdout during dispatch. The semantic narration
 // path (via createProgressCoalescer below) is the only writer that should
-// reach the transcript; raw per-event log lines from executeTask must not
+// reach the transcript; raw per-event log lines from executeAttempt must not
 // surface in the interactive default. Logs remain available via /inspect logs.
 const sinkWriter: TextWriter = { write: () => true };
 

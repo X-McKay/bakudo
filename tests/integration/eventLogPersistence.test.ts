@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
+import type { AttemptSpec } from "../../src/attemptProtocol.js";
 import type {
   ABoxTaskRunner,
   TaskExecutionRecord,
   TaskRunnerHandlers,
 } from "../../src/aboxTaskRunner.js";
-import type { WorkerTaskSpec } from "../../src/workerRuntime.js";
 import { ArtifactStore } from "../../src/artifactStore.js";
 import { SessionStore } from "../../src/sessionStore.js";
 import {
@@ -19,7 +19,7 @@ import {
   type SessionEventKind,
 } from "../../src/protocol.js";
 import type { WorkerTaskProgressEvent } from "../../src/workerRuntime.js";
-import { executeTask } from "../../src/host/orchestration.js";
+import { executeAttempt } from "../../src/host/executeAttempt.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
 import {
   createSessionEventLogWriter,
@@ -30,6 +30,25 @@ import {
 import { loadEventLog } from "../../src/host/timeline.js";
 
 const createTempRoot = async (): Promise<string> => mkdtemp(join(tmpdir(), "bakudo-eventlog-int-"));
+
+const buildAttemptSpec = (sessionId: string, prompt: string): AttemptSpec => ({
+  schemaVersion: 3,
+  sessionId,
+  turnId: "turn-1",
+  attemptId: "attempt-1",
+  taskId: "attempt-1",
+  intentId: "intent-1",
+  mode: "plan",
+  taskKind: "assistant_job",
+  prompt,
+  instructions: [],
+  cwd: ".",
+  execution: { engine: "agent_cli" },
+  permissions: { rules: [], allowAllTools: false, noAskUser: false },
+  budget: { timeoutSeconds: 60, maxOutputBytes: 1024, heartbeatIntervalMs: 5000 },
+  acceptanceChecks: [],
+  artifactRequests: [],
+});
 
 test("appending N envelopes round-trips through readSessionEventLog", async () => {
   const rootDir = await createTempRoot();
@@ -173,8 +192,8 @@ const stubRunnerEmitting = (events: WorkerTaskProgressEvent[]): ABoxTaskRunner =
     metadata: { cmd: ["abox", "run"], taskId: "abox-task-1" },
   };
   return {
-    runTask: async (
-      _spec: WorkerTaskSpec,
+    runAttempt: async (
+      _spec: AttemptSpec,
       _overrides: Record<string, unknown>,
       handlers: TaskRunnerHandlers = {},
     ): Promise<TaskExecutionRecord> => {
@@ -186,7 +205,7 @@ const stubRunnerEmitting = (events: WorkerTaskProgressEvent[]): ABoxTaskRunner =
   } as unknown as ABoxTaskRunner;
 };
 
-test("executeTask round-trip writes the expected envelope sequence", async () => {
+test("executeAttempt round-trip writes the expected envelope sequence", async () => {
   const rootDir = await createTempRoot();
   try {
     const sessionId = "session-exec";
@@ -243,39 +262,30 @@ test("executeTask round-trip writes the expected envelope sequence", async () =>
       copilot: {},
     };
 
-    const request = {
-      schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
-      taskId: "attempt-1",
-      sessionId,
-      goal: "exec-goal",
-      mode: "plan" as const,
-      cwd: ".",
-      assumeDangerousSkipPermissions: false,
-    };
-
-    await executeTask({
+    await executeAttempt({
       sessionStore,
       artifactStore,
       runner,
       sessionId,
       turnId: "turn-1",
-      request,
+      spec: buildAttemptSpec(sessionId, "exec-goal"),
       args,
     });
 
     const envelopes: SessionEventEnvelope[] = await readSessionEventLog(rootDir, sessionId);
     const kinds = envelopes.map((envelope) => envelope.kind);
-    // Artifact-registered envelopes are interleaved with the orchestration
-    // lifecycle after `host.review_completed` (three per `executeTask` run:
-    // result, worker-output, dispatch). Check the prefix ordering, then the
-    // trailing `host.artifact_registered` block.
+    // Artifact-registered envelopes are interleaved after the executeAttempt
+    // lifecycle finishes (three per run: result, worker-output, dispatch).
+    // Check the prefix ordering, then the trailing artifact block.
     const expectedPrefix: SessionEventKind[] = [
       "host.dispatch_started",
+      "host.provenance_started",
       "worker.attempt_started",
       "worker.attempt_progress",
       "worker.attempt_progress",
       "worker.attempt_progress",
       "worker.attempt_completed",
+      "host.provenance_finalized",
       "host.review_started",
       "host.review_completed",
     ];

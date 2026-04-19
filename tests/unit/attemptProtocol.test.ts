@@ -4,8 +4,15 @@ import test from "node:test";
 import {
   AttemptExecutionResultSchema,
   AttemptSpecSchema,
+  BatchSpecSchema,
+  CandidateSetSchema,
+  CandidateSetResultSchema,
+  DispatchPlanSchema,
+  ExecutionProfileSchema,
   PermissionRuleSchema,
   TurnIntentSchema,
+  reservedGuestOutputDirForAttempt,
+  sanitizeAttemptPathSegment,
   type AttemptExecutionResult,
   type AttemptSpec,
   type PermissionRule,
@@ -184,6 +191,90 @@ test("AttemptSpecSchema rejects invalid taskKind", () => {
   assert.throws(
     () => AttemptSpecSchema.parse({ ...validAttemptSpec, taskKind: "unknown" }),
     /invalid/iu,
+  );
+});
+
+test("DispatchPlanSchema accepts optional batchId/candidateId", () => {
+  const parsed = DispatchPlanSchema.parse({
+    schemaVersion: 1,
+    profile: ExecutionProfileSchema.parse({
+      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      sandboxLifecycle: "preserved",
+      mergeStrategy: "interactive",
+    }),
+    spec: validAttemptSpec,
+  });
+  assert.equal(parsed.batchId, undefined);
+  assert.equal(parsed.candidateId, undefined);
+});
+
+test("BatchSpecSchema accepts dispatch-plan candidates", () => {
+  const batch = BatchSpecSchema.parse({
+    batchId: "batch-1",
+    intentId: "intent-1",
+    candidates: [
+      {
+        schemaVersion: 1,
+        candidateId: "attempt-1",
+        profile: ExecutionProfileSchema.parse({
+          agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+          sandboxLifecycle: "preserved",
+          mergeStrategy: "interactive",
+        }),
+        spec: validAttemptSpec,
+      },
+    ],
+  });
+  assert.equal(batch.candidates.length, 1);
+});
+
+test("CandidateSetSchema aliases the batch candidate shape", () => {
+  const candidateSet = CandidateSetSchema.parse({
+    batchId: "batch-1",
+    intentId: "intent-1",
+    candidates: [
+      {
+        schemaVersion: 1,
+        candidateId: "candidate-1",
+        profile: ExecutionProfileSchema.parse({
+          agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+          sandboxLifecycle: "preserved",
+          mergeStrategy: "interactive",
+        }),
+        spec: validAttemptSpec,
+      },
+    ],
+  });
+  assert.equal(candidateSet.batchId, "batch-1");
+  assert.equal(candidateSet.candidates[0]?.candidateId, "candidate-1");
+});
+
+test("CandidateSetResultSchema accepts selected candidate ids", () => {
+  const parsed = CandidateSetResultSchema.parse({
+    batchId: "batch-1",
+    results: {
+      "attempt-1": {
+        schemaVersion: 3,
+        attemptId: "attempt-1",
+        taskKind: "assistant_job",
+        status: "succeeded",
+        summary: "ok",
+        startedAt: "2026-04-15T00:00:00Z",
+        finishedAt: "2026-04-15T00:05:00Z",
+        durationMs: 1,
+        artifacts: [],
+      },
+    },
+    selectedCandidateId: "attempt-1",
+  });
+  assert.equal(parsed.selectedCandidateId, "attempt-1");
+});
+
+test("reservedGuestOutputDirForAttempt uses a worktree-visible path", () => {
+  assert.equal(sanitizeAttemptPathSegment("turn:1/attempt 2"), "turn-1-attempt-2");
+  assert.equal(
+    reservedGuestOutputDirForAttempt("turn:1/attempt 2"),
+    "/workspace/.bakudo/out/turn-1-attempt-2",
   );
 });
 

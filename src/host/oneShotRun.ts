@@ -8,7 +8,7 @@ import {
   type JsonEventSink,
 } from "./eventLogWriter.js";
 import { getBaseStdout, stdoutWrite } from "./io.js";
-import { promptForApproval, requiresSandboxApproval, storageRootFor } from "./orchestration.js";
+import { promptForApproval, requiresSandboxApproval, storageRootFor } from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import { printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
 import { JsonBackend } from "./renderers/jsonBackend.js";
@@ -84,7 +84,7 @@ export const runNonInteractiveOneShot = async (
       return EXIT_CODES.BLOCKED;
     }
     const approved = await promptForApprovalFn(
-      `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+      `Dispatch a ${args.mode} attempt into an abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Dispatch cancelled.\n");

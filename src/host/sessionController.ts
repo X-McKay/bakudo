@@ -31,7 +31,7 @@ import {
   repoRootFor,
   sessionStatusFromReview,
   storageRootFor,
-} from "./orchestration.js";
+} from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import { planAttempt } from "./planner.js";
 import { parseTokenBudget } from "./tokenBudget.js";
@@ -90,7 +90,7 @@ const buildRunnerContext = async (
     sessionStore: new SessionStore(rootDir, { enforceLock: true }),
     artifactStore: new ArtifactStore(rootDir, redactionPolicy),
     runner: new ABoxTaskRunner(
-      new ABoxAdapter(args.aboxBin, args.repo),
+      new ABoxAdapter(args.aboxBin),
       undefined,
       envPolicy,
       undefined,
@@ -304,7 +304,7 @@ export const createAndRunFirstTurn = async (
     const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
     const repoRoot = repoRootFor(args.repo);
     const plannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
-    const { spec } = planAttempt(
+    const { plan } = planAttempt(
       effectivePrompt,
       composerMode,
       {
@@ -318,19 +318,21 @@ export const createAndRunFirstTurn = async (
       plannerOpts,
     );
 
-    const { reviewed } = await executeAttempt({
-      sessionStore,
-      artifactStore,
-      runner,
-      sessionId: session.sessionId,
-      turnId,
-      spec,
-      args,
-      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
-      ...(options.eventLogWriterFactory
-        ? { eventLogWriterFactory: options.eventLogWriterFactory }
-        : {}),
-    });
+    const { reviewed } = await executeAttempt(
+      {
+        sessionStore,
+        artifactStore,
+        runner,
+        sessionId: session.sessionId,
+        turnId,
+        args,
+        ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+        ...(options.eventLogWriterFactory
+          ? { eventLogWriterFactory: options.eventLogWriterFactory }
+          : {}),
+      },
+      plan,
+    );
 
     const updated = await sessionStore.saveSession({
       ...(await sessionStore.loadSession(session.sessionId))!,
@@ -412,7 +414,7 @@ export const appendTurnToActiveSession = async (
     const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
     const repoRoot = repoRootFor(args.repo);
     const appendPlannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
-    const { spec } = planAttempt(
+    const { plan } = planAttempt(
       effectivePrompt,
       composerMode,
       {
@@ -427,19 +429,21 @@ export const appendTurnToActiveSession = async (
     );
 
     await sessionStore.saveSession({ ...withTurn, status: "running" });
-    const { reviewed } = await executeAttempt({
-      sessionStore,
-      artifactStore,
-      runner,
-      sessionId,
-      turnId,
-      spec,
-      args,
-      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
-      ...(options.eventLogWriterFactory
-        ? { eventLogWriterFactory: options.eventLogWriterFactory }
-        : {}),
-    });
+    const { reviewed } = await executeAttempt(
+      {
+        sessionStore,
+        artifactStore,
+        runner,
+        sessionId,
+        turnId,
+        args,
+        ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+        ...(options.eventLogWriterFactory
+          ? { eventLogWriterFactory: options.eventLogWriterFactory }
+          : {}),
+      },
+      plan,
+    );
 
     const updated = await sessionStore.saveSession({
       ...(await sessionStore.loadSession(sessionId))!,

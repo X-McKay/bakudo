@@ -17,7 +17,7 @@ import type { BakudoConfig, ConfigLayer } from "./config.js";
 import { BakudoConfigSchema, loadConfigCascade } from "./config.js";
 import { UserInputError } from "./errors.js";
 import { stdoutWrite } from "./io.js";
-import { repoRootFor } from "./orchestration.js";
+import { repoRootFor } from "./sessionRunSupport.js";
 
 /**
  * Result of an explain-config lookup. `layer` is `null` when no layer

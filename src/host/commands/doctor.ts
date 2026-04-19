@@ -40,7 +40,7 @@ import {
 import { stdoutWrite } from "../io.js";
 import { xdgKeybindingsPath } from "../keybindings/userBindings.js";
 import { validateBindings } from "../keybindings/validate.js";
-import { repoRootFor, storageRootFor } from "../orchestration.js";
+import { repoRootFor, storageRootFor } from "../sessionRunSupport.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
 import { resolveEffectiveRedactionPolicy, summarizeRedactionPolicy } from "../redaction.js";

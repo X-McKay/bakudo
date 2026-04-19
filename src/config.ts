@@ -1,8 +1,50 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Mode, type AutonomyBudget } from "./models.js";
 import { defaultHarnessConfig, type HarnessConfig } from "./orchestrator.js";
 import type { PolicyConfig } from "./policy.js";
+
+/**
+ * Default config file name relative to either the caller cwd or the install root.
+ * The string is exposed so CLI defaults can render it for `--help`.
+ */
+export const DEFAULT_CONFIG_FILE = "config/default.json";
+
+const installRoot = (): string => {
+  // src/config.ts -> dist/src/config.js at runtime; install root is two levels up.
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, "..", "..");
+};
+
+/**
+ * Resolve the bakudo default config to an absolute path.
+ *
+ * Resolution order:
+ *  1. An explicit caller-supplied path is used verbatim. The caller is
+ *     responsible for ensuring it exists; loadConfig will surface ENOENT.
+ *  2. `<cwd>/config/default.json` — preserves the in-repo dev workflow.
+ *  3. `<install-root>/config/default.json` — the published bundle ships the
+ *     default config alongside `dist/`, so installed bakudo works regardless
+ *     of caller cwd.
+ *
+ * Returns the first existing candidate, falling back to the install-root path
+ * even when missing (so loadConfig produces a stable, actionable error
+ * message rather than a cwd-dependent one).
+ */
+export const resolveDefaultConfigPath = (
+  override?: string | undefined,
+  cwd: string = process.cwd(),
+): string => {
+  if (override !== undefined && override.length > 0 && override !== DEFAULT_CONFIG_FILE) {
+    return resolve(cwd, override);
+  }
+  const cwdCandidate = resolve(cwd, DEFAULT_CONFIG_FILE);
+  if (existsSync(cwdCandidate)) return cwdCandidate;
+  return resolve(installRoot(), DEFAULT_CONFIG_FILE);
+};
 
 export type RuntimeFileConfig = {
   runtime?: Partial<{
@@ -24,7 +66,8 @@ export type RuntimeFileConfig = {
 };
 
 export const loadConfig = async (path: string): Promise<RuntimeFileConfig> => {
-  const raw = await readFile(path, "utf8");
+  const resolved = resolveDefaultConfigPath(path);
+  const raw = await readFile(resolved, "utf8");
   return JSON.parse(raw) as RuntimeFileConfig;
 };
 

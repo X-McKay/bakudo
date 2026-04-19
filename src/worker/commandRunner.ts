@@ -1,4 +1,4 @@
-import type { AttemptSpec } from "../attemptProtocol.js";
+import type { AttemptSpec, ExecutionProfile } from "../attemptProtocol.js";
 import type { TaskRunnerCommand } from "./taskKinds.js";
 
 /**
@@ -8,7 +8,10 @@ import type { TaskRunnerCommand } from "./taskKinds.js";
  * runner returns a failing `false` command so workerRuntime surfaces a clear
  * error via a non-zero exit code.
  */
-export const runExplicitCommand = (spec: AttemptSpec): TaskRunnerCommand => {
+export const runExplicitCommand = (
+  spec: AttemptSpec,
+  _profile: ExecutionProfile,
+): TaskRunnerCommand => {
   const command = spec.execution.command;
   if (!command || command.length === 0) {
     return { command: ["false"] };

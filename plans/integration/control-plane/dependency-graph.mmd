@@ -1,0 +1,28 @@
+graph TD
+    W0["Wave 0<br/>Correctness Floor<br/><i>config • stdin • run_check</i>"]
+    W1["Wave 1<br/>Data Model<br/><i>DispatchPlan • ExecutionProfile</i>"]
+    W2["Wave 2<br/>Worker Backend<br/><i>codex exec • reserved output</i>"]
+    W3["Wave 3<br/>Orchestration<br/><i>adapter split • lifecycle modules</i>"]
+    W4["Wave 4<br/>Review Decoupling<br/><i>worktree inspector • host artifacts</i>"]
+    W5["Wave 5<br/>Persistence & UI<br/><i>lifecycle state • approval copy</i>"]
+    W6["Waves 6 & 7<br/>Harness & Batch<br/><i>mock abox • CandidateSet</i>"]
+    UX["UX Realignment<br/><i>output kind • footer • log envelopes</i>"]
+
+    W0 --> W1
+    W0 --> W2
+    W1 --> W2
+    W1 --> W3
+    W3 --> W4
+    W2 -.->|recommended before| W4
+    W4 --> W5
+    W5 --> W6
+    W5 --> UX
+
+    style W0 fill:#dff,stroke:#066,stroke-width:2px
+    style W1 fill:#dff,stroke:#066,stroke-width:2px
+    style W3 fill:#fdd,stroke:#900,stroke-width:2px
+    style W4 fill:#fdd,stroke:#900,stroke-width:2px
+    style W2 fill:#ffd,stroke:#960,stroke-width:1px
+    style W5 fill:#ffd,stroke:#960,stroke-width:1px
+    style W6 fill:#dfd,stroke:#060,stroke-width:1px
+    style UX fill:#dfd,stroke:#060,stroke-width:1px

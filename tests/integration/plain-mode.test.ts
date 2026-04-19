@@ -20,16 +20,18 @@ import test from "node:test";
 
 import { ANSI_PATTERN, stripAnsi } from "../../src/host/ansi.js";
 import { initialHostAppState } from "../../src/host/appState.js";
+import { emitSessionEvent } from "../../src/host/eventLogWriter.js";
 import { formatInspectSummary } from "../../src/host/inspectFormatter.js";
 import { withCapturedStdout } from "../../src/host/io.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
-import { printSessions, printStatus } from "../../src/host/printers.js";
+import { printLogs, printSessions, printStatus } from "../../src/host/printers.js";
 import { reduceHost } from "../../src/host/reducer.js";
 import { selectRenderFrame, type TranscriptItem } from "../../src/host/renderModel.js";
 import { selectRendererBackend, type RendererStdout } from "../../src/host/rendererBackend.js";
 import { PlainBackend } from "../../src/host/renderers/plainBackend.js";
 import { renderTranscriptFramePlain } from "../../src/host/renderers/plainRenderer.js";
 import { SessionStore } from "../../src/sessionStore.js";
+import { createSessionEvent } from "../../src/protocol.js";
 
 // 80-column fallback — the matrix guarantees plain output is pipe-friendly
 // when the consumer has no terminal-width probe available (plan
@@ -231,6 +233,60 @@ test("plain status (no session id): newline-separated, stripped cleanly to ASCII
       // pipe-friendly: the line should print without requiring a TTY.
       assert.equal(line.match(/\r/u), null, "CRs would break `| grep` pipelines");
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Logs (v2 envelope text rendering)
+// ---------------------------------------------------------------------------
+
+test("plain logs: text mode renders v2 envelope details without undefined", async () => {
+  const root = await mkdtemp(join(tmpdir(), "bakudo-plain-logs-"));
+  try {
+    const store = new SessionStore(root);
+    await store.createSession({
+      sessionId: "session-plain-logs",
+      goal: "logs plain",
+      repoRoot: "/tmp/repo",
+      assumeDangerousSkipPermissions: false,
+      status: "running",
+    });
+    await emitSessionEvent(
+      root,
+      "session-plain-logs",
+      createSessionEvent({
+        kind: "host.dispatch_started",
+        sessionId: "session-plain-logs",
+        actor: "host",
+        timestamp: "2026-04-16T01:02:03.000Z",
+        payload: {
+          attemptId: "attempt-log-1",
+          goal: "collect plain logs",
+          mode: "build",
+          assumeDangerousSkipPermissions: false,
+        },
+      }),
+    );
+
+    const cap = captureWriter();
+    const args = {
+      ...baseArgs(root),
+      command: "logs" as const,
+      sessionId: "session-plain-logs",
+      taskId: "attempt-log-1",
+    };
+    const code = await withCapturedStdout(cap.writer, () => printLogs(args));
+    assert.equal(code, 0);
+
+    const body = stripAnsi(cap.chunks.join(""));
+    assert.match(body, /Logs/u);
+    assert.match(body, /host\.dispatch_started/u);
+    assert.match(body, /turn=-/u);
+    assert.match(body, /attempt=attempt-log-1/u);
+    assert.match(body, /goal=collect plain logs/u);
+    assert.doesNotMatch(body, /undefined/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

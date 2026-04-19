@@ -94,6 +94,7 @@ test("selectRenderFrame: transcript echoes input items unchanged", () => {
   const items = [
     { kind: "user" as const, text: "hi" },
     { kind: "assistant" as const, text: "ok", tone: "success" as const },
+    { kind: "output" as const, text: "alpha\nbeta" },
   ];
   const frame = selectRenderFrame({ state: initialHostAppState(), transcript: items });
   assert.deepEqual(frame.transcript, items);

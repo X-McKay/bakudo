@@ -35,4 +35,5 @@ declare const process: {
   stderr: { write(data: string): void };
   exitCode: number;
   env: Record<string, string | undefined>;
+  cwd(): string;
 };

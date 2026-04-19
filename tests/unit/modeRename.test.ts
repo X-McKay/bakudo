@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { deriveAutoApprove, initialHostAppState } from "../../src/host/appState.js";
-import { composerModeToTaskMode } from "../../src/host/orchestration.js";
+import { composerModeToTaskMode } from "../../src/host/attemptCompiler.js";
 import { reduceHost } from "../../src/host/reducer.js";
 
 test("composer default mode is 'standard'", () => {
@@ -21,8 +21,6 @@ test("composerModeToTaskMode: plan stays plan, standard/autopilot → build", ()
   assert.equal(composerModeToTaskMode("plan"), "plan");
   assert.equal(composerModeToTaskMode("standard"), "build");
   assert.equal(composerModeToTaskMode("autopilot"), "build");
-  // legacy values pass through safely
-  assert.equal(composerModeToTaskMode("build"), "build");
 });
 
 test("set_mode autopilot flips autoApprove to true; back to standard flips it false", () => {
