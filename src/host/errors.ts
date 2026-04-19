@@ -42,6 +42,7 @@ export type BakudoErrorCode =
   | "user_input"
   | "policy_denied"
   | "approval_denied"
+  | "approval_required"
   | "worker_protocol_mismatch"
   | "worker_execution"
   | "session_corruption"

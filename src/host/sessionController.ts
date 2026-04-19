@@ -227,7 +227,7 @@ const taskModeToComposerMode = (mode: string, autoApprove: boolean): ComposerMod
  * inside `resolveApprovalBeforeDispatch` — this only collapses the composer
  * mode so the planner emits `allowAllTools: true` on the spec.
  */
-const resolveAutoApprove = (args: HostCliArgs): boolean =>
+export const resolveAutoApprove = (args: HostCliArgs): boolean =>
   (args.yes ?? false) || args.copilot.allowAllTools === true;
 
 export type SessionDispatchOptions = {

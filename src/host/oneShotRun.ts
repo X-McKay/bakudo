@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { buildOneShotReviewEnvelope } from "./copilotFlags.js";
-import { classifyError } from "./errors.js";
+import { buildJsonErrorEnvelope, classifyError, EXIT_CODES } from "./errors.js";
 import {
   createSessionEventLogWriter,
   emitUserTurnSubmitted,
@@ -57,14 +57,38 @@ const createOneShotJsonBackend = (): JsonBackend => {
  * `buildOneShotReviewEnvelope` summary on success, or a
  * `JsonBackend.emitJsonError` envelope on dispatch failure.
  */
-export const runNonInteractiveOneShot = async (args: HostCliArgs): Promise<number> => {
+export type OneShotRunDeps = {
+  promptForApprovalFn?: typeof promptForApproval;
+};
+
+export const runNonInteractiveOneShot = async (
+  args: HostCliArgs,
+  deps: OneShotRunDeps = {},
+): Promise<number> => {
+  const promptForApprovalFn = deps.promptForApprovalFn ?? promptForApproval;
+
   if (requiresSandboxApproval(args) && !args.yes && args.copilot.allowAllTools !== true) {
-    const approved = await promptForApproval(
+    if (args.copilot.outputFormat === "json") {
+      stdoutWrite(
+        `${JSON.stringify(
+          buildJsonErrorEnvelope({
+            code: "approval_required",
+            message: "Approval is required but stdin is --output-format=json",
+            details: {
+              taskId: args.taskId ?? "pending",
+              mode: args.mode,
+            },
+          }),
+        )}\n`,
+      );
+      return EXIT_CODES.BLOCKED;
+    }
+    const approved = await promptForApprovalFn(
       `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Dispatch cancelled.\n");
-      return 2;
+      return EXIT_CODES.BLOCKED;
     }
   }
   const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
