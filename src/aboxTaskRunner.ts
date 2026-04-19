@@ -3,20 +3,21 @@ import { readFile } from "node:fs/promises";
 import { ABoxAdapter } from "./aboxAdapter.js";
 import type { AttemptSpec, ExecutionProfile } from "./attemptProtocol.js";
 import { DEFAULT_ENV_POLICY, filterEnv, type EnvPolicy } from "./host/envPolicy.js";
-import { generateSandboxTaskId, isEphemeralSandbox } from "./host/sandboxLifecycle.js";
+import { buildAboxShellCommandArgs, generateSandboxTaskId } from "./host/sandboxLifecycle.js";
 import {
   getCachedWorkerCapabilities,
   negotiateAttemptAgainstCapabilities,
   type ProbeOutcome,
 } from "./host/workerCapabilities.js";
-import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskResult } from "./protocol.js";
+import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type TaskRequest, type TaskResult } from "./protocol.js";
 import {
   WORKER_ERROR_PREFIX,
   WORKER_EVENT_PREFIX,
   WORKER_RESULT_PREFIX,
+  type LegacyWorkerRequest,
+  type WorkerDispatchInput,
   type WorkerTaskProgressEvent,
   type WorkerTaskResult,
-  type WorkerTaskSpec,
 } from "./workerRuntime.js";
 
 export type TaskExecutionRecord = {
@@ -45,7 +46,26 @@ type WorkerModuleSources = {
   workerCheckRunnerJs: string;
 };
 
-const ABOX_GUEST_WORKSPACE_CWD = "/workspace";
+const DEFAULT_WORKER_EXECUTION_PROFILE: ExecutionProfile = {
+  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  sandboxLifecycle: "ephemeral",
+  mergeStrategy: "none",
+};
+
+const isAttemptSpec = (spec: WorkerDispatchInput): spec is AttemptSpec => spec.schemaVersion === 3;
+const inputTimeoutSeconds = (spec: WorkerDispatchInput): number | undefined =>
+  isAttemptSpec(spec) ? spec.budget.timeoutSeconds : spec.timeoutSeconds;
+const inputMaxOutputBytes = (spec: WorkerDispatchInput): number | undefined =>
+  isAttemptSpec(spec) ? spec.budget.maxOutputBytes : spec.maxOutputBytes;
+const inputHeartbeatIntervalMs = (spec: WorkerDispatchInput): number | undefined =>
+  isAttemptSpec(spec) ? spec.budget.heartbeatIntervalMs : spec.heartbeatIntervalMs;
+const inputCommandLabel = (spec: WorkerDispatchInput): string =>
+  isAttemptSpec(spec) ? spec.prompt : spec.goal;
+const inputReportedCwd = (spec: WorkerDispatchInput): string =>
+  isAttemptSpec(spec) ? "/workspace" : spec.cwd ?? ".";
+const inputAssumeDangerousSkipPermissions = (spec: WorkerDispatchInput): boolean =>
+  isAttemptSpec(spec) ? spec.permissions.allowAllTools : spec.assumeDangerousSkipPermissions;
+const inputRepoRoot = (spec: WorkerDispatchInput): string | undefined => spec.cwd;
 
 const shellEscape = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 
@@ -64,7 +84,16 @@ const renderHereDoc = (targetPath: string, content: string, base: string): strin
 
 const resolveDistSource = async (relativePath: string): Promise<string> => {
   const url = new URL(relativePath, import.meta.url);
-  return readFile(url, "utf8");
+  try {
+    return await readFile(url, "utf8");
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== "ENOENT" || !relativePath.endsWith(".js")) {
+      throw error;
+    }
+    const sourceUrl = new URL(relativePath.replace(/\.js$/u, ".ts"), import.meta.url);
+    return readFile(sourceUrl, "utf8");
+  }
 };
 
 const loadWorkerModuleSources = async (): Promise<WorkerModuleSources> => ({
@@ -80,7 +109,7 @@ const loadWorkerModuleSources = async (): Promise<WorkerModuleSources> => ({
 });
 
 const buildWorkerLaunchCommand = async (
-  spec: WorkerTaskSpec,
+  spec: WorkerDispatchInput,
   overrides: {
     shell?: string;
     timeoutSeconds?: number;
@@ -88,22 +117,30 @@ const buildWorkerLaunchCommand = async (
     heartbeatIntervalMs?: number;
     killGraceMs?: number;
   } = {},
+  executionProfile?: ExecutionProfile,
 ): Promise<string> => {
   const sources = await loadWorkerModuleSources();
   const encodedSpec = Buffer.from(JSON.stringify(spec), "utf8").toString("base64");
+  const encodedProfile =
+    executionProfile === undefined
+      ? undefined
+      : Buffer.from(JSON.stringify(executionProfile), "utf8").toString("base64");
   const commandArgs = [
     "node",
     '"$tmpdir/workerCli.js"',
-    "--task-spec-b64",
+    "--input-b64",
     shellEscape(encodedSpec),
+    ...(encodedProfile === undefined
+      ? []
+      : ["--execution-profile-b64", shellEscape(encodedProfile)]),
     "--shell",
     shellEscape(overrides.shell ?? "bash"),
     "--timeout-seconds",
-    String(overrides.timeoutSeconds ?? spec.timeoutSeconds ?? 120),
+    String(overrides.timeoutSeconds ?? inputTimeoutSeconds(spec) ?? 120),
     "--max-output-bytes",
-    String(overrides.maxOutputBytes ?? spec.maxOutputBytes ?? 256 * 1024),
+    String(overrides.maxOutputBytes ?? inputMaxOutputBytes(spec) ?? 256 * 1024),
     "--heartbeat-ms",
-    String(overrides.heartbeatIntervalMs ?? spec.heartbeatIntervalMs ?? 5000),
+    String(overrides.heartbeatIntervalMs ?? inputHeartbeatIntervalMs(spec) ?? 5000),
     "--kill-grace-ms",
     String(overrides.killGraceMs ?? 2000),
   ].join(" ");
@@ -166,7 +203,7 @@ const toExitCode = (value: unknown): number | undefined => {
 };
 
 const synthesizeResult = (
-  spec: WorkerTaskSpec,
+  spec: WorkerDispatchInput,
   rawOutput: string,
   workerErrors: Array<Record<string, unknown>>,
   metadata?: Record<string, unknown>,
@@ -188,10 +225,10 @@ const synthesizeResult = (
     summary,
     finishedAt: new Date().toISOString(),
     exitCode: toExitCode(metadata?.code) ?? 1,
-    command: spec.goal,
-    cwd: spec.cwd ?? ".",
+    command: inputCommandLabel(spec),
+    cwd: inputReportedCwd(spec),
     shell: "bash",
-    timeoutSeconds: spec.timeoutSeconds ?? 120,
+    timeoutSeconds: inputTimeoutSeconds(spec) ?? 120,
     durationMs: 0,
     exitSignal: typeof metadata?.signal === "string" ? metadata.signal : null,
     stdout: rawOutput,
@@ -199,12 +236,12 @@ const synthesizeResult = (
     stdoutTruncated: false,
     stderrTruncated: false,
     timedOut: String(metadata?.errorType ?? "") === "timeout",
-    assumeDangerousSkipPermissions: spec.assumeDangerousSkipPermissions,
+    assumeDangerousSkipPermissions: inputAssumeDangerousSkipPermissions(spec),
   };
 };
 
 const parseExecutionOutput = (
-  spec: WorkerTaskSpec,
+  spec: WorkerDispatchInput,
   rawOutput: string,
   ok: boolean,
   metadata?: Record<string, unknown>,
@@ -243,43 +280,6 @@ const parseExecutionOutput = (
     ok,
     ...(metadata === undefined ? {} : { metadata }),
   };
-};
-
-/**
- * Convert an {@link AttemptSpec} to a {@link WorkerTaskSpec} so the existing
- * worker launch pipeline (heredocs, workerCli.js, workerRuntime.js) can
- * execute it. The worker runtime inspects `taskKind` to decide the
- * task-kind dispatch path (PR10); specs without `taskKind` fall through to
- * the legacy `goal`-as-command path.
- */
-export const attemptSpecToWorkerSpec = (
-  spec: AttemptSpec,
-  executionProfile?: ExecutionProfile,
-): WorkerTaskSpec => {
-  const base: WorkerTaskSpec = {
-    schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
-    taskId: spec.taskId,
-    sessionId: spec.sessionId,
-    goal: spec.prompt,
-    mode: spec.mode,
-    // Attempt specs carry the host repo root for host-side bookkeeping, but
-    // the guest only sees the worktree mounted at /workspace.
-    cwd: ABOX_GUEST_WORKSPACE_CWD,
-    timeoutSeconds: spec.budget.timeoutSeconds,
-    maxOutputBytes: spec.budget.maxOutputBytes,
-    heartbeatIntervalMs: spec.budget.heartbeatIntervalMs,
-    assumeDangerousSkipPermissions: spec.permissions.allowAllTools,
-  };
-  // Phase 3 v3 fields — workerRuntime reads `taskKind` + `attemptSpec` via
-  // duck-typing for task-kind dispatch. Not on the TS type (legacy shape)
-  // so we assign post-construction.
-  const extended = base as WorkerTaskSpec & { taskKind: string; attemptSpec: AttemptSpec };
-  extended.taskKind = spec.taskKind;
-  extended.attemptSpec = spec;
-  if (executionProfile !== undefined) {
-    extended.executionProfile = executionProfile;
-  }
-  return extended;
 };
 
 /**
@@ -359,8 +359,55 @@ export class ABoxTaskRunner {
     private readonly probeFailureEmitter?: ProbeFailureEmitter,
   ) {}
 
+  private async runDispatch(
+    spec: WorkerDispatchInput,
+    overrides: {
+      shell?: string;
+      timeoutSeconds?: number;
+      maxOutputBytes?: number;
+      heartbeatIntervalMs?: number;
+      killGraceMs?: number;
+    } = {},
+    handlers: TaskRunnerHandlers = {},
+    executionProfile?: ExecutionProfile,
+  ): Promise<TaskExecutionRecord> {
+    const profile = executionProfile ?? DEFAULT_WORKER_EXECUTION_PROFILE;
+    const command = await buildWorkerLaunchCommand(spec, overrides, profile);
+    const timeoutSeconds = (overrides.timeoutSeconds ?? inputTimeoutSeconds(spec) ?? 120) + 20;
+    // Phase 6 W5 — route the host env through the allowlist BEFORE building
+    // the spawn. Default policy has an empty allowlist, so workers see a
+    // clean env unless the user has opted in to specific names.
+    const filteredEnv = filterEnv(this.envSource(), this.envPolicy);
+    const sandboxTaskId = generateSandboxTaskId(
+      isAttemptSpec(spec) ? spec.attemptId : spec.streamId ?? spec.taskId,
+    );
+    const args = buildAboxShellCommandArgs(
+      sandboxTaskId,
+      command,
+      profile,
+      inputRepoRoot(spec),
+    );
+    let rawOutput = "";
+    const execution = await this.adapter.spawnLive(
+      args,
+      timeoutSeconds,
+      {
+        onStdout: (chunk: string) => {
+          rawOutput += chunk;
+        },
+        onStderr: (chunk: string) => {
+          rawOutput += chunk;
+        },
+      },
+      filteredEnv,
+      { taskId: sandboxTaskId },
+    );
+    const output = rawOutput.length > 0 ? rawOutput : execution.output;
+    return parseExecutionOutput(spec, output, execution.ok, execution.metadata, handlers);
+  }
+
   public async runTask(
-    spec: WorkerTaskSpec,
+    spec: TaskRequest & { stdin?: string },
     overrides: {
       shell?: string;
       timeoutSeconds?: number;
@@ -370,40 +417,12 @@ export class ABoxTaskRunner {
     } = {},
     handlers: TaskRunnerHandlers = {},
   ): Promise<TaskExecutionRecord> {
-    const command = await buildWorkerLaunchCommand(spec, overrides);
-    const timeoutSeconds = (overrides.timeoutSeconds ?? spec.timeoutSeconds ?? 120) + 20;
-    const streamId = spec.streamId ?? spec.taskId;
-    // Phase 6 W5 — route the host env through the allowlist BEFORE building
-    // the spawn. Default policy has an empty allowlist, so workers see a
-    // clean env unless the user has opted in to specific names.
-    const filteredEnv = filterEnv(this.envSource(), this.envPolicy);
-    const runtimeAttemptId =
-      (spec as WorkerTaskSpec & { attemptSpec?: AttemptSpec }).attemptSpec?.attemptId ?? spec.taskId;
-    const sandboxTaskId = generateSandboxTaskId(runtimeAttemptId);
-    const ephemeral = isEphemeralSandbox(spec.executionProfile);
-    let rawOutput = "";
-    const execution = await this.adapter.runInStreamLive(
-      streamId,
-      command,
-      timeoutSeconds,
-      {
-        onStdout: (chunk) => {
-          rawOutput += chunk;
-        },
-        onStderr: (chunk) => {
-          rawOutput += chunk;
-        },
-      },
-      filteredEnv,
-      { taskId: sandboxTaskId, ephemeral },
-    );
-    const output = rawOutput.length > 0 ? rawOutput : execution.output;
-    return parseExecutionOutput(spec, output, execution.ok, execution.metadata, handlers);
+    return this.runDispatch(spec as LegacyWorkerRequest, overrides, handlers);
   }
 
   /**
-   * Run an {@link AttemptSpec} through the worker pipeline. Converts the
-   * spec to a {@link WorkerTaskSpec}, delegates to {@link runTask}.
+   * Run an {@link AttemptSpec} through the worker pipeline using direct
+   * AttemptSpec transport plus an optional execution profile.
    *
    * Phase 6 W3 — runs the worker capability negotiation against the cached
    * probe before dispatch. On a mismatch (protocol version, task kind, or
@@ -450,8 +469,7 @@ export class ABoxTaskRunner {
       capabilities: probe.capabilities,
       ...(probe.fallbackReason === undefined ? {} : { fallbackReason: probe.fallbackReason }),
     });
-    const workerSpec = attemptSpecToWorkerSpec(spec, executionProfile);
-    return this.runTask(workerSpec, overrides, handlers);
+    return this.runDispatch(spec, overrides, handlers, executionProfile);
   }
 }
 

@@ -62,7 +62,7 @@ const runAndCaptureSpawnEnv = async (
     return child;
   }) as never;
 
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, spawnFn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, spawnFn);
   const provider = async (): Promise<ProbeOutcome> => ({
     capabilities: hostDefaultFallbackCapabilities(),
   });

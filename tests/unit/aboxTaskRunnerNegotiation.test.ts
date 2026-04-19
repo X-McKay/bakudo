@@ -61,7 +61,7 @@ test("runAttempt: probe-fail fallback still dispatches (2026-04-18 plan amendmen
     return child;
   }) as never;
 
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, spawnFn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, spawnFn);
   const provider = async (): Promise<ProbeOutcome> => ({
     capabilities: hostDefaultFallbackCapabilities(),
     fallbackReason: "abox does not support --capabilities",
@@ -96,7 +96,7 @@ test("runAttempt: restrictive successful probe still rejects synchronously (hard
     return child;
   }) as never;
 
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, spawnFn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, spawnFn);
   const provider = async (): Promise<ProbeOutcome> => ({
     // Hypothetical future abox that advertises a restrictive shape over
     // --capabilities. Mismatch detection must still fire before dispatch.
@@ -142,7 +142,7 @@ test("runAttempt: proceeds to spawn when capabilities cover the spec", async () 
     return child;
   }) as never;
 
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, spawnFn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, spawnFn);
   const provider = async (): Promise<ProbeOutcome> => ({
     capabilities: {
       protocolVersions: [3],
@@ -173,7 +173,7 @@ test("runAttempt: queries the provider with the adapter's bin path", async () =>
     return child;
   }) as never;
 
-  const adapter = new ABoxAdapter("/opt/abox-custom", undefined, undefined, spawnFn);
+  const adapter = new ABoxAdapter("/opt/abox-custom", undefined, spawnFn);
   const provider = async (bin: string): Promise<ProbeOutcome> => {
     seenBins.push(bin);
     return {

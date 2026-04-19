@@ -8,7 +8,7 @@ import {
   type JsonEventSink,
 } from "./eventLogWriter.js";
 import { getBaseStdout, stdoutWrite } from "./io.js";
-import { promptForApproval, requiresSandboxApproval, storageRootFor } from "./orchestration.js";
+import { promptForApproval, requiresSandboxApproval, storageRootFor } from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import { printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
 import { JsonBackend } from "./renderers/jsonBackend.js";

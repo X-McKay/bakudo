@@ -103,6 +103,28 @@ export type DispatchPlan = {
   spec: AttemptSpec;
 };
 
+export type BatchSpec = {
+  batchId: string;
+  intentId: string;
+  candidates: DispatchPlan[];
+};
+
+export type CandidateSet = BatchSpec;
+
+export type CandidateSetResult = {
+  batchId: string;
+  results: Record<string, AttemptExecutionResult>;
+  selectedCandidateId?: string;
+};
+
+export const sanitizeAttemptPathSegment = (value: string): string => {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return sanitized.length > 0 ? sanitized : "attempt";
+};
+
+export const reservedGuestOutputDirForAttempt = (attemptId: string): string =>
+  `/workspace/.bakudo/out/${sanitizeAttemptPathSegment(attemptId)}`;
+
 // ---------------------------------------------------------------------------
 // Execution result
 // ---------------------------------------------------------------------------
@@ -326,5 +348,23 @@ export const AttemptExecutionResultSchema = z
     durationMs: z.number(),
     artifacts: z.array(z.string()),
     checkResults: z.array(CheckResultSchema).optional(),
+  })
+  .strip();
+
+export const BatchSpecSchema = z
+  .object({
+    batchId: z.string(),
+    intentId: z.string(),
+    candidates: z.array(DispatchPlanSchema),
+  })
+  .strip();
+
+export const CandidateSetSchema = BatchSpecSchema;
+
+export const CandidateSetResultSchema = z
+  .object({
+    batchId: z.string(),
+    results: z.record(z.string(), AttemptExecutionResultSchema),
+    selectedCandidateId: z.string().optional(),
   })
   .strip();

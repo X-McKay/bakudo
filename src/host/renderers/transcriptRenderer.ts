@@ -26,19 +26,22 @@ const toneWrap = (
   return text;
 };
 
-const renderItem = (item: TranscriptItem): string => {
+const renderItem = (item: TranscriptItem): string[] => {
   if (item.kind === "user") {
-    return `${dim("You: ")}${item.text}`;
+    return [`${dim("You: ")}${item.text}`];
   }
   if (item.kind === "assistant") {
-    return `${bold("Bakudo: ")}${toneWrap(item.text, item.tone)}`;
+    return [`${bold("Bakudo: ")}${toneWrap(item.text, item.tone)}`];
   }
   if (item.kind === "event") {
     const detail = item.detail ? ` ${item.detail}` : "";
-    return dim(`· ${item.label}${detail}`);
+    return [dim(`· ${item.label}${detail}`)];
+  }
+  if (item.kind === "output") {
+    return item.text.split("\n").map((line) => `  ${dim(line)}`);
   }
   const next = item.nextAction ? ` (next: ${item.nextAction})` : "";
-  return `${bold("Review: ")}${item.outcome} — ${item.summary}${next}`;
+  return [`${bold("Review: ")}${item.outcome} — ${item.summary}${next}`];
 };
 
 const renderHeader = (frame: RenderFrame): string => {
@@ -95,7 +98,7 @@ export const renderTranscriptFrame = (frame: RenderFrame): string[] => {
   lines.push(renderHeader(frame));
   lines.push("");
   for (const item of frame.transcript) {
-    lines.push(renderItem(item));
+    lines.push(...renderItem(item));
   }
   lines.push("");
   for (const overlayLine of renderOverlay(frame)) {

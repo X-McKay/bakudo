@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { ABoxAdapter } from "../../src/aboxAdapter.js";
+import { buildAboxShellCommandArgs } from "../../src/host/sandboxLifecycle.js";
 import { DEFAULT_ENV_POLICY, filterEnv } from "../../src/host/envPolicy.js";
 
 type MockChildProcess = EventEmitter & {
@@ -27,6 +28,12 @@ const createMockChildProcess = (): MockChildProcess => {
   return child;
 };
 
+const EPHEMERAL_PROFILE = {
+  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  sandboxLifecycle: "ephemeral" as const,
+  mergeStrategy: "none" as const,
+};
+
 const runAndCaptureSpawnEnv = async (
   aboxBin: string,
   env: Readonly<Record<string, string>>,
@@ -39,8 +46,15 @@ const runAndCaptureSpawnEnv = async (
     return child;
   }) as never;
 
-  const adapter = new ABoxAdapter(aboxBin, undefined, undefined, spawnFn);
-  const result = await adapter.runInStreamLive("f-04", "echo ok", 5, {}, env);
+  const taskId = "bakudo-f-04";
+  const adapter = new ABoxAdapter(aboxBin, undefined, spawnFn);
+  const result = await adapter.spawnLive(
+    buildAboxShellCommandArgs(taskId, "echo ok", EPHEMERAL_PROFILE),
+    5,
+    {},
+    env,
+    { taskId },
+  );
   assert.equal(result.ok, true);
   return capturedEnv;
 };

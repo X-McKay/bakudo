@@ -201,7 +201,8 @@ const selectReviewView = (
 
 const formatArtifactRows = (artifacts: ArtifactRow[]): string[] =>
   artifacts.map(
-    (artifact) => `  - ${safe(artifact.name)} (${artifact.kind}) -> ${safe(artifact.path)}`,
+    (artifact) =>
+      `  - ${safe(artifact.name)} (${artifact.kind}${typeof artifact.metadata?.generatedBy === "string" ? `, ${safe(artifact.metadata.generatedBy)}` : ""}) -> ${safe(artifact.path)}`,
   );
 
 export type InspectSummaryInput = {
@@ -238,6 +239,9 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
       renderKv("Attempt", `${attempt.attemptId} mode=${modeOf(attempt)} status=${attempt.status}`),
     );
     lines.push(renderKv("Sandbox", sandboxOf(attempt)));
+    if (attempt.sandboxLifecycleState !== undefined) {
+      lines.push(renderKv("Lifecycle", attempt.sandboxLifecycleState));
+    }
   }
   const spec = resolveAttemptSpec(attempt, turn);
   if (spec?.taskKind !== undefined) {
@@ -337,6 +341,9 @@ export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
     renderKv("Task", attempt.attemptId),
     renderKv("Mode", modeOf(attempt)),
     renderKv("Status", attempt.status),
+    ...(attempt.sandboxLifecycleState !== undefined
+      ? [renderKv("Lifecycle", attempt.sandboxLifecycleState)]
+      : []),
     renderKv("Sandbox", sandboxOf(attempt)),
     ...summarizeSandboxDispatchCommand({
       dispatchCommand: dispatchCommandOf(attempt),
@@ -349,6 +356,9 @@ export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
         : "host requested safer planning mode",
     ),
   ];
+  if (typeof attempt.metadata?.worktreePath === "string") {
+    lines.push(renderKv("Worktree", safe(attempt.metadata.worktreePath)));
+  }
   if (artifacts.length > 0) {
     lines.push("Artifacts:");
     lines.push(...formatArtifactRows(artifacts));

@@ -1,4 +1,8 @@
-import type { AttemptSpec, ExecutionProfile } from "../attemptProtocol.js";
+import {
+  reservedGuestOutputDirForAttempt,
+  type AttemptSpec,
+  type ExecutionProfile,
+} from "../attemptProtocol.js";
 import type { TaskRunnerCommand } from "./taskKinds.js";
 
 /**
@@ -19,7 +23,7 @@ export const runAssistantJob = (
     throw new Error("invalid execution profile: agentBackend is empty");
   }
   const boundedPrompt = [spec.prompt, ...spec.instructions].join("\n\n");
-  const guestOutputDir = "/tmp/bakudo-artifacts";
+  const guestOutputDir = reservedGuestOutputDirForAttempt(spec.attemptId);
 
   return {
     command,

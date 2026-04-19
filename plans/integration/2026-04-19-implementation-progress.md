@@ -1,6 +1,6 @@
 # Control-Plane Implementation Progress
 
-**Branch:** `manus/20260419`
+**Branch:** `codex/begin-work-on-kickoff-prompt`
 **Implements:** [`2026-04-19-bakudo-abox-control-plane-spec.md`](2026-04-19-bakudo-abox-control-plane-spec.md) per the [implementation plan](2026-04-19-bakudo-abox-control-plane-implementation-plan.md) and [review](2026-04-19-control-plane-review.md).
 
 ## Pinned decisions (from spec §"Questions to confirm before coding")
@@ -23,12 +23,12 @@
 - [x] **Wave 0** — installed config, stdin pipeline, `run_check` fix, lifecycle wording.
 - [x] **Wave 1** — `DispatchPlan` + `ExecutionProfile`.
 - [x] **Wave 2** — `assistant_job` backend-driven, reserved guest output dir.
-- [ ] **Wave 3** — split `aboxAdapter`, host lifecycle helpers, remove `BAKUDO_EPHEMERAL`.
-- [ ] **Wave 4** — worktree inspection, host-generated artifacts, profile-aware review, decoupled execute/review.
-- [ ] **Wave 5** — approval copy + lifecycle persistence + inspect surfaces.
-- [ ] **Wave 6** — live workflow harness + non-live coverage; **Wave 7** — batch/candidate seams.
-- [ ] **UX realignment** — candidate cards, lifecycle/merge chips, footer hints, `output` transcript kind, log v2 envelope renderer.
-- [ ] **Cleanup + docs + delivery report.**
+- [x] **Wave 3** — split `aboxAdapter`, host lifecycle helpers, remove `BAKUDO_EPHEMERAL`.
+- [x] **Wave 4** — worktree inspection, host-generated artifacts, profile-aware review, decoupled execute/review.
+- [x] **Wave 5** — approval copy + lifecycle persistence + inspect surfaces.
+- [x] **Wave 6** — mock live workflow harness + non-live coverage; **Wave 7** — batch/candidate seams.
+- [x] **UX realignment** — candidate cards, lifecycle/merge chips, footer hints, `output` transcript kind, log v2 envelope renderer.
+- [x] **Cleanup + docs + delivery report.**
 
 ## Per-wave notes
 
@@ -107,3 +107,23 @@ Started orchestration split with lifecycle foundations and env-decoupling:
 - Added unit coverage in `tests/unit/sandboxLifecycle.test.ts`, `tests/unit/worktreeDiscovery.test.ts`, and updated adapter expectations in `tests/unit/aboxAdapter.test.ts`.
 
 Validated: `pnpm test:unit` passed (1406 pass / 0 fail / 1 skipped).
+
+### 2026-04-19: Waves 3-7 + UX Completed
+
+The remaining control-plane realignment landed across execution, review, persistence, UX, and integration coverage:
+
+- `src/host/sessionRunSupport.ts` and `src/host/sessionLifecycle.ts` now route session start/resume through `executeAttempt` instead of the deprecated `executeTask` path.
+- `src/host/orchestration.ts` has now been deleted; the remaining session-entry helpers live in `sessionRunSupport.ts` / `sessionLifecycle.ts`.
+- `src/aboxAdapter.ts` is now a raw argv/spawn wrapper, `src/aboxTaskRunner.ts` dispatches direct `AttemptSpec` payloads, and `src/workerCli.ts` / `src/workerRuntime.ts` decode either `AttemptSpec` v3 or legacy `TaskRequest` v1 directly without the deprecated `WorkerTaskSpec` wrapper.
+- `src/host/worktreeInspector.ts` and `src/host/hostArtifactGenerator.ts` inspect preserved worktrees, harvest reserved-output artifacts from `.bakudo/out/<attempt>`, and persist host-generated `patch.diff`, `changed-files.json`, and `merge-result.json`.
+- `src/host/executeAttempt.ts`, `src/reviewer.ts`, and `src/sessionTypes.ts` now persist sandbox lifecycle state, review preserved candidates by actual worktree state, and auto-merge/discard preserved candidates when the execution profile requires it.
+- `src/host/followUpActions.ts` now resolves preserved interactive candidates on host follow-up: accept merges + cleans up, halt discards, and the attempt lifecycle/status are updated durably.
+- `src/host/orchestrationSupport.ts` now includes `sandboxLifecycleState` on `host.review_completed` envelopes so the event log carries the same lifecycle decision persisted on the attempt record.
+- `src/host/inspectFormatter.ts`, `src/host/renderModel.ts`, `src/host/renderers/transcriptRenderer.ts`, `src/host/renderers/plainRenderer.ts`, `src/host/interactiveRenderLoop.ts`, and `src/host/printers.ts` now surface lifecycle/worktree details and render the host-owned `output` transcript/log shapes correctly.
+- `src/attemptProtocol.ts` now carries `candidateId` / `batchId` seams plus `BatchSpec` / `CandidateSetResult` for future multi-candidate fan-out.
+- `tests/helpers/mockAbox.sh` and `tests/integration/pipeline.test.ts` add preserved-worktree pipeline coverage without depending on a real abox VM boot.
+
+Validated:
+
+- `pnpm build`
+- `node --loader ts-node/esm --test tests/unit/aboxAdapter.test.ts tests/integration/spawn-abox-path.test.ts tests/regression/F-04-path-preservation.test.ts tests/unit/aboxTaskRunnerNegotiation.test.ts tests/unit/aboxTaskRunnerEnvFilter.test.ts tests/unit/probeFailureEmitter.test.ts tests/unit/aboxTaskRunnerWorkerBundle.test.ts tests/unit/workerRuntime.test.ts tests/unit/executeAttempt.test.ts tests/harness.test.ts tests/unit/followUpActions.test.ts tests/unit/reviewer.test.ts tests/unit/taskKindDispatch.test.ts tests/unit/attemptProtocol.test.ts tests/unit/worktreeInspector.test.ts tests/unit/attemptCompiler.test.ts tests/unit/modeRename.test.ts tests/integration/eventLogPersistence.test.ts tests/regression/F-03-resume-attempt-spec.test.ts tests/unit/transcriptRenderer.test.ts tests/unit/renderModel.test.ts tests/unit/interactiveRenderLoop.test.ts tests/integration/plain-mode.test.ts tests/unit/nonInteractiveCompat.test.ts tests/integration/pipeline.test.ts`

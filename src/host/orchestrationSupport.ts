@@ -1,8 +1,8 @@
 import { createSessionEvent, type SessionEventEnvelope, type TaskMode } from "../protocol.js";
 import type { ReviewClassification } from "../resultClassifier.js";
-import type { SessionReviewRecord } from "../sessionTypes.js";
+import type { SandboxLifecycleState, SessionReviewRecord } from "../sessionTypes.js";
 import type { SessionStore } from "../sessionStore.js";
-import type { WorkerTaskProgressEvent, WorkerTaskSpec } from "../workerRuntime.js";
+import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import { bold, dim, renderKeyValue, renderModeChip, renderSection } from "./ansi.js";
 import type { HostCliArgs } from "./parsing.js";
 import { statusBadge } from "./printers.js";
@@ -25,7 +25,7 @@ export const formatProgressLine = (event: WorkerTaskProgressEvent): string => {
 
 export const renderDispatchBanner = (
   sessionId: string,
-  request: WorkerTaskSpec,
+  request: { taskId: string; goal: string; mode?: TaskMode },
   mode: HostCliArgs["mode"],
 ): string =>
   [
@@ -40,9 +40,9 @@ export const renderDispatchBanner = (
   ].join("\n");
 
 /**
- * Convenience builder for the `host.dispatch_started` envelope emitted by
- * `executeTask` just before the worker runs. Consolidated here to keep the
- * orchestration entry point below the 400-line cap.
+ * Convenience builder for the `host.dispatch_started` envelope emitted just
+ * before the worker runs. Consolidated here to keep the execution entry
+ * points below the 400-line cap.
  */
 export const buildDispatchStartedEnvelope = (args: {
   sessionId: string;
@@ -85,6 +85,7 @@ export const buildReviewCompletedEnvelope = (args: {
   turnId: string;
   attemptId: string;
   reviewed: ReviewClassification;
+  sandboxLifecycleState?: SandboxLifecycleState;
 }): SessionEventEnvelope =>
   createSessionEvent({
     kind: "host.review_completed",
@@ -97,6 +98,9 @@ export const buildReviewCompletedEnvelope = (args: {
       outcome: args.reviewed.outcome,
       action: args.reviewed.action,
       reason: args.reviewed.reason,
+      ...(args.sandboxLifecycleState === undefined
+        ? {}
+        : { sandboxLifecycleState: args.sandboxLifecycleState }),
     },
   });
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import type { AttemptSpec } from "../../src/attemptProtocol.js";
 import type {
   ABoxTaskRunner,
   TaskExecutionRecord,
@@ -12,12 +13,31 @@ import type {
 import { ArtifactStore } from "../../src/artifactStore.js";
 import { BAKUDO_PROTOCOL_SCHEMA_VERSION, type SessionEventEnvelope } from "../../src/protocol.js";
 import { SessionStore } from "../../src/sessionStore.js";
-import type { WorkerTaskProgressEvent, WorkerTaskSpec } from "../../src/workerRuntime.js";
+import type { WorkerTaskProgressEvent } from "../../src/workerRuntime.js";
+import { executeAttempt } from "../../src/host/executeAttempt.js";
 import type { EventLogWriter } from "../../src/host/eventLogWriter.js";
-import { executeTask } from "../../src/host/orchestration.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
 
 const createTempRoot = (): Promise<string> => mkdtemp(join(tmpdir(), "bakudo-crosssink-"));
+
+const buildAttemptSpec = (sessionId: string, prompt: string): AttemptSpec => ({
+  schemaVersion: 3,
+  sessionId,
+  turnId: "turn-1",
+  attemptId: "attempt-1",
+  taskId: "attempt-1",
+  intentId: "intent-1",
+  mode: "plan",
+  taskKind: "assistant_job",
+  prompt,
+  instructions: [],
+  cwd: ".",
+  execution: { engine: "agent_cli" },
+  permissions: { rules: [], allowAllTools: false, noAskUser: false },
+  budget: { timeoutSeconds: 60, maxOutputBytes: 1024, heartbeatIntervalMs: 5000 },
+  acceptanceChecks: [],
+  artifactRequests: [],
+});
 
 /**
  * Build a stub ABoxTaskRunner that emits exactly `N` task.progress events
@@ -73,8 +93,8 @@ const stubRunnerEmitting = (
     metadata: { cmd: ["abox", "run"], taskId: "abox-task-1" },
   };
   const runner = {
-    runTask: async (
-      _spec: WorkerTaskSpec,
+    runAttempt: async (
+      _spec: AttemptSpec,
       _overrides: Record<string, unknown>,
       handlers: TaskRunnerHandlers = {},
     ): Promise<TaskExecutionRecord> => {
@@ -155,21 +175,13 @@ test("cross-sink: writer.append and coalescer.onProgress see matching raw event 
       progressEvents.push(event);
     };
 
-    await executeTask({
+    await executeAttempt({
       sessionStore,
       artifactStore,
       runner,
       sessionId,
       turnId: "turn-1",
-      request: {
-        schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
-        taskId: "attempt-1",
-        sessionId,
-        goal: "cross-sink",
-        mode: "plan",
-        cwd: ".",
-        assumeDangerousSkipPermissions: false,
-      },
+      spec: buildAttemptSpec(sessionId, "cross-sink"),
       args: { ...baseArgs, storageRoot: rootDir },
       eventLogWriterFactory: factory,
       onProgress,
@@ -186,11 +198,13 @@ test("cross-sink: writer.append and coalescer.onProgress see matching raw event 
 
     // The scoped writer receives:
     //   1 host.dispatch_started
+    //   1 host.provenance_started
     //   N+2 projected worker envelopes (started + N progress + completed)
+    //   1 host.provenance_finalized
     //   1 host.review_started
     //   1 host.review_completed
-    // = N+5 total through the scoped writer.
-    const expectedWriterCount = N + 5;
+    // = N+7 total through the scoped writer.
+    const expectedWriterCount = N + 7;
     assert.equal(captured.length, expectedWriterCount, "writer.append count matches expected");
 
     // Raw worker event envelopes projected through the writer:
@@ -243,21 +257,13 @@ test("cross-sink: zero-progress run still emits lifecycle envelopes", async () =
     const { factory, captured } = createCapturingWriterFactory();
     const progressCount: number[] = [];
 
-    await executeTask({
+    await executeAttempt({
       sessionStore,
       artifactStore,
       runner,
       sessionId,
       turnId: "turn-1",
-      request: {
-        schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
-        taskId: "attempt-1",
-        sessionId,
-        goal: "zero",
-        mode: "plan",
-        cwd: ".",
-        assumeDangerousSkipPermissions: false,
-      },
+      spec: buildAttemptSpec(sessionId, "zero"),
       args: { ...baseArgs, storageRoot: rootDir },
       eventLogWriterFactory: factory,
       onProgress: () => {
@@ -265,8 +271,8 @@ test("cross-sink: zero-progress run still emits lifecycle envelopes", async () =
       },
     });
 
-    // 2 worker envelopes (started + completed), 1 dispatch, 2 review = 5.
-    assert.equal(captured.length, 5);
+    // 2 worker envelopes, 1 dispatch, 2 provenance, 2 review = 7.
+    assert.equal(captured.length, 7);
     // Coalescer sees started + completed = 2.
     assert.equal(progressCount.length, 2);
   } finally {

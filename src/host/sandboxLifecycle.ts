@@ -19,3 +19,10 @@ export const buildAboxRunArgs = (
   taskId,
   ...(isEphemeralSandbox(profile) ? ["--ephemeral"] : []),
 ];
+
+export const buildAboxShellCommandArgs = (
+  taskId: string,
+  command: string,
+  profile: ExecutionProfile,
+  repoPath?: string,
+): string[] => [...buildAboxRunArgs(taskId, profile, repoPath), "--", "bash", "-lc", command];

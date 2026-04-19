@@ -9,7 +9,7 @@ import { readSessionEventLog } from "../eventLogWriter.js";
 import { listTurnApprovals } from "../approvalStore.js";
 import { formatInspectTab } from "../inspectTabs.js";
 import { registerKeybinding } from "../keybindings/hooks.js";
-import { storageRootFor } from "../orchestration.js";
+import { storageRootFor } from "../sessionRunSupport.js";
 import { awaitPrompt, newPromptId } from "../promptResolvers.js";
 import { reduceHost } from "../reducer.js";
 import { loadAttemptProvenance } from "../timeline.js";

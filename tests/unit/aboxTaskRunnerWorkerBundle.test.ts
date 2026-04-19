@@ -56,7 +56,7 @@ test("runAttempt: stages the runtime worker module bundle before launch", async 
     return child;
   }) as never;
 
-  const adapter = new ABoxAdapter("/tmp/abox", undefined, undefined, spawnFn);
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, spawnFn);
   const provider = async (): Promise<ProbeOutcome> => ({
     capabilities: {
       protocolVersions: [3],

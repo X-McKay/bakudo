@@ -7,7 +7,7 @@
  * behavior for these rarely-invoked commands.
  */
 
-import { repoRootFor } from "./orchestration.js";
+import { repoRootFor } from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import { printUsage } from "./usage.js";
 

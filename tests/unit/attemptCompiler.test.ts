@@ -238,6 +238,7 @@ test("instructions include user prompt and constraints", () => {
   assert.ok(spec.instructions.some((i) => i.includes("add logging to the parser")));
   assert.ok(spec.instructions.some((i) => i.includes("prefer minimal diff")));
   assert.ok(spec.instructions.some((i) => i.includes("summarize results clearly")));
+  assert.ok(spec.instructions.some((i) => i.includes("/workspace/.bakudo/out/attempt-1")));
 });
 
 // ---------------------------------------------------------------------------

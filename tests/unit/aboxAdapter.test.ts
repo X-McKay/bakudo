@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
 import { ABoxAdapter } from "../../src/aboxAdapter.js";
+import type { ExecutionProfile } from "../../src/attemptProtocol.js";
+import { buildAboxShellCommandArgs } from "../../src/host/sandboxLifecycle.js";
 
 type MockChildProcess = EventEmitter & {
   stdout: EventEmitter;
@@ -26,7 +28,18 @@ const createMockChildProcess = (): MockChildProcess => {
   return child;
 };
 
-test("ABoxAdapter uses abox run with a valid ephemeral task", async () => {
+const EPHEMERAL_PROFILE: ExecutionProfile = {
+  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  sandboxLifecycle: "ephemeral",
+  mergeStrategy: "none",
+};
+
+const PRESERVED_PROFILE: ExecutionProfile = {
+  ...EPHEMERAL_PROFILE,
+  sandboxLifecycle: "preserved",
+};
+
+test("ABoxAdapter exec runs caller-supplied abox argv for an ephemeral shell command", async () => {
   const calls: Array<{ file: string; args: readonly string[] }> = [];
   const execFn = async (
     file: string,
@@ -36,8 +49,10 @@ test("ABoxAdapter uses abox run with a valid ephemeral task", async () => {
     return { stdout: "ok", stderr: "" };
   };
 
-  const adapter = new ABoxAdapter("/tmp/abox", "/work/repo", execFn as never);
-  const result = await adapter.runInStream("stream/one", "echo hello", 5);
+  const taskId = "bakudo-stream-one";
+  const args = buildAboxShellCommandArgs(taskId, "echo hello", EPHEMERAL_PROFILE, "/work/repo");
+  const adapter = new ABoxAdapter("/tmp/abox", execFn as never);
+  const result = await adapter.exec(args, 5, { taskId });
 
   assert.equal(result.ok, true);
   assert.equal(calls.length, 1);
@@ -73,12 +88,14 @@ test("ABoxAdapter returns task metadata on failures", async () => {
     throw error;
   };
 
-  const adapter = new ABoxAdapter("abox", undefined, execFn as never);
-  const result = await adapter.runInStream("s2", "echo hello", 5);
+  const taskId = "bakudo-s2";
+  const args = buildAboxShellCommandArgs(taskId, "echo hello", EPHEMERAL_PROFILE);
+  const adapter = new ABoxAdapter("abox", execFn as never);
+  const result = await adapter.exec(args, 5, { taskId });
 
   assert.equal(result.ok, false);
   assert.match(result.output, /abox failed/);
-  assert.equal(result.metadata?.["taskId"], "bakudo-s2");
+  assert.equal(result.metadata?.["taskId"], taskId);
 });
 
 test("ABoxAdapter streams live output events and aggregates the final result", async () => {
@@ -97,27 +114,24 @@ test("ABoxAdapter streams live output events and aggregates the final result", a
 
   const stdoutChunks: string[] = [];
   const stderrChunks: string[] = [];
-  const adapter = new ABoxAdapter("/tmp/abox", "/work/repo", undefined, spawnFn);
-  const result = await adapter.runInStreamLive("stream one", "echo hello", 5, {
-    onStdout: (chunk) => stdoutChunks.push(chunk),
-    onStderr: (chunk) => stderrChunks.push(chunk),
-  });
+  const taskId = "bakudo-stream-one";
+  const args = buildAboxShellCommandArgs(taskId, "echo hello", EPHEMERAL_PROFILE, "/work/repo");
+  const adapter = new ABoxAdapter("/tmp/abox", undefined, spawnFn);
+  const result = await adapter.spawnLive(
+    args,
+    5,
+    {
+      onStdout: (chunk) => stdoutChunks.push(chunk),
+      onStderr: (chunk) => stderrChunks.push(chunk),
+    },
+    undefined,
+    { taskId },
+  );
 
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], {
     file: "/tmp/abox",
-    args: [
-      "--repo",
-      "/work/repo",
-      "run",
-      "--task",
-      "bakudo-stream-one",
-      "--ephemeral",
-      "--",
-      "bash",
-      "-lc",
-      "echo hello",
-    ],
+    args,
     options: {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -133,22 +147,13 @@ test("ABoxAdapter streams live output events and aggregates the final result", a
     signal: "",
     cmd: [
       "/tmp/abox",
-      "--repo",
-      "/work/repo",
-      "run",
-      "--task",
-      "bakudo-stream-one",
-      "--ephemeral",
-      "--",
-      "bash",
-      "-lc",
-      "echo hello",
+      ...args,
     ],
-    taskId: "bakudo-stream-one",
+    taskId,
   });
 });
 
-test("ABoxAdapter run options can disable --ephemeral", async () => {
+test("ABoxAdapter exec preserves caller-built preserved sandbox argv", async () => {
   const calls: Array<{ file: string; args: readonly string[] }> = [];
   const execFn = async (
     file: string,
@@ -158,25 +163,14 @@ test("ABoxAdapter run options can disable --ephemeral", async () => {
     return { stdout: "ok", stderr: "" };
   };
 
-  const adapter = new ABoxAdapter("/tmp/abox", "/work/repo", execFn as never);
-  const result = await adapter.runInStream("stream/preserved", "echo hello", 5, {
-    taskId: "bakudo-attempt-42",
-    ephemeral: false,
-  });
+  const taskId = "bakudo-attempt-42";
+  const args = buildAboxShellCommandArgs(taskId, "echo hello", PRESERVED_PROFILE, "/work/repo");
+  const adapter = new ABoxAdapter("/tmp/abox", execFn as never);
+  const result = await adapter.exec(args, 5, { taskId });
 
   assert.equal(result.ok, true);
   assert.deepEqual(calls[0], {
     file: "/tmp/abox",
-    args: [
-      "--repo",
-      "/work/repo",
-      "run",
-      "--task",
-      "bakudo-attempt-42",
-      "--",
-      "bash",
-      "-lc",
-      "echo hello",
-    ],
+    args,
   });
 });

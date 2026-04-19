@@ -2,7 +2,7 @@ import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { stdoutWrite } from "./io.js";
-import { promptForApproval, repoRootFor } from "./orchestration.js";
+import { promptForApproval, repoRootFor } from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 
 export const buildAgentsTemplate = (repoRoot: string): string =>

@@ -5,7 +5,14 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import { ABoxAdapter } from "../../src/aboxAdapter.js";
+import { buildAboxShellCommandArgs } from "../../src/host/sandboxLifecycle.js";
 import { DEFAULT_ENV_POLICY, filterEnv } from "../../src/host/envPolicy.js";
+
+const EPHEMERAL_PROFILE = {
+  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  sandboxLifecycle: "ephemeral" as const,
+  mergeStrategy: "none" as const,
+};
 
 test("F-04 acceptance: adapter spawn with empty allowlist resolves unqualified abox via PATH", async () => {
   const root = await mkdtemp(join(tmpdir(), "bakudo-f04-integration-"));
@@ -22,8 +29,15 @@ test("F-04 acceptance: adapter spawn with empty allowlist resolves unqualified a
     );
     assert.equal(filtered.PATH, undefined, "precondition: filterEnv strips PATH");
 
+    const taskId = "bakudo-f-04-integration";
     const adapter = new ABoxAdapter("abox");
-    const result = await adapter.runInStreamLive("f-04-integration", "echo ok", 5, {}, filtered);
+    const result = await adapter.spawnLive(
+      buildAboxShellCommandArgs(taskId, "echo ok", EPHEMERAL_PROFILE),
+      5,
+      {},
+      filtered,
+      { taskId },
+    );
 
     assert.equal(
       result.metadata?.errorType,

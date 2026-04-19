@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
+import type { AttemptSpec } from "../../src/attemptProtocol.js";
 import type {
   ABoxTaskRunner,
   TaskExecutionRecord,
@@ -15,8 +16,9 @@ import {
   type SessionEventEnvelope,
 } from "../../src/protocol.js";
 import { SessionStore } from "../../src/sessionStore.js";
-import type { WorkerTaskProgressEvent, WorkerTaskSpec } from "../../src/workerRuntime.js";
+import type { WorkerTaskProgressEvent } from "../../src/workerRuntime.js";
 import type { EventLogWriter } from "../../src/host/eventLogWriter.js";
+import { executeAttempt } from "../../src/host/executeAttempt.js";
 import { emitSessionEvent, readSessionEventLog } from "../../src/host/eventLogWriter.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
 import { resumeNamedSession } from "../../src/host/sessionController.js";
@@ -40,6 +42,25 @@ const baseArgs = (storageRoot: string): HostCliArgs => ({
   copilot: {},
 });
 
+const buildAttemptSpec = (sessionId: string): AttemptSpec => ({
+  schemaVersion: 3,
+  sessionId,
+  turnId: "turn-1",
+  attemptId: "attempt-1",
+  taskId: "attempt-1",
+  intentId: "intent-1",
+  mode: "plan",
+  taskKind: "assistant_job",
+  prompt: "di-test",
+  instructions: [],
+  cwd: ".",
+  execution: { engine: "agent_cli" },
+  permissions: { rules: [], allowAllTools: false, noAskUser: false },
+  budget: { timeoutSeconds: 60, maxOutputBytes: 1024, heartbeatIntervalMs: 5000 },
+  acceptanceChecks: [],
+  artifactRequests: [],
+});
+
 test("resumeNamedSession: returns null for unknown session", async () => {
   const rootDir = await createTempRoot();
   try {
@@ -52,7 +73,7 @@ test("resumeNamedSession: returns null for unknown session", async () => {
 
 test("pre-dispatch emit: host.turn_queued envelope shape matches what sessionController writes", async () => {
   // sessionController.createAndRunFirstTurn/appendTurnToActiveSession emit
-  // host.turn_queued via emitSessionEvent before calling executeTask. This
+  // host.turn_queued via emitSessionEvent before calling executeAttempt. This
   // test locks in the envelope contract without needing to boot the full
   // runner pipeline — a regression in the emit payload shape here is exactly
   // what PR4 consumers (timeline/doctor) will trip over first.
@@ -163,8 +184,8 @@ const stubRunner = (sessionId: string): ABoxTaskRunner => {
     metadata: { cmd: ["abox", "run"], taskId: "abox-stub-1" },
   };
   return {
-    runTask: async (
-      _spec: WorkerTaskSpec,
+    runAttempt: async (
+      _spec: AttemptSpec,
       _overrides: Record<string, unknown>,
       handlers: TaskRunnerHandlers = {},
     ): Promise<TaskExecutionRecord> => {
@@ -196,9 +217,9 @@ test("createAndRunFirstTurn: DI seam captures envelopes without a real runner", 
     // (all envelopes go to our in-memory sink), but we still need the
     // runner's execution result to round-trip. Unfortunately the module
     // constructs its own runner internally (not injected yet); so we exercise
-    // the factory seam indirectly via executeTask for now.
+    // the factory seam indirectly via executeAttempt for now.
     //
-    // Direct round-trip: invoke executeTask with the DI seam.
+    // Direct round-trip: invoke executeAttempt with the DI seam.
     const { ArtifactStore } = await import("../../src/artifactStore.js");
     const sessionStore = new SessionStore(rootDir);
     const artifactStore = new ArtifactStore(rootDir);
@@ -223,32 +244,24 @@ test("createAndRunFirstTurn: DI seam captures envelopes without a real runner", 
       ],
     });
 
-    const { executeTask: execFn } = await import("../../src/host/orchestration.js");
     const runner = stubRunner(sessionId);
 
-    const reviewed = await execFn({
+    const { reviewed } = await executeAttempt({
       sessionStore,
       artifactStore,
       runner,
       sessionId,
       turnId: "turn-1",
-      request: {
-        schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
-        taskId: "attempt-1",
-        sessionId,
-        goal: "di-test",
-        mode: "plan",
-        cwd: ".",
-        assumeDangerousSkipPermissions: false,
-      },
+      spec: buildAttemptSpec(sessionId),
       args: { ...baseArgs(rootDir), mode: "plan" },
       eventLogWriterFactory: writerFactory,
     });
 
     assert.equal(reviewed.outcome, "success");
-    // Captured envelopes: dispatch_started, started, progress, completed,
-    // review_started, review_completed = 6.
-    assert.equal(captured.length, 6);
+    // Captured envelopes: dispatch_started, provenance_started, started,
+    // progress, completed, provenance_finalized, review_started,
+    // review_completed = 8.
+    assert.equal(captured.length, 8);
     assert.equal(captured[0]!.kind, "host.dispatch_started");
     assert.equal(captured[captured.length - 1]!.kind, "host.review_completed");
   } finally {

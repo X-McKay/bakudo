@@ -7,7 +7,7 @@ import type { HostCommandSpec } from "../commandRegistry.js";
 import { readSessionEventLog } from "../eventLogWriter.js";
 import { formatInspectSandbox } from "../inspectFormatter.js";
 import { formatInspectTab, type InspectTabName } from "../inspectTabs.js";
-import { storageRootFor } from "../orchestration.js";
+import { storageRootFor } from "../sessionRunSupport.js";
 import { loadAttemptProvenance } from "../timeline.js";
 import { reduceHost } from "../reducer.js";
 

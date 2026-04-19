@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
-import { ExecutionProfileSchema, type AttemptSpec, type ExecutionProfile } from "./attemptProtocol.js";
+import {
+  AttemptSpecSchema,
+  ExecutionProfileSchema,
+  type AttemptSpec,
+  type ExecutionProfile,
+} from "./attemptProtocol.js";
 import {
   BAKUDO_PROTOCOL_SCHEMA_VERSION,
   type TaskProgressEvent,
@@ -12,18 +18,11 @@ export const WORKER_EVENT_PREFIX = "BAKUDO_WORKER_EVENT";
 export const WORKER_RESULT_PREFIX = "BAKUDO_WORKER_RESULT";
 export const WORKER_ERROR_PREFIX = "BAKUDO_WORKER_ERROR";
 
-/**
- * @deprecated Replaced by {@link AttemptSpec} in the planAttempt → executeAttempt
- * pipeline (Phase 3). Kept for backward compatibility with legacy executeTask
- * callers. Remove in Phase 6.
- */
-export type WorkerTaskSpec = TaskRequest & {
-  timeoutSeconds?: number;
-  maxOutputBytes?: number;
-  heartbeatIntervalMs?: number;
+export type LegacyWorkerRequest = TaskRequest & {
   stdin?: string;
-  executionProfile?: ExecutionProfile;
 };
+
+export type WorkerDispatchInput = AttemptSpec | LegacyWorkerRequest;
 
 export type WorkerTaskProgressEvent = TaskProgressEvent & {
   outputBytes?: number;
@@ -65,6 +64,8 @@ export type WorkerRuntimeOptions = {
   maxOutputBytes?: number;
   heartbeatIntervalMs?: number;
   killGraceMs?: number;
+  stdin?: string;
+  executionProfile?: ExecutionProfile;
   now?: () => Date;
   emit?: (event: WorkerTaskProgressEvent) => void;
 };
@@ -79,9 +80,17 @@ const DEFAULT_TIMEOUT_SECONDS = 120;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5000;
 const DEFAULT_KILL_GRACE_MS = 2000;
+const ABOX_GUEST_WORKSPACE_CWD = "/workspace";
+const DEFAULT_EXECUTION_PROFILE: ExecutionProfile = {
+  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  sandboxLifecycle: "ephemeral",
+  mergeStrategy: "none",
+};
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isAttemptSpec = (value: WorkerDispatchInput): value is AttemptSpec => value.schemaVersion === 3;
 
 const clampPositiveInteger = (value: number, fallback: number): number =>
   Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -137,43 +146,62 @@ type ResolvedCommand = {
   heartbeatIntervalMs?: number;
 };
 
-/** Detect taskKind → AttemptSpec dispatch; else legacy bash -lc goal. */
-const resolveCommand = (spec: WorkerTaskSpec, shell: string): ResolvedCommand => {
-  const raw = spec as Record<string, unknown>;
-  const envelopeStdin = typeof raw.stdin === "string" ? raw.stdin : undefined;
-  if (typeof raw.taskKind === "string") {
-    const as = (isObject(raw.attemptSpec) ? raw.attemptSpec : raw) as AttemptSpec;
-    const defaultProfile: ExecutionProfile = {
-      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
-      sandboxLifecycle: "ephemeral",
-      mergeStrategy: "none",
-    };
-    const parsedProfile = ExecutionProfileSchema.safeParse(raw.executionProfile);
-    const profile = parsedProfile.success ? parsedProfile.data : defaultProfile;
-    const cmd = dispatchTaskKind(as, profile);
+/** Resolve AttemptSpec dispatch; else fall back to legacy bash -lc goal. */
+const resolveCommand = (
+  spec: WorkerDispatchInput,
+  shell: string,
+  executionProfile?: ExecutionProfile,
+  stdinOverride?: string,
+): ResolvedCommand => {
+  if (isAttemptSpec(spec)) {
+    const parsedProfile = ExecutionProfileSchema.safeParse(executionProfile);
+    const profile = parsedProfile.success ? parsedProfile.data : DEFAULT_EXECUTION_PROFILE;
+    const cmd = dispatchTaskKind(spec, profile);
     const [exe = shell, ...args] = cmd.command;
-    const resolvedStdin = cmd.stdin ?? envelopeStdin;
+    const resolvedStdin = cmd.stdin ?? stdinOverride;
     return {
       spawnArgs: [exe, args],
       goalLabel: cmd.command.join(" "),
       ...(typeof resolvedStdin === "string" ? { stdin: resolvedStdin } : {}),
-      timeoutSeconds: as.budget.timeoutSeconds,
-      maxOutputBytes: as.budget.maxOutputBytes,
-      heartbeatIntervalMs: as.budget.heartbeatIntervalMs,
+      timeoutSeconds: spec.budget.timeoutSeconds,
+      maxOutputBytes: spec.budget.maxOutputBytes,
+      heartbeatIntervalMs: spec.budget.heartbeatIntervalMs,
     };
   }
+  const resolvedStdin = spec.stdin ?? stdinOverride;
   return {
     spawnArgs: [shell, ["-lc", spec.goal]],
     goalLabel: spec.goal,
-    ...(envelopeStdin !== undefined ? { stdin: envelopeStdin } : {}),
+    ...(typeof resolvedStdin === "string" ? { stdin: resolvedStdin } : {}),
+    ...(spec.timeoutSeconds === undefined ? {} : { timeoutSeconds: spec.timeoutSeconds }),
+    ...(spec.maxOutputBytes === undefined ? {} : { maxOutputBytes: spec.maxOutputBytes }),
+    ...(spec.heartbeatIntervalMs === undefined
+      ? {}
+      : { heartbeatIntervalMs: spec.heartbeatIntervalMs }),
   };
 };
 
 const nowIso = (now?: () => Date): string => (now ?? (() => new Date()))().toISOString();
 
+const resolveWorkingDirectory = (
+  spec: WorkerDispatchInput,
+  fallbackCwd: string,
+): string => {
+  if (!isAttemptSpec(spec)) {
+    return spec.cwd ?? fallbackCwd;
+  }
+  if (existsSync(ABOX_GUEST_WORKSPACE_CWD)) {
+    return ABOX_GUEST_WORKSPACE_CWD;
+  }
+  if (existsSync(spec.cwd)) {
+    return spec.cwd;
+  }
+  return fallbackCwd;
+};
+
 const emitProgress = (
   emit: (event: WorkerTaskProgressEvent) => void,
-  spec: WorkerTaskSpec,
+  spec: WorkerDispatchInput,
   kind: WorkerTaskProgressEvent["kind"],
   status: WorkerTaskProgressEvent["status"],
   message: string,
@@ -191,16 +219,18 @@ const emitProgress = (
   });
 };
 
-const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
+const formatValidationError = (label: string, value: unknown): never => {
+  throw new Error(`unsupported worker input schema version: ${String(value)} (${label})`);
+};
+
+const validateLegacyWorkerRequest = (value: unknown): LegacyWorkerRequest => {
   if (!isObject(value)) {
-    throw new Error("invalid task spec: expected JSON object");
+    throw new Error("invalid legacy worker request: expected JSON object");
   }
 
   const schemaVersion = value.schemaVersion;
   if (schemaVersion !== BAKUDO_PROTOCOL_SCHEMA_VERSION) {
-    throw new Error(
-      `unsupported task spec schema version: ${String(schemaVersion)} (expected ${BAKUDO_PROTOCOL_SCHEMA_VERSION})`,
-    );
+    formatValidationError(`expected ${BAKUDO_PROTOCOL_SCHEMA_VERSION}`, schemaVersion);
   }
 
   const taskId = value.taskId;
@@ -209,16 +239,16 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
   const assumeDangerousSkipPermissions = value.assumeDangerousSkipPermissions;
 
   if (typeof taskId !== "string" || taskId.trim().length === 0) {
-    throw new Error("invalid task spec: missing taskId");
+    throw new Error("invalid legacy worker request: missing taskId");
   }
   if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
-    throw new Error("invalid task spec: missing sessionId");
+    throw new Error("invalid legacy worker request: missing sessionId");
   }
   if (typeof goal !== "string" || goal.trim().length === 0) {
-    throw new Error("invalid task spec: missing goal");
+    throw new Error("invalid legacy worker request: missing goal");
   }
   if (typeof assumeDangerousSkipPermissions !== "boolean") {
-    throw new Error("invalid task spec: missing assumeDangerousSkipPermissions");
+    throw new Error("invalid legacy worker request: missing assumeDangerousSkipPermissions");
   }
 
   const cwd = value.cwd;
@@ -227,12 +257,10 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
   const timeoutSeconds = value.timeoutSeconds;
   const maxOutputBytes = value.maxOutputBytes;
   const heartbeatIntervalMs = value.heartbeatIntervalMs;
-  const taskKind = value.taskKind;
-  const attemptSpec = value.attemptSpec;
-  const executionProfile = value.executionProfile;
+  const stdin = value.stdin;
 
-  const spec: WorkerTaskSpec = {
-    schemaVersion,
+  return {
+    schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
     taskId,
     sessionId,
     goal,
@@ -249,53 +277,53 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
     ...(typeof heartbeatIntervalMs === "number" && Number.isFinite(heartbeatIntervalMs)
       ? { heartbeatIntervalMs }
       : {}),
+    ...(typeof stdin === "string" ? { stdin } : {}),
   };
-
-  const extended = spec as WorkerTaskSpec & {
-    taskKind?: string;
-    attemptSpec?: Record<string, unknown>;
-    executionProfile?: ExecutionProfile;
-  };
-  if (typeof taskKind === "string" && taskKind.trim().length > 0) {
-    extended.taskKind = taskKind;
-  }
-  if (isObject(attemptSpec)) {
-    extended.attemptSpec = attemptSpec;
-  }
-  const parsedProfile = ExecutionProfileSchema.safeParse(executionProfile);
-  if (parsedProfile.success) {
-    extended.executionProfile = parsedProfile.data;
-  }
-  return extended;
 };
 
-export const decodeWorkerTaskSpec = (encoded: string): WorkerTaskSpec =>
-  validateTaskSpec(decodeJson(encoded));
+const validateAttemptSpec = (value: unknown): AttemptSpec => {
+  const parsed = AttemptSpecSchema.safeParse(value);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.join(".") : "root";
+        return `${path}: ${issue.message}`;
+      })
+      .join("; ");
+    throw new Error(`invalid attempt spec: ${issues}`);
+  }
+  return parsed.data as AttemptSpec;
+};
+
+const validateWorkerInput = (value: unknown): WorkerDispatchInput => {
+  if (!isObject(value)) {
+    throw new Error("invalid worker input: expected JSON object");
+  }
+  if (value.schemaVersion === 3) {
+    return validateAttemptSpec(value);
+  }
+  return validateLegacyWorkerRequest(value);
+};
+
+export const decodeWorkerInput = (encoded: string): WorkerDispatchInput =>
+  validateWorkerInput(decodeJson(encoded));
+
+export const decodeExecutionProfile = (encoded: string): ExecutionProfile => {
+  const parsed = ExecutionProfileSchema.safeParse(decodeJson(encoded));
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.join(".") : "root";
+        return `${path}: ${issue.message}`;
+      })
+      .join("; ");
+    throw new Error(`invalid execution profile: ${issues}`);
+  }
+  return parsed.data;
+};
 
 export const encodeWorkerEnvelope = (prefix: string, payload: unknown): string =>
   `${prefix} ${JSON.stringify(payload)}`;
-
-export const parseWorkerTaskSpec = (argv: string[]): WorkerTaskSpec => {
-  const specArg = argv.find(
-    (arg) => arg === "--task-spec-b64" || arg.startsWith("--task-spec-b64="),
-  );
-  if (!specArg) {
-    throw new Error("missing required argument --task-spec-b64");
-  }
-
-  const encoded = specArg.includes("=")
-    ? specArg.slice("--task-spec-b64=".length)
-    : (() => {
-        const index = argv.indexOf(specArg);
-        const value = argv[index + 1];
-        if (value === undefined || value.startsWith("--")) {
-          throw new Error("missing value for --task-spec-b64");
-        }
-        return value;
-      })();
-
-  return decodeWorkerTaskSpec(encoded);
-};
 
 export const workerResultStatusFromExitCode = (
   exitCode: number | null,
@@ -303,7 +331,7 @@ export const workerResultStatusFromExitCode = (
 ): WorkerTaskResult["status"] => (exitCode === 0 && !timedOut ? "succeeded" : "failed");
 
 export const runWorkerTask = async (
-  spec: WorkerTaskSpec,
+  spec: WorkerDispatchInput,
   options: WorkerRuntimeOptions = {},
 ): Promise<WorkerTaskResult> => {
   const runtimeProcess = process as unknown as {
@@ -312,25 +340,25 @@ export const runWorkerTask = async (
   };
   const emit = options.emit ?? (() => undefined);
   const shell = options.shell ?? "bash";
-  const resolved = resolveCommand(spec, shell);
+  const resolved = resolveCommand(spec, shell, options.executionProfile, options.stdin);
   const timeoutSeconds = clampPositiveInteger(
     options.timeoutSeconds ??
       resolved.timeoutSeconds ??
-      spec.timeoutSeconds ??
+      (isAttemptSpec(spec) ? undefined : spec.timeoutSeconds) ??
       DEFAULT_TIMEOUT_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
   );
   const maxOutputBytes = clampPositiveInteger(
     options.maxOutputBytes ??
       resolved.maxOutputBytes ??
-      spec.maxOutputBytes ??
+      (isAttemptSpec(spec) ? undefined : spec.maxOutputBytes) ??
       DEFAULT_MAX_OUTPUT_BYTES,
     DEFAULT_MAX_OUTPUT_BYTES,
   );
   const heartbeatIntervalMs = clampPositiveInteger(
     options.heartbeatIntervalMs ??
       resolved.heartbeatIntervalMs ??
-      spec.heartbeatIntervalMs ??
+      (isAttemptSpec(spec) ? undefined : spec.heartbeatIntervalMs) ??
       DEFAULT_HEARTBEAT_INTERVAL_MS,
     DEFAULT_HEARTBEAT_INTERVAL_MS,
   );
@@ -338,7 +366,7 @@ export const runWorkerTask = async (
     options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
     DEFAULT_KILL_GRACE_MS,
   );
-  const cwd = spec.cwd ?? runtimeProcess.cwd?.() ?? ".";
+  const cwd = resolveWorkingDirectory(spec, runtimeProcess.cwd?.() ?? ".");
   const startedAt = nowIso(options.now);
 
   emitProgress(emit, spec, "task.queued", "queued", "task accepted for execution", {
@@ -475,7 +503,9 @@ export const runWorkerTask = async (
     stdoutTruncated: stdoutCapture.truncated,
     stderrTruncated: stderrCapture.truncated,
     timedOut,
-    assumeDangerousSkipPermissions: spec.assumeDangerousSkipPermissions,
+    assumeDangerousSkipPermissions: isAttemptSpec(spec)
+      ? spec.permissions.allowAllTools
+      : spec.assumeDangerousSkipPermissions,
   };
 
   if (status === "succeeded") {

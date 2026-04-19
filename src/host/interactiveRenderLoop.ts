@@ -266,9 +266,8 @@ export const executePrompt = async (
       coalesce.flushNow();
       deps.transcript.push(exitCodeToReviewItem(code));
     } else {
-      const recent = capture.lines.slice(-6);
-      for (const captured of recent) {
-        deps.transcript.push({ kind: "event", label: parsed.command, detail: captured });
+      if (capture.lines.length > 0) {
+        deps.transcript.push({ kind: "output", text: capture.lines.join("\n") });
       }
     }
 

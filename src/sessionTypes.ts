@@ -58,6 +58,28 @@ export type SessionReviewOutcome =
 
 export type SessionReviewAction = "accept" | "retry" | "ask_user" | "halt" | "follow_up";
 
+export type SandboxLifecycleState =
+  | "ephemeral"
+  | "preserved_active"
+  | "preserved_merged"
+  | "preserved_discarded"
+  | "merge_failed";
+
+export type SandboxLifecycleRecord = {
+  state: SandboxLifecycleState;
+  candidateId?: string;
+  sandboxTaskId?: string;
+  branchName?: string;
+  worktreePath?: string;
+  reservedOutputDir?: string;
+  changedFiles?: string[];
+  outputArtifacts?: string[];
+  updatedAt: string;
+  mergedAt?: string;
+  discardedAt?: string;
+  mergeError?: string;
+};
+
 /**
  * Structured host-side review of an attempt outcome. Lives on the turn
  * (`SessionTurnRecord.latestReview`), not on the attempt, so a turn can carry
@@ -102,6 +124,8 @@ export type SessionAttemptRecord = {
    * the worker-facing AttemptSpec plus sandbox/merge profile decisions.
    */
   dispatchPlan?: DispatchPlan;
+  sandboxLifecycleState?: SandboxLifecycleState;
+  sandbox?: SandboxLifecycleRecord;
   /**
    * Phase 4 PR3 lineage: predecessor attempt in the same turn when this
    * attempt was produced by a retry. Undefined for the first attempt of a

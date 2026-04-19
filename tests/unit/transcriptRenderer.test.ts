@@ -16,6 +16,7 @@ const baseTranscript: TranscriptItem[] = [
   { kind: "user", text: "do the thing" },
   { kind: "assistant", text: "working on it", tone: "info" },
   { kind: "event", label: "dispatch", detail: "task-1" },
+  { kind: "output", text: "line one\nline two" },
   { kind: "review", outcome: "success", summary: "all green", nextAction: "review" },
 ];
 
@@ -48,9 +49,19 @@ for (const [label, render] of renderers) {
     assert.ok(joined.includes("Bakudo: working on it"));
     assert.ok(joined.includes("dispatch"));
     assert.ok(joined.includes("task-1"));
+    assert.ok(joined.includes("  line one"));
+    assert.ok(joined.includes("  line two"));
     assert.ok(joined.includes("Review: success"));
     assert.ok(joined.includes("all green"));
     assert.ok(joined.includes("next: review"));
+  });
+
+  test(`${label} renderer: output items render as an indented block`, () => {
+    const lines = render(buildFrame()).map(stripAnsi);
+    assert.ok(lines.includes("  line one"));
+    assert.ok(lines.includes("  line two"));
+    assert.ok(!lines.includes("Bakudo: line one"));
+    assert.ok(!lines.includes("· output line one"));
   });
 
   test(`${label} renderer: prompt "> " appears only when mode is prompt`, () => {

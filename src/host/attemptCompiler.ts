@@ -7,6 +7,7 @@ import type {
   TurnIntent,
   TurnIntentKind,
 } from "../attemptProtocol.js";
+import { reservedGuestOutputDirForAttempt } from "../attemptProtocol.js";
 import {
   BAKUDO_HOST_EXECUTION_ENGINES,
   BAKUDO_HOST_REQUIRED_PROTOCOL_VERSION,
@@ -181,9 +182,12 @@ const buildAcceptanceChecks = (intent: TurnIntent): AcceptanceCheck[] => {
 // Instructions
 // ---------------------------------------------------------------------------
 
-const buildInstructions = (intent: TurnIntent): string[] => {
+const buildInstructions = (intent: TurnIntent, attemptId: string): string[] => {
   const parts: string[] = [];
   parts.push(`User prompt: ${intent.prompt}`);
+  if (TASK_KIND_MAP[intent.kind] === "assistant_job") {
+    parts.push(`Reserved output directory: ${reservedGuestOutputDirForAttempt(attemptId)}`);
+  }
   for (const c of intent.constraints) {
     parts.push(`Constraint: ${c}`);
   }
@@ -227,7 +231,7 @@ export const compileAttemptSpec = (intent: TurnIntent, context: CompilerContext)
     mode,
     taskKind,
     prompt,
-    instructions: buildInstructions(intent),
+    instructions: buildInstructions(intent, context.attemptId),
     cwd: context.repoRoot,
     execution: {
       engine,

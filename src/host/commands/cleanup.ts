@@ -38,7 +38,7 @@ import {
 import type { HostCommandSpec } from "../commandRegistry.js";
 import { ArtifactPersistenceError } from "../errors.js";
 import { stdoutWrite } from "../io.js";
-import { storageRootFor } from "../orchestration.js";
+import { storageRootFor } from "../sessionRunSupport.js";
 import {
   buildRetentionPlan,
   DEFAULT_RETENTION_POLICY,

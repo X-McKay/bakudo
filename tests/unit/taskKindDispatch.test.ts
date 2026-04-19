@@ -138,7 +138,7 @@ test("assistantJobRunner: builds backend command from profile and uses stdin for
   assert.equal(result.command[0], "codex");
   assert.ok(result.stdin?.includes("implement the feature"));
   assert.ok(result.stdin?.includes("follow the style guide"));
-  assert.equal(result.env?.BAKUDO_GUEST_OUTPUT_DIR, "/tmp/bakudo-artifacts");
+  assert.equal(result.env?.BAKUDO_GUEST_OUTPUT_DIR, "/workspace/.bakudo/out/attempt-1");
 });
 
 test("assistantJobRunner: adds --dangerously-skip-permissions when allowAllTools", () => {

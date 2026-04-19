@@ -31,7 +31,7 @@ import {
   repoRootFor,
   sessionStatusFromReview,
   storageRootFor,
-} from "./orchestration.js";
+} from "./sessionRunSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import { planAttempt } from "./planner.js";
 import { parseTokenBudget } from "./tokenBudget.js";
@@ -90,7 +90,7 @@ const buildRunnerContext = async (
     sessionStore: new SessionStore(rootDir, { enforceLock: true }),
     artifactStore: new ArtifactStore(rootDir, redactionPolicy),
     runner: new ABoxTaskRunner(
-      new ABoxAdapter(args.aboxBin, args.repo),
+      new ABoxAdapter(args.aboxBin),
       undefined,
       envPolicy,
       undefined,
@@ -320,16 +320,16 @@ export const createAndRunFirstTurn = async (
 
     const { reviewed } = await executeAttempt(
       {
-      sessionStore,
-      artifactStore,
-      runner,
-      sessionId: session.sessionId,
-      turnId,
-      args,
-      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
-      ...(options.eventLogWriterFactory
-        ? { eventLogWriterFactory: options.eventLogWriterFactory }
-        : {}),
+        sessionStore,
+        artifactStore,
+        runner,
+        sessionId: session.sessionId,
+        turnId,
+        args,
+        ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+        ...(options.eventLogWriterFactory
+          ? { eventLogWriterFactory: options.eventLogWriterFactory }
+          : {}),
       },
       plan,
     );
@@ -431,16 +431,16 @@ export const appendTurnToActiveSession = async (
     await sessionStore.saveSession({ ...withTurn, status: "running" });
     const { reviewed } = await executeAttempt(
       {
-      sessionStore,
-      artifactStore,
-      runner,
-      sessionId,
-      turnId,
-      args,
-      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
-      ...(options.eventLogWriterFactory
-        ? { eventLogWriterFactory: options.eventLogWriterFactory }
-        : {}),
+        sessionStore,
+        artifactStore,
+        runner,
+        sessionId,
+        turnId,
+        args,
+        ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+        ...(options.eventLogWriterFactory
+          ? { eventLogWriterFactory: options.eventLogWriterFactory }
+          : {}),
       },
       plan,
     );
