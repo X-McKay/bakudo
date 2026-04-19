@@ -553,6 +553,8 @@ export const shouldUseHostCli = (argv: string[]): boolean => {
     first === undefined ||
     first === "--help" ||
     first === "-h" ||
+    first === "--version" ||
+    first === "-V" ||
     HOST_COMMANDS.has(first as HostCommand) ||
     (!first.startsWith("--") && !first.includes("=")) ||
     argv.includes("--session-id") ||

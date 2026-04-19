@@ -3,6 +3,8 @@
 import { ABoxAdapter } from "./aboxAdapter.js";
 import { loadConfig, buildPolicyConfig, buildRuntimeConfig } from "./config.js";
 import { runHostCli, shouldUseHostCli } from "./hostCli.js";
+import { EXIT_CODES } from "./host/errors.js";
+import { printVersion } from "./host/commands/version.js";
 import { isMainModule } from "./mainModule.js";
 import { AgentHarness, buildPolicy } from "./orchestrator.js";
 import { ToolRuntime } from "./tools.js";
@@ -14,6 +16,10 @@ type CliArgs = {
   aboxBin: string;
   repo?: string;
 };
+
+const LEGACY_TOP_LEVEL_FLAGS = new Set(["--goal", "--config", "--streams", "--abox-bin", "--repo"]);
+
+const isVersionFlag = (arg: string | undefined): boolean => arg === "--version" || arg === "-V";
 
 export const parseArgs = (argv: string[]): CliArgs => {
   const result: CliArgs = {
@@ -54,7 +60,24 @@ export const parseArgs = (argv: string[]): CliArgs => {
 
 export const runCli = async (argv: string[]): Promise<number> => {
   if (shouldUseHostCli(argv)) {
+    if (isVersionFlag(argv[0])) {
+      const useJson = argv.includes("--output-format=json") || argv.includes("--json");
+      printVersion({ useJson });
+      return 0;
+    }
     return runHostCli(argv);
+  }
+
+  const firstArg = argv[0];
+  if (
+    firstArg !== undefined &&
+    firstArg.startsWith("--") &&
+    !LEGACY_TOP_LEVEL_FLAGS.has(firstArg)
+  ) {
+    process.stderr.write(
+      `harness_error: unrecognized top-level flag: ${firstArg} (run 'bakudo --help' for options)\n`,
+    );
+    return EXIT_CODES.FAILURE;
   }
 
   const args = parseArgs(argv);
