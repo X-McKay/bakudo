@@ -304,7 +304,7 @@ export const createAndRunFirstTurn = async (
     const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
     const repoRoot = repoRootFor(args.repo);
     const plannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
-    const { spec } = planAttempt(
+    const { plan } = planAttempt(
       effectivePrompt,
       composerMode,
       {
@@ -318,19 +318,21 @@ export const createAndRunFirstTurn = async (
       plannerOpts,
     );
 
-    const { reviewed } = await executeAttempt({
+    const { reviewed } = await executeAttempt(
+      {
       sessionStore,
       artifactStore,
       runner,
       sessionId: session.sessionId,
       turnId,
-      spec,
       args,
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
       ...(options.eventLogWriterFactory
         ? { eventLogWriterFactory: options.eventLogWriterFactory }
         : {}),
-    });
+      },
+      plan,
+    );
 
     const updated = await sessionStore.saveSession({
       ...(await sessionStore.loadSession(session.sessionId))!,
@@ -412,7 +414,7 @@ export const appendTurnToActiveSession = async (
     const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
     const repoRoot = repoRootFor(args.repo);
     const appendPlannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
-    const { spec } = planAttempt(
+    const { plan } = planAttempt(
       effectivePrompt,
       composerMode,
       {
@@ -427,19 +429,21 @@ export const appendTurnToActiveSession = async (
     );
 
     await sessionStore.saveSession({ ...withTurn, status: "running" });
-    const { reviewed } = await executeAttempt({
+    const { reviewed } = await executeAttempt(
+      {
       sessionStore,
       artifactStore,
       runner,
       sessionId,
       turnId,
-      spec,
       args,
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
       ...(options.eventLogWriterFactory
         ? { eventLogWriterFactory: options.eventLogWriterFactory }
         : {}),
-    });
+      },
+      plan,
+    );
 
     const updated = await sessionStore.saveSession({
       ...(await sessionStore.loadSession(sessionId))!,

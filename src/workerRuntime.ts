@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import type { AttemptSpec } from "./attemptProtocol.js";
+import { ExecutionProfileSchema, type AttemptSpec, type ExecutionProfile } from "./attemptProtocol.js";
 import {
   BAKUDO_PROTOCOL_SCHEMA_VERSION,
   type TaskProgressEvent,
@@ -21,6 +21,8 @@ export type WorkerTaskSpec = TaskRequest & {
   timeoutSeconds?: number;
   maxOutputBytes?: number;
   heartbeatIntervalMs?: number;
+  stdin?: string;
+  executionProfile?: ExecutionProfile;
 };
 
 export type WorkerTaskProgressEvent = TaskProgressEvent & {
@@ -129,6 +131,7 @@ const formatMessage = (goal: string): string => {
 type ResolvedCommand = {
   spawnArgs: [string, string[]];
   goalLabel: string;
+  stdin?: string;
   timeoutSeconds?: number;
   maxOutputBytes?: number;
   heartbeatIntervalMs?: number;
@@ -137,19 +140,33 @@ type ResolvedCommand = {
 /** Detect taskKind → AttemptSpec dispatch; else legacy bash -lc goal. */
 const resolveCommand = (spec: WorkerTaskSpec, shell: string): ResolvedCommand => {
   const raw = spec as Record<string, unknown>;
+  const envelopeStdin = typeof raw.stdin === "string" ? raw.stdin : undefined;
   if (typeof raw.taskKind === "string") {
     const as = (isObject(raw.attemptSpec) ? raw.attemptSpec : raw) as AttemptSpec;
-    const cmd = dispatchTaskKind(as);
+    const defaultProfile: ExecutionProfile = {
+      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      sandboxLifecycle: "ephemeral",
+      mergeStrategy: "none",
+    };
+    const parsedProfile = ExecutionProfileSchema.safeParse(raw.executionProfile);
+    const profile = parsedProfile.success ? parsedProfile.data : defaultProfile;
+    const cmd = dispatchTaskKind(as, profile);
     const [exe = shell, ...args] = cmd.command;
+    const resolvedStdin = cmd.stdin ?? envelopeStdin;
     return {
       spawnArgs: [exe, args],
       goalLabel: cmd.command.join(" "),
+      ...(typeof resolvedStdin === "string" ? { stdin: resolvedStdin } : {}),
       timeoutSeconds: as.budget.timeoutSeconds,
       maxOutputBytes: as.budget.maxOutputBytes,
       heartbeatIntervalMs: as.budget.heartbeatIntervalMs,
     };
   }
-  return { spawnArgs: [shell, ["-lc", spec.goal]], goalLabel: spec.goal };
+  return {
+    spawnArgs: [shell, ["-lc", spec.goal]],
+    goalLabel: spec.goal,
+    ...(envelopeStdin !== undefined ? { stdin: envelopeStdin } : {}),
+  };
 };
 
 const nowIso = (now?: () => Date): string => (now ?? (() => new Date()))().toISOString();
@@ -212,6 +229,7 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
   const heartbeatIntervalMs = value.heartbeatIntervalMs;
   const taskKind = value.taskKind;
   const attemptSpec = value.attemptSpec;
+  const executionProfile = value.executionProfile;
 
   const spec: WorkerTaskSpec = {
     schemaVersion,
@@ -236,12 +254,17 @@ const validateTaskSpec = (value: unknown): WorkerTaskSpec => {
   const extended = spec as WorkerTaskSpec & {
     taskKind?: string;
     attemptSpec?: Record<string, unknown>;
+    executionProfile?: ExecutionProfile;
   };
   if (typeof taskKind === "string" && taskKind.trim().length > 0) {
     extended.taskKind = taskKind;
   }
   if (isObject(attemptSpec)) {
     extended.attemptSpec = attemptSpec;
+  }
+  const parsedProfile = ExecutionProfileSchema.safeParse(executionProfile);
+  if (parsedProfile.success) {
+    extended.executionProfile = parsedProfile.data;
   }
   return extended;
 };
@@ -336,11 +359,16 @@ export const runWorkerTask = async (
   let timedOut = false;
   let failedToSpawn: Error | null = null;
 
+  const hasStdin = typeof resolved.stdin === "string";
   const child = spawn(resolved.spawnArgs[0], resolved.spawnArgs[1], {
     cwd,
     env: runtimeProcess.env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [hasStdin ? "pipe" : "ignore", "pipe", "pipe"],
   });
+  if (hasStdin && child.stdin) {
+    child.stdin.write(resolved.stdin);
+    child.stdin.end();
+  }
 
   const heartbeat = setInterval(() => {
     const elapsedMs = Date.now() - Date.parse(startedAt);

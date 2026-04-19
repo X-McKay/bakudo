@@ -20,9 +20,9 @@
 
 ## Wave checklist
 
-- [ ] **Wave 0** — installed config, stdin pipeline, `run_check` fix, lifecycle wording.
-- [ ] **Wave 1** — `DispatchPlan` + `ExecutionProfile`.
-- [ ] **Wave 2** — `assistant_job` backend-driven, reserved guest output dir.
+- [x] **Wave 0** — installed config, stdin pipeline, `run_check` fix, lifecycle wording.
+- [x] **Wave 1** — `DispatchPlan` + `ExecutionProfile`.
+- [x] **Wave 2** — `assistant_job` backend-driven, reserved guest output dir.
 - [ ] **Wave 3** — split `aboxAdapter`, host lifecycle helpers, remove `BAKUDO_EPHEMERAL`.
 - [ ] **Wave 4** — worktree inspection, host-generated artifacts, profile-aware review, decoupled execute/review.
 - [ ] **Wave 5** — approval copy + lifecycle persistence + inspect surfaces.
@@ -50,3 +50,60 @@ Configuration resolution fix has been committed and pushed:
 - `scripts/package-release.sh`: copy `config/` into release bundle
 
 Validated: `bakudo` invoked from `/tmp` successfully reads its config. Unit tests: 1398 pass / 0 fail.
+
+### 2026-04-19: Wave 0.2 Landed
+
+Worker stdin delivery is now wired through the runtime and assistant-job dispatch:
+- `src/workerRuntime.ts`: when a resolved command includes stdin, spawn now uses piped stdin and writes/ends it deterministically.
+- `src/worker/assistantJobRunner.ts`: bounded prompt now flows through `TaskRunnerCommand.stdin` instead of argv.
+- `tests/unit/taskKindDispatch.test.ts`: assistant-job assertions now verify stdin payload semantics.
+- `tests/unit/workerRuntime.test.ts`: added stdin piping regression coverage and relaxed stderr brittleness from local shell tooling noise.
+
+Validated: `pnpm test:unit` passed (1399 pass / 0 fail / 1 skipped).
+
+### 2026-04-19: Wave 0.3 Landed
+
+`run_check` now compiles and runs through a single command contract shared by runner + review:
+- `src/host/attemptCompiler.ts`: `run_check` emits derived command via `acceptanceChecks[0].command`.
+- `src/worker/checkRunner.ts`: prefers `spec.execution.command` when explicitly provided, otherwise falls back to acceptance-check folding.
+- `tests/unit/attemptCompiler.test.ts` and `tests/unit/taskKindDispatch.test.ts`: added/updated coverage for the new command source-of-truth behavior.
+
+### 2026-04-19: Wave 0.4 Landed
+
+Lifecycle wording no longer hardcodes an "ephemeral code-changing sandbox":
+- Updated host-facing copy in `src/host/init.ts`, `src/host/oneShotRun.ts`, `src/host/sessionLifecycle.ts`, and `src/host/orchestrationSupport.ts` to use attempt/sandbox language aligned with current lifecycle behavior.
+
+Validated: `pnpm test:unit` passed after W0.3+W0.4 changes.
+
+### 2026-04-19: Wave 1 Landed
+
+Introduced host-owned dispatch planning and threaded it through planner/execution persistence:
+- `src/attemptProtocol.ts`: added `ExecutionProfile` + `DispatchPlan` types and Zod schemas.
+- `src/host/planner.ts`: now emits `{ intent, plan, spec }` where `plan` contains candidate id, execution profile, and compiled spec.
+- `src/host/sessionController.ts` + `src/host/executeAttempt.ts`: execution now accepts a `DispatchPlan` argument and persists `dispatchPlan` on attempts.
+- `src/sessionTypes.ts`: `SessionAttemptRecord` now carries `dispatchPlan` (with `attemptSpec` retained as compatibility fallback).
+- `src/host/inspectTabs.ts` + `src/host/inspectFormatter.ts`: provenance/inspect spec rendering now prefers `dispatchPlan.spec`.
+
+Validated: `pnpm test:unit` passed (1401 pass / 0 fail / 1 skipped).
+
+### 2026-04-19: Wave 2 Landed
+
+`assistant_job` is now backend/profile-driven and reserves a stable guest output directory:
+- `src/worker/taskKinds.ts`: task-kind runners now receive `ExecutionProfile` alongside `AttemptSpec`.
+- `src/worker/assistantJobRunner.ts`: backend command is parsed from `profile.agentBackend`; bounded prompt is piped via stdin; runner exports `BAKUDO_GUEST_OUTPUT_DIR=/tmp/bakudo-artifacts`.
+- `src/workerRuntime.ts`: task-kind resolution now loads `executionProfile` from worker payload with a safe default fallback profile.
+- `src/aboxTaskRunner.ts` + `src/host/executeAttempt.ts`: host now threads `DispatchPlan.profile` into worker payload encoding.
+- `tests/unit/taskKindDispatch.test.ts`: updated backend/dispatch assertions for profile-driven assistant-job commands.
+
+Validated: `pnpm test:unit` passed (1401 pass / 0 fail / 1 skipped).
+
+### 2026-04-19: Wave 3 In Progress (Slice A)
+
+Started orchestration split with lifecycle foundations and env-decoupling:
+- `src/host/sandboxLifecycle.ts`: added canonical task-id generation + ephemeral lifecycle helpers.
+- `src/host/worktreeDiscovery.ts`: added `git worktree list --porcelain` parser + discovery helper.
+- `src/host/mergeController.ts`: added explicit `abox merge` / `abox stop --clean` wrappers.
+- `src/aboxAdapter.ts` + `src/aboxTaskRunner.ts`: removed env-coupled ephemeral control path and now pass explicit `{ taskId, ephemeral }` invocation options.
+- Added unit coverage in `tests/unit/sandboxLifecycle.test.ts`, `tests/unit/worktreeDiscovery.test.ts`, and updated adapter expectations in `tests/unit/aboxAdapter.test.ts`.
+
+Validated: `pnpm test:unit` passed (1406 pass / 0 fail / 1 skipped).

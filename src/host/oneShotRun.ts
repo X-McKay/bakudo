@@ -84,7 +84,7 @@ export const runNonInteractiveOneShot = async (
       return EXIT_CODES.BLOCKED;
     }
     const approved = await promptForApprovalFn(
-      `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+      `Dispatch a ${args.mode} attempt into an abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Dispatch cancelled.\n");

@@ -79,11 +79,12 @@ const renderAgentProfile = (provenance: ProvenanceRecord | undefined): string[] 
 
 const renderAttemptSpec = (attempt: SessionAttemptRecord): string[] => {
   const lines = ["Compiled AttemptSpec:"];
-  if (attempt.attemptSpec === undefined) {
+  const spec = attempt.dispatchPlan?.spec ?? attempt.attemptSpec;
+  if (spec === undefined) {
     lines.push("  (no compiled spec — legacy attempt)");
     return lines;
   }
-  const pretty = JSON.stringify(attempt.attemptSpec, null, 2).split("\n");
+  const pretty = JSON.stringify(spec, null, 2).split("\n");
   for (const row of pretty) {
     lines.push(`  ${row}`);
   }

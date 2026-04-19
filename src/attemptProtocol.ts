@@ -89,6 +89,20 @@ export type AttemptSpec = {
   artifactRequests: ArtifactRequest[];
 };
 
+export type ExecutionProfile = {
+  agentBackend: string;
+  sandboxLifecycle: "preserved" | "ephemeral";
+  mergeStrategy: "auto" | "interactive" | "none";
+};
+
+export type DispatchPlan = {
+  schemaVersion: 1;
+  candidateId?: string;
+  batchId?: string;
+  profile: ExecutionProfile;
+  spec: AttemptSpec;
+};
+
 // ---------------------------------------------------------------------------
 // Execution result
 // ---------------------------------------------------------------------------
@@ -269,6 +283,24 @@ export const AttemptSpecSchema = z
       .strip(),
     acceptanceChecks: z.array(AcceptanceCheckSchema),
     artifactRequests: z.array(ArtifactRequestSchema),
+  })
+  .strip();
+
+export const ExecutionProfileSchema = z
+  .object({
+    agentBackend: z.string(),
+    sandboxLifecycle: z.enum(["preserved", "ephemeral"]),
+    mergeStrategy: z.enum(["auto", "interactive", "none"]),
+  })
+  .strip();
+
+export const DispatchPlanSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    candidateId: z.string().optional(),
+    batchId: z.string().optional(),
+    profile: ExecutionProfileSchema,
+    spec: AttemptSpecSchema,
   })
   .strip();
 

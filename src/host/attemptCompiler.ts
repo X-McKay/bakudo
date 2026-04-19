@@ -159,11 +159,23 @@ const compilePermissions = (composerMode: ComposerMode, config: BakudoConfig): P
 // Acceptance checks
 // ---------------------------------------------------------------------------
 
-const buildAcceptanceChecks = (goals: string[]): AcceptanceCheck[] =>
-  goals.map((label, i) => ({
+const buildAcceptanceChecks = (intent: TurnIntent): AcceptanceCheck[] => {
+  if (intent.kind === "run_check") {
+    const command = deriveCheckCommand(intent.prompt);
+    return [
+      {
+        checkId: "check-0",
+        label: intent.acceptanceGoals[0] ?? "run requested verification check",
+        command,
+      },
+    ];
+  }
+
+  return intent.acceptanceGoals.map((label, i) => ({
     checkId: `check-${i}`,
     label,
   }));
+};
 
 // ---------------------------------------------------------------------------
 // Instructions
@@ -200,8 +212,6 @@ export const compileAttemptSpec = (intent: TurnIntent, context: CompilerContext)
   let command: string[] | undefined;
   if (taskKind === "explicit_command") {
     command = extractCommand(intent.prompt);
-  } else if (taskKind === "verification_check") {
-    command = deriveCheckCommand(intent.prompt);
   }
 
   // Prompt
@@ -234,7 +244,7 @@ export const compileAttemptSpec = (intent: TurnIntent, context: CompilerContext)
       heartbeatIntervalMs: 5000,
       ...(intent.tokenBudget !== undefined ? { tokenBudget: intent.tokenBudget } : {}),
     },
-    acceptanceChecks: buildAcceptanceChecks(intent.acceptanceGoals),
+    acceptanceChecks: buildAcceptanceChecks(intent),
     artifactRequests: ARTIFACT_REQUESTS[taskKind],
   };
 };

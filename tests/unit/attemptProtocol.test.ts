@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   AttemptExecutionResultSchema,
   AttemptSpecSchema,
+  DispatchPlanSchema,
+  ExecutionProfileSchema,
   PermissionRuleSchema,
   TurnIntentSchema,
   type AttemptExecutionResult,
@@ -185,6 +187,20 @@ test("AttemptSpecSchema rejects invalid taskKind", () => {
     () => AttemptSpecSchema.parse({ ...validAttemptSpec, taskKind: "unknown" }),
     /invalid/iu,
   );
+});
+
+test("DispatchPlanSchema accepts optional batchId/candidateId", () => {
+  const parsed = DispatchPlanSchema.parse({
+    schemaVersion: 1,
+    profile: ExecutionProfileSchema.parse({
+      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      sandboxLifecycle: "preserved",
+      mergeStrategy: "interactive",
+    }),
+    spec: validAttemptSpec,
+  });
+  assert.equal(parsed.batchId, undefined);
+  assert.equal(parsed.candidateId, undefined);
 });
 
 // ---------------------------------------------------------------------------

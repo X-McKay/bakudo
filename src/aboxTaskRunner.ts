@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 
 import { ABoxAdapter } from "./aboxAdapter.js";
-import type { AttemptSpec } from "./attemptProtocol.js";
+import type { AttemptSpec, ExecutionProfile } from "./attemptProtocol.js";
 import { DEFAULT_ENV_POLICY, filterEnv, type EnvPolicy } from "./host/envPolicy.js";
+import { generateSandboxTaskId, isEphemeralSandbox } from "./host/sandboxLifecycle.js";
 import {
   getCachedWorkerCapabilities,
   negotiateAttemptAgainstCapabilities,
@@ -251,7 +252,10 @@ const parseExecutionOutput = (
  * task-kind dispatch path (PR10); specs without `taskKind` fall through to
  * the legacy `goal`-as-command path.
  */
-export const attemptSpecToWorkerSpec = (spec: AttemptSpec): WorkerTaskSpec => {
+export const attemptSpecToWorkerSpec = (
+  spec: AttemptSpec,
+  executionProfile?: ExecutionProfile,
+): WorkerTaskSpec => {
   const base: WorkerTaskSpec = {
     schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
     taskId: spec.taskId,
@@ -272,6 +276,9 @@ export const attemptSpecToWorkerSpec = (spec: AttemptSpec): WorkerTaskSpec => {
   const extended = base as WorkerTaskSpec & { taskKind: string; attemptSpec: AttemptSpec };
   extended.taskKind = spec.taskKind;
   extended.attemptSpec = spec;
+  if (executionProfile !== undefined) {
+    extended.executionProfile = executionProfile;
+  }
   return extended;
 };
 
@@ -370,6 +377,10 @@ export class ABoxTaskRunner {
     // the spawn. Default policy has an empty allowlist, so workers see a
     // clean env unless the user has opted in to specific names.
     const filteredEnv = filterEnv(this.envSource(), this.envPolicy);
+    const runtimeAttemptId =
+      (spec as WorkerTaskSpec & { attemptSpec?: AttemptSpec }).attemptSpec?.attemptId ?? spec.taskId;
+    const sandboxTaskId = generateSandboxTaskId(runtimeAttemptId);
+    const ephemeral = isEphemeralSandbox(spec.executionProfile);
     let rawOutput = "";
     const execution = await this.adapter.runInStreamLive(
       streamId,
@@ -384,6 +395,7 @@ export class ABoxTaskRunner {
         },
       },
       filteredEnv,
+      { taskId: sandboxTaskId, ephemeral },
     );
     const output = rawOutput.length > 0 ? rawOutput : execution.output;
     return parseExecutionOutput(spec, output, execution.ok, execution.metadata, handlers);
@@ -409,6 +421,7 @@ export class ABoxTaskRunner {
       killGraceMs?: number;
     } = {},
     handlers: TaskRunnerHandlers = {},
+    executionProfile?: ExecutionProfile,
   ): Promise<TaskExecutionRecord> {
     const probe = await this.capabilitiesProvider(this.adapter.binPath);
     // Wave 6c PR9 carryover #6 — emit the deferred diagnostic envelope when
@@ -437,7 +450,7 @@ export class ABoxTaskRunner {
       capabilities: probe.capabilities,
       ...(probe.fallbackReason === undefined ? {} : { fallbackReason: probe.fallbackReason }),
     });
-    const workerSpec = attemptSpecToWorkerSpec(spec);
+    const workerSpec = attemptSpecToWorkerSpec(spec, executionProfile);
     return this.runTask(workerSpec, overrides, handlers);
   }
 }

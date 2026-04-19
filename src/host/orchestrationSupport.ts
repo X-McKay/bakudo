@@ -35,7 +35,7 @@ export const renderDispatchBanner = (
     renderKeyValue("Session", sessionId),
     renderKeyValue("Task", request.taskId),
     renderKeyValue("Goal", request.goal),
-    renderKeyValue("Sandbox", "ephemeral abox worker"),
+    renderKeyValue("Sandbox", "abox worker"),
     "",
   ].join("\n");
 

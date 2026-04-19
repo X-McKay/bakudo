@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { ABoxTaskRunner, TaskExecutionRecord } from "../aboxTaskRunner.js";
 import type { ArtifactStore } from "../artifactStore.js";
-import type { AttemptExecutionResult, AttemptSpec } from "../attemptProtocol.js";
+import type { AttemptExecutionResult, AttemptSpec, DispatchPlan } from "../attemptProtocol.js";
 import type { TaskMode } from "../protocol.js";
 import { type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
@@ -20,6 +20,7 @@ import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import type { HookRegistry } from "./hooks.js";
 import { startDispatchProgress } from "./dispatchProgress.js";
 import { stdoutWrite } from "./io.js";
+import { discoverWorktree } from "./worktreeDiscovery.js";
 import type { EventLogWriterFactory } from "./orchestration.js";
 import {
   buildDispatchStartedEnvelope,
@@ -66,7 +67,7 @@ export type ExecuteAttemptContext = {
   runner: ABoxTaskRunner;
   sessionId: string;
   turnId: string;
-  spec: AttemptSpec;
+  spec?: AttemptSpec;
   args: HostCliArgs;
   eventLogWriterFactory?: EventLogWriterFactory;
   onProgress?: (event: WorkerTaskProgressEvent) => void;
@@ -125,8 +126,13 @@ export const toAttemptExecutionResult = (
  */
 export const executeAttempt = async (
   ctx: ExecuteAttemptContext,
+  plan?: DispatchPlan,
 ): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
-  const { sessionStore, artifactStore, runner, sessionId, turnId, spec, args, onProgress } = ctx;
+  const spec = plan?.spec ?? ctx.spec;
+  if (spec === undefined) {
+    throw new Error("executeAttempt requires either plan.spec or ctx.spec");
+  }
+  const { sessionStore, artifactStore, runner, sessionId, turnId, args, onProgress } = ctx;
   const storageRoot = sessionStore.rootDir;
   const writerFactory = ctx.eventLogWriterFactory ?? createSessionEventLogWriter;
   const writer = writerFactory(storageRoot, sessionId);
@@ -136,6 +142,7 @@ export const executeAttempt = async (
       status: "queued",
       lastMessage: "queued for sandbox execution",
       attemptSpec: spec,
+      ...(plan !== undefined ? { dispatchPlan: plan } : {}),
     });
 
     const composerMode = inferComposerMode(spec);
@@ -144,9 +151,9 @@ export const executeAttempt = async (
     // so deny/ask decisions short-circuit the worker entirely. The producer
     // emits its own `host.approval_requested` / `host.approval_resolved`
     // envelopes; `host.dispatch_started` follows only on proceed.
-    const approvalOutcome = await runApprovalIfNeeded({ ctx, writer, composerMode });
+    const approvalOutcome = await runApprovalIfNeeded({ ctx, writer, composerMode, spec });
     if (approvalOutcome.status === "blocked") {
-      return handleBlockedDispatch({ ctx, writer, rationale: approvalOutcome.rationale });
+      return handleBlockedDispatch({ ctx, writer, rationale: approvalOutcome.rationale, spec });
     }
 
     await writer.append(
@@ -211,6 +218,7 @@ export const executeAttempt = async (
             stdoutWrite(`[worker-error] ${message}\n`);
           },
         },
+        plan?.profile,
       );
     } catch (error) {
       dispatchProgress.stop();
@@ -230,6 +238,11 @@ export const executeAttempt = async (
     const dispatchCommand = Array.isArray(execution.metadata?.cmd)
       ? execution.metadata.cmd.map((entry) => String(entry))
       : undefined;
+    const discoveredWorktree =
+      plan?.profile.sandboxLifecycle === "preserved" &&
+      typeof execution.metadata?.taskId === "string"
+        ? await discoverWorktree(spec.cwd, execution.metadata.taskId)
+        : null;
 
     const finalized = await recordProvenanceFinalize({
       storageRoot,
@@ -256,8 +269,10 @@ export const executeAttempt = async (
       result: execution.result,
       lastMessage: reviewed.reason,
       attemptSpec: spec,
+      ...(plan !== undefined ? { dispatchPlan: plan } : {}),
       metadata: {
         sandboxTaskId: execution.metadata?.taskId,
+        ...(discoveredWorktree?.path !== undefined ? { worktreePath: discoveredWorktree.path } : {}),
         aboxCommand: execution.metadata?.cmd,
       },
       ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
@@ -313,9 +328,10 @@ const runApprovalIfNeeded = async (args: {
   ctx: ExecuteAttemptContext;
   writer: EventLogWriter;
   composerMode: ComposerMode;
+  spec: AttemptSpec;
 }): Promise<ApprovalProducerOutcome> => {
-  const { ctx, writer, composerMode } = args;
-  const operation = extractIntendedOperation(ctx.spec);
+  const { ctx, writer, composerMode, spec } = args;
+  const operation = extractIntendedOperation(spec);
   if (operation === null) {
     return { status: "proceed" };
   }
@@ -328,8 +344,8 @@ const runApprovalIfNeeded = async (args: {
 
   const input: ResolveApprovalInput = {
     storageRoot: ctx.sessionStore.rootDir,
-    repoRoot: ctx.repoRoot ?? ctx.spec.cwd,
-    spec: ctx.spec,
+    repoRoot: ctx.repoRoot ?? spec.cwd,
+    spec,
     operation,
     composerMode,
     agentProfileName: PROFILE_NAME[composerMode],
@@ -363,14 +379,15 @@ const handleBlockedDispatch = async (args: {
   ctx: ExecuteAttemptContext;
   writer: EventLogWriter;
   rationale: string;
+  spec: AttemptSpec;
 }): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
-  const { ctx, rationale } = args;
+  const { ctx, rationale, spec } = args;
   // `args.writer` is accepted for symmetry with the proceed path and so
   // future consumers can emit an additional "blocked" envelope here without
   // changing the signature — the Phase 4 producer already wrote its own
   // `host.approval_resolved` envelope before returning blocked.
   void args.writer;
-  const { spec, sessionStore, sessionId, turnId } = ctx;
+  const { sessionStore, sessionId, turnId } = ctx;
   const blockedAt = new Date().toISOString();
 
   await sessionStore.upsertAttempt(sessionId, turnId, {

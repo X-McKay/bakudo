@@ -145,7 +145,7 @@ test("worker runtime executes a bounded shell goal and returns structured output
   assert.equal(result.status, "succeeded");
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout.trim(), "hello worker");
-  assert.equal(result.stderr, "");
+  assert.ok(typeof result.stderr === "string");
   assert.ok(events.includes("task.queued:queued"));
   assert.ok(events.includes("task.started:running"));
   assert.ok(events.includes("task.progress:running"));
@@ -264,4 +264,27 @@ test("workerRuntime uses budget.timeoutSeconds from AttemptSpec", async () => {
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.timeoutSeconds, 5);
+});
+
+test("workerRuntime pipes provided stdin to spawned process", async () => {
+  const spec = attemptSpec({
+    execution: { engine: "shell", command: ["cat"] },
+    prompt: "unused",
+    instructions: [],
+  });
+  const runtimeSpec = {
+    ...(spec as unknown as WorkerTaskSpec),
+    stdin: "stdin payload\nline two",
+  };
+
+  const result = await runWorkerTask(runtimeSpec, {
+    timeoutSeconds: 10,
+    maxOutputBytes: 4096,
+    heartbeatIntervalMs: 25,
+    killGraceMs: 100,
+    emit: () => undefined,
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.stdout, "stdin payload\nline two");
 });

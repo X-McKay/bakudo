@@ -61,7 +61,7 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
 
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
-      `Dispatch a ${args.mode} task into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+      `Dispatch a ${args.mode} attempt into an abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Dispatch cancelled.\n");
@@ -154,8 +154,10 @@ export const resumeSession = async (
     throw new Error(`no resumable attempt found for session ${session.sessionId}`);
   }
   const baseRequest =
-    attempt.attemptSpec !== undefined
-      ? attemptSpecToWorkerSpec(attempt.attemptSpec)
+    attempt.dispatchPlan?.spec !== undefined
+      ? attemptSpecToWorkerSpec(attempt.dispatchPlan.spec)
+      : attempt.attemptSpec !== undefined
+        ? attemptSpecToWorkerSpec(attempt.attemptSpec)
       : attempt.request;
   if (baseRequest === undefined) {
     throw new Error(
@@ -175,7 +177,7 @@ export const resumeSession = async (
 
   if (requiresSandboxApproval(args) && !args.yes) {
     const approved = await promptForApproval(
-      `Re-dispatch task ${attempt.attemptId} into an ephemeral abox sandbox with dangerous-skip-permissions?`,
+      `Re-dispatch attempt ${attempt.attemptId} into an abox sandbox with dangerous-skip-permissions?`,
     );
     if (!approved) {
       stdoutWrite("Resume cancelled.\n");

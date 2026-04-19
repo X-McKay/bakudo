@@ -102,6 +102,9 @@ const resolveAttemptSpec = (
   attempt: SessionAttemptRecord | undefined,
   turn: SessionTurnRecord | undefined,
 ): Partial<AttemptSpec> | undefined => {
+  if (attempt?.dispatchPlan?.spec !== undefined) {
+    return attempt.dispatchPlan.spec;
+  }
   if (attempt?.attemptSpec !== undefined) {
     return attempt.attemptSpec;
   }

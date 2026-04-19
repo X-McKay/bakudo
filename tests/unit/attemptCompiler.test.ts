@@ -99,7 +99,8 @@ test("run_check compiles to verification_check with engine shell", () => {
   const spec = compileAttemptSpec(intent, baseContext());
   assert.equal(spec.taskKind, "verification_check");
   assert.equal(spec.execution.engine, "shell");
-  assert.deepEqual(spec.execution.command, ["bash", "-lc", "tests"]);
+  assert.equal(spec.execution.command, undefined);
+  assert.deepEqual(spec.acceptanceChecks[0]?.command, ["bash", "-lc", "tests"]);
 });
 
 // ---------------------------------------------------------------------------

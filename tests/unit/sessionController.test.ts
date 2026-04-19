@@ -290,7 +290,8 @@ test("planAttempt: check-like prompt produces verification_check spec", () => {
   assert.equal(intent.kind, "run_check");
   assert.equal(spec.taskKind, "verification_check");
   assert.equal(spec.execution.engine, "shell");
-  assert.ok(spec.execution.command);
+  assert.equal(spec.execution.command, undefined);
+  assert.deepEqual(spec.acceptanceChecks[0]?.command, ["bash", "-lc", "tests"]);
 });
 
 test("planAttempt: attemptSpec has acceptance checks", () => {

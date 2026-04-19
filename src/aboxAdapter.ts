@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
+import { buildAboxRunArgs } from "./host/sandboxLifecycle.js";
 import type { ToolResult } from "./models.js";
 
 const execFileAsync = promisify(execFile);
@@ -20,10 +21,12 @@ export type StreamHandlers = {
  * opted in to.
  */
 export type SpawnEnv = Readonly<Record<string, string>> | undefined;
+export type ABoxRunOptions = {
+  taskId?: string;
+  ephemeral?: boolean;
+};
 
 export class ABoxAdapter {
-  private sequence = 0;
-
   public constructor(
     private readonly aboxBin: string = "abox",
     private readonly repoPath?: string,
@@ -44,8 +47,9 @@ export class ABoxAdapter {
     streamId: string,
     command: string,
     timeoutSeconds = 120,
+    options: ABoxRunOptions = {},
   ): Promise<ToolResult> {
-    const { taskId, cmd } = this.buildInvocation(streamId, command);
+    const { taskId, cmd } = this.buildInvocation(streamId, command, options);
     try {
       const { stdout, stderr } = await this.execFn(this.aboxBin, cmd, {
         timeout: timeoutSeconds * 1000,
@@ -90,8 +94,9 @@ export class ABoxAdapter {
     timeoutSeconds = 120,
     handlers: StreamHandlers = {},
     env?: SpawnEnv,
+    options: ABoxRunOptions = {},
   ): Promise<ToolResult> {
-    const { taskId, cmd } = this.buildInvocation(streamId, command);
+    const { taskId, cmd } = this.buildInvocation(streamId, command, options);
     const spawnEnv = this.resolveSpawnEnv(env);
     // Phase 6 W5 — when `env` is supplied, we pass ONLY those vars (plus the
     // ephemeral-opt-out signal the adapter inspects below); without `env` we
@@ -171,15 +176,22 @@ export class ABoxAdapter {
     });
   }
 
-  private buildInvocation(streamId: string, command: string): { taskId: string; cmd: string[] } {
-    const taskId = this.nextTaskId(streamId);
-    const ephemeral = process.env.BAKUDO_EPHEMERAL !== "0";
+  private buildInvocation(
+    streamId: string,
+    command: string,
+    options: ABoxRunOptions = {},
+  ): { taskId: string; cmd: string[] } {
+    const taskId = options.taskId ?? this.sanitizeTaskId(streamId);
     const cmd = [
-      ...(this.repoPath ? ["--repo", this.repoPath] : []),
-      "run",
-      "--task",
-      taskId,
-      ...(ephemeral ? ["--ephemeral"] : []),
+      ...buildAboxRunArgs(
+        taskId,
+        {
+          agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+          sandboxLifecycle: (options.ephemeral ?? true) ? "ephemeral" : "preserved",
+          mergeStrategy: "none",
+        },
+        this.repoPath,
+      ),
       "--",
       "bash",
       "-lc",
@@ -200,10 +212,9 @@ export class ABoxAdapter {
     return spawnEnv;
   }
 
-  private nextTaskId(streamId: string): string {
-    this.sequence += 1;
+  private sanitizeTaskId(streamId: string): string {
     const sanitized = streamId.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
     const prefix = sanitized.length > 0 ? sanitized : "stream";
-    return `bakudo-${prefix}-${this.sequence}`;
+    return `bakudo-${prefix}`;
   }
 }
