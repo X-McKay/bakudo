@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { ABoxAdapter } from "../aboxAdapter.js";
-import { ABoxTaskRunner } from "../aboxTaskRunner.js";
+import { ABoxTaskRunner, attemptSpecToWorkerSpec } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
 import { buildRuntimeConfig, loadConfig } from "../config.js";
 import { reviewTaskResult } from "../reviewer.js";
@@ -118,7 +118,15 @@ export const runNewSession = async (args: HostCliArgs): Promise<number> => {
  * @deprecated Uses the legacy executeTask path. Phase 6 should migrate this
  * to planAttempt → executeAttempt.
  */
-export const resumeSession = async (args: HostCliArgs): Promise<number> => {
+export type ResumeSessionDeps = {
+  executeTaskFn?: typeof executeTask;
+};
+
+export const resumeSession = async (
+  args: HostCliArgs,
+  deps: ResumeSessionDeps = {},
+): Promise<number> => {
+  const executeTaskFn = deps.executeTaskFn ?? executeTask;
   const rootDir = storageRootFor(args.repo, args.storageRoot);
   const sessionStore = new SessionStore(rootDir);
   // Wave 6c PR7 carryover #7: effective redaction policy resolved up-front
@@ -142,8 +150,17 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
     throw new Error(`no resumable turn found for session ${session.sessionId}`);
   }
   const attempt = latestAttempt(turn, args.taskId);
-  if (attempt === undefined || attempt.request === undefined) {
+  if (attempt === undefined) {
     throw new Error(`no resumable attempt found for session ${session.sessionId}`);
+  }
+  const baseRequest =
+    attempt.attemptSpec !== undefined
+      ? attemptSpecToWorkerSpec(attempt.attemptSpec)
+      : attempt.request;
+  if (baseRequest === undefined) {
+    throw new Error(
+      `no resumable attempt found for session ${session.sessionId} (neither attemptSpec nor request is set)`,
+    );
   }
 
   const priorReview = attempt.result === undefined ? null : reviewTaskResult(attempt.result);
@@ -181,7 +198,7 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
   );
   const retryId = createSessionTaskKey(session.sessionId, `retry-${turn.attempts.length + 1}`);
   const request: WorkerTaskSpec = {
-    ...attempt.request,
+    ...baseRequest,
     taskId: retryId,
     timeoutSeconds: args.timeoutSeconds,
     maxOutputBytes: args.maxOutputBytes,
@@ -205,7 +222,7 @@ export const resumeSession = async (args: HostCliArgs): Promise<number> => {
   });
 
   await sessionStore.saveSession({ ...session, status: "running" });
-  const reviewed = await executeTask({
+  const reviewed = await executeTaskFn({
     sessionStore,
     artifactStore,
     runner,
