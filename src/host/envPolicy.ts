@@ -4,7 +4,10 @@
  * Determines which environment variables from the bakudo host process may be
  * forwarded to an abox-spawned worker. The default allowlist is EMPTY —
  * nothing passes through unless a user opts in via the Phase 2 config
- * cascade or the `BAKUDO_ENV_ALLOWLIST` override.
+ * cascade or the `BAKUDO_ENV_ALLOWLIST` override. One host-side exception:
+ * when `aboxBin` is an unqualified command name, the adapter preserves
+ * `PATH` on the host spawn so Node can resolve the binary. That `PATH`
+ * never changes the worker env policy and does not relax this allowlist.
  *
  * Plan 06 §W5 recommended default rule 3 ("require explicit opt-in for
  * passing nonstandard env vars to workers") and hard rule 381 motivate this

@@ -92,6 +92,7 @@ export class ABoxAdapter {
     env?: SpawnEnv,
   ): Promise<ToolResult> {
     const { taskId, cmd } = this.buildInvocation(streamId, command);
+    const spawnEnv = this.resolveSpawnEnv(env);
     // Phase 6 W5 — when `env` is supplied, we pass ONLY those vars (plus the
     // ephemeral-opt-out signal the adapter inspects below); without `env` we
     // inherit the parent process env (pre-W5 behaviour). The `ABoxTaskRunner`
@@ -100,7 +101,7 @@ export class ABoxAdapter {
     const spawnOptions: Parameters<SpawnFn>[2] = {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      ...(env === undefined ? {} : { env }),
+      ...(spawnEnv === undefined ? {} : { env: spawnEnv }),
     };
     const child = this.spawnFn(this.aboxBin, cmd, spawnOptions);
 
@@ -185,6 +186,18 @@ export class ABoxAdapter {
       command,
     ];
     return { taskId, cmd };
+  }
+
+  private resolveSpawnEnv(env: SpawnEnv): Record<string, string> | undefined {
+    if (env === undefined) return undefined;
+
+    const spawnEnv = { ...env };
+    // F-04: bare command names require the host PATH for binary resolution.
+    // This PATH is only for the host-side abox spawn, not worker env policy.
+    if (!/[\\/]/u.test(this.aboxBin) && process.env.PATH !== undefined) {
+      spawnEnv.PATH = process.env.PATH;
+    }
+    return spawnEnv;
   }
 
   private nextTaskId(streamId: string): string {
