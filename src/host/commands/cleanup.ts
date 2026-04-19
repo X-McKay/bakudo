@@ -111,6 +111,41 @@ const buildSyntheticOrphanRecord = (
   createdAt: new Date(0).toISOString(),
 });
 
+const keptReasonForRecord = (
+  kind: ArtifactRecord["kind"],
+  protectedKinds: ReadonlyArray<ArtifactRecord["kind"]>,
+): string => (protectedKinds.includes(kind) ? "protected_kind" : "under_retention");
+
+const listSessionRootKeptEntries = async (
+  storageRoot: string,
+  sessionId: string,
+): Promise<CleanupReportEntry[]> => {
+  const { sessionDir } = createSessionPaths(storageRoot, sessionId);
+  try {
+    const entries = await readdir(sessionDir, { withFileTypes: true });
+    const kept = await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && isProtectedBasename(entry.name))
+        .sort((left, right) => left.name.localeCompare(right.name))
+        .map(async (entry) => {
+          const path = join(sessionDir, entry.name);
+          const st = await safeStat(path);
+          return {
+            sessionId,
+            artifactId: `session-root:${sessionId}:${entry.name}`,
+            path,
+            bytes: st?.isFile() === true ? st.size : 0,
+            reason: "session_root",
+          } satisfies CleanupReportEntry;
+        }),
+    );
+    return kept;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+};
+
 const appendCleanupLog = async (
   storageRoot: string,
   sessionId: string,
@@ -146,15 +181,21 @@ export const cleanupSession = async (
   sessionId: string,
   args: CleanupArgs,
   now: number = Date.now(),
-): Promise<{ entries: CleanupReportEntry[]; removed: CleanupReportEntry[]; errors: string[] }> => {
+): Promise<{
+  entries: CleanupReportEntry[];
+  kept: CleanupReportEntry[];
+  removed: CleanupReportEntry[];
+  errors: string[];
+}> => {
   const errors: string[] = [];
   const eligible: CleanupReportEntry[] = [];
+  const kept: CleanupReportEntry[] = [];
   const removed: CleanupReportEntry[] = [];
 
   const sessionStore = new SessionStore(storageRoot);
   const session = await sessionStore.loadSession(sessionId);
   if (session === null) {
-    return { entries: eligible, removed, errors };
+    return { entries: eligible, kept, removed, errors };
   }
 
   const records = await listArtifactsForSession(storageRoot, sessionId);
@@ -166,6 +207,10 @@ export const cleanupSession = async (
     ...(policyOverride === undefined ? {} : { policy: policyOverride }),
     now,
   });
+
+  if (args.dryRun) {
+    kept.push(...(await listSessionRootKeptEntries(storageRoot, sessionId)));
+  }
 
   // Discover orphan files in the session's artifacts dir and append them as
   // synthetic records so they participate in the same delete loop.
@@ -190,19 +235,30 @@ export const cleanupSession = async (
   const removedIds: string[] = [];
 
   for (const item of plan.items) {
-    if (!item.decision.eligible) continue;
     const absPath = resolveAbsolutePath(storageRoot, sessionId, item.record.path);
     const basename = absPath.split(/[\\/]/u).at(-1) ?? "";
-    if (isProtectedBasename(basename)) continue; // Hard rules 1 + 2 (defense in depth).
     const st = await safeStat(absPath);
     const bytes = st?.isFile() === true ? st.size : 0;
-    const entry: CleanupReportEntry = {
+    const entryBase = {
       sessionId,
       artifactId: item.record.artifactId,
       path: absPath,
       bytes,
-      reason: item.decision.reason,
     };
+    if (isProtectedBasename(basename)) {
+      if (args.dryRun) kept.push({ ...entryBase, reason: "session_root" });
+      continue; // Hard rules 1 + 2 (defense in depth).
+    }
+    if (!item.decision.eligible) {
+      if (args.dryRun) {
+        kept.push({
+          ...entryBase,
+          reason: keptReasonForRecord(item.record.kind, plan.policy.protectedKinds),
+        });
+      }
+      continue;
+    }
+    const entry: CleanupReportEntry = { ...entryBase, reason: item.decision.reason };
     eligible.push(entry);
     if (args.dryRun) continue;
     try {
@@ -219,16 +275,19 @@ export const cleanupSession = async (
   // Process orphans last so they share the same protection guard.
   for (const orphan of orphanItems) {
     const basename = orphan.path.split(/[\\/]/u).at(-1) ?? "";
-    if (isProtectedBasename(basename)) continue;
     const st = await safeStat(orphan.path);
     const bytes = st?.isFile() === true ? st.size : 0;
-    const entry: CleanupReportEntry = {
+    const entryBase = {
       sessionId,
       artifactId: orphan.record.artifactId,
       path: orphan.path,
       bytes,
-      reason: "orphan_temp_file",
     };
+    if (isProtectedBasename(basename)) {
+      if (args.dryRun) kept.push({ ...entryBase, reason: "under_retention" });
+      continue;
+    }
+    const entry: CleanupReportEntry = { ...entryBase, reason: "orphan_temp_file" };
     eligible.push(entry);
     if (args.dryRun) continue;
     try {
@@ -268,7 +327,7 @@ export const cleanupSession = async (
     }
   }
 
-  return { entries: eligible, removed, errors };
+  return { entries: eligible, kept, removed, errors };
 };
 
 /**
@@ -284,6 +343,7 @@ export const runCleanup = async (
     args.sessionId !== undefined ? [args.sessionId] : await listSessionDirs(storageRoot);
 
   const eligible: CleanupReportEntry[] = [];
+  const kept: CleanupReportEntry[] = [];
   const removed: CleanupReportEntry[] = [];
   const errors: string[] = [];
   let scannedArtifacts = 0;
@@ -291,12 +351,14 @@ export const runCleanup = async (
   for (const sessionId of sessionIds) {
     const sessionResult = await cleanupSession(storageRoot, sessionId, args, now);
     eligible.push(...sessionResult.entries);
+    kept.push(...sessionResult.kept);
     removed.push(...sessionResult.removed);
     errors.push(...sessionResult.errors);
-    scannedArtifacts += sessionResult.entries.length;
+    scannedArtifacts += sessionResult.entries.length + sessionResult.kept.length;
   }
 
   const totalBytes = (args.dryRun ? eligible : removed).reduce((sum, e) => sum + e.bytes, 0);
+  const totalArtifacts = eligible.length + kept.length;
 
   return {
     policy: {
@@ -308,6 +370,8 @@ export const runCleanup = async (
     scannedSessions: sessionIds.length,
     scannedArtifacts,
     eligible,
+    kept,
+    totalArtifacts,
     removed,
     totalBytes,
     errors,

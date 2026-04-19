@@ -135,9 +135,15 @@ export type CleanupReportEntry = {
 export type CleanupReport = {
   policy: RetentionPolicy;
   dryRun: boolean;
+  /** Legacy count field; older callers may still populate only this. */
   scannedSessions: number;
+  /** Legacy count field retained for compatibility with existing tests/callers. */
   scannedArtifacts: number;
   eligible: CleanupReportEntry[];
+  /** Dry-run-only entries that were considered and explicitly kept. */
+  kept?: CleanupReportEntry[];
+  /** Dry-run total, defined as `eligible.length + kept.length`. */
+  totalArtifacts?: number;
   removed: CleanupReportEntry[];
   totalBytes: number;
   errors: string[];
@@ -157,17 +163,36 @@ export const formatBytes = (bytes: number): string => {
  */
 export const formatCleanupReport = (report: CleanupReport): string[] => {
   const lines: string[] = [];
-  const verb = report.dryRun ? "would remove" : "removed";
-  const list = report.dryRun ? report.eligible : report.removed;
+  const kept = report.kept ?? [];
+  const totalArtifacts = report.totalArtifacts ?? report.scannedArtifacts;
   lines.push(`bakudo cleanup — ${report.dryRun ? "dry run" : "live"}`);
-  lines.push(
-    `scanned ${report.scannedSessions} session(s); ${verb} ${list.length} artifact(s) (${formatBytes(report.totalBytes)})`,
-  );
+  if (report.dryRun) {
+    lines.push(
+      `scanned ${report.scannedSessions} session(s); total ${totalArtifacts} artifact(s); would remove ${report.eligible.length} artifact(s) (${formatBytes(report.totalBytes)}); would keep ${kept.length} artifact(s)`,
+    );
+  } else {
+    lines.push(
+      `scanned ${report.scannedSessions} session(s); removed ${report.removed.length} artifact(s) (${formatBytes(report.totalBytes)})`,
+    );
+  }
   lines.push(
     `policy: intermediateMaxAgeMs=${report.policy.intermediateMaxAgeMs} ms; protectedKinds=${report.policy.protectedKinds.join(",")}`,
   );
-  for (const entry of list) {
-    lines.push(`  [${entry.reason}] ${entry.path} (${formatBytes(entry.bytes)})`);
+  if (report.dryRun) {
+    lines.push("Would remove:");
+    if (report.eligible.length === 0) lines.push("  (none)");
+    for (const entry of report.eligible) {
+      lines.push(`  [${entry.reason}] ${entry.path} (${formatBytes(entry.bytes)})`);
+    }
+    lines.push("Would keep:");
+    if (kept.length === 0) lines.push("  (none)");
+    for (const entry of kept) {
+      lines.push(`  [${entry.reason}] ${entry.path} (${formatBytes(entry.bytes)})`);
+    }
+  } else {
+    for (const entry of report.removed) {
+      lines.push(`  [${entry.reason}] ${entry.path} (${formatBytes(entry.bytes)})`);
+    }
   }
   if (report.errors.length > 0) {
     lines.push("errors:");
