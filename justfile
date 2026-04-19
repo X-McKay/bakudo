@@ -6,7 +6,10 @@ install:
 
 # Build the project
 build:
-    pnpm exec tsc
+    pnpm build
+
+release-bundle:
+    pnpm build:release-bundle
 
 # Run tests
 test:

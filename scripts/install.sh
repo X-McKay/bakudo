@@ -1,55 +1,41 @@
 #!/usr/bin/env bash
-# bakudo install script. A thin wrapper around `pnpm install -g @bakudo/cli`
-# that adds shell-profile detection, tarball checksum validation (when
-# the tarball env vars are set), and version-management modes.
+# install.sh — one-command installer for bakudo.
+#
+# Downloads the latest (or specified) bakudo release bundle from GitHub,
+# verifies checksums, and installs the CLI wrappers to ~/.bakudo/bin.
 #
 # Usage:
-#   bakudo/scripts/install.sh [latest|prerelease|<version>]
-#
-# Environment variables:
-#   BAKUDO_VERSION          — explicit version (`1.2.3` or `v1.2.3`). Optional.
-#   BAKUDO_TARBALL          — URL of a prebuilt tarball. Optional.
-#   BAKUDO_TARBALL_SHA256   — expected SHA-256 for BAKUDO_TARBALL. Required
-#                             when BAKUDO_TARBALL is set.
-#   BAKUDO_INSTALL_DRY=1    — print planned actions; do not execute.
-#   BAKUDO_SKIP_PROFILE=1   — do not modify any shell profile file.
+#   curl -fsSL https://raw.githubusercontent.com/X-McKay/bakudo/main/scripts/install.sh | bash
+#   BAKUDO_VERSION=v0.1.0 bash install.sh
+#   BAKUDO_INSTALL_DIR=/usr/local/bin bash install.sh
 
 set -euo pipefail
 
+REPO="X-McKay/bakudo"
+INSTALL_DIR="${BAKUDO_INSTALL_DIR:-$HOME/.bakudo/bin}"
+RELEASES_DIR="${BAKUDO_RELEASES_DIR:-$HOME/.bakudo/releases}"
+ASSET_NAME="${BAKUDO_ASSET_NAME:-bakudo-cli.tar.gz}"
+
 log() { printf '[bakudo.install] %s\n' "$*"; }
-warn() { printf '[bakudo.install] WARNING: %s\n' "$*" >&2; }
-die()  { printf '[bakudo.install] ERROR: %s\n' "$*" >&2; exit 1; }
+die() { printf '[bakudo.install] ERROR: %s\n' "$*" >&2; exit 1; }
 
 is_dry() { [ "${BAKUDO_INSTALL_DRY:-}" = "1" ]; }
-skip_profile() { [ "${BAKUDO_SKIP_PROFILE:-}" = "1" ]; }
 
-run() {
-    if is_dry; then
-        log "dry-run: $*"
-    else
-        log "run: $*"
-        "$@"
-    fi
+normalize_version_tag() {
+    local raw="$1"
+    local stripped="${raw#v}"
+    printf 'v%s' "${stripped}"
 }
 
-# ---------------------------------------------------------------------------
-# Version-management modes
-# ---------------------------------------------------------------------------
-
-normalize_version() {
-    # Strip a leading v/V so `1.2.3` and `v1.2.3` are accepted equivalently.
+normalize_version_dir() {
     local raw="$1"
-    printf '%s' "${raw#v}" | sed -E 's/^V//'
+    printf '%s' "${raw#v}"
 }
 
 resolve_version_mode() {
-    # Resolution order:
-    #   1. BAKUDO_VERSION env var (explicit wins).
-    #   2. CLI positional (latest | prerelease | <version>).
-    #   3. Default: latest.
     local arg="${1:-}"
     if [ -n "${BAKUDO_VERSION:-}" ]; then
-        printf 'explicit:%s' "$(normalize_version "${BAKUDO_VERSION}")"
+        printf 'explicit:%s' "$(normalize_version_tag "${BAKUDO_VERSION}")"
         return
     fi
     case "${arg}" in
@@ -60,96 +46,51 @@ resolve_version_mode() {
             printf 'prerelease'
             ;;
         *)
-            printf 'explicit:%s' "$(normalize_version "${arg}")"
+            printf 'explicit:%s' "$(normalize_version_tag "${arg}")"
             ;;
     esac
 }
 
 resolve_prerelease_version() {
-    # Discover the newest prerelease tag from the bakudo repo. We rely
-    # only on `git ls-remote --tags` so no GitHub API token is needed.
     local repo_url="${BAKUDO_REPO_URL:-https://github.com/X-McKay/bakudo.git}"
+    command -v git >/dev/null 2>&1 || die "git is required to resolve prerelease versions"
     local tags
-    if ! command -v git >/dev/null 2>&1; then
-        die "git is required to resolve prerelease versions"
-    fi
-    tags=$(git ls-remote --tags --refs "${repo_url}" 2>/dev/null \
+    tags="$(git ls-remote --tags --refs "${repo_url}" 2>/dev/null \
         | awk '{print $2}' \
         | sed 's,refs/tags/,,' \
         | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+(-|$)' \
-        | sort -V)
-    # Prefer a prerelease tag (contains a hyphen) over a stable one.
-    printf '%s' "${tags}" | grep -E -- '-' | tail -n 1
+        | sort -V)"
+    local resolved
+    resolved="$(printf '%s' "${tags}" | grep -E -- '-' | tail -n 1)"
+    [ -n "${resolved}" ] || die "no prerelease tag resolved"
+    normalize_version_tag "${resolved}"
 }
 
-# ---------------------------------------------------------------------------
-# Shell-profile detection
-# ---------------------------------------------------------------------------
+resolve_latest_version() {
+    local api_url="https://api.github.com/repos/${REPO}/releases/latest"
+    local api_response
+    api_response="$(curl -fsSL "${api_url}" 2>/dev/null || true)"
+    local version
+    version="$(printf '%s' "${api_response}" | grep '"tag_name"' | head -n 1 | cut -d'"' -f4)"
+    if [ -z "${version}" ]; then
+        cat >&2 <<'EOF'
 
-detect_shell_profile() {
-    local shell_name="${SHELL##*/}"
-    case "${shell_name}" in
-        zsh)
-            printf '%s/.zprofile' "${HOME}"
-            ;;
-        bash)
-            if [ -f "${HOME}/.bash_profile" ]; then
-                printf '%s/.bash_profile' "${HOME}"
-            else
-                printf '%s/.profile' "${HOME}"
-            fi
-            ;;
-        fish)
-            printf '%s/.config/fish/config.fish' "${HOME}"
-            ;;
-        *)
-            printf '%s/.profile' "${HOME}"
-            ;;
-    esac
-}
+No published release of bakudo was found.
 
-print_profile_fallback() {
-    # Always printed so CI / unattended installs see the exact line they
-    # should append to their shell profile if auto-editing is disabled.
-    local profile="$1"
-    cat <<EOF
-[bakudo.install] If your shell cannot find bakudo after install, add this to
-[bakudo.install] ${profile}:
-[bakudo.install]
-[bakudo.install]   export PATH="\$(pnpm bin -g):\$PATH"
-[bakudo.install]
+To install from source:
+
+  git clone https://github.com/X-McKay/bakudo.git
+  cd bakudo
+  pnpm install
+  pnpm install:cli
+
+Once a release is published, rerun this script or pin a version:
+  BAKUDO_VERSION=v0.1.0 bash install.sh
 EOF
+        exit 1
+    fi
+    normalize_version_tag "${version}"
 }
-
-update_shell_profile() {
-    # Only edit the profile file when stdin is a TTY AND BAKUDO_SKIP_PROFILE is unset.
-    local profile="$1"
-    if skip_profile; then
-        log "BAKUDO_SKIP_PROFILE=1 — not modifying ${profile}"
-        print_profile_fallback "${profile}"
-        return
-    fi
-    if [ ! -t 0 ]; then
-        log "stdin is not a TTY; skipping profile auto-edit"
-        print_profile_fallback "${profile}"
-        return
-    fi
-    local line='export PATH="$(pnpm bin -g):$PATH"'
-    if [ -f "${profile}" ] && grep -Fq "${line}" "${profile}"; then
-        log "PATH line already present in ${profile}"
-        return
-    fi
-    if is_dry; then
-        log "dry-run: would append PATH line to ${profile}"
-    else
-        printf '\n# bakudo: ensure pnpm global bin is on PATH\n%s\n' "${line}" >> "${profile}"
-        log "appended PATH line to ${profile}"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Checksum validation
-# ---------------------------------------------------------------------------
 
 compute_sha256() {
     local target="$1"
@@ -162,88 +103,128 @@ compute_sha256() {
     fi
 }
 
-verify_tarball_checksum() {
-    # No-op unless BAKUDO_TARBALL + BAKUDO_TARBALL_SHA256 are both set.
-    local url="${BAKUDO_TARBALL:-}"
-    local expected="${BAKUDO_TARBALL_SHA256:-}"
-    if [ -z "${url}" ] && [ -z "${expected}" ]; then
-        return 0
-    fi
-    if [ -z "${url}" ] || [ -z "${expected}" ]; then
-        die "BAKUDO_TARBALL and BAKUDO_TARBALL_SHA256 must be set together"
-    fi
-    if is_dry; then
-        log "dry-run: would download ${url} and verify against ${expected}"
-        return 0
-    fi
-    local tmp
-    tmp="$(mktemp -t bakudo-tarball.XXXXXX)"
-    trap 'rm -f "${tmp}"' EXIT
-    log "downloading ${url}"
-    if ! curl -fsSL "${url}" -o "${tmp}"; then
-        die "failed to download ${url}"
-    fi
+verify_checksum() {
+    local asset_path="$1"
+    local sums_path="$2"
+    local expected
+    expected="$(awk -v asset="${ASSET_NAME}" '$2 == asset { print $1 }' "${sums_path}")"
+    [ -n "${expected}" ] || die "no checksum entry found for ${ASSET_NAME}"
     local actual
-    actual="$(compute_sha256 "${tmp}")"
-    if [ "${actual}" != "${expected}" ]; then
-        die "checksum mismatch: expected ${expected}, got ${actual}"
-    fi
-    log "checksum OK (${actual})"
+    actual="$(compute_sha256 "${asset_path}")"
+    [ "${actual}" = "${expected}" ] || die "checksum mismatch for ${ASSET_NAME}: expected ${expected}, got ${actual}"
 }
 
-# ---------------------------------------------------------------------------
-# Main flow
-# ---------------------------------------------------------------------------
+require_node() {
+    command -v node >/dev/null 2>&1 || die "node is required (v22 or later)"
+    local version
+    version="$(node -p 'process.versions.node' 2>/dev/null || true)"
+    [ -n "${version}" ] || die "failed to determine installed node version"
+    local major="${version%%.*}"
+    case "${major}" in
+        ''|*[!0-9]*)
+            die "unexpected node version: ${version}"
+            ;;
+    esac
+    [ "${major}" -ge 22 ] || die "node ${version} found; bakudo requires node v22 or later"
+}
+
+print_path_hint() {
+    echo "Add bakudo to your PATH:"
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+}
 
 main() {
+    command -v curl >/dev/null 2>&1 || die "curl is required"
+    command -v tar >/dev/null 2>&1 || die "tar is required"
+    require_node
+
     local mode
     mode="$(resolve_version_mode "${1:-}")"
 
-    local resolved_version=""
+    local version_tag=""
     case "${mode}" in
         latest)
             log "install mode: latest"
-            resolved_version="latest"
+            if is_dry; then
+                log "dry-run: would resolve the latest release from GitHub"
+                version_tag="v0.0.0-dry-run"
+            else
+                version_tag="$(resolve_latest_version)"
+                log "resolved latest release: ${version_tag}"
+            fi
             ;;
         prerelease)
             log "install mode: prerelease"
-            resolved_version="$(resolve_prerelease_version)"
-            if [ -z "${resolved_version}" ]; then
-                die "no prerelease tag resolved"
+            if is_dry; then
+                log "dry-run: would resolve the newest prerelease tag from GitHub"
+                version_tag="v0.0.0-dry-run-prerelease"
+            else
+                version_tag="$(resolve_prerelease_version)"
+                log "resolved prerelease version: ${version_tag}"
             fi
-            log "resolved prerelease version: ${resolved_version}"
             ;;
         explicit:*)
-            resolved_version="${mode#explicit:}"
-            log "install mode: explicit (${resolved_version})"
+            version_tag="${mode#explicit:}"
+            log "install mode: explicit (${version_tag})"
             ;;
         *)
             die "internal: unrecognized mode token: ${mode}"
             ;;
     esac
 
-    verify_tarball_checksum
+    local version_dir_name
+    version_dir_name="$(normalize_version_dir "${version_tag}")"
+    local version_dir="${RELEASES_DIR}/${version_dir_name}"
+    local base_url="${BAKUDO_BASE_URL:-https://github.com/${REPO}/releases/download/${version_tag}}"
 
-    if ! command -v pnpm >/dev/null 2>&1; then
-        die "pnpm is required — install pnpm (https://pnpm.io) and rerun"
+    if is_dry; then
+        log "dry-run: would download ${ASSET_NAME} from ${base_url}/${ASSET_NAME}"
+        log "dry-run: would download SHA256SUMS from ${base_url}/SHA256SUMS"
+        log "dry-run: would verify checksums"
+        log "dry-run: would extract into ${version_dir}"
+        log "dry-run: would link ${INSTALL_DIR}/bakudo -> ${version_dir}/bin/bakudo"
+        log "dry-run: would link ${INSTALL_DIR}/bakudo-worker -> ${version_dir}/bin/bakudo-worker"
+        echo
+        print_path_hint
+        echo
+        echo "Then run 'bakudo doctor' to verify the install."
+        return 0
     fi
 
-    local spec="@bakudo/cli"
-    case "${resolved_version}" in
-        ""|latest)
-            : # Default spec resolves to latest.
-            ;;
-        *)
-            spec="@bakudo/cli@${resolved_version}"
-            ;;
-    esac
-    run pnpm install -g "${spec}"
+    tmp_dir="$(mktemp -d)"
+    trap "rm -rf -- \"${tmp_dir}\"" EXIT
 
-    local profile
-    profile="$(detect_shell_profile)"
-    update_shell_profile "${profile}"
+    log "downloading ${ASSET_NAME}"
+    curl -fsSL -o "${tmp_dir}/${ASSET_NAME}" "${base_url}/${ASSET_NAME}"
+    log "downloading SHA256SUMS"
+    curl -fsSL -o "${tmp_dir}/SHA256SUMS" "${base_url}/SHA256SUMS"
+    log "verifying checksums"
+    verify_checksum "${tmp_dir}/${ASSET_NAME}" "${tmp_dir}/SHA256SUMS"
 
-    log "done. Run \`bakudo doctor\` to verify the install."
+    mkdir -p "${INSTALL_DIR}" "${RELEASES_DIR}"
+    local staging_dir="${RELEASES_DIR}/.${version_dir_name}.tmp.$$"
+    rm -rf "${staging_dir}" "${version_dir}"
+    mkdir -p "${staging_dir}"
+    tar xzf "${tmp_dir}/${ASSET_NAME}" -C "${staging_dir}"
+    mv "${staging_dir}" "${version_dir}"
+
+    ln -sfn "${version_dir}/bin/bakudo" "${INSTALL_DIR}/bakudo"
+    ln -sfn "${version_dir}/bin/bakudo-worker" "${INSTALL_DIR}/bakudo-worker"
+
+    echo
+    echo "bakudo ${version_tag} installed successfully."
+    echo
+    echo "  CLI:      ${INSTALL_DIR}/bakudo"
+    echo "  Worker:   ${INSTALL_DIR}/bakudo-worker"
+    echo "  Release:  ${version_dir}"
+    echo
+    if [[ ":${PATH}:" == *":${INSTALL_DIR}:"* ]]; then
+        echo "Run 'bakudo doctor' to verify the install."
+    else
+        print_path_hint
+        echo
+        echo "Then run 'bakudo doctor' to verify the install."
+    fi
 }
 
 main "$@"

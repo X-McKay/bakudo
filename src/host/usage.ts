@@ -72,8 +72,8 @@ export const buildUsageLines = (): string[] => {
     ...buildRolloutHelpLines(),
     "",
     renderSection("Install"),
-    "  pnpm install:cli",
-    "  bakudo",
+    "  curl -fsSL https://raw.githubusercontent.com/X-McKay/bakudo/main/scripts/install.sh | bash",
+    "  bakudo doctor",
     "",
     dim("Legacy mode remains available with: bakudo --goal <command>"),
   ];

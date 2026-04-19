@@ -62,21 +62,25 @@ user prompt → intent classification → attempt compilation → bounded sandbo
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) (v22 or later)
-- [pnpm](https://pnpm.io/)
+- [abox](https://github.com/X-McKay/abox)
+- [pnpm](https://pnpm.io/) for source builds
 - [mise](https://mise.jdx.dev/) (optional, for environment management)
 - [just](https://github.com/casey/just) (optional, for task automation)
 
 ### Installation
 
+Install the latest released CLI:
+
 ```bash
-pnpm install
+curl -fsSL https://raw.githubusercontent.com/X-McKay/bakudo/main/scripts/install.sh | bash
+bakudo doctor
 ```
 
-Install the CLI into your local environment so you can launch it as `bakudo`:
+If you are working from source instead of a release bundle:
 
 ```bash
+pnpm install
 pnpm install:cli
-bakudo
 bakudo --help
 ```
 
