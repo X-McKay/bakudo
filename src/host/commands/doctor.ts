@@ -49,6 +49,7 @@ import { bakudoLogDir } from "../telemetry/xdgPaths.js";
 import { buildMetricsSection, type DoctorMetricsSection } from "../metrics/doctorMetricsSection.js";
 import { DEFAULT_RETENTION_POLICY } from "../retentionPolicy.js";
 import { describeUiMode, getActiveUiMode } from "../uiMode.js";
+import { resolveDoctorVirtiofsdPath } from "../virtiofsdPath.js";
 import { detectLegacyLayout, realMigrationFs, type MigrationPaths } from "../xdgMigration.js";
 import { computeStorageTotalBytes } from "./cleanup.js";
 
@@ -73,7 +74,6 @@ type RawKeybindings = {
 };
 
 const NODE_REQUIRED_MAJOR = 22;
-const DEFAULT_VIRTIOFSD_PATH = "/usr/libexec/virtiofsd";
 
 const fakeStdoutForBackendProbe = (isTTY: boolean): RendererStdout => ({
   isTTY,
@@ -119,7 +119,7 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
   const nodeCheck = checkNodeVersion({ runtime: nodeRuntime, required: NODE_REQUIRED_MAJOR });
 
   // 2 + 3. Minimal host preflight (Phase 0 F-P).
-  const virtiofsdPath = env.BAKUDO_VIRTIOFSD_PATH ?? DEFAULT_VIRTIOFSD_PATH;
+  const virtiofsdPath = await resolveDoctorVirtiofsdPath({ env });
   const virtiofsdCheck = preflightToDoctorCheck(await checkVirtiofsdCaps({ virtiofsdPath }));
   const kvmCheck = preflightToDoctorCheck(await checkKvmAccess());
 
