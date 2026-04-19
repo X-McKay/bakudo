@@ -121,6 +121,57 @@ const dispatchCommandOf = (attempt: SessionAttemptRecord): string[] | undefined 
   return undefined;
 };
 
+const countDisplayLines = (value: string): number => value.split(/\r\n|\r|\n/u).length;
+
+const shouldSummarizeDispatchBody = (body: string): boolean =>
+  body.includes("\n") || Buffer.byteLength(body, "utf8") > 160;
+
+const summarizeSandboxDispatchCommand = (args: {
+  dispatchCommand: string[] | undefined;
+  artifacts: ArtifactRow[];
+}): string[] => {
+  const { dispatchCommand, artifacts } = args;
+  if (dispatchCommand === undefined) {
+    return [renderKv("ABox", "n/a")];
+  }
+
+  const shellBodyFlagIndex = dispatchCommand.findIndex(
+    (entry, index) => index < dispatchCommand.length - 1 && (entry === "-c" || entry === "-lc"),
+  );
+  const bodyIndex = shellBodyFlagIndex === -1 ? -1 : shellBodyFlagIndex + 1;
+  if (bodyIndex === -1) {
+    return [renderKv("ABox", dispatchCommand.map((arg) => safe(arg)).join(" "))];
+  }
+
+  const body = dispatchCommand[bodyIndex];
+  if (body === undefined || !shouldSummarizeDispatchBody(body)) {
+    return [renderKv("ABox", dispatchCommand.map((arg) => safe(arg)).join(" "))];
+  }
+
+  const dispatchArtifact = artifacts.find((artifact) => artifact.kind === "dispatch");
+  const dispatchHint = dispatchArtifact === undefined ? "" : `; see ${safe(dispatchArtifact.path)}`;
+  const bodySummary = `<${countDisplayLines(body)} lines, ${Buffer.byteLength(body, "utf8")} bytes${dispatchHint}>`;
+  const splitIndex = dispatchCommand.indexOf("--");
+
+  if (splitIndex !== -1 && splitIndex < bodyIndex) {
+    const prefix = dispatchCommand
+      .slice(0, splitIndex + 1)
+      .map((arg) => safe(arg))
+      .join(" ");
+    const runner = dispatchCommand
+      .slice(splitIndex + 1, bodyIndex)
+      .map((arg) => safe(arg))
+      .join(" ");
+    return [renderKv("ABox", prefix), renderKv("", `${runner} ${bodySummary}`.trim())];
+  }
+
+  const prefix = dispatchCommand
+    .slice(0, bodyIndex)
+    .map((arg) => safe(arg))
+    .join(" ");
+  return [renderKv("ABox", prefix), renderKv("", bodySummary)];
+};
+
 type ReviewLike = Pick<ReviewedTaskResult, "outcome" | "action"> & { reason?: string };
 
 const reviewFromTurn = (turn: SessionTurnRecord | undefined): SessionReviewRecord | undefined =>
@@ -277,12 +328,6 @@ export type InspectSandboxInput = {
 
 export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
   const { session, attempt, artifacts } = input;
-  const dispatchCommand = dispatchCommandOf(attempt);
-  // Phase 6 W5 hard rule 383 — dispatch commands may embed inline secrets
-  // (e.g. `bash -c 'curl -H "Authorization: Bearer sk-…"'`). Route through
-  // {@link redactText} before joining for display.
-  const aboxCommand =
-    dispatchCommand === undefined ? "n/a" : dispatchCommand.map((arg) => safe(arg)).join(" ");
   const lines = [
     "Sandbox",
     renderKv("Session", session.sessionId),
@@ -290,7 +335,10 @@ export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
     renderKv("Mode", modeOf(attempt)),
     renderKv("Status", attempt.status),
     renderKv("Sandbox", sandboxOf(attempt)),
-    renderKv("ABox", aboxCommand),
+    ...summarizeSandboxDispatchCommand({
+      dispatchCommand: dispatchCommandOf(attempt),
+      artifacts,
+    }),
     renderKv(
       "Safety",
       attempt.request?.assumeDangerousSkipPermissions
