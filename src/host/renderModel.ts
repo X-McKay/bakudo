@@ -118,7 +118,13 @@ export const selectRenderFrame = (inputs: FrameInputs): RenderFrame => {
   const offTranscript = state.screen !== "transcript";
   const mode: FrameMode = hasOverlay || offTranscript ? "transcript" : "prompt";
 
-  const hints = state.activeSessionId ? ["[inspect]", "[help]"] : ["[help]"];
+  // Rich footer hints matching the spec (08-ux-realignment.md §4).
+  // Always show the core navigation hints; add session-specific hints when active.
+  const coreHints = ["[Tab] mode", "[/] commands", "[?] help", "[Ctrl+C] exit"];
+  const sessionHints = state.activeSessionId
+    ? ["[i] inspect", "[r] review"]
+    : [];
+  const hints = [...sessionHints, ...coreHints];
 
   const frame: RenderFrame = {
     mode,

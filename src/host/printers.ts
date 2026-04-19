@@ -13,6 +13,7 @@ import {
   red,
   renderKeyValue,
   renderSection,
+  renderStatusSymbol,
   yellow,
 } from "./ansi.js";
 import { formatInspectReview, formatInspectSandbox } from "./inspectFormatter.js";
@@ -22,28 +23,33 @@ import type { HostCliArgs } from "./parsing.js";
 import type { SessionSummaryView } from "./sessionIndex.js";
 import * as timeline from "./timeline.js";
 
+/**
+ * Render a status badge with a Unicode symbol + short label.
+ * Matches the visual style of Codex CLI / OpenCode status indicators.
+ */
 export const statusBadge = (status: string): string => {
+  const symbol = renderStatusSymbol(status);
   switch (status) {
     case "completed":
     case "succeeded":
     case "success":
-      return green("[OK]");
+      return `${symbol} ${green("ok")}`;
     case "running":
     case "reviewing":
-      return blue("[RUN]");
+      return `${symbol} ${blue("running")}`;
     case "planned":
     case "queued":
-      return cyan("[QUE]");
+      return `${symbol} ${cyan("queued")}`;
     case "awaiting_user":
     case "blocked":
     case "blocked_needs_user":
-      return yellow("[ASK]");
+      return `${symbol} ${yellow("waiting")}`;
     case "failed":
     case "retryable_failure":
     case "policy_denied":
-      return red("[ERR]");
+      return `${symbol} ${red("failed")}`;
     default:
-      return gray("[---]");
+      return `${symbol} ${gray(status)}`;
   }
 };
 
@@ -166,10 +172,10 @@ export const printRunSummary = (
       "",
       renderSection("Summary"),
       renderKeyValue("Session", session.sessionId),
-      renderKeyValue("Status", `${statusBadge(session.status)} ${session.status}`),
+      renderKeyValue("Status", statusBadge(session.status)),
       renderKeyValue("Task", taskId),
       renderKeyValue("Sandbox", sbx),
-      renderKeyValue("Outcome", `${statusBadge(reviewed.outcome)} ${reviewed.outcome}`),
+      renderKeyValue("Outcome", statusBadge(reviewed.outcome)),
       renderKeyValue("Action", reviewed.action),
       renderKeyValue("Reason", reviewed.reason),
       renderKeyValue("Summary", summary),

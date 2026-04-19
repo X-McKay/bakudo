@@ -6,9 +6,10 @@ export type HostScreen = "transcript" | "sessions" | "inspect" | "help";
  * - "plan":     Read-only discovery / planning mode.
  * - "autopilot": Build-equivalent dispatch with auto-approval.
  *
- * Note: worker TaskMode stays "build" | "plan"; createTaskSpec translates.
- * `composer.autoApprove` is kept in state for backward compat but is
- * derived — it always equals `composer.mode === "autopilot"`.
+ * Note: worker TaskMode stays "build" | "plan"; the planner maps this to
+ * an `ExecutionProfile` inside a `DispatchPlan`. `composer.autoApprove` is
+ * kept in state for backward compat but is derived — it always equals
+ * `composer.mode === "autopilot"`.
  */
 export type ComposerMode = "standard" | "plan" | "autopilot";
 

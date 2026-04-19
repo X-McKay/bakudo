@@ -43,7 +43,7 @@ user prompt → intent classification → attempt compilation → bounded sandbo
 
 **`/run-command` escape hatch**: bypasses intent classification, compiles directly to `explicit_command` with `engine: "shell"` and `command: ["bash", "-lc", "<raw>"]`.
 
-**Legacy compatibility**: `createTaskSpec` and `executeTask` are deprecated but preserved. Sessions created before Phase 3 lack `attemptSpec` on their attempts; the inspect surface synthesizes a display-only legacy spec via `synthesizeLegacySpec`.
+**Control-plane dispatch** (`planner.ts` / `executeAttempt.ts`): the planner produces a `DispatchPlan` with an `ExecutionProfile` (`agentBackend`, `sandboxLifecycle`). `executeAttempt` drives the abox sandbox via `WorkerDispatchInput`. The legacy `createTaskSpec` → `executeTask` path and `WorkerTaskSpec` type have been removed.
 
 ## Project Structure
 

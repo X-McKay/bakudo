@@ -52,9 +52,14 @@ test("selectRenderFrame: session label is placeholder when no active session", (
   assert.equal(frame.header.sessionLabel, "no active session");
 });
 
-test("selectRenderFrame: footer hints differ based on activeSessionId presence", () => {
+test("selectRenderFrame: footer hints always include core navigation hints", () => {
   const idle = selectRenderFrame({ state: initialHostAppState(), transcript: [] });
-  assert.deepEqual(idle.footer.hints, ["[help]"]);
+  // Core hints always present
+  assert.ok(idle.footer.hints.includes("[Tab] mode"));
+  assert.ok(idle.footer.hints.includes("[?] help"));
+  assert.ok(idle.footer.hints.includes("[Ctrl+C] exit"));
+  // No session-specific hints when idle
+  assert.ok(!idle.footer.hints.some((h) => h.includes("inspect")));
   const active = selectRenderFrame({
     state: reduceHost(initialHostAppState(), {
       type: "set_active_session",
@@ -62,7 +67,11 @@ test("selectRenderFrame: footer hints differ based on activeSessionId presence",
     }),
     transcript: [],
   });
-  assert.deepEqual(active.footer.hints, ["[inspect]", "[help]"]);
+  // Session-specific hints appear when a session is active
+  assert.ok(active.footer.hints.some((h) => h.includes("inspect")));
+  assert.ok(active.footer.hints.some((h) => h.includes("review")));
+  // Core hints still present
+  assert.ok(active.footer.hints.includes("[Tab] mode"));
 });
 
 test("selectRenderFrame: composer fields mirror state", () => {

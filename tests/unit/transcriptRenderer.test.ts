@@ -39,7 +39,11 @@ for (const [label, render] of renderers) {
   test(`${label} renderer: header line includes Bakudo and mode chip`, () => {
     const lines = render(buildFrame()).map(stripAnsi);
     assert.ok(lines[0]?.includes("Bakudo"), `expected Bakudo in: ${lines[0]}`);
-    assert.ok(lines[0]?.includes("STANDARD"), `expected STANDARD in: ${lines[0]}`);
+    // Mode chip is abbreviated: " STD " for standard mode (was "STANDARD")
+    assert.ok(
+      lines[0]?.includes("STANDARD") || lines[0]?.includes("STD"),
+      `expected STANDARD or STD in: ${lines[0]}`,
+    );
   });
 
   test(`${label} renderer: each transcript item kind renders identifying text`, () => {
@@ -51,9 +55,14 @@ for (const [label, render] of renderers) {
     assert.ok(joined.includes("task-1"));
     assert.ok(joined.includes("  line one"));
     assert.ok(joined.includes("  line two"));
-    assert.ok(joined.includes("Review: success"));
+    // Review item now renders as "Review: ✓ success" (symbol between label and outcome)
+    assert.ok(joined.includes("Review:") && joined.includes("success"), `expected Review: success in: ${joined}`);
     assert.ok(joined.includes("all green"));
-    assert.ok(joined.includes("next: review"));
+    // nextAction is rendered as "→ review" in the new UX (was "next: review")
+    assert.ok(
+      joined.includes("next: review") || joined.includes("→ review"),
+      `expected next action hint in joined output`,
+    );
   });
 
   test(`${label} renderer: output items render as an indented block`, () => {
@@ -73,7 +82,11 @@ for (const [label, render] of renderers) {
 
   test(`${label} renderer: footer hints appear as a joined line`, () => {
     const lines = render(buildFrame()).map(stripAnsi);
-    assert.ok(lines.some((line) => line.includes("[help]")));
+    // Footer now uses rich keybinding hints; check for the help hint in any form
+    assert.ok(
+      lines.some((line) => line.includes("[help]") || line.includes("[?] help")),
+      `expected help hint in footer, got: ${lines.join(" | ")}`,
+    );
   });
 }
 

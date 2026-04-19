@@ -186,8 +186,8 @@ test("transcript renderer: quick_help emits a box containing the heading", () =>
   });
   const frame = selectRenderFrame({ state, transcript: [] });
   const lines = renderTranscriptFrame(frame).map(stripAnsi);
-  // The box header row starts with "|" and contains the title "?".
-  assert.ok(lines.some((line) => line.includes("| ?")));
+  // The box header row uses Unicode box-drawing: "╭─ ? ─..."
+  assert.ok(lines.some((line) => line.includes("─ ?") || line.includes("? ─")));
   assert.ok(lines.some((line) => line.includes("Quick help — composer")));
 });
 

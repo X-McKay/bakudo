@@ -1,4 +1,4 @@
-import { bold, dim, gray, renderBox, renderModeChip, tone } from "../ansi.js";
+import { bold, dim, gray, renderBox, renderModeChip, renderStatusSymbol, tone } from "../ansi.js";
 import { DEFAULT_BINDINGS } from "../keybindings/defaults.js";
 import { getKeybindingsFor } from "../keybindings/hooks.js";
 import { buildQuickHelpContents } from "../overlays/quickHelp.js";
@@ -38,10 +38,14 @@ const renderItem = (item: TranscriptItem): string[] => {
     return [dim(`· ${item.label}${detail}`)];
   }
   if (item.kind === "output") {
+    // Render multi-line output blocks as indented, dimmed text — no bullet prefix.
+    // This is the UX Realignment "output" kind (08-ux-realignment.md §1).
     return item.text.split("\n").map((line) => `  ${dim(line)}`);
   }
-  const next = item.nextAction ? ` (next: ${item.nextAction})` : "";
-  return [`${bold("Review: ")}${item.outcome} — ${item.summary}${next}`];
+  // "review" kind — show a polished outcome card with Unicode status symbol.
+  const symbol = renderStatusSymbol(item.outcome);
+  const next = item.nextAction ? `  ${dim(`→ ${item.nextAction}`)}` : "";
+  return [`${bold("Review: ")}${symbol} ${item.outcome} — ${item.summary}${next}`];
 };
 
 const renderHeader = (frame: RenderFrame): string => {
@@ -104,6 +108,8 @@ export const renderTranscriptFrame = (frame: RenderFrame): string[] => {
   for (const overlayLine of renderOverlay(frame)) {
     lines.push(overlayLine);
   }
+  // Footer: separator + hint bar (08-ux-realignment.md §4)
+  lines.push(dim("─".repeat(48)));
   lines.push(dim(frame.footer.hints.join("  ")));
   if (frame.mode === "prompt") {
     lines.push("> ");

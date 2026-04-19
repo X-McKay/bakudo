@@ -93,12 +93,27 @@ export const tone = {
   subagent: (text: string): string => paint(text, getActiveTheme().red_FOR_SUBAGENTS_ONLY),
 } as const;
 
+/**
+ * Render the product wordmark + optional subtitle as a two-line header.
+ * The title is rendered in bold-info color; the subtitle is dimmed.
+ * Matches the visual weight of OpenCode / Codex CLI startup headers.
+ */
 export const renderTitle = (title: string, subtitle?: string): string[] => [
   bold(blue(title)),
   ...(subtitle ? [dim(subtitle)] : []),
 ];
 
-export const renderSection = (title: string): string => bold(cyan(title));
+/**
+ * Render a section heading with a trailing separator line.
+ * e.g.  "Usage ──────────────────"
+ * The separator fills to 40 columns (truncated if title is long).
+ */
+export const renderSection = (title: string): string => {
+  const label = bold(cyan(title));
+  const plainLen = title.length;
+  const sepLen = Math.max(2, 40 - plainLen - 1);
+  return `${label} ${dim("─".repeat(sepLen))}`;
+};
 
 export const renderKeyValue = (label: string, value: string): string =>
   `${dim(label.padEnd(8))} ${value}`;
@@ -109,16 +124,16 @@ export const renderCommandHint = (command: string, description: string): string 
 export const renderModeChip = (mode: TaskMode | ComposerMode): string => {
   const theme = getActiveTheme();
   if (mode === "plan") {
-    return paint("PLAN", ANSI.bold, theme.info);
+    return paint(" PLAN ", ANSI.bold, theme.info);
   }
   if (mode === "autopilot") {
-    return paint("AUTOPILOT", ANSI.bold, theme.success);
+    return paint(" AUTO ", ANSI.bold, theme.success);
   }
   if (mode === "standard") {
-    return paint("STANDARD", ANSI.bold, theme.warning);
+    return paint(" STD ", ANSI.bold, theme.warning);
   }
   // legacy TaskMode "build"
-  return paint("BUILD", ANSI.bold, theme.warning);
+  return paint(" BUILD ", ANSI.bold, theme.warning);
 };
 
 export const renderApprovalChip = (autoApprove: boolean): string => {
@@ -126,6 +141,35 @@ export const renderApprovalChip = (autoApprove: boolean): string => {
   return autoApprove
     ? paint("AUTO", ANSI.bold, theme.success)
     : paint("PROMPT", ANSI.bold, theme.autoAccept);
+};
+
+/**
+ * Render a status badge using Unicode symbols for a polished look.
+ * Matches the visual style of Codex CLI / OpenCode status indicators.
+ */
+export const renderStatusSymbol = (status: string): string => {
+  switch (status) {
+    case "completed":
+    case "succeeded":
+    case "success":
+      return tone.success("✓");
+    case "running":
+    case "reviewing":
+      return tone.info("◆");
+    case "planned":
+    case "queued":
+      return tone.info("◇");
+    case "awaiting_user":
+    case "blocked":
+    case "blocked_needs_user":
+      return tone.warning("◈");
+    case "failed":
+    case "retryable_failure":
+    case "policy_denied":
+      return tone.error("✗");
+    default:
+      return gray("·");
+  }
 };
 
 export const overviewPanelLines = (): string[] => [
@@ -168,6 +212,14 @@ export const wrapPlain = (value: string, width: number): string[] => {
   return wrapped;
 };
 
+/**
+ * Render a framed box using Unicode box-drawing characters.
+ * Matches the visual style of OpenCode / Codex CLI dialog boxes.
+ *
+ *   ╭─ title ─────────────────────╮
+ *   │ content line                │
+ *   ╰─────────────────────────────╯
+ */
 export const renderBox = (
   title: string,
   lines: string[],
@@ -175,17 +227,22 @@ export const renderBox = (
   height?: number,
 ): string[] => {
   const innerWidth = Math.max(8, width - 4);
-  const top = `+${"-".repeat(Math.max(0, width - 2))}+`;
-  const heading = `| ${fitDisplay(title, innerWidth)} |`;
+  // Build top border: ╭─ title ──...──╮
+  const titlePlain = stripAnsi(title);
+  const titlePart = titlePlain.length > 0 ? `─ ${title} ` : "";
+  const titlePlainLen = titlePlain.length > 0 ? titlePlain.length + 3 : 0;
+  const topFillLen = Math.max(0, width - 2 - titlePlainLen);
+  const top = `╭${titlePart}${"─".repeat(topFillLen)}╮`;
+  const bottom = `╰${"─".repeat(width - 2)}╯`;
   const content = lines.flatMap((line) =>
-    wrapPlain(line, innerWidth).map((part) => `| ${fitDisplay(part, innerWidth)} |`),
+    wrapPlain(line, innerWidth).map((part) => `│ ${fitDisplay(part, innerWidth)} │`),
   );
   const targetHeight = height === undefined ? content.length : Math.max(content.length, height);
   const padded = [...content];
   while (padded.length < targetHeight) {
-    padded.push(`| ${" ".repeat(innerWidth)} |`);
+    padded.push(`│ ${" ".repeat(innerWidth)} │`);
   }
-  return [top, heading, top, ...padded, top];
+  return [top, ...padded, bottom];
 };
 
 export const mergeColumns = (left: string[], right: string[], gap = "  "): string[] => {

@@ -39,7 +39,7 @@ User prompts flow through: `intentClassifier` -> `attemptCompiler` -> `executeAt
 - **Executor** (`src/host/executeAttempt.ts`): dispatches to abox, persists `attemptSpec` on `SessionAttemptRecord`.
 - **Reviewer** (`src/reviewer.ts`): `reviewAttemptResult` uses structured `checkResults` for accept/reject.
 
-Legacy path (`createTaskSpec` -> `executeTask`) is deprecated (Phase 6 removal). `WorkerTaskSpec` is deprecated in favor of `AttemptSpec`.
+The legacy `createTaskSpec` → `executeTask` path and `WorkerTaskSpec` type have been **removed**. All dispatch flows through `DispatchPlan` → `executeAttempt` → `WorkerDispatchInput`. There is no backward-compatibility shim.
 
 ### Permission invariant
 
