@@ -18,6 +18,7 @@ import type { DialogDispatcher } from "./dialogLauncher.js";
 import { createSessionEventLogWriter, type EventLogWriter } from "./eventLogWriter.js";
 import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import type { HookRegistry } from "./hooks.js";
+import { startDispatchProgress } from "./dispatchProgress.js";
 import { stdoutWrite } from "./io.js";
 import type { EventLogWriterFactory } from "./orchestration.js";
 import {
@@ -177,7 +178,14 @@ export const executeAttempt = async (
     await writer.append(started.envelope);
 
     let execution: TaskExecutionRecord;
+    const dispatchProgress = startDispatchProgress({
+      taskId: spec.taskId,
+      useJson: args.copilot.outputFormat === "json",
+      write: stdoutWrite,
+    });
+    let sawWorkerEvent = false;
     try {
+      dispatchProgress.start();
       execution = await runner.runAttempt(
         spec,
         {
@@ -189,6 +197,10 @@ export const executeAttempt = async (
         },
         {
           onEvent: (event) => {
+            if (!sawWorkerEvent) {
+              sawWorkerEvent = true;
+              dispatchProgress.stop();
+            }
             onProgress?.(event);
             void writer.append(projectLegacyWorkerEvent(sessionId, turnId, spec.attemptId, event));
             stdoutWrite(formatProgressLine(event));
@@ -201,12 +213,15 @@ export const executeAttempt = async (
         },
       );
     } catch (error) {
+      dispatchProgress.stop();
       // W3 — persist the protocol-mismatch decoration before re-throw so
       // `inspect` renders cleanly. See `persistProtocolMismatchAttempt`.
       if (error instanceof WorkerProtocolMismatchError) {
         await persistProtocolMismatchAttempt({ sessionStore, sessionId, turnId, spec, error });
       }
       throw error;
+    } finally {
+      dispatchProgress.stop();
     }
 
     const executionResult = toAttemptExecutionResult(spec, execution);
