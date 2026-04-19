@@ -22,6 +22,7 @@ import {
   runExplainConfigForSlash,
 } from "../explainConfig.js";
 import { aboxProbeToChecks, probeAbox, type AboxProbe } from "../doctorAboxProbe.js";
+import { checkKvmAccess, checkVirtiofsdCaps, preflightToDoctorCheck } from "../hostPreflight.js";
 import {
   checkAgentProfile,
   checkConfigCascade,
@@ -72,6 +73,7 @@ type RawKeybindings = {
 };
 
 const NODE_REQUIRED_MAJOR = 22;
+const DEFAULT_VIRTIOFSD_PATH = "/usr/libexec/virtiofsd";
 
 const fakeStdoutForBackendProbe = (isTTY: boolean): RendererStdout => ({
   isTTY,
@@ -116,25 +118,30 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
   // 1. Node version.
   const nodeCheck = checkNodeVersion({ runtime: nodeRuntime, required: NODE_REQUIRED_MAJOR });
 
-  // 2 + 3. abox availability + capabilities (via spawn probe).
+  // 2 + 3. Minimal host preflight (Phase 0 F-P).
+  const virtiofsdPath = env.BAKUDO_VIRTIOFSD_PATH ?? DEFAULT_VIRTIOFSD_PATH;
+  const virtiofsdCheck = preflightToDoctorCheck(await checkVirtiofsdCaps({ virtiofsdPath }));
+  const kvmCheck = preflightToDoctorCheck(await checkKvmAccess());
+
+  // 4 + 5. abox availability + capabilities (via spawn probe).
   const aboxBin = ctx.aboxBin ?? "abox";
   const aboxProbe: AboxProbe = await probeAbox({ bin: aboxBin });
   const aboxChecks = aboxProbeToChecks(aboxProbe);
 
-  // 4. Repo writeability.
+  // 6. Repo writeability.
   const repoCheck = await checkRepoWriteability(repoRoot);
 
-  // 5. Terminal capability.
+  // 7. Terminal capability.
   const terminalCheck = checkTerminalCapability({ isTTY: stdout.isTTY === true, env });
   const terminalCap = describeTerminalCapability({ isTTY: stdout.isTTY === true, env });
 
-  // 6. Active renderer backend (probe with a fake stdout structurally).
+  // 8. Active renderer backend (probe with a fake stdout structurally).
   const probeBackend: RendererBackend = selectRendererBackend({ stdout });
   const backendWithCtor = probeBackend as unknown as { constructor?: { name?: string } };
   const rendererCheck = checkRendererBackend(backendWithCtor);
   const rendererName = rendererBackendName(backendWithCtor);
 
-  // 7 + 8. Config cascade + agent profile.
+  // 9 + 10. Config cascade + agent profile.
   const cascade = await loadConfigCascade(repoRoot, {});
   const configCheck = checkConfigCascade(cascade.layers);
   const agentProfileName = (() => {
@@ -147,11 +154,11 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
   })();
   const agentCheck = checkAgentProfile(agentProfileName);
 
-  // 9. Keybindings file path.
+  // 11. Keybindings file path.
   const keybindingsPath = xdgKeybindingsPath();
   const keybindingsCheck = await checkKeybindingsPath(keybindingsPath);
 
-  // 10. Reserved-shortcut conflicts (run validate against loaded user config if any).
+  // 12. Reserved-shortcut conflicts (run validate against loaded user config if any).
   const keybindingProbe = await probeKeybindingConflicts(keybindingsPath);
   const conflictCheck: DoctorCheckResult =
     keybindingProbe.conflicts.length === 0
@@ -168,13 +175,13 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
           remediation: "Edit ~/.config/bakudo/keybindings.json to remove reserved-key overrides.",
         };
 
-  // 11. Telemetry (Wave 6c PR7 — local-only OTel + time-delta log stack).
+  // 13. Telemetry (Wave 6c PR7 — local-only OTel + time-delta log stack).
   const telemetryCheck = checkTelemetry();
   const logDir = bakudoLogDir();
   const spansOnDisk = await countSpanFilesOnDisk(logDir);
   const otlp = describeOtlpEndpoint(env);
 
-  // 12. Storage footprint (Phase 6 W4). Best-effort: a missing storage root
+  // 14. Storage footprint (Phase 6 W4). Best-effort: a missing storage root
   // (fresh repo) yields zero bytes rather than a check failure.
   const storageRoot = storageRootFor(repoRoot, undefined);
   let totalArtifactBytes = 0;
@@ -198,6 +205,8 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
 
   const checks: DoctorCheckResult[] = [
     nodeCheck,
+    virtiofsdCheck,
+    kvmCheck,
     ...aboxChecks,
     repoCheck,
     terminalCheck,

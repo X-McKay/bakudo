@@ -241,6 +241,40 @@ test("runDoctorCommand (json): writes a single JSON line matching the envelope s
   });
 });
 
+test("F-P: doctor surfaces host-virtiofsd-caps error before the abox probe", async () => {
+  await withTempRepo(async (repoRoot) => {
+    const cap = capture();
+    const result = await withCapturedStdout(cap.writer, () =>
+      runDoctorCommand({
+        args: ["--output-format=json"],
+        repoRoot,
+        aboxBin: "missing-abox-bin",
+        env: {
+          BAKUDO_VIRTIOFSD_PATH: join(repoRoot, "missing-virtiofsd"),
+        },
+        nodeRuntime: "v22.0.0",
+        stdout: { isTTY: false, write: () => true },
+      }),
+    );
+
+    assert.equal(result.exitCode, 1);
+
+    const envelope = JSON.parse(cap.chunks.join("").trim()) as DoctorEnvelope;
+    const names = envelope.checks.map((check) => check.name);
+    const virtio = envelope.checks.find((check) => check.name === "host-virtiofsd-caps");
+    const abox = envelope.checks.find((check) => check.name === "abox-availability");
+
+    assert.ok(virtio, "missing host-virtiofsd-caps check");
+    assert.ok(abox, "missing abox-availability check");
+    assert.equal(virtio?.status, "fail");
+    assert.ok(
+      names.indexOf("host-virtiofsd-caps") < names.indexOf("abox-availability"),
+      "preflight must be emitted before the abox probe",
+    );
+    assert.match(`${virtio?.summary ?? ""} ${virtio?.remediation ?? ""}`, /setcap|cap_sys_admin/u);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Phase 6 W1 — UI mode is recorded in the envelope + human report.
 // Plan 06 hard rule 3: the current UI mode MUST appear in doctor output so
