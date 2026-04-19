@@ -32,4 +32,21 @@
 
 ## Per-wave notes
 
-(Filled in as each wave lands.)
+### 2026-04-19: Plan Set Delivered
+
+The complete junior-engineer-proof implementation plan set has been written under [`control-plane/`](control-plane/). Highlights:
+
+- **Master execution overview** ([`control-plane/00-execution-overview.md`](control-plane/00-execution-overview.md)): phasing strategy, parallelism opportunities, hand-off criteria, risk management.
+- **8 wave detail plans** covering W0 through UX Realignment with code examples, file lists (delete/add/modify), test strategy, acceptance criteria, rollback.
+- **Mermaid dependency graph** rendered to PNG showing the critical path.
+- **Index README** ([`control-plane/README.md`](control-plane/README.md)) cross-linking everything with usage instructions.
+
+### 2026-04-19: Wave 0.1 Landed
+
+Configuration resolution fix has been committed and pushed:
+- `src/config.ts`: `resolveDefaultConfigPath()` with install-root fallback
+- `src/node-shims.d.ts`: `process.cwd()` declaration
+- `package.json`: include `config/` in published files
+- `scripts/package-release.sh`: copy `config/` into release bundle
+
+Validated: `bakudo` invoked from `/tmp` successfully reads its config. Unit tests: 1398 pass / 0 fail.
