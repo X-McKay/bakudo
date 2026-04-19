@@ -1,6 +1,6 @@
 # Control-Plane Implementation Progress
 
-**Branch:** `codex/begin-work-on-kickoff-prompt`
+**Branch:** `manus/20260419-consolidated`
 **Implements:** [`2026-04-19-bakudo-abox-control-plane-spec.md`](2026-04-19-bakudo-abox-control-plane-spec.md) per the [implementation plan](2026-04-19-bakudo-abox-control-plane-implementation-plan.md) and [review](2026-04-19-control-plane-review.md).
 
 ## Pinned decisions (from spec §"Questions to confirm before coding")
@@ -127,3 +127,30 @@ Validated:
 
 - `pnpm build`
 - `node --loader ts-node/esm --test tests/unit/aboxAdapter.test.ts tests/integration/spawn-abox-path.test.ts tests/regression/F-04-path-preservation.test.ts tests/unit/aboxTaskRunnerNegotiation.test.ts tests/unit/aboxTaskRunnerEnvFilter.test.ts tests/unit/probeFailureEmitter.test.ts tests/unit/aboxTaskRunnerWorkerBundle.test.ts tests/unit/workerRuntime.test.ts tests/unit/executeAttempt.test.ts tests/harness.test.ts tests/unit/followUpActions.test.ts tests/unit/reviewer.test.ts tests/unit/taskKindDispatch.test.ts tests/unit/attemptProtocol.test.ts tests/unit/worktreeInspector.test.ts tests/unit/attemptCompiler.test.ts tests/unit/modeRename.test.ts tests/integration/eventLogPersistence.test.ts tests/regression/F-03-resume-attempt-spec.test.ts tests/unit/transcriptRenderer.test.ts tests/unit/renderModel.test.ts tests/unit/interactiveRenderLoop.test.ts tests/integration/plain-mode.test.ts tests/unit/nonInteractiveCompat.test.ts tests/integration/pipeline.test.ts`
+
+### 2026-04-19: Consolidated Branch Created
+
+Manus reviewed both parallel implementations (Claude Code `claude/manus-implementation-iX2Rh` and Codex `codex/begin-work-on-kickoff-prompt`) and produced the final consolidated branch `manus/20260419-consolidated`.
+
+**Consolidation decisions:**
+
+| Wave | Winner | Reason |
+| :--- | :--- | :--- |
+| W0 (Correctness) | **Codex** | Identical correctness; Codex's `WorkerDispatchInput` union type replaces `WorkerTaskSpec` entirely. |
+| W1 (Data Model) | **Codex** | Both equivalent; Codex's `candidateId` is optional (correct for batch future), `reservedGuestOutputDirForAttempt` is a single source of truth in `attemptProtocol.ts`. |
+| W2 (Worker Backend) | **Codex** | Uses `reservedGuestOutputDirForAttempt` from `attemptProtocol.ts` instead of hardcoding the path inline. Throws on empty `agentBackend` instead of silently returning `false`. |
+| W3 (Orchestration) | **Codex** | `orchestration.ts` fully deleted. `mergeController.ts` uses factory pattern enabling DI for tests. `sandboxLifecycle.ts` has `isEphemeralSandbox` helper and `buildAboxShellCommandArgs`. |
+| W4 (Review Decoupling) | **Codex** | `worktreeInspector.ts` uses `git status --porcelain` + recursive artifact discovery + separates `repoChangedFiles` from `outputArtifacts`. Claude used `git diff HEAD --name-only` which misses untracked files. |
+| W5 (Persistence & UI) | **Codex** | Equivalent; Codex has `sessionRunSupport.ts` as a clean replacement for deleted `orchestration.ts` helpers. |
+| W6/W7 (Harness/Batch) | **Codex** | More complete test harness; `harness.test.ts` added. |
+| UX Realignment | **Codex** | Equivalent; both implement `output` transcript kind correctly. |
+| Tests | **Codex** | 30 test files vs Claude's 17. Codex adds `mergeController.test.ts`, `worktreeInspector.test.ts`, `interactiveRenderLoop.test.ts`, `reviewer.test.ts`, `followUpActions.test.ts`, `attemptProtocol.test.ts`, and more. |
+
+**Cherry-picked from Claude:** `sandboxBranchName` helper added to `sandboxLifecycle.ts` (useful utility absent from Codex).
+
+**Quality gates passed:**
+- `pnpm build` — zero errors
+- `pnpm test:unit` — 1422 pass / 0 fail / 1 skipped
+- `git grep BAKUDO_EPHEMERAL` in `src/` — nothing
+- `git grep executeTask` in `src/` — nothing
+- `git grep WorkerTaskSpec` in `src/` — nothing

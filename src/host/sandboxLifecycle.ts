@@ -20,6 +20,8 @@ export const buildAboxRunArgs = (
   ...(isEphemeralSandbox(profile) ? ["--ephemeral"] : []),
 ];
 
+export const sandboxBranchName = (taskId: string): string => `agent/${taskId}`;
+
 export const buildAboxShellCommandArgs = (
   taskId: string,
   command: string,
