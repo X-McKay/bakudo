@@ -9,7 +9,7 @@ import { DEFAULT_REDACTION_POLICY, redactRecord, type RedactionPolicy } from "./
 /**
  * First-class artifact record v2 — artifacts become durable records keyed by
  * `(sessionId, turnId, attemptId?, kind)` in an append-only per-session
- * NDJSON log. See `.bakudo-ux-briefs/phase2-pr4-artifact-timeline.md`.
+ * NDJSON log.
  *
  * The legacy `src/artifactStore.ts` JSON-array store is retained unchanged
  * for migration compatibility with Phase 1 sessions. Starting PR4, every

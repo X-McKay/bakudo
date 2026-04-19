@@ -6,7 +6,7 @@
 
 ### On-disk layout
 
-Bakudo splits its on-disk state between repo-local and user-global locations. Repo-local state stays under `<repo>/.bakudo/` (config overlay, per-repo session store, host state, durable approvals). User-global state — local-only OTel spans, time-delta logs, startup profiles, heap snapshots — lives under `$XDG_DATA_HOME/bakudo/log/` (defaults to `~/.local/share/bakudo/log/`). On first launch bakudo runs a one-way migration that moves any legacy `~/.bakudo/log/`, `~/.bakudo/spans/`, or `<repo>/.bakudo/log/` directory into the XDG location and stamps a marker (`.migrated-v1-to-v2`) so subsequent launches are no-ops. The migration is logged once via `host.migration_v1_to_v2` (on the `host.event_skipped` envelope). `bakudo doctor` reports the active layout under `storage.layout`.
+Bakudo splits its on-disk state between repo-local and user-global locations. Repo-local state stays under `<repo>/.bakudo/` (config overlay, per-repo session store, host state, durable approvals). User-global state — local-only OTel spans, time-delta logs, startup profiles, heap snapshots — lives under `$XDG_DATA_HOME/bakudo/log/` (defaults to `~/.local/share/bakudo/log/`). On first launch bakudo runs a one-way migration that moves any legacy `~/.bakudo/log/`, `~/.bakudo/spans/`, or `<repo>/.bakudo/log/` directory into the XDG location and stamps a marker (`.migrated-v1-to-v2`) so subsequent launches are no-ops. The migration is logged once via `host.migration_v1_to_v2` (on the `host.event_skipped` envelope). `bakudo doctor` reports the active layout under `storage.layout`. The repo-local `.bakudo/` directory is runtime state and should remain gitignored.
 
 ## Core Features
 
@@ -82,6 +82,12 @@ If you are working from source instead of a release bundle:
 pnpm install
 pnpm install:cli
 bakudo --help
+```
+
+To prepare a local release bundle for smoke testing or a release draft:
+
+```bash
+just release-bundle
 ```
 
 ### Usage
@@ -391,6 +397,7 @@ If you have `just` installed, you can use the following shortcuts:
 
 - `just check`: Run linting, tests, and build in sequence.
 - `just clean`: Remove build artifacts.
+- `just release-bundle`: Build the release tarball and checksum manifest under `dist/release/`.
 
 ## AI-Driven Workflow
 

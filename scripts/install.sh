@@ -84,6 +84,11 @@ To install from source:
   pnpm install
   pnpm install:cli
 
+To build a local release bundle instead:
+
+  pnpm install
+  just release-bundle
+
 Once a release is published, rerun this script or pin a version:
   BAKUDO_VERSION=v0.1.0 bash install.sh
 EOF
@@ -191,6 +196,7 @@ main() {
         return 0
     fi
 
+    local tmp_dir
     tmp_dir="$(mktemp -d)"
     trap "rm -rf -- \"${tmp_dir}\"" EXIT
 

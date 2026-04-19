@@ -4,3 +4,6 @@ node_modules/
 *.log
 .mise.local.toml
 package-lock.json
+.bakudo/
+.bakudo-ux-briefs/
+.codex

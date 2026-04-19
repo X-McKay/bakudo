@@ -1,12 +1,12 @@
 /**
  * Loader for `bakudo help <topic>` content. Topics live as markdown files
  * under `<repo>/docs/help/<topic>.md` and are bundled with the CLI at
- * build time (the files are also included in the `files` array of
- * `package.json` via `dist` once copied; see README for install steps).
+ * build time (the files are also included in the release bundle; see README
+ * for install steps).
  *
  * The loader resolves topic paths relative to the compiled module
- * location so it works under both `pnpm dev` (src → dist) and `npm link`
- * installs.
+ * location so it works under both `pnpm dev` (src → dist) and installed
+ * CLI wrappers.
  */
 
 import { readFile, readdir } from "node:fs/promises";

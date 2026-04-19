@@ -153,7 +153,7 @@ export const createTaskSessionKey = (sessionId: string, taskId: string): string 
 
 /**
  * Session event envelope v2 — the common wrapper shared by every producer in
- * the host/worker/reviewer pipeline. See `.bakudo-ux-briefs/phase2-pr3-*.md`.
+ * the host/worker/reviewer pipeline.
  */
 
 export const SESSION_EVENT_SCHEMA_VERSION = 2 as const;

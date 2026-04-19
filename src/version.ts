@@ -1,8 +1,7 @@
 /**
  * Version surface for bakudo. The version is read at build time from the
  * compiled module's location via a `package.json` lookup so it remains
- * accurate for both `pnpm build && bakudo version` and `npm link`-installed
- * CLIs.
+ * accurate for both source-linked CLIs and release-bundle installs.
  *
  * Constants exposed alongside the version keep the JSON envelope stable so
  * downstream automation can key on {@link PROTOCOL_VERSION} /
