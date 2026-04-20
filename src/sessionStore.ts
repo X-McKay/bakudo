@@ -7,16 +7,10 @@ import type {
   SessionAttemptRecord,
   SessionRecord,
   SessionStatus,
-  SessionTaskRecord,
   SessionTurnRecord,
 } from "./sessionTypes.js";
 import { CURRENT_SESSION_SCHEMA_VERSION, deriveSessionTitle } from "./sessionTypes.js";
-import {
-  loadSessionRecord,
-  migrateV1TaskToAttempt,
-  normalizeV2Record,
-  taskStatusToTurnStatus,
-} from "./sessionMigration.js";
+import { loadSessionRecord, normalizeV2Record } from "./sessionNormalize.js";
 import {
   SESSION_INDEX_SCHEMA_VERSION,
   buildIndexEntryFromSession,
@@ -407,34 +401,6 @@ export class SessionStore {
     const updated: SessionRecord = { ...session, turns, updatedAt: nowIso() };
     await this.saveSession(updated);
     return updated;
-  }
-
-  /**
-   * @deprecated migrated shim: maps onto turn "turn-1" via {@link upsertAttempt}.
-   */
-  public async upsertTask(
-    sessionId: string,
-    taskRecord: SessionTaskRecord,
-  ): Promise<SessionRecord> {
-    const session = await this.loadSession(sessionId);
-    if (session === null) {
-      throw new Error(`cannot upsert task for missing session: ${sessionId}`);
-    }
-    const attempt = migrateV1TaskToAttempt(taskRecord);
-    const existingTurn = session.turns[0];
-    if (existingTurn === undefined) {
-      const turn: SessionTurnRecord = {
-        turnId: "turn-1",
-        prompt: session.turns[0]?.prompt ?? session.title,
-        mode: taskRecord.request?.mode ?? "build",
-        status: taskStatusToTurnStatus(taskRecord.status),
-        attempts: [attempt],
-        createdAt: nowIso(),
-        updatedAt: nowIso(),
-      };
-      return this.upsertTurn(sessionId, turn);
-    }
-    return this.upsertAttempt(sessionId, existingTurn.turnId, attempt);
   }
 
   public async appendTaskEvent(sessionId: string, event: TaskProgressEvent): Promise<void> {

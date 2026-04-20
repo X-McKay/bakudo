@@ -1,8 +1,11 @@
 import type { AttemptSpec } from "../attemptProtocol.js";
 import type { ArtifactStore } from "../artifactStore.js";
-import { persistedReviewForAttempt, type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
+import {
+  persistedReviewForAttempt,
+  type ReviewedTaskResult,
+  reviewTaskResult,
+} from "../reviewer.js";
 import type { ReviewConfidence } from "../resultClassifier.js";
-import { synthesizeLegacySpec } from "../sessionMigration.js";
 import type {
   CandidateRecord,
   SessionAttemptRecord,
@@ -97,20 +100,17 @@ const renderProtocolMismatchLines = (view: ProtocolMismatchView): string[] => {
 
 /**
  * Resolve the {@link AttemptSpec} for display. Returns the persisted spec when
- * available, or synthesizes a read-only legacy spec for v2 sessions.
+ * available. Post-cutover every attempt is created with an `attemptSpec`, so
+ * attempts lacking one simply omit the spec-derived summary lines.
  */
 const resolveAttemptSpec = (
   attempt: SessionAttemptRecord | undefined,
-  turn: SessionTurnRecord | undefined,
 ): Partial<AttemptSpec> | undefined => {
   if (attempt?.dispatchPlan?.spec !== undefined) {
     return attempt.dispatchPlan.spec;
   }
   if (attempt?.attemptSpec !== undefined) {
     return attempt.attemptSpec;
-  }
-  if (attempt !== undefined && turn !== undefined) {
-    return synthesizeLegacySpec(attempt, turn);
   }
   return undefined;
 };
@@ -250,7 +250,9 @@ const formatArtifactRows = (artifacts: ArtifactRow[]): string[] => {
       if (sourceRelativePath !== undefined) {
         detailParts.push(`source=${safe(sourceRelativePath)}`);
       }
-      lines.push(`    - ${safe(artifact.name)} (${detailParts.join(", ")}) -> ${safe(artifact.path)}`);
+      lines.push(
+        `    - ${safe(artifact.name)} (${detailParts.join(", ")}) -> ${safe(artifact.path)}`,
+      );
     }
   }
   return lines;
@@ -353,7 +355,7 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
       lines.push(renderKv("Candidate", attempt.candidateState));
     }
   }
-  const spec = resolveAttemptSpec(attempt, turn);
+  const spec = resolveAttemptSpec(attempt);
   if (spec?.taskKind !== undefined) {
     lines.push(renderKv("TaskKind", spec.taskKind));
   }

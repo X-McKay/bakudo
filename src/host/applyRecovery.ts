@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 
 import type { ArtifactStore } from "../artifactStore.js";
 import type { ReviewClassification } from "../resultClassifier.js";
-import { createReviewId } from "../sessionMigration.js";
+import { createReviewId } from "../sessionNormalize.js";
 import type {
   CandidateRecord,
   SessionAttemptRecord,
@@ -259,9 +259,7 @@ const parseWritebackJournal = (raw: string): ApplyWritebackJournal | null => {
   };
 };
 
-const latestAttempt = (
-  session: SessionRecord,
-): TailAttemptRef | null => {
+const latestAttempt = (session: SessionRecord): TailAttemptRef | null => {
   const turn = session.turns.at(-1);
   const attempt = turn?.attempts.at(-1);
   if (turn === undefined || attempt === undefined) {
@@ -485,10 +483,9 @@ export const recoverInterruptedApplyIfNeeded = async (args: {
   }
 
   if (unsafePaths.length > 0) {
-    const message =
-      `candidate apply was interrupted during apply_writeback and source paths changed after the crash: ${unsafePaths
-        .map((entry) => entry.path)
-        .join(", ")}`;
+    const message = `candidate apply was interrupted during apply_writeback and source paths changed after the crash: ${unsafePaths
+      .map((entry) => entry.path)
+      .join(", ")}`;
     await writeRecoveryArtifact({
       artifactStore: args.artifactStore,
       storageRoot: args.storageRoot,

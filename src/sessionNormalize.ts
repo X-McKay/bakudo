@@ -1,14 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import type { AttemptSpec } from "./attemptProtocol.js";
 import type {
   SessionAttemptRecord,
   SessionRecord,
   SessionReviewRecord,
-  SessionStatus,
-  SessionTaskRecord,
   SessionTurnRecord,
-  TurnStatus,
 } from "./sessionTypes.js";
 import {
   CURRENT_SESSION_SCHEMA_VERSION,
@@ -18,25 +14,6 @@ import {
 } from "./sessionTypes.js";
 
 export const createReviewId = (): string => `review-${Date.now()}-${randomUUID().slice(0, 8)}`;
-
-export const taskStatusToTurnStatus = (status: string): TurnStatus => {
-  switch (status) {
-    case "queued":
-    case "running":
-    case "failed":
-      return status;
-    case "succeeded":
-      return "completed";
-    case "needs_review":
-      return "reviewing";
-    case "blocked":
-      return "awaiting_user";
-    case "cancelled":
-      return "failed";
-    default:
-      return "queued";
-  }
-};
 
 export const extractDispatchCommand = (metadata: unknown): string[] | undefined => {
   if (typeof metadata !== "object" || metadata === null) {
@@ -48,30 +25,6 @@ export const extractDispatchCommand = (metadata: unknown): string[] | undefined 
   }
   const command = raw.map((entry) => String(entry));
   return command.length === 0 ? undefined : command;
-};
-
-export const synthesizeReviewFromMetadata = (
-  attemptId: string,
-  metadata: unknown,
-  reviewedAt: string,
-  lastMessage: string | undefined,
-): SessionReviewRecord | undefined => {
-  if (typeof metadata !== "object" || metadata === null) {
-    return undefined;
-  }
-  const outcomeRaw = (metadata as { reviewedOutcome?: unknown }).reviewedOutcome;
-  const actionRaw = (metadata as { reviewedAction?: unknown }).reviewedAction;
-  if (outcomeRaw === undefined && actionRaw === undefined) {
-    return undefined;
-  }
-  return {
-    reviewId: createReviewId(),
-    attemptId,
-    outcome: coerceSessionReviewOutcome(outcomeRaw),
-    action: coerceSessionReviewAction(actionRaw),
-    ...(typeof lastMessage === "string" && lastMessage.length > 0 ? { reason: lastMessage } : {}),
-    reviewedAt,
-  };
 };
 
 export const coerceLooseReviewRecord = (
@@ -108,19 +61,6 @@ export const coerceLooseReviewRecord = (
   };
 };
 
-export const migrateV1TaskToAttempt = (task: SessionTaskRecord): SessionAttemptRecord => {
-  const dispatchCommand = extractDispatchCommand(task.metadata);
-  return {
-    attemptId: task.taskId,
-    status: task.status,
-    ...(task.request === undefined ? {} : { request: task.request }),
-    ...(task.result === undefined ? {} : { result: task.result }),
-    ...(task.lastMessage === undefined ? {} : { lastMessage: task.lastMessage }),
-    ...(task.metadata === undefined ? {} : { metadata: task.metadata }),
-    ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
-  };
-};
-
 const attachTailReviewRecord = (
   attempts: SessionAttemptRecord[],
   reviewRecord: SessionReviewRecord | undefined,
@@ -131,60 +71,6 @@ const attachTailReviewRecord = (
   return attempts.map((attempt, index) =>
     index === attempts.length - 1 ? { ...attempt, reviewRecord } : attempt,
   );
-};
-
-export type V1RawSession = {
-  sessionId: string;
-  goal: string;
-  status: SessionStatus;
-  assumeDangerousSkipPermissions: boolean;
-  tasks?: SessionTaskRecord[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-export const migrateV1ToV2 = (raw: V1RawSession): SessionRecord => {
-  const tasks = raw.tasks ?? [];
-  const baseAttempts = tasks.map(migrateV1TaskToAttempt);
-  const latestStatus = tasks.at(-1)?.status ?? "queued";
-  const latestTask = tasks.at(-1);
-  const latestAttemptId = baseAttempts.at(-1)?.attemptId ?? latestTask?.taskId ?? "task-1";
-  const latestReview =
-    latestTask === undefined
-      ? undefined
-      : synthesizeReviewFromMetadata(
-          latestAttemptId,
-          latestTask.metadata,
-          raw.updatedAt,
-          latestTask.lastMessage,
-        );
-  const attempts = attachTailReviewRecord(baseAttempts, latestReview);
-  const turn: SessionTurnRecord = {
-    turnId: "turn-1",
-    prompt: raw.goal,
-    mode: tasks[0]?.request?.mode ?? "build",
-    status: taskStatusToTurnStatus(latestStatus),
-    attempts,
-    createdAt: raw.createdAt,
-    updatedAt: raw.updatedAt,
-    ...(latestReview === undefined ? {} : { latestReview }),
-  };
-  const turns = attempts.length === 0 ? [] : [turn];
-  const title = deriveSessionTitle({
-    sessionId: raw.sessionId,
-    goal: raw.goal,
-    turns,
-  });
-  return {
-    schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-    sessionId: raw.sessionId,
-    repoRoot: ".",
-    title,
-    status: raw.status,
-    turns,
-    createdAt: raw.createdAt,
-    updatedAt: raw.updatedAt,
-  };
 };
 
 const normalizeV2Attempt = (attempt: SessionAttemptRecord): SessionAttemptRecord => {
@@ -245,48 +131,22 @@ export const normalizeV2Record = (
   };
 };
 
+/**
+ * Parse a raw JSON object into a {@link SessionRecord}. The accepted contract
+ * is the post-cutover v2 schema only: `schemaVersion` must equal
+ * {@link CURRENT_SESSION_SCHEMA_VERSION} and `turns` must be an array. Any
+ * other shape throws.
+ */
 export const loadSessionRecord = (raw: unknown): SessionRecord => {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("unrecognized session record shape");
   }
-  const candidate = raw as {
-    schemaVersion?: unknown;
-    turns?: unknown;
-    tasks?: unknown;
-    goal?: unknown;
-  };
+  const candidate = raw as { schemaVersion?: unknown; turns?: unknown };
   if (
     candidate.schemaVersion === CURRENT_SESSION_SCHEMA_VERSION &&
     Array.isArray(candidate.turns)
   ) {
     return normalizeV2Record(raw as SessionRecord);
   }
-  if (Array.isArray(candidate.tasks) && typeof candidate.goal === "string") {
-    return migrateV1ToV2(raw as V1RawSession);
-  }
   throw new Error("unrecognized session record shape");
 };
-
-// ---------------------------------------------------------------------------
-// Legacy spec synthesizer — display-only, never re-dispatched
-// ---------------------------------------------------------------------------
-
-/**
- * Synthesize a read-only partial {@link AttemptSpec} from a v2
- * {@link SessionAttemptRecord} that lacks an `attemptSpec`. This lets the
- * `/inspect` surface render spec-style metadata for sessions created before
- * the Phase 3 planner existed.
- *
- * The returned spec is intentionally `Partial<AttemptSpec>` — fields like
- * `permissions`, `budget`, `acceptanceChecks`, and `artifactRequests` are
- * absent because legacy attempts did not record them.
- */
-export const synthesizeLegacySpec = (
-  attempt: SessionAttemptRecord,
-  turn: SessionTurnRecord,
-): Partial<AttemptSpec> => ({
-  taskKind: "explicit_command",
-  prompt: turn.prompt,
-  mode: (attempt.request?.mode ?? "build") as "build" | "plan",
-  execution: { engine: "shell", command: ["bash", "-lc", turn.prompt] },
-});

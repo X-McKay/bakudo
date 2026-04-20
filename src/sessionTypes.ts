@@ -36,19 +36,6 @@ export type TurnStatus =
 
 export type AttemptStatus = TaskStatus;
 
-/**
- * @deprecated v1 session task record. Kept for migration compatibility.
- * v2 uses {@link SessionAttemptRecord} inside {@link SessionTurnRecord}.
- */
-export type SessionTaskRecord = {
-  taskId: string;
-  status: TaskStatus;
-  request?: TaskRequest;
-  result?: TaskResult;
-  lastMessage?: string;
-  metadata?: Record<string, unknown>;
-};
-
 export type SessionReviewOutcome =
   | "success"
   | "retryable_failure"
@@ -254,8 +241,6 @@ export type SessionRecord = {
   turns: SessionTurnRecord[];
   createdAt: string;
   updatedAt: string;
-  /** @deprecated v1 compatibility — do not read in host code */
-  tasks?: SessionTaskRecord[];
 };
 
 export const CURRENT_SESSION_SCHEMA_VERSION = 2 as const;
@@ -274,12 +259,6 @@ export const isTerminalSessionStatus = (status: SessionStatus): status is Termin
 
 export const createSessionTaskKey = (sessionId: string, taskId: string): string =>
   `${BAKUDO_PROTOCOL_SCHEMA_VERSION}:${sessionId}:${taskId}`;
-
-/**
- * @deprecated use attempt/turn helpers. Retained for migration compatibility.
- */
-export const isCompletedTaskRecord = (task: SessionTaskRecord): boolean =>
-  isTerminalTaskStatus(task.status) && task.status === "succeeded";
 
 export const isCompletedAttemptRecord = (attempt: SessionAttemptRecord): boolean =>
   isTerminalTaskStatus(attempt.status) && attempt.status === "succeeded";
