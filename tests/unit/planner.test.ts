@@ -73,13 +73,15 @@ test("planAttempt: round-trip run_check", () => {
 });
 
 test("planAttempt: round-trip run_explicit_command", () => {
-  const { intent, spec } = planAttempt("echo hello", "standard", baseContext(), {
+  const { intent, plan, spec } = planAttempt("echo hello", "standard", baseContext(), {
     isExplicitCommand: true,
   });
   assert.equal(intent.kind, "run_explicit_command");
   assert.equal(spec.taskKind, "explicit_command");
   assert.equal(spec.execution.engine, "shell");
   assert.deepEqual(spec.execution.command, ["bash", "-lc", "echo hello"]);
+  assert.equal(plan.profile.sandboxLifecycle, "ephemeral");
+  assert.equal(plan.profile.mergeStrategy, "none");
 });
 
 test("planAttempt: tokenBudget forwarded through intent to spec", () => {

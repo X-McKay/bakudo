@@ -114,10 +114,10 @@ export const rememberInteractiveContext = (
 
 export const sessionPromptLabel = (sessionId: string | undefined): string => {
   if (!sessionId) {
-    return "no-session";
+    return "new-session";
   }
-  const parts = sessionId.split("-");
-  return parts.at(-1) ?? sessionId;
+  const trimmed = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
+  return trimmed.length <= 13 ? trimmed : `${trimmed.slice(0, 10)}…${trimmed.slice(-2)}`;
 };
 
 /**

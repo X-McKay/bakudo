@@ -47,8 +47,59 @@ export type FrameInputs = {
   repoLabel?: string;
 };
 
-const sessionLabelFor = (activeSessionId: string | undefined): string =>
-  activeSessionId ? `session ${activeSessionId.slice(0, 8)}` : "no active session";
+const truncateMiddle = (value: string, head: number, tail: number): string => {
+  if (value.length <= head + tail + 1) {
+    return value;
+  }
+  return `${value.slice(0, head)}…${value.slice(-tail)}`;
+};
+
+const displaySessionId = (sessionId: string): string => {
+  const trimmed = sessionId.startsWith("session-") ? sessionId.slice("session-".length) : sessionId;
+  return truncateMiddle(trimmed, 10, 3);
+};
+
+const displayTurnId = (turnId: string | undefined): string | undefined => {
+  if (turnId === undefined || turnId.length === 0) {
+    return undefined;
+  }
+  const match = /^turn-(.+)$/u.exec(turnId);
+  return match ? `turn ${match[1]}` : turnId;
+};
+
+const sessionLabelFor = (
+  activeSessionId: string | undefined,
+  activeTurnId: string | undefined,
+): string => {
+  if (!activeSessionId) {
+    return "new session";
+  }
+  const session = `session ${displaySessionId(activeSessionId)}`;
+  const turn = displayTurnId(activeTurnId);
+  return turn === undefined ? session : `${session} / ${turn}`;
+};
+
+const footerHintsFor = (state: HostAppState, overlay: HostOverlay | undefined): string[] => {
+  if (overlay?.kind === "approval_prompt") {
+    return ["[1/2/3/4] choose", "[Shift+Tab] cycle", "[?] help", "[Ctrl+C] exit"];
+  }
+  if (overlay?.kind === "command_palette" || overlay?.kind === "session_picker") {
+    return ["[↑/↓] move", "[Enter] select", "[?] help", "[Ctrl+C] exit"];
+  }
+  if (overlay?.kind === "quick_help") {
+    return ["[?] close", "[Ctrl+C] exit"];
+  }
+  if (state.screen === "inspect") {
+    return ["[Shift+Tab] tabs", "[↑/↓] scroll", "[?] help", "[Ctrl+C] exit"];
+  }
+  if (overlay !== undefined) {
+    return ["[/] commands", "[?] help", "[Ctrl+C] exit"];
+  }
+  if (state.activeSessionId) {
+    return ["[inspect]", "[inspect provenance]", "[new]", "[resume]"];
+  }
+  return ["[new]", "[resume]", "[help]"];
+};
 
 const deriveOverlay = (
   prompt: PromptEntry | undefined,
@@ -117,21 +168,14 @@ export const selectRenderFrame = (inputs: FrameInputs): RenderFrame => {
   const hasOverlay = overlay !== undefined;
   const offTranscript = state.screen !== "transcript";
   const mode: FrameMode = hasOverlay || offTranscript ? "transcript" : "prompt";
-
-  // Rich footer hints matching the spec (08-ux-realignment.md §4).
-  // Always show the core navigation hints; add session-specific hints when active.
-  const coreHints = ["[Tab] mode", "[/] commands", "[?] help", "[Ctrl+C] exit"];
-  const sessionHints = state.activeSessionId
-    ? ["[i] inspect", "[r] review"]
-    : [];
-  const hints = [...sessionHints, ...coreHints];
+  const hints = footerHintsFor(state, overlay);
 
   const frame: RenderFrame = {
     mode,
     header: {
       title: "Bakudo",
       mode: state.composer.mode,
-      sessionLabel: sessionLabelFor(state.activeSessionId),
+      sessionLabel: sessionLabelFor(state.activeSessionId, state.activeTurnId),
       ...(repoLabel !== undefined ? { repoLabel } : {}),
     },
     transcript,

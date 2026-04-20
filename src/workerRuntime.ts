@@ -1,12 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 
-import {
-  AttemptSpecSchema,
-  ExecutionProfileSchema,
-  type AttemptSpec,
-  type ExecutionProfile,
-} from "./attemptProtocol.js";
+import type { AttemptSpec, ExecutionProfile } from "./attemptProtocol.js";
 import {
   BAKUDO_PROTOCOL_SCHEMA_VERSION,
   type TaskProgressEvent,
@@ -92,6 +87,25 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 const isAttemptSpec = (value: WorkerDispatchInput): value is AttemptSpec => value.schemaVersion === 3;
 
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((entry) => typeof entry === "string");
+
+const isObjectArray = (value: unknown): value is Array<Record<string, unknown>> =>
+  Array.isArray(value) && value.every((entry) => isObject(entry));
+
+const isExecutionProfile = (value: unknown): value is ExecutionProfile => {
+  if (!isObject(value)) {
+    return false;
+  }
+  return (
+    typeof value.agentBackend === "string" &&
+    (value.sandboxLifecycle === "preserved" || value.sandboxLifecycle === "ephemeral") &&
+    (value.mergeStrategy === "auto" ||
+      value.mergeStrategy === "interactive" ||
+      value.mergeStrategy === "none")
+  );
+};
+
 const clampPositiveInteger = (value: number, fallback: number): number =>
   Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 
@@ -154,8 +168,9 @@ const resolveCommand = (
   stdinOverride?: string,
 ): ResolvedCommand => {
   if (isAttemptSpec(spec)) {
-    const parsedProfile = ExecutionProfileSchema.safeParse(executionProfile);
-    const profile = parsedProfile.success ? parsedProfile.data : DEFAULT_EXECUTION_PROFILE;
+    const profile = isExecutionProfile(executionProfile)
+      ? executionProfile
+      : DEFAULT_EXECUTION_PROFILE;
     const cmd = dispatchTaskKind(spec, profile);
     const [exe = shell, ...args] = cmd.command;
     const resolvedStdin = cmd.stdin ?? stdinOverride;
@@ -223,6 +238,10 @@ const formatValidationError = (label: string, value: unknown): never => {
   throw new Error(`unsupported worker input schema version: ${String(value)} (${label})`);
 };
 
+const invalidAttemptSpec = (message: string): never => {
+  throw new Error(`invalid attempt spec: ${message}`);
+};
+
 const validateLegacyWorkerRequest = (value: unknown): LegacyWorkerRequest => {
   if (!isObject(value)) {
     throw new Error("invalid legacy worker request: expected JSON object");
@@ -282,17 +301,106 @@ const validateLegacyWorkerRequest = (value: unknown): LegacyWorkerRequest => {
 };
 
 const validateAttemptSpec = (value: unknown): AttemptSpec => {
-  const parsed = AttemptSpecSchema.safeParse(value);
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((issue) => {
-        const path = issue.path.length > 0 ? issue.path.join(".") : "root";
-        return `${path}: ${issue.message}`;
-      })
-      .join("; ");
-    throw new Error(`invalid attempt spec: ${issues}`);
+  if (!isObject(value)) {
+    invalidAttemptSpec("expected JSON object");
   }
-  return parsed.data as AttemptSpec;
+  const spec = value as Record<string, unknown>;
+  if (spec.schemaVersion !== 3) {
+    invalidAttemptSpec(`schemaVersion: expected 3, got ${String(spec.schemaVersion)}`);
+  }
+  if (typeof spec.sessionId !== "string" || spec.sessionId.trim().length === 0) {
+    invalidAttemptSpec("sessionId: expected non-empty string");
+  }
+  if (typeof spec.turnId !== "string" || spec.turnId.trim().length === 0) {
+    invalidAttemptSpec("turnId: expected non-empty string");
+  }
+  if (typeof spec.attemptId !== "string" || spec.attemptId.trim().length === 0) {
+    invalidAttemptSpec("attemptId: expected non-empty string");
+  }
+  if (typeof spec.taskId !== "string" || spec.taskId.trim().length === 0) {
+    invalidAttemptSpec("taskId: expected non-empty string");
+  }
+  if (typeof spec.intentId !== "string" || spec.intentId.trim().length === 0) {
+    invalidAttemptSpec("intentId: expected non-empty string");
+  }
+  if (spec.mode !== "build" && spec.mode !== "plan") {
+    invalidAttemptSpec("mode: expected build or plan");
+  }
+  if (
+    spec.taskKind !== "assistant_job" &&
+    spec.taskKind !== "explicit_command" &&
+    spec.taskKind !== "verification_check"
+  ) {
+    invalidAttemptSpec("taskKind: expected assistant_job, explicit_command, or verification_check");
+  }
+  if (typeof spec.prompt !== "string") {
+    invalidAttemptSpec("prompt: expected string");
+  }
+  if (!isStringArray(spec.instructions)) {
+    invalidAttemptSpec("instructions: expected string[]");
+  }
+  if (typeof spec.cwd !== "string" || spec.cwd.trim().length === 0) {
+    invalidAttemptSpec("cwd: expected non-empty string");
+  }
+  if (!isObject(spec.execution)) {
+    invalidAttemptSpec("execution: expected object");
+  }
+  const execution = spec.execution as Record<string, unknown>;
+  if (execution.engine !== "agent_cli" && execution.engine !== "shell") {
+    invalidAttemptSpec("execution.engine: expected agent_cli or shell");
+  }
+  if (execution.command !== undefined && !isStringArray(execution.command)) {
+    invalidAttemptSpec("execution.command: expected string[]");
+  }
+  if (!isObject(spec.permissions)) {
+    invalidAttemptSpec("permissions: expected object");
+  }
+  const permissions = spec.permissions as Record<string, unknown>;
+  if (!isObjectArray(permissions.rules)) {
+    invalidAttemptSpec("permissions.rules: expected object[]");
+  }
+  if (typeof permissions.allowAllTools !== "boolean") {
+    invalidAttemptSpec("permissions.allowAllTools: expected boolean");
+  }
+  if (typeof permissions.noAskUser !== "boolean") {
+    invalidAttemptSpec("permissions.noAskUser: expected boolean");
+  }
+  if (!isObject(spec.budget)) {
+    invalidAttemptSpec("budget: expected object");
+  }
+  const budget = spec.budget as Record<string, unknown>;
+  if (
+    typeof budget.timeoutSeconds !== "number" ||
+    !Number.isFinite(budget.timeoutSeconds)
+  ) {
+    invalidAttemptSpec("budget.timeoutSeconds: expected finite number");
+  }
+  if (
+    typeof budget.maxOutputBytes !== "number" ||
+    !Number.isFinite(budget.maxOutputBytes)
+  ) {
+    invalidAttemptSpec("budget.maxOutputBytes: expected finite number");
+  }
+  if (
+    typeof budget.heartbeatIntervalMs !== "number" ||
+    !Number.isFinite(budget.heartbeatIntervalMs)
+  ) {
+    invalidAttemptSpec("budget.heartbeatIntervalMs: expected finite number");
+  }
+  if (
+    budget.tokenBudget !== undefined &&
+    (typeof budget.tokenBudget !== "number" || !Number.isFinite(budget.tokenBudget))
+  ) {
+    invalidAttemptSpec("budget.tokenBudget: expected finite number");
+  }
+  if (!isObjectArray(spec.acceptanceChecks)) {
+    invalidAttemptSpec("acceptanceChecks: expected object[]");
+  }
+  if (!isObjectArray(spec.artifactRequests)) {
+    invalidAttemptSpec("artifactRequests: expected object[]");
+  }
+
+  return spec as AttemptSpec;
 };
 
 const validateWorkerInput = (value: unknown): WorkerDispatchInput => {
@@ -309,17 +417,13 @@ export const decodeWorkerInput = (encoded: string): WorkerDispatchInput =>
   validateWorkerInput(decodeJson(encoded));
 
 export const decodeExecutionProfile = (encoded: string): ExecutionProfile => {
-  const parsed = ExecutionProfileSchema.safeParse(decodeJson(encoded));
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((issue) => {
-        const path = issue.path.length > 0 ? issue.path.join(".") : "root";
-        return `${path}: ${issue.message}`;
-      })
-      .join("; ");
-    throw new Error(`invalid execution profile: ${issues}`);
+  const parsed = decodeJson(encoded);
+  if (!isExecutionProfile(parsed)) {
+    throw new Error(
+      "invalid execution profile: expected agentBackend plus valid sandboxLifecycle and mergeStrategy",
+    );
   }
-  return parsed.data;
+  return parsed;
 };
 
 export const encodeWorkerEnvelope = (prefix: string, payload: unknown): string =>

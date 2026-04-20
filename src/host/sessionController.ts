@@ -221,6 +221,14 @@ const taskModeToComposerMode = (mode: string, autoApprove: boolean): ComposerMod
   return autoApprove ? "autopilot" : "standard";
 };
 
+const planAttemptOptionsFor = (
+  tokenBudget: number | null,
+  isExplicitCommand: boolean | undefined,
+): { isExplicitCommand?: true; tokenBudget?: number } => ({
+  ...(tokenBudget !== null ? { tokenBudget } : {}),
+  ...(isExplicitCommand ? { isExplicitCommand: true as const } : {}),
+});
+
 /**
  * Resolve the effective auto-approve flag, honoring `--allow-all-tools` as a
  * Copilot-parity shortcut for Autopilot mode. Deny-precedence still wins
@@ -303,7 +311,7 @@ export const createAndRunFirstTurn = async (
     const attemptId = createSessionTaskKey(session.sessionId, "turn1-attempt-1");
     const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
     const repoRoot = repoRootFor(args.repo);
-    const plannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
+    const plannerOpts = planAttemptOptionsFor(budget?.tokens ?? null, args.isExplicitCommand);
     const { plan } = planAttempt(
       effectivePrompt,
       composerMode,
@@ -413,7 +421,7 @@ export const appendTurnToActiveSession = async (
     const attemptId = nextAttemptId(withTurn, turnId);
     const composerMode = taskModeToComposerMode(args.mode, resolveAutoApprove(args));
     const repoRoot = repoRootFor(args.repo);
-    const appendPlannerOpts = budget !== null ? { tokenBudget: budget.tokens } : {};
+    const appendPlannerOpts = planAttemptOptionsFor(budget?.tokens ?? null, args.isExplicitCommand);
     const { plan } = planAttempt(
       effectivePrompt,
       composerMode,

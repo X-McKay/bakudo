@@ -10,6 +10,7 @@ export type HostCommand =
   | "tasks"
   | "review"
   | "logs"
+  | "inspect"
   | "sessions"
   | "sandbox"
   | "status"
@@ -63,6 +64,13 @@ export type HostCliArgs = {
   goal?: string;
   sessionId?: string;
   taskId?: string;
+  /**
+   * Optional tab selector for `bakudo inspect` (summary|review|provenance|
+   * artifacts|approvals|sandbox|logs).
+   */
+  inspectTab?: string;
+  /** Internal flag used by `/run-command` to force explicit shell planning. */
+  isExplicitCommand?: boolean;
   /**
    * Topic argument for `bakudo help <topic>`. Populated only when the
    * command is `help` and a single positional argument is supplied.
@@ -127,6 +135,7 @@ export const HOST_COMMANDS = new Set<HostCommand>([
   "tasks",
   "review",
   "logs",
+  "inspect",
   "sessions",
   "sandbox",
   "status",
@@ -323,6 +332,19 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       i += consumed - 1;
       continue;
     }
+    if (
+      result.command === "inspect" &&
+      (arg === "--session" || arg.startsWith("--session="))
+    ) {
+      const { value, consumed } = readLongFlag(argv, i, "--session");
+      result.sessionId = value;
+      i += consumed - 1;
+      continue;
+    }
+    if (arg === "--explicit-command") {
+      result.isExplicitCommand = true;
+      continue;
+    }
     if (arg === "--task-id" || arg.startsWith("--task-id=")) {
       const { value, consumed } = readLongFlag(argv, i, "--task-id");
       result.taskId = value;
@@ -490,6 +512,27 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
     }
     if (positionals[0] !== undefined) {
       result.sessionId = positionals[0];
+    }
+  } else if (result.command === "inspect") {
+    if (result.sessionId === undefined) {
+      const sessionId = positionals[0];
+      if (sessionId === undefined) {
+        throw new Error("missing session id for inspect");
+      }
+      if (positionals.length > 2) {
+        throw new Error("inspect accepts a session id and optional tab");
+      }
+      result.sessionId = sessionId;
+      if (positionals[1] !== undefined) {
+        result.inspectTab = positionals[1];
+      }
+    } else {
+      if (positionals.length > 1) {
+        throw new Error("inspect accepts at most one positional tab when --session is used");
+      }
+      if (positionals[0] !== undefined) {
+        result.inspectTab = positionals[0];
+      }
     }
   } else if (result.command === "review") {
     const sessionId = result.sessionId ?? positionals[0];

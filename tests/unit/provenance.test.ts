@@ -184,6 +184,29 @@ test("last-write-wins: finalize record overrides start", async () => {
   });
 });
 
+test("loadProvenance prefers the newest record when attemptId is reused with a new provenanceId", async () => {
+  await withTempRoot(async (root) => {
+    const first = baseRecord({
+      sessionId: "session-reused",
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      dispatchCommand: ["abox", "run", "--task", "old"],
+    });
+    const second = baseRecord({
+      sessionId: "session-reused",
+      turnId: "turn-1",
+      attemptId: "attempt-1",
+      dispatchCommand: ["abox", "run", "--task", "new"],
+    });
+    await appendProvenanceRecord(root, first);
+    await appendProvenanceRecord(root, second);
+
+    const found = await loadProvenance(root, "session-reused", "attempt-1");
+    assert.equal(found?.provenanceId, second.provenanceId);
+    assert.deepEqual(found?.dispatchCommand, ["abox", "run", "--task", "new"]);
+  });
+});
+
 test("listTurnProvenance filters by turnId", async () => {
   await withTempRoot(async (root) => {
     await appendProvenanceRecord(root, baseRecord({ turnId: "t1", attemptId: "a1" }));

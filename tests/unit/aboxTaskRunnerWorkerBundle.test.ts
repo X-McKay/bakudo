@@ -76,6 +76,7 @@ test("runAttempt: stages the runtime worker module bundle before launch", async 
 
   assert.match(launchScript, /mkdir -p "\$tmpdir\/worker"/);
   assert.match(launchScript, /> "\$tmpdir\/protocol\.js"/);
+  assert.match(launchScript, /> "\$tmpdir\/attemptPath\.js"/);
   assert.match(launchScript, /> "\$tmpdir\/mainModule\.js"/);
   assert.match(launchScript, /> "\$tmpdir\/workerRuntime\.js"/);
   assert.match(launchScript, /> "\$tmpdir\/worker\/taskKinds\.js"/);

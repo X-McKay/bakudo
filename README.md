@@ -84,6 +84,10 @@ pnpm install:cli
 bakudo --help
 ```
 
+`pnpm install:cli` builds the current checkout and installs a global pnpm link,
+so `bakudo` resolves from any directory on a shell that already has the pnpm
+global bin directory on `PATH`.
+
 To prepare a local release bundle for smoke testing or a release draft:
 
 ```bash

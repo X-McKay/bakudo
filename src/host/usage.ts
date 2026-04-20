@@ -29,6 +29,8 @@ export const buildUsageLines = (): string[] => {
     "  bakudo tasks <session-id>",
     "  bakudo review <session-id> [task-id]",
     "  bakudo logs <session-id> [task-id]",
+    "  bakudo inspect <session-id> [summary|review|provenance|artifacts|approvals|sandbox|logs]",
+    "  bakudo inspect --session <id> [summary|review|provenance|artifacts|approvals|sandbox|logs]",
     "  bakudo version [--output-format=json]",
     "  bakudo doctor [--output-format=json]",
     "  bakudo usage [--session <id>] [--since <dur>] [--format text|json]",

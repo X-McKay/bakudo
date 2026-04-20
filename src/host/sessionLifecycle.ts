@@ -56,9 +56,7 @@ const buildRetrySpec = (spec: AttemptSpec, retryId: string, args: HostCliArgs): 
   },
 });
 
-const composerModeFromLegacyRequest = (
-  request: TaskRequest,
-): "standard" | "plan" | "autopilot" => {
+const composerModeFromLegacyRequest = (request: TaskRequest): "standard" | "plan" | "autopilot" => {
   if (request.mode === "plan") {
     return "plan";
   }
@@ -72,14 +70,21 @@ const buildRetryPlanFromLegacyRequest = (
   args: HostCliArgs,
 ): DispatchPlan => {
   const repoRoot = repoRootFor(args.repo);
-  const { plan } = planAttempt(request.goal, composerModeFromLegacyRequest(request), {
-    sessionId: request.sessionId,
-    turnId,
-    attemptId: retryId,
-    taskId: retryId,
-    repoRoot,
-    config: BakudoConfigDefaults,
-  });
+  const { plan } = planAttempt(
+    request.goal,
+    composerModeFromLegacyRequest(request),
+    {
+      sessionId: request.sessionId,
+      turnId,
+      attemptId: retryId,
+      taskId: retryId,
+      repoRoot,
+      config: BakudoConfigDefaults,
+    },
+    {
+      isExplicitCommand: /^\/run-command\s+/u.test(request.goal),
+    },
+  );
   return {
     ...plan,
     spec: {

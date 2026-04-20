@@ -197,6 +197,7 @@ export const reviewAttemptResult = (
   if (
     profile?.sandboxLifecycle === "preserved" &&
     profile.mergeStrategy !== "none" &&
+    spec.taskKind === "assistant_job" &&
     checksOk &&
     exitOk &&
     executionResult.status === "succeeded"

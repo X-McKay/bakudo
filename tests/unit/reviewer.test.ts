@@ -234,6 +234,39 @@ test("reviewAttemptResult: preserved change without repo mutation is rejected", 
   assert.equal(review.action, "retry");
 });
 
+test("reviewAttemptResult: explicit_command is accepted without repo mutation even under a preserved profile", () => {
+  const review = reviewAttemptResult(
+    {
+      ...baseSpec,
+      taskKind: "explicit_command",
+      execution: { engine: "shell", command: ["bash", "-lc", "echo hi"] },
+      acceptanceChecks: [],
+    },
+    makeExecResult({ taskKind: "explicit_command", summary: "command completed successfully" }),
+    {
+      profile: {
+        agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+        sandboxLifecycle: "preserved",
+        mergeStrategy: "auto",
+      },
+      inspection: {
+        sandboxTaskId: "bakudo-attempt-1",
+        branchName: "refs/heads/agent/bakudo-attempt-1",
+        worktreePath: "/tmp/worktree",
+        reservedOutputDir: ".bakudo/out/attempt-1",
+        dirty: false,
+        changedFiles: [],
+        repoChangedFiles: [],
+        outputArtifacts: ["result.json"],
+        patchDiff: "",
+        diffBytes: 0,
+      },
+    },
+  );
+  assert.equal(review.outcome, "success");
+  assert.equal(review.action, "accept");
+});
+
 test("reviewAttemptResult: report-only attempt rejects repo mutation", () => {
   const review = reviewAttemptResult(
     { ...baseSpec, mode: "plan" },

@@ -16,6 +16,7 @@
     "bakudo-worker": "dist/src/workerCli.js"
   },
   "scripts": {
+    "prebuild": "node scripts/clean-dist.mjs",
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "build:release-bundle": "bash scripts/package-release.sh",
     "prepare": "pnpm build",
@@ -26,8 +27,8 @@
     "start": "pnpm build && node dist/src/cli.js",
     "start:host": "pnpm build && node dist/src/hostCli.js",
     "start:worker": "pnpm build && node dist/src/workerCli.js",
-    "install:cli": "pnpm build && npm link",
-    "uninstall:cli": "npm unlink --global bakudo",
+    "install:cli": "pnpm build && pnpm link --global",
+    "uninstall:cli": "pnpm unlink --global bakudo",
     "lint": "eslint .",
     "format": "prettier --write ."
   },

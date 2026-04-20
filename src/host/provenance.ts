@@ -270,5 +270,11 @@ export const loadProvenance = async (
   attemptId: string,
 ): Promise<ProvenanceRecord | null> => {
   const all = await listSessionProvenance(storageRoot, sessionId);
-  return all.find((record) => record.attemptId === attemptId) ?? null;
+  for (let index = all.length - 1; index >= 0; index -= 1) {
+    const record = all[index];
+    if (record?.attemptId === attemptId) {
+      return record;
+    }
+  }
+  return null;
 };

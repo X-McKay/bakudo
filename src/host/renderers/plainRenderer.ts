@@ -50,9 +50,13 @@ const renderOverlay = (frame: RenderFrame): string[] => {
     return [`[approval] ${overlay.message} [y/N]`];
   }
   if (overlay.kind === "approval_prompt") {
-    // VERBATIM copy per Phase 4 spec — mirrors the transcript renderer
-    // exactly since the plain renderer is used for non-TTY/log capture.
-    return renderApprovalPromptLines(overlay.request, overlay.cursorIndex);
+    // Keep the approval lines verbatim and add a lightweight frame so the
+    // plain renderer still reads as a dialog in logs and non-TTY output.
+    return [
+      "-------- approval required --------",
+      ...renderApprovalPromptLines(overlay.request, overlay.cursorIndex),
+      "-----------------------------------",
+    ];
   }
   if (overlay.kind === "resume_confirm") {
     return [`[resume?] ${overlay.message} [y/N]`];

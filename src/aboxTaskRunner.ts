@@ -37,6 +37,7 @@ export type TaskRunnerHandlers = {
 type WorkerModuleSources = {
   packageJson: string;
   protocolJs: string;
+  attemptPathJs: string;
   mainModuleJs: string;
   workerRuntimeJs: string;
   workerCliJs: string;
@@ -99,6 +100,7 @@ const resolveDistSource = async (relativePath: string): Promise<string> => {
 const loadWorkerModuleSources = async (): Promise<WorkerModuleSources> => ({
   packageJson: JSON.stringify({ type: "module" }, null, 2),
   protocolJs: await resolveDistSource("./protocol.js"),
+  attemptPathJs: await resolveDistSource("./attemptPath.js"),
   mainModuleJs: await resolveDistSource("./mainModule.js"),
   workerRuntimeJs: await resolveDistSource("./workerRuntime.js"),
   workerCliJs: await resolveDistSource("./workerCli.js"),
@@ -151,6 +153,7 @@ const buildWorkerLaunchCommand = async (
     'mkdir -p "$tmpdir/worker"',
     renderHereDoc('"$tmpdir/package.json"', `${sources.packageJson}\n`, "BAKUDO_PACKAGE_JSON"),
     renderHereDoc('"$tmpdir/protocol.js"', sources.protocolJs, "BAKUDO_PROTOCOL_JS"),
+    renderHereDoc('"$tmpdir/attemptPath.js"', sources.attemptPathJs, "BAKUDO_ATTEMPT_PATH_JS"),
     renderHereDoc('"$tmpdir/mainModule.js"', sources.mainModuleJs, "BAKUDO_MAIN_MODULE_JS"),
     renderHereDoc(
       '"$tmpdir/workerRuntime.js"',

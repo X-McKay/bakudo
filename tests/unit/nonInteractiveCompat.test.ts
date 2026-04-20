@@ -148,6 +148,18 @@ test("runHostCli: sandbox command routes through inspect formatter", async () =>
   assert.match(output, /abox-abc/);
 });
 
+test("runHostCli: inspect command renders a seeded session via the top-level contract", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-compat-"));
+  const sessionId = await seedV2Session(storageRoot);
+  const { value, output } = await captureStdout(() =>
+    runHostCli(["inspect", "--session", sessionId, "review", "--storage-root", storageRoot]),
+  );
+  assert.equal(value, 0);
+  assert.match(output, /Review/);
+  assert.match(output, new RegExp(sessionId));
+  assert.match(output, /Outcome/);
+});
+
 test("runHostCli: logs command succeeds with zero events on a sessionless file", async () => {
   const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-compat-"));
   const sessionId = await seedV2Session(storageRoot);

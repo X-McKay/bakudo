@@ -4,6 +4,7 @@ import test from "node:test";
 import { initialHostAppState } from "../../src/host/appState.js";
 import { buildDefaultCommandRegistry } from "../../src/host/commandRegistryDefaults.js";
 import type { TickDeps } from "../../src/host/interactiveRenderLoop.js";
+import { parseHostArgs } from "../../src/host/parsing.js";
 import { buildRunCommandSpec } from "../../src/host/commands/runCommand.js";
 
 const buildDeps = (): TickDeps => ({
@@ -81,11 +82,20 @@ test("/run-command: dispatches fallthrough with run argv", async () => {
   assert.equal(outcome.kind, "fallthrough");
   if (outcome.kind === "fallthrough") {
     assert.equal(outcome.resolution.argv[0], "run");
+    assert.ok(
+      outcome.resolution.argv.includes("--explicit-command"),
+      "expected hidden explicit-command flag in argv",
+    );
     assert.ok(outcome.resolution.argv.includes("--mode"));
     assert.ok(outcome.resolution.argv.includes("build"));
     assert.ok(outcome.resolution.argv.includes("echo hello"));
     assert.ok(outcome.resolution.sessionId);
     assert.ok(outcome.resolution.taskId);
+
+    const parsed = parseHostArgs(outcome.resolution.argv);
+    assert.equal(parsed.command, "run");
+    assert.equal(parsed.goal, "echo hello");
+    assert.equal(parsed.isExplicitCommand, true);
   }
 });
 

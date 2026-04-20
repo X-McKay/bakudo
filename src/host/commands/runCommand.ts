@@ -67,7 +67,7 @@ export const runCommandSpec: HostCommandSpec = {
 
     const shell = deriveShellContext(deps.appState);
     const { sessionId, taskId } = createInteractiveSessionIdentity();
-    const argv = ["run", "--mode", "build"];
+    const argv = ["run", "--mode", "build", "--explicit-command"];
     if (shell.autoApprove) {
       argv.push("--yes");
     }

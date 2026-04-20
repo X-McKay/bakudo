@@ -16,7 +16,7 @@ export const createMergeController = (execFileFn: ExecFileLike = execFileAsync) 
     repoPath: string,
     candidate: PreservedCandidateRef,
   ): Promise<void> => {
-    await execFileFn(aboxBin, ["--repo", repoPath, "merge", "--task", candidate.taskId]);
+    await execFileFn(aboxBin, ["merge", "--repo", repoPath, candidate.taskId]);
   };
 
   const discardPreservedCandidate = async (
@@ -24,7 +24,7 @@ export const createMergeController = (execFileFn: ExecFileLike = execFileAsync) 
     repoPath: string,
     candidate: PreservedCandidateRef,
   ): Promise<void> => {
-    await execFileFn(aboxBin, ["--repo", repoPath, "stop", "--task", candidate.taskId, "--clean"]);
+    await execFileFn(aboxBin, ["stop", "--repo", repoPath, candidate.taskId, "--clean"]);
   };
 
   return { mergePreservedCandidate, discardPreservedCandidate };

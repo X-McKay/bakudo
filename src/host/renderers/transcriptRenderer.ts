@@ -54,6 +54,20 @@ const renderHeader = (frame: RenderFrame): string => {
   return `${bold(frame.header.title)}  ${chip}  ${gray(frame.header.sessionLabel)}${repo}`;
 };
 
+const stylizeApprovalPromptLine = (line: string): string => {
+  const wantsPrefix = "Bakudo: Worker wants to run: ";
+  if (line.startsWith(wantsPrefix)) {
+    const command = line.slice(wantsPrefix.length);
+    return `${tone.info("Bakudo:")} Worker wants to run: ${bold(command)}`;
+  }
+  const agentPrefix = "Bakudo: This matches no existing allow rule in agent=";
+  if (line.startsWith(agentPrefix) && line.endsWith(".")) {
+    const agent = line.slice(agentPrefix.length, -1);
+    return `${tone.info("Bakudo:")} This matches no existing allow rule in ${bold(`agent=${agent}`)}.`;
+  }
+  return line;
+};
+
 const renderOverlay = (frame: RenderFrame): string[] => {
   const overlay = frame.overlay;
   if (overlay === undefined) {
@@ -63,9 +77,13 @@ const renderOverlay = (frame: RenderFrame): string[] => {
     return [tone.warning(`[approval] ${overlay.message} [y/N]`)];
   }
   if (overlay.kind === "approval_prompt") {
-    // VERBATIM copy per Phase 4 spec (04-provenance-first-inspection-and-approval.md
-    // §Approval Prompt UX). No tone wrapping — must match byte-for-byte.
-    return renderApprovalPromptLines(overlay.request, overlay.cursorIndex);
+    // Keep the core approval lines verbatim after ANSI stripping, but frame
+    // them as a dialog in TTY mode so the prompt reads like a distinct step.
+    return [
+      tone.warning("──────── approval required ────────"),
+      ...renderApprovalPromptLines(overlay.request, overlay.cursorIndex).map(stylizeApprovalPromptLine),
+      tone.warning("────────────────────────────────────"),
+    ];
   }
   if (overlay.kind === "resume_confirm") {
     return [tone.warning(`[resume?] ${overlay.message} [y/N]`)];

@@ -84,6 +84,9 @@ To install from source:
   pnpm install
   pnpm install:cli
 
+`pnpm install:cli` builds bakudo and installs a global pnpm link so the
+`bakudo` command is available outside the repo as well.
+
 To build a local release bundle instead:
 
   pnpm install

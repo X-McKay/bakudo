@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { access, constants } from "node:fs/promises";
+import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import type { ReviewClassification } from "../resultClassifier.js";
@@ -17,6 +18,49 @@ export const storageRootFor = (
   explicitRoot !== undefined ? resolve(explicitRoot) : resolve(repo ?? ".", ".bakudo", "sessions");
 
 export const repoRootFor = (repo: string | undefined): string => resolve(repo ?? ".");
+
+const localAboxCandidatesFor = (repoRoot: string): string[] => {
+  const workspaceCandidate = resolve(repoRoot, "abox", "target", "release", "abox");
+  const siblingCandidate = resolve(repoRoot, "..", "abox", "target", "release", "abox");
+  return basename(repoRoot) === "bakudo"
+    ? [siblingCandidate, workspaceCandidate]
+    : [workspaceCandidate, siblingCandidate];
+};
+
+const isExecutableFile = async (path: string): Promise<boolean> => {
+  try {
+    await access(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Resolve the effective abox binary for local development. The parser keeps
+ * the stable default `abox`; the host runtime upgrades that sentinel to the
+ * checked-in sibling build when the documented workspace layout is present.
+ */
+export const resolveEffectiveAboxBin = async (
+  repo: string | undefined,
+  aboxBin: string,
+): Promise<string> => {
+  if (aboxBin !== "abox") {
+    return aboxBin;
+  }
+  const repoRoot = repoRootFor(repo);
+  for (const candidate of localAboxCandidatesFor(repoRoot)) {
+    if (await isExecutableFile(candidate)) {
+      return candidate;
+    }
+  }
+  return aboxBin;
+};
+
+export const resolveRuntimeHostArgs = async (args: HostCliArgs): Promise<HostCliArgs> => {
+  const aboxBin = await resolveEffectiveAboxBin(args.repo, args.aboxBin);
+  return aboxBin === args.aboxBin ? args : { ...args, aboxBin };
+};
 
 export const sessionStatusFromReview = (reviewed: ReviewClassification): SessionStatus => {
   if (reviewed.outcome === "success") {

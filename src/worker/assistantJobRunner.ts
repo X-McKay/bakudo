@@ -1,8 +1,5 @@
-import {
-  reservedGuestOutputDirForAttempt,
-  type AttemptSpec,
-  type ExecutionProfile,
-} from "../attemptProtocol.js";
+import { reservedGuestOutputDirForAttempt } from "../attemptPath.js";
+import type { AttemptSpec, ExecutionProfile } from "../attemptProtocol.js";
 import type { TaskRunnerCommand } from "./taskKinds.js";
 
 /**

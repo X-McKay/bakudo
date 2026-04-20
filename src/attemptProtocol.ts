@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+export {
+  reservedGuestOutputDirForAttempt,
+  sanitizeAttemptPathSegment,
+} from "./attemptPath.js";
 import type { ComposerMode } from "./host/appState.js";
 import type { ArtifactKind } from "./host/artifactStore.js";
 
@@ -116,14 +120,6 @@ export type CandidateSetResult = {
   results: Record<string, AttemptExecutionResult>;
   selectedCandidateId?: string;
 };
-
-export const sanitizeAttemptPathSegment = (value: string): string => {
-  const sanitized = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return sanitized.length > 0 ? sanitized : "attempt";
-};
-
-export const reservedGuestOutputDirForAttempt = (attemptId: string): string =>
-  `/workspace/.bakudo/out/${sanitizeAttemptPathSegment(attemptId)}`;
 
 // ---------------------------------------------------------------------------
 // Execution result

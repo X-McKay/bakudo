@@ -16,7 +16,7 @@ test("mergePreservedCandidate dispatches abox merge for candidate task id", asyn
   assert.deepEqual(calls, [
     {
       file: "abox",
-      args: ["--repo", "/repo", "merge", "--task", "task-preserved-1"],
+      args: ["merge", "--repo", "/repo", "task-preserved-1"],
     },
   ]);
 });
@@ -34,7 +34,7 @@ test("discardPreservedCandidate dispatches abox stop --clean for candidate task 
   assert.deepEqual(calls, [
     {
       file: "abox",
-      args: ["--repo", "/repo", "stop", "--task", "task-preserved-1", "--clean"],
+      args: ["stop", "--repo", "/repo", "task-preserved-1", "--clean"],
     },
   ]);
 });

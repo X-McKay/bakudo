@@ -27,6 +27,18 @@ export const dispatchVersionCommand = async (args: HostCliArgs): Promise<number>
   return 0;
 };
 
+export const dispatchInspectCommand = async (args: HostCliArgs): Promise<number> => {
+  const { runInspectCommand } = await import("./commands/inspect.js");
+  const result = await runInspectCommand({
+    sessionId: args.sessionId ?? "",
+    repoRoot: repoRootFor(args.repo),
+    ...(args.storageRoot !== undefined ? { storageRoot: args.storageRoot } : {}),
+    ...(args.inspectTab !== undefined ? { requestedTab: args.inspectTab } : {}),
+    ...(args.copilot.outputFormat !== undefined ? { outputFormat: args.copilot.outputFormat } : {}),
+  });
+  return result.exitCode;
+};
+
 export const dispatchDoctorCommand = async (args: HostCliArgs): Promise<number> => {
   const { runDoctorCommand } = await import("./commands/doctor.js");
   const flags: string[] = [];

@@ -10,6 +10,7 @@ import {
   dispatchCleanupCommand,
   dispatchDoctorCommand,
   dispatchHelpCommand,
+  dispatchInspectCommand,
   dispatchMetricsCommand,
   dispatchUsageCommand,
   dispatchVersionCommand,
@@ -44,7 +45,7 @@ import {
 } from "./interactiveResolvers.js";
 import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 import { resumeSession } from "./sessionLifecycle.js";
-import { repoRootFor, storageRootFor } from "./sessionRunSupport.js";
+import { repoRootFor, resolveRuntimeHostArgs, storageRootFor } from "./sessionRunSupport.js";
 import { parseHostArgs, tokenizeCommand, type HostCliArgs } from "./parsing.js";
 import {
   printLogs,
@@ -80,58 +81,66 @@ import { runNonInteractiveOneShot } from "./oneShotRun.js";
 export { runNonInteractiveOneShot };
 
 export const dispatchHostCommand = async (args: HostCliArgs): Promise<number> => {
+  const runtimeArgs = await resolveRuntimeHostArgs(args);
   // Wave 6d PR11 review blocker B2: user-initiated top-level dispatch — one
   // increment per invocation. `dispatchHostCommand` has a single caller
   // (`hostCli.ts`) and does not recurse, so double-counting is not possible
   // from the current call graph. If a future refactor adds a recursive
   // internal dispatch, this site needs to be guarded.
   getMetricsRecorder().incWorkflowCommand();
-  if (args.command === "help") {
-    return dispatchHelpCommand(args);
+  if (runtimeArgs.command === "help") {
+    return dispatchHelpCommand(runtimeArgs);
   }
-  if (args.command === "version") {
-    return dispatchVersionCommand(args);
+  if (runtimeArgs.command === "version") {
+    return dispatchVersionCommand(runtimeArgs);
   }
-  if (args.command === "doctor") {
-    return dispatchDoctorCommand(args);
+  if (runtimeArgs.command === "doctor") {
+    return dispatchDoctorCommand(runtimeArgs);
   }
-  if (args.command === "cleanup") {
-    return dispatchCleanupCommand(args);
+  if (runtimeArgs.command === "cleanup") {
+    return dispatchCleanupCommand(runtimeArgs);
   }
-  if (args.command === "usage") {
-    return dispatchUsageCommand(args);
+  if (runtimeArgs.command === "usage") {
+    return dispatchUsageCommand(runtimeArgs);
   }
-  if (args.command === "chronicle") {
-    return dispatchChronicleCommand(args);
+  if (runtimeArgs.command === "chronicle") {
+    return dispatchChronicleCommand(runtimeArgs);
   }
-  if (args.command === "metrics") {
-    return dispatchMetricsCommand(args);
+  if (runtimeArgs.command === "metrics") {
+    return dispatchMetricsCommand(runtimeArgs);
   }
-  if (args.command === "run" || args.command === "build" || args.command === "plan") {
-    return runNonInteractiveOneShot(args);
+  if (
+    runtimeArgs.command === "run" ||
+    runtimeArgs.command === "build" ||
+    runtimeArgs.command === "plan"
+  ) {
+    return runNonInteractiveOneShot(runtimeArgs);
   }
-  if (args.command === "sessions") {
-    return printSessions(args);
+  if (runtimeArgs.command === "sessions") {
+    return printSessions(runtimeArgs);
   }
-  if (args.command === "status") {
-    return printStatus(args);
+  if (runtimeArgs.command === "status") {
+    return printStatus(runtimeArgs);
   }
-  if (args.command === "sandbox") {
-    return printSandbox(args);
+  if (runtimeArgs.command === "sandbox") {
+    return printSandbox(runtimeArgs);
   }
-  if (args.command === "resume") {
-    return resumeSession(args);
+  if (runtimeArgs.command === "resume") {
+    return resumeSession(runtimeArgs);
   }
-  if (args.command === "tasks") {
-    return printTasks(args);
+  if (runtimeArgs.command === "tasks") {
+    return printTasks(runtimeArgs);
   }
-  if (args.command === "review") {
-    return printReview(args);
+  if (runtimeArgs.command === "review") {
+    return printReview(runtimeArgs);
   }
-  if (args.command === "init") {
-    return runInit(args);
+  if (runtimeArgs.command === "inspect") {
+    return dispatchInspectCommand(runtimeArgs);
   }
-  return printLogs(args);
+  if (runtimeArgs.command === "init") {
+    return runInit(runtimeArgs);
+  }
+  return printLogs(runtimeArgs);
 };
 
 const buildHostStateFromDeps = (deps: TickDeps): HostStateRecord => ({
@@ -204,7 +213,9 @@ const dispatchThroughController = async (
   // Pre-generate sessionId so user.turn_submitted lands before the dispatch.
   const activeSessionId = deps.appState.activeSessionId;
   const sessionId = activeSessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const args: HostCliArgs = activeSessionId === undefined ? { ...baseArgs, sessionId } : baseArgs;
+  const initialArgs: HostCliArgs =
+    activeSessionId === undefined ? { ...baseArgs, sessionId } : baseArgs;
+  const args = await resolveRuntimeHostArgs(initialArgs);
   const root = storageRootFor(args.repo, args.storageRoot);
   await emitUserTurnSubmitted(root, sessionId, goal, deps.appState.composer.mode);
   const coalesce = createProgressCoalescer((item) => {

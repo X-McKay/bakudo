@@ -50,6 +50,7 @@ test("host cli parses review and resume commands", () => {
   const sandboxArgs = parseHostArgs(["sandbox", "session-9", "task-4"]);
   const tasksArgs = parseHostArgs(["tasks", "session-2"]);
   const logsArgs = parseHostArgs(["logs", "session-3", "task-11"]);
+  const inspectArgs = parseHostArgs(["inspect", "session-8", "provenance"]);
   const helpArgs = parseHostArgs(["help"]);
 
   assert.equal(buildArgs.command, "build");
@@ -74,7 +75,28 @@ test("host cli parses review and resume commands", () => {
   assert.equal(logsArgs.command, "logs");
   assert.equal(logsArgs.sessionId, "session-3");
   assert.equal(logsArgs.taskId, "task-11");
+  assert.equal(inspectArgs.command, "inspect");
+  assert.equal(inspectArgs.sessionId, "session-8");
+  assert.equal(inspectArgs.inspectTab, "provenance");
   assert.equal(helpArgs.command, "help");
+});
+
+test("host cli parses inspect with positional and --session forms", () => {
+  const positional = parseHostArgs(["inspect", "session-1", "summary"]);
+  const flagged = parseHostArgs(["inspect", "--session", "session-2", "logs"]);
+  const defaultTab = parseHostArgs(["inspect", "--session", "session-3"]);
+
+  assert.equal(positional.command, "inspect");
+  assert.equal(positional.sessionId, "session-1");
+  assert.equal(positional.inspectTab, "summary");
+
+  assert.equal(flagged.command, "inspect");
+  assert.equal(flagged.sessionId, "session-2");
+  assert.equal(flagged.inspectTab, "logs");
+
+  assert.equal(defaultTab.command, "inspect");
+  assert.equal(defaultTab.sessionId, "session-3");
+  assert.equal(defaultTab.inspectTab, undefined);
 });
 
 test("host cli command detection prefers the host surface", () => {
@@ -91,6 +113,7 @@ test("host cli command detection prefers the host surface", () => {
   assert.equal(shouldUseHostCli(["sandbox", "session-1"]), true);
   assert.equal(shouldUseHostCli(["tasks", "session-1"]), true);
   assert.equal(shouldUseHostCli(["logs", "session-1"]), true);
+  assert.equal(shouldUseHostCli(["inspect", "session-1"]), true);
   assert.equal(shouldUseHostCli(["--session-id", "session-1", "--task-id", "task-1"]), true);
   assert.equal(shouldUseHostCli(["--goal", "echo hi"]), false);
 });
@@ -98,6 +121,18 @@ test("host cli command detection prefers the host surface", () => {
 test("host cli rejects conflicting modes and unknown options", () => {
   assert.throws(() => parseHostArgs(["plan", "--mode", "build", "inspect"]), /cannot be combined/);
   assert.throws(() => parseHostArgs(["run", "inspect", "--bogus"]), /unknown option: --bogus/);
+});
+
+test("host cli validates inspect arity", () => {
+  assert.throws(() => parseHostArgs(["inspect"]), /missing session id for inspect/);
+  assert.throws(
+    () => parseHostArgs(["inspect", "session-1", "summary", "extra"]),
+    /inspect accepts a session id and optional tab/,
+  );
+  assert.throws(
+    () => parseHostArgs(["inspect", "--session", "session-1", "summary", "extra"]),
+    /inspect accepts at most one positional tab when --session is used/,
+  );
 });
 
 test("host cli dispatches status and init commands", async () => {

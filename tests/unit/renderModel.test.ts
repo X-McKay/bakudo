@@ -38,28 +38,34 @@ test("selectRenderFrame: frame.mode is transcript when screen is inspect", () =>
   assert.equal(frame.mode, "transcript");
 });
 
-test("selectRenderFrame: session label reflects activeSessionId prefix", () => {
+test("selectRenderFrame: session label truncates long ids without duplicating the session prefix", () => {
   const state = reduceHost(initialHostAppState(), {
     type: "set_active_session",
-    sessionId: "abcdef0123456789",
+    sessionId: "session-abcdef0123456789",
   });
   const frame = selectRenderFrame({ state, transcript: [] });
-  assert.equal(frame.header.sessionLabel, "session abcdef01");
+  assert.equal(frame.header.sessionLabel, "session abcdef0123…789");
+});
+
+test("selectRenderFrame: session label includes the active turn when available", () => {
+  const state = reduceHost(initialHostAppState(), {
+    type: "set_active_session",
+    sessionId: "ses_01HXYZABCDEF01",
+    turnId: "turn-3",
+  });
+  const frame = selectRenderFrame({ state, transcript: [] });
+  assert.equal(frame.header.sessionLabel, "session ses_01HXYZ…F01 / turn 3");
 });
 
 test("selectRenderFrame: session label is placeholder when no active session", () => {
   const frame = selectRenderFrame({ state: initialHostAppState(), transcript: [] });
-  assert.equal(frame.header.sessionLabel, "no active session");
+  assert.equal(frame.header.sessionLabel, "new session");
 });
 
-test("selectRenderFrame: footer hints always include core navigation hints", () => {
+test("selectRenderFrame: prompt footer uses action chips that reflect session state", () => {
   const idle = selectRenderFrame({ state: initialHostAppState(), transcript: [] });
-  // Core hints always present
-  assert.ok(idle.footer.hints.includes("[Tab] mode"));
-  assert.ok(idle.footer.hints.includes("[?] help"));
-  assert.ok(idle.footer.hints.includes("[Ctrl+C] exit"));
-  // No session-specific hints when idle
-  assert.ok(!idle.footer.hints.some((h) => h.includes("inspect")));
+  assert.deepEqual(idle.footer.hints, ["[new]", "[resume]", "[help]"]);
+
   const active = selectRenderFrame({
     state: reduceHost(initialHostAppState(), {
       type: "set_active_session",
@@ -67,11 +73,31 @@ test("selectRenderFrame: footer hints always include core navigation hints", () 
     }),
     transcript: [],
   });
-  // Session-specific hints appear when a session is active
-  assert.ok(active.footer.hints.some((h) => h.includes("inspect")));
-  assert.ok(active.footer.hints.some((h) => h.includes("review")));
-  // Core hints still present
-  assert.ok(active.footer.hints.includes("[Tab] mode"));
+  assert.deepEqual(active.footer.hints, ["[inspect]", "[inspect provenance]", "[new]", "[resume]"]);
+});
+
+test("selectRenderFrame: transcript-mode footer switches to overlay/navigation hints", () => {
+  const state = reduceHost(initialHostAppState(), {
+    type: "enqueue_prompt",
+    prompt: {
+      id: "p1",
+      kind: "approval_prompt",
+      payload: {
+        sessionId: "s",
+        turnId: "t",
+        tool: "shell",
+        argument: "git push origin main",
+        policySnapshot: { agent: "standard", composerMode: "standard", autopilot: false },
+      },
+    },
+  });
+  const frame = selectRenderFrame({ state, transcript: [] });
+  assert.deepEqual(frame.footer.hints, [
+    "[1/2/3/4] choose",
+    "[Shift+Tab] cycle",
+    "[?] help",
+    "[Ctrl+C] exit",
+  ]);
 });
 
 test("selectRenderFrame: composer fields mirror state", () => {

@@ -44,7 +44,7 @@ const TRANSCRIPT: TranscriptItem[] = [
 const BASE_TRANSCRIPT_MARKERS: readonly RegExp[] = [
   /You: refactor the reducer/u,
   /Bakudo: Queued sandbox attempt/u,
-  /Review: success/u,
+  /Review: (?:✓ )?success/u,
 ];
 
 const paletteRequest = (): CommandPaletteRequest => ({

@@ -19,12 +19,15 @@ export const planAttempt = (
 ): { intent: TurnIntent; plan: DispatchPlan; spec: AttemptSpec } => {
   const intent = buildTurnIntent(prompt, composerMode, context.repoRoot, options);
   const spec = compileAttemptSpec(intent, context);
-  const isReadOnly = intent.kind === "inspect_repository" || intent.kind === "run_check";
+  const usesEphemeralSandbox =
+    intent.kind === "inspect_repository" ||
+    intent.kind === "run_check" ||
+    intent.kind === "run_explicit_command";
   const isAuto = composerMode === "autopilot" || composerMode === "plan";
   const profile: ExecutionProfile = {
     agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
-    sandboxLifecycle: isReadOnly ? "ephemeral" : "preserved",
-    mergeStrategy: isReadOnly ? "none" : isAuto ? "auto" : "interactive",
+    sandboxLifecycle: usesEphemeralSandbox ? "ephemeral" : "preserved",
+    mergeStrategy: usesEphemeralSandbox ? "none" : isAuto ? "auto" : "interactive",
   };
   const plan: DispatchPlan = {
     schemaVersion: 1,
