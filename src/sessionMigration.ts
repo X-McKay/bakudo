@@ -121,6 +121,18 @@ export const migrateV1TaskToAttempt = (task: SessionTaskRecord): SessionAttemptR
   };
 };
 
+const attachTailReviewRecord = (
+  attempts: SessionAttemptRecord[],
+  reviewRecord: SessionReviewRecord | undefined,
+): SessionAttemptRecord[] => {
+  if (reviewRecord === undefined || attempts.length === 0) {
+    return attempts;
+  }
+  return attempts.map((attempt, index) =>
+    index === attempts.length - 1 ? { ...attempt, reviewRecord } : attempt,
+  );
+};
+
 export type V1RawSession = {
   sessionId: string;
   goal: string;
@@ -133,10 +145,10 @@ export type V1RawSession = {
 
 export const migrateV1ToV2 = (raw: V1RawSession): SessionRecord => {
   const tasks = raw.tasks ?? [];
-  const attempts = tasks.map(migrateV1TaskToAttempt);
+  const baseAttempts = tasks.map(migrateV1TaskToAttempt);
   const latestStatus = tasks.at(-1)?.status ?? "queued";
   const latestTask = tasks.at(-1);
-  const latestAttemptId = attempts.at(-1)?.attemptId ?? latestTask?.taskId ?? "task-1";
+  const latestAttemptId = baseAttempts.at(-1)?.attemptId ?? latestTask?.taskId ?? "task-1";
   const latestReview =
     latestTask === undefined
       ? undefined
@@ -146,6 +158,7 @@ export const migrateV1ToV2 = (raw: V1RawSession): SessionRecord => {
           raw.updatedAt,
           latestTask.lastMessage,
         );
+  const attempts = attachTailReviewRecord(baseAttempts, latestReview);
   const turn: SessionTurnRecord = {
     turnId: "turn-1",
     prompt: raw.goal,
@@ -193,9 +206,10 @@ const normalizeV2Turn = (turn: SessionTurnRecord): SessionTurnRecord => {
     looseReview === undefined
       ? undefined
       : coerceLooseReviewRecord(looseReview, fallbackAttemptId, fallbackReviewedAt);
+  const attemptsWithReview = attachTailReviewRecord(attempts, coercedReview);
   return {
     ...turn,
-    attempts,
+    attempts: attemptsWithReview,
     ...(coercedReview === undefined ? {} : { latestReview: coercedReview }),
   };
 };

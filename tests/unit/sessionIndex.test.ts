@@ -45,7 +45,13 @@ test("buildIndexEntryFromSession extracts latestTurnId and review from final tur
         prompt: "second turn",
         mode: "plan",
         status: "completed",
-        attempts: [],
+        attempts: [
+          {
+            attemptId: "attempt-1",
+            status: "blocked",
+            candidateState: "candidate_ready",
+          },
+        ],
         createdAt: "2026-04-14T10:31:00.000Z",
         updatedAt: "2026-04-14T11:00:00.000Z",
         latestReview: {
@@ -69,6 +75,7 @@ test("buildIndexEntryFromSession extracts latestTurnId and review from final tur
   assert.equal(entry.lastMode, "plan");
   assert.equal(entry.latestReviewedOutcome, "success");
   assert.equal(entry.latestReviewedAction, "accept");
+  assert.equal(entry.latestCandidateState, "candidate_ready");
 });
 
 test("buildIndexEntryFromSession omits review fields when no turn has landed", () => {

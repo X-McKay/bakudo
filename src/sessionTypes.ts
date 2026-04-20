@@ -58,32 +58,101 @@ export type SessionReviewOutcome =
 
 export type SessionReviewAction = "accept" | "retry" | "ask_user" | "halt" | "follow_up";
 
-export type SandboxLifecycleState =
+export type CandidateState =
   | "ephemeral"
-  | "preserved_active"
-  | "preserved_merged"
-  | "preserved_discarded"
-  | "merge_failed";
+  | "candidate_ready"
+  | "apply_staging"
+  | "apply_verifying"
+  | "needs_confirmation"
+  | "apply_writeback"
+  | "applied"
+  | "apply_failed"
+  | "discarded";
 
-export type SandboxLifecycleRecord = {
-  state: SandboxLifecycleState;
+export type CandidateChangeKind = "clean" | "dirty" | "committed" | "mixed";
+
+export type ApplyDriftDecision =
+  | "not_checked"
+  | "allowed"
+  | "blocked_repo_mismatch"
+  | "blocked_detached_head"
+  | "blocked_branch_switched"
+  | "blocked_baseline_not_ancestor"
+  | "blocked_unrelated_history";
+
+export type SourceBaselineRecord = {
+  repoRoot: string;
+  repoIdentity: string;
+  headSha: string;
+  branchName?: string;
+  detachedHead: boolean;
+  clean: boolean;
+  capturedAt: string;
+};
+
+export type ApplyDispatchKind = "apply_verify" | "apply_resolve";
+
+export type ApplyDispatchStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export type ApplyDispatchRecord = {
+  kind: ApplyDispatchKind;
+  attemptId: string;
+  taskId: string;
+  command?: string[];
+  status: ApplyDispatchStatus;
+  recordedAt: string;
+  artifacts?: string[];
+  error?: string;
+};
+
+export type ApplyResolutionConfidence = "high" | "medium" | "low";
+
+export type ApplyResolutionStatus = "auto_applied" | "needs_confirmation" | "failed";
+
+export type ApplyResolutionRecord = {
+  path: string;
+  confidence: ApplyResolutionConfidence;
+  rationale: string;
+  status: ApplyResolutionStatus;
+  recordedAt: string;
+  artifacts?: string[];
+  reason?: string;
+};
+
+export type CandidateRecord = {
+  state: CandidateState;
   candidateId?: string;
   sandboxTaskId?: string;
   branchName?: string;
   worktreePath?: string;
   reservedOutputDir?: string;
+  changeKind?: CandidateChangeKind;
   changedFiles?: string[];
+  dirtyFiles?: string[];
+  committedFiles?: string[];
   outputArtifacts?: string[];
+  fingerprint?: string;
+  manifestArtifact?: string;
+  sourceBaseline?: SourceBaselineRecord;
+  driftDecision?: ApplyDriftDecision;
+  applyDispatches?: ApplyDispatchRecord[];
+  resolutions?: ApplyResolutionRecord[];
   updatedAt: string;
-  mergedAt?: string;
+  reviewedAt?: string;
+  stagedAt?: string;
+  verifiedAt?: string;
+  writebackAt?: string;
+  appliedAt?: string;
   discardedAt?: string;
-  mergeError?: string;
+  failureAt?: string;
+  applyError?: string;
+  confirmationReason?: string;
 };
 
 /**
- * Structured host-side review of an attempt outcome. Lives on the turn
- * (`SessionTurnRecord.latestReview`), not on the attempt, so a turn can carry
- * its most recent verdict even after multiple retry attempts accumulate.
+ * Structured host-side review of an attempt outcome. Persisted on the attempt
+ * as the authoritative review record; `SessionTurnRecord.latestReview` mirrors
+ * the tail attempt's record for summary/index surfaces.
  */
 export type SessionReviewRecord = {
   reviewId: string;
@@ -121,11 +190,12 @@ export type SessionAttemptRecord = {
   attemptSpec?: AttemptSpec;
   /**
    * Phase 7 control-plane planner payload. Host-owned plan envelope that wraps
-   * the worker-facing AttemptSpec plus sandbox/merge profile decisions.
+   * the worker-facing AttemptSpec plus sandbox/candidate-policy decisions.
    */
   dispatchPlan?: DispatchPlan;
-  sandboxLifecycleState?: SandboxLifecycleState;
-  sandbox?: SandboxLifecycleRecord;
+  reviewRecord?: SessionReviewRecord;
+  candidateState?: CandidateState;
+  candidate?: CandidateRecord;
   /**
    * Phase 4 PR3 lineage: predecessor attempt in the same turn when this
    * attempt was produced by a retry. Undefined for the first attempt of a
@@ -151,8 +221,8 @@ export type SessionTurnRecord = {
   createdAt: string;
   updatedAt: string;
   /**
-   * Most recent structured review for this turn. May be absent until the first
-   * attempt completes a review pass.
+   * Most recent structured review for this turn. Mirrors the tail attempt's
+   * `reviewRecord` so list/summary paths do not need to scan every attempt.
    */
   latestReview?: SessionReviewRecord;
   /**

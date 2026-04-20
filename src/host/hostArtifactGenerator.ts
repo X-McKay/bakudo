@@ -3,6 +3,11 @@ import { basename, join } from "node:path";
 
 import type { ArtifactStore } from "../artifactStore.js";
 import type { ArtifactKind } from "./artifactStore.js";
+import {
+  CANDIDATE_FINGERPRINT_ARTIFACT_NAME,
+  CANDIDATE_MANIFEST_ARTIFACT_NAME,
+  describeCandidateManifest,
+} from "./candidateManifest.js";
 import { writeSessionArtifact } from "./sessionArtifactWriter.js";
 import type { WorktreeInspection } from "./worktreeInspector.js";
 
@@ -26,11 +31,11 @@ export const writeHostArtifacts = async (args: {
   turnId: string;
   attemptId: string;
   inspection: WorktreeInspection;
-  mergeResult?: Record<string, unknown>;
+  applyResult?: Record<string, unknown>;
 }): Promise<string[]> => {
-  const { artifactStore, storageRoot, sessionId, turnId, attemptId, inspection, mergeResult } =
-    args;
+  const { artifactStore, storageRoot, sessionId, turnId, attemptId, inspection, applyResult } = args;
   const written: string[] = [];
+  const { manifest, fingerprint } = describeCandidateManifest(inspection);
   if (inspection.patchDiff.length > 0) {
     await writeSessionArtifact(
       artifactStore,
@@ -41,7 +46,12 @@ export const writeHostArtifacts = async (args: {
       "patch.diff",
       inspection.patchDiff,
       "patch",
-      { generatedBy: "host.worktreeInspector", diffBytes: inspection.diffBytes },
+      {
+        generatedBy: "host.worktreeInspector",
+        producer: "host.worktreeInspector",
+        phase: "provenance",
+        diffBytes: inspection.diffBytes,
+      },
     );
     written.push("patch.diff");
   }
@@ -54,23 +64,76 @@ export const writeHostArtifacts = async (args: {
     "changed-files.json",
     `${JSON.stringify(inspection.repoChangedFiles, null, 2)}\n`,
     "report",
-    { generatedBy: "host.worktreeInspector", fileCount: inspection.repoChangedFiles.length },
+    {
+      generatedBy: "host.worktreeInspector",
+      producer: "host.worktreeInspector",
+      phase: "provenance",
+      role: "changed-files",
+      fileCount: inspection.repoChangedFiles.length,
+    },
   );
   written.push("changed-files.json");
+  await writeSessionArtifact(
+    artifactStore,
+    storageRoot,
+    sessionId,
+    turnId,
+    attemptId,
+    CANDIDATE_MANIFEST_ARTIFACT_NAME,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    "report",
+    {
+      generatedBy: "host.worktreeInspector",
+      producer: "host.worktreeInspector",
+      phase: "provenance",
+      role: "candidate-manifest",
+      fingerprint,
+      changeKind: manifest.changeKind,
+      currentHeadSha: manifest.currentHeadSha,
+      ...(manifest.baselineHeadSha === undefined
+        ? {}
+        : { baselineHeadSha: manifest.baselineHeadSha }),
+    },
+  );
+  written.push(CANDIDATE_MANIFEST_ARTIFACT_NAME);
 
-  if (mergeResult !== undefined) {
+  await writeSessionArtifact(
+    artifactStore,
+    storageRoot,
+    sessionId,
+    turnId,
+    attemptId,
+    CANDIDATE_FINGERPRINT_ARTIFACT_NAME,
+    `${fingerprint}\n`,
+    "report",
+    {
+      generatedBy: "host.worktreeInspector",
+      producer: "host.worktreeInspector",
+      phase: "provenance",
+      role: "candidate-fingerprint",
+      fingerprint,
+    },
+  );
+  written.push(CANDIDATE_FINGERPRINT_ARTIFACT_NAME);
+
+  if (applyResult !== undefined) {
     await writeSessionArtifact(
       artifactStore,
       storageRoot,
       sessionId,
       turnId,
       attemptId,
-      "merge-result.json",
-      `${JSON.stringify(mergeResult, null, 2)}\n`,
+      "apply-result.json",
+      `${JSON.stringify(applyResult, null, 2)}\n`,
       "report",
-      { generatedBy: "host.executeAttempt" },
+      {
+        generatedBy: "host.executeAttempt",
+        producer: "host.executeAttempt",
+        phase: "finalize",
+        role: "apply-result",
+      },
     );
-    written.push("merge-result.json");
+    written.push("apply-result.json");
   }
   return written;
 };
@@ -102,6 +165,9 @@ export const harvestGuestArtifacts = async (args: {
       guestArtifactKind(name),
       {
         generatedBy: "guest",
+        producer: "guest",
+        phase: "execution",
+        sourceRelativePath: relativePath,
         originalPath: relativePath,
       },
     );

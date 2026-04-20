@@ -1,8 +1,15 @@
 import { ArtifactStore } from "../artifactStore.js";
 import type { SessionEventEnvelope } from "../protocol.js";
 import type { ReviewClassification } from "../resultClassifier.js";
-import { reviewTaskResult } from "../reviewer.js";
-import type { SessionAttemptRecord, SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
+import { persistedReviewForAttempt, reviewTaskResult } from "../reviewer.js";
+import { SessionStore } from "../sessionStore.js";
+import type {
+  SessionAttemptRecord,
+  SessionRecord,
+  SessionReviewAction,
+  SessionReviewOutcome,
+  SessionTurnRecord,
+} from "../sessionTypes.js";
 import {
   blue,
   cyan,
@@ -67,15 +74,21 @@ export const nextActionHint = (
   reviewed: { action: string },
   attempt?: SessionAttemptRecord,
 ): string => {
+  if (attempt?.candidateState === "candidate_ready") {
+    return "Inspect `bakudo review` and `bakudo sandbox`, then accept to apply or halt to discard the preserved candidate.";
+  }
+  if (attempt?.candidateState === "needs_confirmation") {
+    return "Inspect the preserved candidate and current checkout drift, then accept to continue or halt to discard.";
+  }
+  if (attempt?.candidateState === "apply_failed") {
+    return "Inspect `bakudo review` and `bakudo sandbox`; the preserved candidate was kept because apply failed.";
+  }
   switch (reviewed.action) {
     case "accept":
       return "No follow-up needed.";
     case "retry":
       return "Use `bakudo resume <session-id> [task-id]` to retry with the current host settings.";
     case "ask_user":
-      if (attempt?.sandboxLifecycleState === "preserved_active") {
-        return "Inspect `bakudo review` and `bakudo sandbox`, then accept to merge or halt to discard the preserved candidate.";
-      }
       return "Inspect `bakudo review` and `bakudo sandbox` before deciding whether to retry or adjust scope.";
     case "follow_up":
       return "Review worker logs and artifacts, then decide whether the host should retry or narrow the task.";
@@ -122,19 +135,23 @@ export const findAttemptById = (
 export const countSessionAttempts = (session: SessionRecord): number =>
   session.turns.reduce((total, turn) => total + turn.attempts.length, 0);
 
-export type TurnReviewView = { outcome: string; action: string; reason?: string };
+export type TurnReviewView = {
+  outcome: SessionReviewOutcome;
+  action: SessionReviewAction;
+  reason?: string;
+};
 
 /** Structured review view for a turn/attempt pair. Prefers `latestReview`. */
 export const reviewViewFor = (
   turn: SessionTurnRecord | undefined,
   attempt: SessionAttemptRecord | undefined,
 ): TurnReviewView | null => {
-  const fromTurn = turn?.latestReview;
-  if (fromTurn !== undefined) {
+  const persisted = persistedReviewForAttempt(turn, attempt);
+  if (persisted !== undefined) {
     return {
-      outcome: fromTurn.outcome,
-      action: fromTurn.action,
-      ...(fromTurn.reason === undefined ? {} : { reason: fromTurn.reason }),
+      outcome: persisted.outcome,
+      action: persisted.action,
+      ...(persisted.reason === undefined ? {} : { reason: persisted.reason }),
     };
   }
   if (attempt?.result !== undefined) {
@@ -144,7 +161,9 @@ export const reviewViewFor = (
   return null;
 };
 
-export const reviewedOutcomeExitCode = (reviewed: ReviewClassification): number => {
+export const reviewedOutcomeExitCode = (
+  reviewed: { outcome: ReviewClassification["outcome"]; [key: string]: unknown },
+): number => {
   if (reviewed.outcome === "success") {
     return 0;
   }
@@ -159,7 +178,13 @@ export const reviewedOutcomeExitCode = (reviewed: ReviewClassification): number 
 
 export const printRunSummary = (
   session: SessionRecord,
-  reviewed: ReviewClassification & { taskId?: string; result?: { summary: string } },
+  reviewed: {
+    outcome: ReviewClassification["outcome"];
+    action: string;
+    reason?: string;
+    taskId?: string;
+    result?: { summary: string };
+  },
 ): void => {
   const taskId = reviewed.taskId ?? session.turns.at(-1)?.attempts.at(-1)?.attemptId ?? "n/a";
   const attempt = findAttemptById(session, taskId)?.attempt;
@@ -176,7 +201,7 @@ export const printRunSummary = (
       renderKeyValue("Sandbox", sbx),
       renderKeyValue("Outcome", statusBadge(reviewed.outcome)),
       renderKeyValue("Action", reviewed.action),
-      renderKeyValue("Reason", reviewed.reason),
+      renderKeyValue("Reason", reviewed.reason ?? "n/a"),
       renderKeyValue("Summary", summary),
     ].join("\n") + "\n",
   );
@@ -214,7 +239,7 @@ export const printTasks = async (args: HostCliArgs): Promise<number> => {
           ? attempt.metadata.sandboxTaskId
           : "n/a";
       lines.push(
-        `- ${statusBadge(attempt.status)} ${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status} sandbox=${sbx}${reviewed ? ` outcome=${reviewed.outcome} action=${reviewed.action}` : ""}${attempt.lastMessage ? ` message=${attempt.lastMessage}` : ""}`,
+        `- ${statusBadge(attempt.status)} ${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status} sandbox=${sbx}${attempt.candidateState ? ` candidate=${attempt.candidateState}` : ""}${reviewed ? ` outcome=${reviewed.outcome} action=${reviewed.action}` : ""}${attempt.lastMessage ? ` message=${attempt.lastMessage}` : ""}`,
       );
     }
   }
@@ -239,7 +264,7 @@ const emptySessionsText = (heading: string): string =>
 
 const formatSummaryLine = (summary: SessionSummaryView): string => {
   const reviewed = reviewViewForSummary(summary);
-  return `- ${statusBadge(summary.status)} ${summary.sessionId} status=${summary.status} updated=${summary.updatedAt}${reviewed ? ` latest=${reviewed.outcome}` : ""} title=${summary.title}`;
+  return `- ${statusBadge(summary.status)} ${summary.sessionId} status=${summary.status} updated=${summary.updatedAt}${summary.latestCandidateState ? ` candidate=${summary.latestCandidateState}` : ""}${reviewed ? ` latest=${reviewed.outcome}` : ""} title=${summary.title}`;
 };
 
 const emitSummariesJsonl = (summaries: SessionSummaryView[]): void => {
@@ -307,7 +332,7 @@ export const printStatus = async (args: HostCliArgs): Promise<number> => {
     lines.push(
       kv(
         "Latest",
-        `${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status}`,
+        `${attempt.attemptId} mode=${attemptModeLabel(attempt)} status=${attempt.status}${attempt.candidateState ? ` candidate=${attempt.candidateState}` : ""}`,
       ),
     );
     lines.push(kv("Sandbox", sbx));
@@ -360,21 +385,32 @@ export const printReview = async (args: HostCliArgs): Promise<number> => {
     throw new Error(`no reviewed result found for session ${session.sessionId}`);
   }
   const reviewed = reviewTaskResult(attempt.result);
+  const persistedReview = persistedReviewForAttempt(turn, attempt);
+  const reviewForOutput = persistedReview ?? reviewed;
   if (args.copilot.outputFormat === "json") {
-    const reviewRecord = turn.latestReview ?? {
-      outcome: reviewed.outcome,
-      action: reviewed.action,
-      reason: reviewed.reason,
-    };
-    stdoutWrite(`${JSON.stringify(reviewRecord)}\n`);
-    return reviewedOutcomeExitCode(reviewed);
+    stdoutWrite(
+      `${JSON.stringify({
+        ...reviewForOutput,
+        ...(attempt.candidateState === undefined ? {} : { candidateState: attempt.candidateState }),
+        ...(attempt.candidate?.driftDecision === undefined
+          ? {}
+          : { driftDecision: attempt.candidate.driftDecision }),
+        ...(attempt.candidate?.confirmationReason === undefined
+          ? {}
+          : { confirmationReason: attempt.candidate.confirmationReason }),
+        ...(attempt.candidate?.applyError === undefined
+          ? {}
+          : { applyError: attempt.candidate.applyError }),
+      })}\n`,
+    );
+    return reviewedOutcomeExitCode(reviewForOutput);
   }
   const artifactStore = new ArtifactStore(rootDir);
   const artifacts = await artifactStore.listTaskArtifacts(session.sessionId, attempt.attemptId);
-  const lines = formatInspectReview({ session, attempt, reviewed, artifacts });
-  lines.push(`Next       ${nextActionHint(reviewed, attempt)}`);
+  const lines = formatInspectReview({ session, attempt, reviewed: reviewForOutput, artifacts });
+  lines.push(`Next       ${nextActionHint(reviewForOutput, attempt)}`);
   stdoutWrite(`${renderSection("Review")}\n${lines.slice(1).join("\n")}\n`);
-  return reviewedOutcomeExitCode(reviewed);
+  return reviewedOutcomeExitCode(reviewForOutput);
 };
 
 const truncateLogValue = (value: string, max: number): string =>

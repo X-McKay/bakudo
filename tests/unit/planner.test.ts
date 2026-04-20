@@ -42,11 +42,11 @@ test("planAttempt: intent.intentId === spec.intentId", () => {
 test("planAttempt: dispatch profile defaults by intent/mode", () => {
   const standard = planAttempt("add a button", "standard", baseContext()).plan.profile;
   assert.equal(standard.sandboxLifecycle, "preserved");
-  assert.equal(standard.mergeStrategy, "interactive");
+  assert.equal(standard.candidatePolicy, "manual_apply");
 
   const check = planAttempt("run tests", "standard", baseContext()).plan.profile;
   assert.equal(check.sandboxLifecycle, "ephemeral");
-  assert.equal(check.mergeStrategy, "none");
+  assert.equal(check.candidatePolicy, "discard");
 });
 
 test("planAttempt: round-trip inspect_repository (plan mode)", () => {
@@ -81,7 +81,7 @@ test("planAttempt: round-trip run_explicit_command", () => {
   assert.equal(spec.execution.engine, "shell");
   assert.deepEqual(spec.execution.command, ["bash", "-lc", "echo hello"]);
   assert.equal(plan.profile.sandboxLifecycle, "ephemeral");
-  assert.equal(plan.profile.mergeStrategy, "none");
+  assert.equal(plan.profile.candidatePolicy, "discard");
 });
 
 test("planAttempt: tokenBudget forwarded through intent to spec", () => {

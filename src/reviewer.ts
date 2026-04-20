@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   AttemptExecutionResult,
   AttemptSpec,
@@ -22,7 +24,7 @@ import {
   type ReviewClassifierHints,
   type ReviewConfidence,
 } from "./resultClassifier.js";
-import type { SessionAttemptRecord } from "./sessionTypes.js";
+import type { SessionAttemptRecord, SessionReviewRecord, SessionTurnRecord } from "./sessionTypes.js";
 
 export type { ReviewConfidence } from "./resultClassifier.js";
 
@@ -75,10 +77,12 @@ export type ReviewedAttemptResult = ReviewClassification & {
 export type ReviewAttemptOptions = ReviewClassifierHints & {
   inspection?: WorktreeInspection | null;
   profile?: ExecutionProfile;
-  mergeResult?: {
-    merged?: boolean;
+  applyResult?: {
+    applied?: boolean;
     discarded?: boolean;
     error?: string;
+    needsConfirmation?: boolean;
+    confirmationReason?: string;
   } | null;
 };
 
@@ -105,7 +109,7 @@ export const reviewAttemptResult = (
   executionResult: AttemptExecutionResult,
   options: ReviewAttemptOptions = {},
 ): ReviewedAttemptResult => {
-  const { inspection, profile, mergeResult, ...hints } = options;
+  const { inspection, profile, applyResult, ...hints } = options;
   // Fast path: structured checks + clean exit → success.
   const checksOk = allChecksPassed(executionResult);
   const exitOk =
@@ -115,11 +119,11 @@ export const reviewAttemptResult = (
   const repoChangedFiles = inspection?.repoChangedFiles ?? [];
   const outputArtifacts = inspection?.outputArtifacts ?? [];
 
-  if (typeof mergeResult?.error === "string" && mergeResult.error.length > 0) {
+  if (typeof applyResult?.error === "string" && applyResult.error.length > 0) {
     return {
       outcome: "retryable_failure",
       action: "retry",
-      reason: mergeResult.error,
+      reason: applyResult.error,
       retryable: true,
       needsUser: false,
       confidence: hints.confidence ?? "high",
@@ -131,7 +135,7 @@ export const reviewAttemptResult = (
   }
 
   if (
-    profile?.mergeStrategy === "none" &&
+    profile?.candidatePolicy === "discard" &&
     profile.sandboxLifecycle === "preserved" &&
     spec.taskKind === "assistant_job" &&
     checksOk &&
@@ -197,7 +201,7 @@ export const reviewAttemptResult = (
 
   if (
     profile?.sandboxLifecycle === "preserved" &&
-    profile.mergeStrategy !== "none" &&
+    profile.candidatePolicy !== "discard" &&
     spec.taskKind === "assistant_job" &&
     checksOk &&
     exitOk &&
@@ -236,11 +240,26 @@ export const reviewAttemptResult = (
       };
     }
     const changeSummary = `modified ${repoChangedFiles.length} file${repoChangedFiles.length === 1 ? "" : "s"}`;
-    if (profile.mergeStrategy === "interactive") {
+    if (profile.candidatePolicy === "manual_apply") {
       return {
         outcome: "blocked_needs_user",
         action: "ask_user",
-        reason: `${changeSummary}; candidate preserved for merge or discard`,
+        reason: `${changeSummary}; candidate preserved for apply or discard`,
+        retryable: false,
+        needsUser: true,
+        confidence: hints.confidence ?? "high",
+        attemptId: spec.attemptId,
+        intentId: spec.intentId,
+        status: "blocked",
+        ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
+      };
+    }
+    if (applyResult?.needsConfirmation === true) {
+      return {
+        outcome: "blocked_needs_user",
+        action: "ask_user",
+        reason:
+          applyResult.confirmationReason ?? `${changeSummary}; apply requires explicit confirmation`,
         retryable: false,
         needsUser: true,
         confidence: hints.confidence ?? "high",
@@ -254,7 +273,9 @@ export const reviewAttemptResult = (
       outcome: "success",
       action: "accept",
       reason:
-        mergeResult?.merged === true ? `${changeSummary}; auto-merge succeeded` : changeSummary,
+        applyResult?.applied === true
+          ? `${changeSummary}; auto-apply succeeded`
+          : `${changeSummary}; candidate ready for apply`,
       retryable: false,
       needsUser: false,
       confidence: hints.confidence ?? "high",
@@ -300,6 +321,33 @@ export const reviewAttemptResult = (
     status: executionResult.status,
     ...(executionResult.checkResults ? { checkResults: executionResult.checkResults } : {}),
   };
+};
+
+export const createAttemptReviewRecord = (args: {
+  spec: Pick<AttemptSpec, "attemptId" | "intentId">;
+  reviewed: Pick<ReviewedAttemptResult, "outcome" | "action" | "reason">;
+  reviewedAt: string;
+}): SessionReviewRecord => ({
+  reviewId: `review-${Date.now()}-${randomUUID().slice(0, 8)}`,
+  attemptId: args.spec.attemptId,
+  intentId: args.spec.intentId,
+  outcome: args.reviewed.outcome,
+  action: args.reviewed.action,
+  ...(args.reviewed.reason === undefined ? {} : { reason: args.reviewed.reason }),
+  reviewedAt: args.reviewedAt,
+});
+
+export const persistedReviewForAttempt = (
+  turn: SessionTurnRecord | undefined,
+  attempt: SessionAttemptRecord | undefined,
+): SessionReviewRecord | undefined => {
+  if (attempt?.reviewRecord !== undefined) {
+    return attempt.reviewRecord;
+  }
+  if (turn?.latestReview?.attemptId === attempt?.attemptId) {
+    return turn?.latestReview;
+  }
+  return undefined;
 };
 
 // ---------------------------------------------------------------------------

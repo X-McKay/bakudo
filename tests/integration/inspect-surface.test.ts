@@ -13,7 +13,9 @@ import {
   formatInspectSandbox,
   formatInspectSummary,
 } from "../../src/host/inspectFormatter.js";
+import { buildInspectView } from "../../src/host/commands/inspect.js";
 import { reviewTaskResult } from "../../src/reviewer.js";
+import { SessionStore } from "../../src/sessionStore.js";
 
 const createTempRoot = async (): Promise<string> => mkdtemp(join(tmpdir(), "bakudo-inspect-int-"));
 
@@ -188,4 +190,80 @@ test("inspect logs subcommand renders event lines", () => {
   assert.match(joined, /task\.started/, "contains started event");
   assert.match(joined, /working/, "contains progress message");
   assert.match(joined, /task\.completed/, "contains completed event");
+});
+
+test("buildInspectView review prefers persisted apply-state review over raw worker success", async () => {
+  const rootDir = await createTempRoot();
+  try {
+    const store = new SessionStore(rootDir);
+    await store.createSession({
+      sessionId: "session-inspect-apply",
+      goal: "apply recovery",
+      repoRoot: "/tmp/repo",
+      status: "failed",
+      turns: [
+        {
+          turnId: "turn-1",
+          prompt: "apply recovery",
+          mode: "build",
+          status: "failed",
+          attempts: [
+            {
+              attemptId: "attempt-apply",
+              status: "failed",
+              candidateState: "apply_failed",
+              candidate: {
+                state: "apply_failed",
+                updatedAt: "2026-04-19T12:00:02.000Z",
+                applyError: "host apply failed after review",
+              },
+              result: {
+                schemaVersion: 1,
+                taskId: "attempt-apply",
+                sessionId: "session-inspect-apply",
+                status: "succeeded",
+                summary: "worker succeeded before host apply",
+                exitCode: 0,
+                finishedAt: "2026-04-19T12:00:01.000Z",
+              },
+              reviewRecord: {
+                reviewId: "review-apply-1",
+                attemptId: "attempt-apply",
+                outcome: "retryable_failure",
+                action: "retry",
+                reason: "host apply failed after review",
+                reviewedAt: "2026-04-19T12:00:02.000Z",
+              },
+            },
+          ],
+          latestReview: {
+            reviewId: "review-apply-1",
+            attemptId: "attempt-apply",
+            outcome: "retryable_failure",
+            action: "retry",
+            reason: "host apply failed after review",
+            reviewedAt: "2026-04-19T12:00:02.000Z",
+          },
+          createdAt: "2026-04-19T12:00:00.000Z",
+          updatedAt: "2026-04-19T12:00:02.000Z",
+        },
+      ],
+      createdAt: "2026-04-19T12:00:00.000Z",
+      updatedAt: "2026-04-19T12:00:02.000Z",
+    });
+    const session = (await store.loadSession("session-inspect-apply"))!;
+    const { lines } = await buildInspectView({
+      rootDir,
+      session,
+      requestedTab: "review",
+      invalidTabMode: "error",
+    });
+    const joined = lines.join("\n");
+    assert.match(joined, /Outcome\s+retryable_failure/u);
+    assert.match(joined, /Action\s+retry/u);
+    assert.match(joined, /Candidate\s+apply_failed/u);
+    assert.match(joined, /host apply failed after review/u);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
 });

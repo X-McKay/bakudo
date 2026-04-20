@@ -34,7 +34,7 @@ const baseSpec = (overrides: Partial<AttemptSpec> = {}): AttemptSpec => ({
 const profile = {
   agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
   sandboxLifecycle: "preserved" as const,
-  mergeStrategy: "interactive" as const,
+  candidatePolicy: "manual_apply" as const,
 };
 
 // ---------------------------------------------------------------------------

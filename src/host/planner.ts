@@ -32,7 +32,7 @@ export const planAttempt = (
   const profile: ExecutionProfile = {
     agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
     sandboxLifecycle: usesEphemeralSandbox ? "ephemeral" : "preserved",
-    mergeStrategy: usesEphemeralSandbox ? "none" : isAuto ? "auto" : "interactive",
+    candidatePolicy: usesEphemeralSandbox ? "discard" : isAuto ? "auto_apply" : "manual_apply",
   };
   const plan: DispatchPlan = {
     schemaVersion: 1,

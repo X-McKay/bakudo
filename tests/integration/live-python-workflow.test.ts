@@ -212,11 +212,18 @@ if (!liveE2EEnabled || aboxBin === undefined || aboxBin.length === 0) {
         );
 
         const sessionDir = join(storageRoot, sessions[0]!.name);
+        const session = JSON.parse(await readFile(join(sessionDir, "session.json"), "utf8")) as {
+          turns: Array<{ attempts: Array<{ status?: string; candidateState?: string }> }>;
+        };
         const artifacts = await readJsonLines<ArtifactRecord>(join(sessionDir, "artifacts.ndjson"));
         const workerOutput = artifacts
           .filter((record) => record.name === "worker-output.log")
           .at(-1);
         assert.ok(workerOutput, "expected a persisted worker-output.log artifact");
+        assert.ok(artifacts.some((record) => record.name === "apply-result.json"));
+        assert.ok(artifacts.some((record) => record.name === "apply-verify-result.json"));
+        assert.equal(session.turns[0]?.attempts[0]?.status, "succeeded");
+        assert.equal(session.turns[0]?.attempts[0]?.candidateState, "applied");
 
         const workerLog = await readFile(join(sessionDir, workerOutput.path), "utf8");
         const resultLine = workerLog

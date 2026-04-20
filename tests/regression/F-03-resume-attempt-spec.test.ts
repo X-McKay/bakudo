@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -13,8 +13,11 @@ import type { TaskRequest } from "../../src/protocol.js";
 import { createSessionTaskKey } from "../../src/sessionTypes.js";
 import { SessionStore } from "../../src/sessionStore.js";
 import type { ReviewedAttemptResult } from "../../src/reviewer.js";
+import { ArtifactStore } from "../../src/artifactStore.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
+import { APPLY_WRITEBACK_JOURNAL_ARTIFACT_NAME } from "../../src/host/applyRecovery.js";
 import { withCapturedStdout } from "../../src/host/io.js";
+import { writeSessionArtifact } from "../../src/host/sessionArtifactWriter.js";
 import { resumeSession } from "../../src/host/sessionLifecycle.js";
 
 type Capture = {
@@ -245,6 +248,120 @@ test("F-03: resumeSession still works for legacy request-only attempts", async (
     assert.equal(captured.length, 1);
     assert.ok(captured[0]?.instructions.some((line) => line.includes("User prompt: echo hi")));
     assert.equal(captured[0]?.taskId, createSessionTaskKey(sessionId, "retry-2"));
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+    await rm(storageRoot, { recursive: true, force: true });
+  }
+});
+
+test("F-03: resumeSession restores interrupted apply_writeback before deciding whether to retry", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "bakudo-f-03-apply-recovery-repo-"));
+  const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-f-03-apply-recovery-store-"));
+  try {
+    const store = new SessionStore(storageRoot);
+    const spec = buildAttemptSpec();
+    const artifactStore = new ArtifactStore(storageRoot);
+    await writeFile(join(repoRoot, "README.md"), "after\n", "utf8");
+    await store.createSession({
+      sessionId: spec.sessionId,
+      goal: spec.prompt,
+      repoRoot,
+      status: "reviewing",
+      turns: [
+        {
+          turnId: spec.turnId,
+          prompt: spec.prompt,
+          mode: spec.mode,
+          status: "reviewing",
+          attempts: [
+            {
+              attemptId: spec.attemptId,
+              status: "needs_review",
+              attemptSpec: spec,
+              candidateState: "apply_writeback",
+              candidate: {
+                state: "apply_writeback",
+                updatedAt: "2026-04-19T00:00:00.000Z",
+              },
+              result: {
+                schemaVersion: 1,
+                taskId: spec.taskId,
+                sessionId: spec.sessionId,
+                status: "succeeded",
+                summary: "worker ok",
+                exitCode: 0,
+                finishedAt: "2026-04-19T00:00:01.000Z",
+              },
+              reviewRecord: {
+                reviewId: "review-1",
+                attemptId: spec.attemptId,
+                outcome: "success",
+                action: "accept",
+                reviewedAt: "2026-04-19T00:00:01.000Z",
+              },
+            },
+          ],
+          latestReview: {
+            reviewId: "review-1",
+            attemptId: spec.attemptId,
+            outcome: "success",
+            action: "accept",
+            reviewedAt: "2026-04-19T00:00:01.000Z",
+          },
+          createdAt: "2026-04-19T00:00:00.000Z",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-04-19T00:00:00.000Z",
+      updatedAt: "2026-04-19T00:00:00.000Z",
+    });
+    await writeSessionArtifact(
+      artifactStore,
+      storageRoot,
+      spec.sessionId,
+      spec.turnId,
+      spec.attemptId,
+      APPLY_WRITEBACK_JOURNAL_ARTIFACT_NAME,
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          createdAt: "2026-04-19T00:00:00.000Z",
+          entries: [
+            {
+              path: "README.md",
+              before: { kind: "text", content: "before\n" },
+              after: { kind: "text", content: "after\n" },
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+      "report",
+      {
+        generatedBy: "host.candidateApplier",
+        producer: "host.candidateApplier",
+        phase: "apply",
+        role: "apply-writeback-journal",
+      },
+    );
+
+    let executeCalled = false;
+    const cap = capture();
+    const exit = await withCapturedStdout(cap.writer, () =>
+      resumeSession(buildArgs(storageRoot, repoRoot, spec.sessionId, spec.attemptId), {
+        executeAttemptFn: async () => {
+          executeCalled = true;
+          throw new Error("resume should not redispatch after apply recovery");
+        },
+      }),
+    );
+
+    assert.equal(exit, 1);
+    assert.equal(executeCalled, false);
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "before\n");
+    const session = await store.loadSession(spec.sessionId);
+    assert.equal(session?.turns[0]?.attempts[0]?.candidateState, "apply_failed");
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
     await rm(storageRoot, { recursive: true, force: true });

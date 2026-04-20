@@ -9,7 +9,7 @@ export class ToolRuntime {
   private static readonly TOOL_PROFILE: ExecutionProfile = {
     agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
     sandboxLifecycle: "ephemeral",
-    mergeStrategy: "none",
+    candidatePolicy: "discard",
   };
 
   private readonly specs: Map<string, ToolSpec>;

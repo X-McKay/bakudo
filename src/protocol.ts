@@ -33,6 +33,8 @@ export const BAKUDO_HOST_TASK_KINDS: readonly string[] = [
   "assistant_job",
   "explicit_command",
   "verification_check",
+  "apply_verify",
+  "apply_resolve",
 ] as const;
 
 /** Execution engines the host knows how to dispatch through. */
@@ -332,6 +334,7 @@ export type SessionEventPayloadMap = {
     outcome: string;
     action: string;
     reason: string;
+    candidateState?: string;
   };
   "host.artifact_registered": {
     artifactId: string;
@@ -339,8 +342,14 @@ export type SessionEventPayloadMap = {
     // imports; mirrors the `ArtifactKind` type exported from
     // `src/host/artifactStore.ts`.
     kind: "result" | "log" | "dispatch" | "patch" | "summary" | "diff" | "report";
+    // Collision-proof persisted filename/key; display copy stays in `name`.
+    storageKey: string;
     name: string;
     path: string;
+    producer?: string;
+    phase?: string;
+    role?: string;
+    sourceRelativePath?: string;
     turnId: string;
     attemptId?: string;
   };

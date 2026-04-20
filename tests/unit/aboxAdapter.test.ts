@@ -31,7 +31,7 @@ const createMockChildProcess = (): MockChildProcess => {
 const EPHEMERAL_PROFILE: ExecutionProfile = {
   agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
   sandboxLifecycle: "ephemeral",
-  mergeStrategy: "none",
+  candidatePolicy: "discard",
 };
 
 const PRESERVED_PROFILE: ExecutionProfile = {

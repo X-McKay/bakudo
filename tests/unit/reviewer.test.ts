@@ -185,21 +185,25 @@ test("reviewAttemptResult: policy denial via hints", () => {
   assert.equal(review.action, "halt");
 });
 
-test("reviewAttemptResult: preserved interactive candidate blocks for user review", () => {
+test("reviewAttemptResult: preserved manual-apply candidate blocks for user review", () => {
   const review = reviewAttemptResult(baseSpec, makeExecResult(), {
     profile: {
       agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
       sandboxLifecycle: "preserved",
-      mergeStrategy: "interactive",
+      candidatePolicy: "manual_apply",
     },
     inspection: {
       sandboxTaskId: "bakudo-attempt-1",
       branchName: "refs/heads/agent/bakudo-attempt-1",
       worktreePath: "/tmp/worktree",
       reservedOutputDir: ".bakudo/out/attempt-1",
+      currentHeadSha: "a".repeat(40),
       dirty: true,
       changedFiles: ["src/app.ts"],
       repoChangedFiles: ["src/app.ts"],
+      dirtyFiles: ["src/app.ts"],
+      committedFiles: [],
+      changeKind: "dirty",
       outputArtifacts: [],
       patchDiff: "diff --git a/src/app.ts b/src/app.ts",
       diffBytes: 32,
@@ -215,16 +219,20 @@ test("reviewAttemptResult: preserved change without repo mutation is rejected", 
     profile: {
       agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
       sandboxLifecycle: "preserved",
-      mergeStrategy: "auto",
+      candidatePolicy: "auto_apply",
     },
     inspection: {
       sandboxTaskId: "bakudo-attempt-1",
       branchName: "refs/heads/agent/bakudo-attempt-1",
       worktreePath: "/tmp/worktree",
       reservedOutputDir: ".bakudo/out/attempt-1",
+      currentHeadSha: "a".repeat(40),
       dirty: true,
       changedFiles: [".bakudo/out/attempt-1/summary.md"],
       repoChangedFiles: [],
+      dirtyFiles: [],
+      committedFiles: [],
+      changeKind: "clean",
       outputArtifacts: ["summary.md"],
       patchDiff: "",
       diffBytes: 0,
@@ -247,16 +255,20 @@ test("reviewAttemptResult: explicit_command is accepted without repo mutation ev
       profile: {
         agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
         sandboxLifecycle: "preserved",
-        mergeStrategy: "auto",
+        candidatePolicy: "auto_apply",
       },
       inspection: {
         sandboxTaskId: "bakudo-attempt-1",
         branchName: "refs/heads/agent/bakudo-attempt-1",
         worktreePath: "/tmp/worktree",
         reservedOutputDir: ".bakudo/out/attempt-1",
+        currentHeadSha: "a".repeat(40),
         dirty: false,
         changedFiles: [],
         repoChangedFiles: [],
+        dirtyFiles: [],
+        committedFiles: [],
+        changeKind: "clean",
         outputArtifacts: ["result.json"],
         patchDiff: "",
         diffBytes: 0,
@@ -268,25 +280,33 @@ test("reviewAttemptResult: explicit_command is accepted without repo mutation ev
 });
 
 test("reviewAttemptResult: report-only attempt rejects repo mutation", () => {
-  const review = reviewAttemptResult({ ...baseSpec, mode: "plan" }, makeExecResult(), {
-    profile: {
-      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
-      sandboxLifecycle: "preserved",
-      mergeStrategy: "none",
+  const review = reviewAttemptResult(
+    { ...baseSpec, mode: "plan" },
+    makeExecResult(),
+    {
+      profile: {
+        agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+        sandboxLifecycle: "preserved",
+        candidatePolicy: "discard",
+      },
+      inspection: {
+        sandboxTaskId: "bakudo-attempt-1",
+        branchName: "refs/heads/agent/bakudo-attempt-1",
+        worktreePath: "/tmp/worktree",
+        reservedOutputDir: ".bakudo/out/attempt-1",
+        currentHeadSha: "a".repeat(40),
+        dirty: true,
+        changedFiles: ["README.md"],
+        repoChangedFiles: ["README.md"],
+        dirtyFiles: ["README.md"],
+        committedFiles: [],
+        changeKind: "dirty",
+        outputArtifacts: ["summary.md"],
+        patchDiff: "diff",
+        diffBytes: 4,
+      },
     },
-    inspection: {
-      sandboxTaskId: "bakudo-attempt-1",
-      branchName: "refs/heads/agent/bakudo-attempt-1",
-      worktreePath: "/tmp/worktree",
-      reservedOutputDir: ".bakudo/out/attempt-1",
-      dirty: true,
-      changedFiles: ["README.md"],
-      repoChangedFiles: ["README.md"],
-      outputArtifacts: ["summary.md"],
-      patchDiff: "diff",
-      diffBytes: 4,
-    },
-  });
+  );
   assert.equal(review.outcome, "retryable_failure");
   assert.equal(review.action, "retry");
 });

@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import type { ComposerMode } from "./appState.js";
 import type {
+  CandidateState,
   SessionRecord,
   SessionReviewAction,
   SessionReviewOutcome,
@@ -31,6 +32,7 @@ export type SessionIndexEntry = {
   latestTurnId?: string;
   latestReviewedOutcome?: SessionReviewOutcome;
   latestReviewedAction?: SessionReviewAction;
+  latestCandidateState?: CandidateState;
   updatedAt: string;
 };
 
@@ -73,7 +75,8 @@ const coerceComposerMode = (value: unknown): ComposerMode => {
  */
 export const buildIndexEntryFromSession = (session: SessionRecord): SessionIndexEntry => {
   const latestTurn = session.turns.at(-1);
-  const latestReview = latestTurn?.latestReview;
+  const latestAttempt = latestTurn?.attempts.at(-1);
+  const latestReview = latestAttempt?.reviewRecord ?? latestTurn?.latestReview;
   const lastMode = coerceComposerMode(latestTurn?.mode);
   const entry: SessionIndexEntry = {
     schemaVersion: SESSION_INDEX_SCHEMA_VERSION,
@@ -90,6 +93,9 @@ export const buildIndexEntryFromSession = (session: SessionRecord): SessionIndex
   if (latestReview !== undefined) {
     entry.latestReviewedOutcome = latestReview.outcome;
     entry.latestReviewedAction = latestReview.action;
+  }
+  if (latestAttempt?.candidateState !== undefined) {
+    entry.latestCandidateState = latestAttempt.candidateState;
   }
   return entry;
 };
@@ -124,6 +130,7 @@ export const SessionIndexEntrySchema = z
     latestTurnId: z.string().optional(),
     latestReviewedOutcome: z.string().optional(),
     latestReviewedAction: z.string().optional(),
+    latestCandidateState: z.string().optional(),
     updatedAt: z.string(),
   })
   .strip();

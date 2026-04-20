@@ -13,6 +13,10 @@ import type {
 } from "../../src/aboxTaskRunner.js";
 import type { DispatchPlan, AttemptSpec } from "../../src/attemptProtocol.js";
 import { ArtifactStore } from "../../src/artifactStore.js";
+import {
+  CANDIDATE_FINGERPRINT_ARTIFACT_NAME,
+  CANDIDATE_MANIFEST_ARTIFACT_NAME,
+} from "../../src/host/candidateManifest.js";
 import { readSessionEventLog } from "../../src/host/eventLogWriter.js";
 import { discoverWorktree } from "../../src/host/worktreeDiscovery.js";
 import { reservedOutputRelativeDirForAttempt } from "../../src/host/worktreeInspector.js";
@@ -89,8 +93,9 @@ const createRunner = (args: {
   sandboxTaskId: string;
   worktreePath: string;
   attemptId: string;
+  resolveContent?: string;
 }): ABoxTaskRunner => {
-  const { sessionId, sandboxTaskId, worktreePath, attemptId } = args;
+  const { sessionId, sandboxTaskId, worktreePath, attemptId, resolveContent } = args;
   const baseEvent: WorkerTaskProgressEvent = {
     schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
     kind: "task.progress",
@@ -107,14 +112,33 @@ const createRunner = (args: {
 
   return {
     runAttempt: async (
-      _spec: AttemptSpec,
+      spec: AttemptSpec,
       _overrides: Record<string, unknown>,
       handlers: TaskRunnerHandlers = {},
     ): Promise<TaskExecutionRecord> => {
-      await writeFile(join(worktreePath, "README.md"), "hello\nfrom sandbox\n", "utf8");
-      const outputDir = join(worktreePath, reservedOutputRelativeDirForAttempt(attemptId));
-      await mkdir(outputDir, { recursive: true });
-      await writeFile(join(outputDir, "summary.md"), "# summary\n", "utf8");
+      if (spec.taskKind === "apply_resolve") {
+        const outputDir = join(spec.cwd, reservedOutputRelativeDirForAttempt(spec.attemptId));
+        await mkdir(outputDir, { recursive: true });
+        await writeFile(
+          join(outputDir, "result.json"),
+          `${JSON.stringify(
+            {
+              path: "README.md",
+              resolvedContent: resolveContent ?? "hello\nfrom source and sandbox\n",
+              rationale: "reconciled the current source note with the candidate update",
+              confidence: "high",
+            },
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+      } else if (spec.taskKind !== "apply_verify") {
+        await writeFile(join(worktreePath, "README.md"), "hello\nfrom sandbox\n", "utf8");
+        const outputDir = join(worktreePath, reservedOutputRelativeDirForAttempt(attemptId));
+        await mkdir(outputDir, { recursive: true });
+        await writeFile(join(outputDir, "summary.md"), "# summary\n", "utf8");
+      }
 
       for (const event of events) {
         handlers.onEvent?.(event);
@@ -156,7 +180,7 @@ const createRunner = (args: {
   } as ABoxTaskRunner;
 };
 
-test("executeAttempt auto-merges preserved worktree artifacts and cleans up sandbox", async () => {
+test("executeAttempt auto-applies a reviewed candidate into the source repo", async () => {
   const rootDir = await createTempRoot();
   try {
     const repoRoot = join(rootDir, "repo");
@@ -187,7 +211,7 @@ test("executeAttempt auto-merges preserved worktree artifacts and cleans up sand
       profile: {
         agentBackend: "mock",
         sandboxLifecycle: "preserved",
-        mergeStrategy: "auto",
+        candidatePolicy: "auto_apply",
       },
       spec,
     };
@@ -214,54 +238,142 @@ test("executeAttempt auto-merges preserved worktree artifacts and cleans up sand
     assert.equal(reviewed.action, "accept");
     assert.equal(executionResult.status, "succeeded");
 
-    const mergedReadme = await readFile(join(repoRoot, "README.md"), "utf8");
-    assert.equal(mergedReadme, "hello\nfrom sandbox\n");
+    const repoReadme = await readFile(join(repoRoot, "README.md"), "utf8");
+    assert.equal(repoReadme, "hello\nfrom sandbox\n");
 
     const artifacts = await artifactStore.listTaskArtifacts(sessionId, spec.taskId);
     const artifactNames = artifacts.map((artifact) => artifact.name).sort();
-    assert.deepEqual(artifactNames, [
-      "changed-files.json",
-      "dispatch.json",
-      "merge-result.json",
-      "patch.diff",
-      "result.json",
-      "summary.md",
-      "worker-output.log",
-    ]);
-
-    const mergeArtifact = artifacts.find((artifact) => artifact.name === "merge-result.json");
-    assert.ok(mergeArtifact);
-    const mergePayload = JSON.parse(await readFile(mergeArtifact.path, "utf8")) as {
-      merged?: boolean;
-      discarded?: boolean;
-    };
-    assert.equal(mergePayload.merged, true);
-    assert.equal(mergePayload.discarded, true);
+    assert.deepEqual(
+      artifactNames,
+      [
+        "apply-drift-report.json",
+        "apply-fingerprint-check.json",
+        "apply-result.json",
+        "apply-source-status.json",
+        "apply-staged.patch",
+        "apply-verify-dispatch.json",
+        "apply-verify-output.log",
+        "apply-verify-result.json",
+        "apply-writeback-journal.json",
+        "apply-writeback-plan.json",
+        CANDIDATE_FINGERPRINT_ARTIFACT_NAME,
+        CANDIDATE_MANIFEST_ARTIFACT_NAME,
+        "changed-files.json",
+        "dispatch.json",
+        "patch.diff",
+        "result.json",
+        "summary.md",
+        "worker-output.log",
+      ],
+    );
 
     const session = await sessionStore.loadSession(sessionId);
     assert.ok(session);
     const attempt = session.turns[0]?.attempts[0];
     assert.ok(attempt);
-    assert.equal(attempt.sandboxLifecycleState, "preserved_merged");
-    assert.equal(attempt.sandbox?.state, "preserved_merged");
-    assert.equal(attempt.sandbox?.sandboxTaskId, sandboxTaskId);
-    assert.equal(attempt.sandbox?.worktreePath, worktreePath);
-    assert.deepEqual(attempt.sandbox?.changedFiles, ["README.md"]);
-    assert.deepEqual(attempt.sandbox?.outputArtifacts, ["summary.md"]);
+    assert.equal(attempt.candidateState, "applied");
+    assert.equal(attempt.candidate?.state, "applied");
+    assert.equal(attempt.candidate?.sandboxTaskId, sandboxTaskId);
+    assert.equal(attempt.candidate?.worktreePath, worktreePath);
+    assert.equal(attempt.candidate?.changeKind, "dirty");
+    assert.deepEqual(attempt.candidate?.changedFiles, ["README.md"]);
+    assert.deepEqual(attempt.candidate?.dirtyFiles, ["README.md"]);
+    assert.deepEqual(attempt.candidate?.committedFiles, []);
+    assert.deepEqual(attempt.candidate?.outputArtifacts, ["summary.md"]);
+    assert.equal(attempt.candidate?.driftDecision, "allowed");
+    assert.equal(attempt.candidate?.manifestArtifact, CANDIDATE_MANIFEST_ARTIFACT_NAME);
+    assert.ok(typeof attempt.candidate?.fingerprint === "string");
 
     const events = await readSessionEventLog(storageRoot, sessionId);
     const reviewCompleted = [...events]
       .reverse()
       .find((event) => event.kind === "host.review_completed");
-    assert.equal(reviewCompleted?.payload.sandboxLifecycleState, "preserved_merged");
+    assert.equal(reviewCompleted?.payload.candidateState, "applied");
 
     const mockLogPath = join(repoRoot, ".git", "bakudo-mock.log");
     const mockLog = await readFile(mockLogPath, "utf8");
-    assert.match(mockLog, /merge task=sandbox-task-1/u);
-    assert.match(mockLog, /stop task=sandbox-task-1/u);
+    assert.match(mockLog, /\bstop task=sandbox-task-1\b/u);
+    assert.doesNotMatch(mockLog, /\bmerge task=sandbox-task-1\b/u);
 
     const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
     assert.equal(discovered, null);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("executeAttempt auto-resolves overlapping source edits through apply_resolve before write-back", async () => {
+  const rootDir = await createTempRoot();
+  try {
+    const repoRoot = join(rootDir, "repo");
+    const storageRoot = join(rootDir, "sessions");
+    const worktreePath = join(rootDir, "worktree-sandbox-task-1");
+    const sessionId = "session-pipeline-auto-resolve";
+    const sandboxTaskId = "sandbox-task-1";
+    const aboxBin = join(process.cwd(), "tests/helpers/mockAbox.sh");
+
+    await mkdir(repoRoot, { recursive: true });
+    await git(repoRoot, ["init"]);
+    await git(repoRoot, ["config", "user.email", "bakudo@example.test"]);
+    await git(repoRoot, ["config", "user.name", "Bakudo Tests"]);
+    await writeFile(join(repoRoot, "README.md"), "hello\n", "utf8");
+    await git(repoRoot, ["add", "README.md"]);
+    await git(repoRoot, ["commit", "-m", "initial"]);
+    await git(repoRoot, ["worktree", "add", "-b", `agent/${sandboxTaskId}`, worktreePath, "HEAD"]);
+
+    const sessionStore = new SessionStore(storageRoot);
+    const artifactStore = new ArtifactStore(storageRoot);
+    await seedSession(sessionStore, sessionId, repoRoot);
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+
+    const spec = buildAttemptSpec(sessionId, repoRoot);
+    const plan: DispatchPlan = {
+      schemaVersion: 1,
+      candidateId: "candidate-1",
+      batchId: "batch-1",
+      profile: {
+        agentBackend: "mock",
+        sandboxLifecycle: "preserved",
+        candidatePolicy: "auto_apply",
+      },
+      spec,
+    };
+
+    const { reviewed } = await executeAttempt(
+      {
+        sessionStore,
+        artifactStore,
+        runner: createRunner({
+          sessionId,
+          sandboxTaskId,
+          worktreePath,
+          attemptId: spec.attemptId,
+          resolveContent: "hello\nfrom source and sandbox\n",
+        }),
+        sessionId,
+        turnId: "turn-1",
+        spec,
+        args: baseArgs(storageRoot, aboxBin),
+      },
+      plan,
+    );
+
+    assert.equal(reviewed.outcome, "success");
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\nfrom source and sandbox\n");
+
+    const session = await sessionStore.loadSession(sessionId);
+    const attempt = session?.turns[0]?.attempts[0];
+    assert.deepEqual(
+      attempt?.candidate?.applyDispatches?.map((entry) => entry.kind),
+      ["apply_resolve", "apply_verify"],
+    );
+    assert.equal(attempt?.candidate?.resolutions?.[0]?.status, "auto_applied");
+    assert.equal(attempt?.candidate?.resolutions?.[0]?.confidence, "high");
+
+    const artifacts = await artifactStore.listTaskArtifacts(sessionId, spec.taskId);
+    const artifactNames = artifacts.map((artifact) => artifact.name);
+    assert.ok(artifactNames.some((name) => name === "apply-resolve-summary.json"));
+    assert.ok(artifactNames.some((name) => /apply-resolve-.*-result\.json/u.test(name)));
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

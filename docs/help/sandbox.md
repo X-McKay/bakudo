@@ -35,6 +35,10 @@ session case and are not routed through the default bakudo paths.
 - Output artifacts (diffs, logs, attachments) are persisted under
   `<repo>/.bakudo/artifacts/<session>/<attempt>/`.
 
+For preserved code-changing attempts, bakudo may keep the sandbox worktree as
+the reviewed candidate. The later `accept` path applies that candidate into
+the current source checkout; it does not merge a sandbox branch.
+
 ## Capability negotiation
 
 `abox --capabilities` reports a string tag (`v1`, `v2`, ...). bakudo
@@ -43,6 +47,8 @@ defaults to assuming `v1` when the flag is not recognized. Use
 
 ## Related
 
+- `bakudo help candidate-apply` — preserved candidate lifecycle, drift
+  gate, and apply-time dispatches.
 - `bakudo help permissions` — what the sandbox enforces.
 - `bakudo help hooks` — pre- and post-dispatch hooks.
 - `bakudo help monitoring` — how to observe sandbox dispatches.

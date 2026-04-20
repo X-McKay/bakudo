@@ -3,7 +3,7 @@ import { basename, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import type { ReviewClassification } from "../resultClassifier.js";
-import type { SessionStatus, SessionTurnRecord } from "../sessionTypes.js";
+import type { CandidateState, SessionStatus, SessionTurnRecord, TurnStatus } from "../sessionTypes.js";
 import { dim, renderSection } from "./ansi.js";
 import type { EventLogWriter } from "./eventLogWriter.js";
 import { runtimeIo } from "./io.js";
@@ -62,7 +62,32 @@ export const resolveRuntimeHostArgs = async (args: HostCliArgs): Promise<HostCli
   return aboxBin === args.aboxBin ? args : { ...args, aboxBin };
 };
 
-export const sessionStatusFromReview = (reviewed: ReviewClassification): SessionStatus => {
+export const sessionStatusFromReview = (
+  reviewed: ReviewClassification,
+  candidateState?: CandidateState,
+): SessionStatus => {
+  if (candidateState === "candidate_ready") {
+    return reviewed.action === "ask_user" ? "awaiting_user" : "reviewing";
+  }
+  if (
+    candidateState === "apply_staging" ||
+    candidateState === "apply_verifying" ||
+    candidateState === "apply_writeback"
+  ) {
+    return "reviewing";
+  }
+  if (candidateState === "needs_confirmation") {
+    return "awaiting_user";
+  }
+  if (candidateState === "applied") {
+    return "completed";
+  }
+  if (candidateState === "apply_failed") {
+    return "failed";
+  }
+  if (candidateState === "discarded") {
+    return "cancelled";
+  }
   if (reviewed.outcome === "success") {
     return "completed";
   }
@@ -71,6 +96,47 @@ export const sessionStatusFromReview = (reviewed: ReviewClassification): Session
   }
   if (reviewed.outcome === "policy_denied") {
     return "blocked";
+  }
+  if (reviewed.outcome === "incomplete_needs_follow_up") {
+    return "reviewing";
+  }
+  return "failed";
+};
+
+export const turnStatusFromReview = (
+  reviewed: ReviewClassification,
+  candidateState?: CandidateState,
+): TurnStatus => {
+  if (candidateState === "candidate_ready") {
+    return reviewed.action === "ask_user" ? "awaiting_user" : "reviewing";
+  }
+  if (
+    candidateState === "apply_staging" ||
+    candidateState === "apply_verifying" ||
+    candidateState === "apply_writeback"
+  ) {
+    return "reviewing";
+  }
+  if (candidateState === "needs_confirmation") {
+    return "awaiting_user";
+  }
+  if (candidateState === "applied") {
+    return "completed";
+  }
+  if (candidateState === "apply_failed") {
+    return "failed";
+  }
+  if (candidateState === "discarded") {
+    return "cancelled";
+  }
+  if (reviewed.outcome === "success") {
+    return "completed";
+  }
+  if (reviewed.outcome === "blocked_needs_user") {
+    return "awaiting_user";
+  }
+  if (reviewed.outcome === "policy_denied") {
+    return "failed";
   }
   if (reviewed.outcome === "incomplete_needs_follow_up") {
     return "reviewing";

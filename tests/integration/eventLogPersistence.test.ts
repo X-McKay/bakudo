@@ -302,7 +302,12 @@ test("executeAttempt round-trip writes the expected envelope sequence", async ()
       assert.equal(envelope.attemptId, "attempt-1");
       assert.equal(typeof envelope.payload.artifactId, "string");
       assert.match(envelope.payload.artifactId as string, /^artifact-\d+-[0-9a-f]{8}$/u);
+      assert.equal(typeof envelope.payload.storageKey, "string");
+      assert.notEqual(envelope.payload.storageKey, envelope.payload.name);
       assert.equal(typeof envelope.payload.path, "string");
+      assert.equal(typeof envelope.payload.producer, "string");
+      assert.equal(typeof envelope.payload.phase, "string");
+      assert.equal(typeof envelope.payload.role, "string");
     }
 
     // Every envelope must carry v2 schemaVersion and the expected actor.

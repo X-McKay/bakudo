@@ -1,6 +1,6 @@
 import { createSessionEvent, type SessionEventEnvelope, type TaskMode } from "../protocol.js";
 import type { ReviewClassification } from "../resultClassifier.js";
-import type { SandboxLifecycleState, SessionReviewRecord } from "../sessionTypes.js";
+import type { CandidateState, SessionReviewRecord } from "../sessionTypes.js";
 import type { SessionStore } from "../sessionStore.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import { bold, dim, renderKeyValue, renderModeChip, renderSection } from "./ansi.js";
@@ -85,7 +85,7 @@ export const buildReviewCompletedEnvelope = (args: {
   turnId: string;
   attemptId: string;
   reviewed: ReviewClassification;
-  sandboxLifecycleState?: SandboxLifecycleState;
+  candidateState?: CandidateState;
 }): SessionEventEnvelope =>
   createSessionEvent({
     kind: "host.review_completed",
@@ -98,9 +98,7 @@ export const buildReviewCompletedEnvelope = (args: {
       outcome: args.reviewed.outcome,
       action: args.reviewed.action,
       reason: args.reviewed.reason,
-      ...(args.sandboxLifecycleState === undefined
-        ? {}
-        : { sandboxLifecycleState: args.sandboxLifecycleState }),
+      ...(args.candidateState === undefined ? {} : { candidateState: args.candidateState }),
     },
   });
 

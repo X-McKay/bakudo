@@ -4,18 +4,29 @@ import { join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { reservedGuestOutputDirForAttempt } from "../attemptProtocol.js";
+import type { CandidateChangeKind } from "../sessionTypes.js";
 import type { WorktreeSnapshot } from "./worktreeDiscovery.js";
 
 const execFileAsync = promisify(execFile);
+
+type GitStatusEntry = {
+  code: string;
+  path: string;
+};
 
 export type WorktreeInspection = {
   sandboxTaskId: string;
   branchName: string;
   worktreePath: string;
   reservedOutputDir: string;
+  baselineHeadSha?: string;
+  currentHeadSha: string;
   dirty: boolean;
   changedFiles: string[];
   repoChangedFiles: string[];
+  dirtyFiles: string[];
+  committedFiles: string[];
+  changeKind: CandidateChangeKind;
   outputArtifacts: string[];
   patchDiff: string;
   diffBytes: number;
@@ -33,7 +44,7 @@ const normalizeStatusPath = (raw: string): string => {
   return renameIndex === -1 ? trimmed : trimmed.slice(renameIndex + 4).trim();
 };
 
-const listChangedFiles = async (cwd: string): Promise<string[]> => {
+const listStatusEntries = async (cwd: string): Promise<GitStatusEntry[]> => {
   const { stdout } = await execFileAsync(
     "git",
     ["status", "--porcelain", "--untracked-files=all"],
@@ -41,9 +52,12 @@ const listChangedFiles = async (cwd: string): Promise<string[]> => {
   );
   return stdout
     .split("\n")
-    .map((line) => line.slice(3))
-    .map(normalizeStatusPath)
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length >= 4)
+    .map((line) => ({
+      code: line.slice(0, 2),
+      path: normalizeStatusPath(line.slice(3)),
+    }))
+    .filter((entry) => entry.path.length > 0);
 };
 
 const readDirRecursive = async (rootDir: string, currentDir = rootDir): Promise<string[]> => {
@@ -62,10 +76,61 @@ const readDirRecursive = async (rootDir: string, currentDir = rootDir): Promise<
   return files.sort();
 };
 
-const readTrackedPatch = async (cwd: string, reservedOutputDir: string): Promise<string> => {
+const gitString = async (cwd: string, args: string[]): Promise<string> => {
+  const { stdout } = await execFileAsync("git", args, { cwd });
+  return stdout.trim();
+};
+
+const resolveBaselineHeadSha = async (
+  cwd: string,
+  baselineHeadSha: string | undefined,
+): Promise<string | undefined> => {
+  if (baselineHeadSha === undefined) {
+    return undefined;
+  }
+  try {
+    return await gitString(cwd, ["rev-parse", `${baselineHeadSha}^{commit}`]);
+  } catch {
+    return undefined;
+  }
+};
+
+const excludeReservedOutputPaths = (paths: ReadonlyArray<string>, reservedOutputDir: string): string[] =>
+  paths
+    .filter((path) => path !== reservedOutputDir && !path.startsWith(`${reservedOutputDir}/`))
+    .sort();
+
+const readChangedPaths = async (cwd: string, args: string[]): Promise<string[]> => {
+  const { stdout } = await execFileAsync("git", args, { cwd });
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .sort();
+};
+
+const listCommittedFiles = async (
+  cwd: string,
+  baselineHeadSha: string,
+  reservedOutputDir: string,
+): Promise<string[]> =>
+  readChangedPaths(cwd, [
+    "diff",
+    "--name-only",
+    `${baselineHeadSha}..HEAD`,
+    "--",
+    ".",
+    `:(exclude)${reservedOutputDir}`,
+  ]);
+
+const readTrackedPatch = async (
+  cwd: string,
+  comparisonHeadSha: string,
+  reservedOutputDir: string,
+): Promise<string> => {
   const { stdout } = await execFileAsync(
     "git",
-    ["diff", "--binary", "HEAD", "--", ".", `:(exclude)${reservedOutputDir}`],
+    ["diff", "--binary", comparisonHeadSha, "--", ".", `:(exclude)${reservedOutputDir}`],
     { cwd },
   );
   return stdout;
@@ -85,17 +150,44 @@ const readUntrackedPatch = async (cwd: string, path: string): Promise<string> =>
   }
 };
 
+const sortUnique = (paths: ReadonlyArray<string>): string[] => [...new Set(paths)].sort();
+
+const candidateChangeKindFor = (
+  committedFiles: ReadonlyArray<string>,
+  dirtyFiles: ReadonlyArray<string>,
+): CandidateChangeKind => {
+  if (committedFiles.length > 0 && dirtyFiles.length > 0) {
+    return "mixed";
+  }
+  if (committedFiles.length > 0) {
+    return "committed";
+  }
+  if (dirtyFiles.length > 0) {
+    return "dirty";
+  }
+  return "clean";
+};
+
 export const inspectWorktree = async (args: {
   snapshot: WorktreeSnapshot;
   taskId: string;
   attemptId: string;
+  baselineHeadSha?: string;
 }): Promise<WorktreeInspection> => {
-  const { snapshot, taskId, attemptId } = args;
+  const { snapshot, taskId, attemptId, baselineHeadSha } = args;
   const reservedOutputDir = reservedOutputRelativeDirForAttempt(attemptId);
-  const changedFiles = await listChangedFiles(snapshot.path);
-  const repoChangedFiles = changedFiles.filter(
-    (path) => path !== reservedOutputDir && !path.startsWith(`${reservedOutputDir}/`),
+  const effectiveBaselineHeadSha = await resolveBaselineHeadSha(snapshot.path, baselineHeadSha);
+  const statusEntries = await listStatusEntries(snapshot.path);
+  const changedFiles = sortUnique(statusEntries.map((entry) => entry.path));
+  const dirtyFiles = excludeReservedOutputPaths(
+    statusEntries.map((entry) => entry.path),
+    reservedOutputDir,
   );
+  const committedFiles =
+    effectiveBaselineHeadSha === undefined
+      ? []
+      : await listCommittedFiles(snapshot.path, effectiveBaselineHeadSha, reservedOutputDir);
+  const repoChangedFiles = sortUnique([...committedFiles, ...dirtyFiles]);
 
   const outputDir = join(snapshot.path, reservedOutputDir);
   let outputArtifacts: string[] = [];
@@ -105,8 +197,15 @@ export const inspectWorktree = async (args: {
     outputArtifacts = [];
   }
 
-  const trackedPatch = await readTrackedPatch(snapshot.path, reservedOutputDir);
-  const untrackedFiles = repoChangedFiles.filter((path) => !trackedPatch.includes(` b/${path}\n`));
+  const trackedPatch = await readTrackedPatch(
+    snapshot.path,
+    effectiveBaselineHeadSha ?? "HEAD",
+    reservedOutputDir,
+  );
+  const untrackedFiles = excludeReservedOutputPaths(
+    statusEntries.filter((entry) => entry.code === "??").map((entry) => entry.path),
+    reservedOutputDir,
+  );
   const untrackedPatches = await Promise.all(
     untrackedFiles.map((path) => readUntrackedPatch(snapshot.path, path)),
   );
@@ -119,9 +218,14 @@ export const inspectWorktree = async (args: {
     branchName: snapshot.branch,
     worktreePath: snapshot.path,
     reservedOutputDir,
-    dirty: changedFiles.length > 0,
+    ...(effectiveBaselineHeadSha === undefined ? {} : { baselineHeadSha: effectiveBaselineHeadSha }),
+    currentHeadSha: snapshot.head,
+    dirty: dirtyFiles.length > 0,
     changedFiles,
     repoChangedFiles,
+    dirtyFiles,
+    committedFiles,
+    changeKind: candidateChangeKindFor(committedFiles, dirtyFiles),
     outputArtifacts,
     patchDiff,
     diffBytes: Buffer.byteLength(patchDiff, "utf8"),

@@ -79,7 +79,7 @@ const ABOX_GUEST_WORKSPACE_CWD = "/workspace";
 const DEFAULT_EXECUTION_PROFILE: ExecutionProfile = {
   agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
   sandboxLifecycle: "ephemeral",
-  mergeStrategy: "none",
+  candidatePolicy: "discard",
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -101,9 +101,9 @@ const isExecutionProfile = (value: unknown): value is ExecutionProfile => {
   return (
     typeof value.agentBackend === "string" &&
     (value.sandboxLifecycle === "preserved" || value.sandboxLifecycle === "ephemeral") &&
-    (value.mergeStrategy === "auto" ||
-      value.mergeStrategy === "interactive" ||
-      value.mergeStrategy === "none")
+    (value.candidatePolicy === "auto_apply" ||
+      value.candidatePolicy === "manual_apply" ||
+      value.candidatePolicy === "discard")
   );
 };
 
@@ -412,7 +412,7 @@ export const decodeExecutionProfile = (encoded: string): ExecutionProfile => {
   const parsed = decodeJson(encoded);
   if (!isExecutionProfile(parsed)) {
     throw new Error(
-      "invalid execution profile: expected agentBackend plus valid sandboxLifecycle and mergeStrategy",
+      "invalid execution profile: expected agentBackend plus valid sandboxLifecycle and candidatePolicy",
     );
   }
   return parsed;

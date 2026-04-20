@@ -50,7 +50,7 @@ type WorkerModuleSources = {
 const DEFAULT_WORKER_EXECUTION_PROFILE: ExecutionProfile = {
   agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
   sandboxLifecycle: "ephemeral",
-  mergeStrategy: "none",
+  candidatePolicy: "discard",
 };
 
 const isAttemptSpec = (spec: WorkerDispatchInput): spec is AttemptSpec => spec.schemaVersion === 3;
