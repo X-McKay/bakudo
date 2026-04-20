@@ -207,6 +207,12 @@ test("reducer: clear_transcript empties the transcript", () => {
   assert.deepEqual(s1.transcript, []);
 });
 
+test("reducer: clear_transcript is referentially stable when already empty", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "clear_transcript" });
+  assert.strictEqual(s1, s0);
+});
+
 test("reducer: dispatch_started sets inflight with label", () => {
   const s0 = initialHostAppState();
   const s1 = reduceHost(s0, { type: "dispatch_started", label: "Routing", startedAt: 1000 });
@@ -243,10 +249,13 @@ test("reducer: dispatch_finished resets to idle", () => {
 
 test("reducer: submit sets pendingSubmit with monotonic seq", () => {
   const s0 = initialHostAppState();
+  assert.equal(s0.submitSeq, 0);
   const s1 = reduceHost(s0, { type: "submit", text: "hello" });
+  assert.equal(s1.submitSeq, 1);
   assert.equal(s1.pendingSubmit?.text, "hello");
   assert.equal(s1.pendingSubmit?.seq, 1);
   const s2 = reduceHost(s1, { type: "submit", text: "again" });
+  assert.equal(s2.submitSeq, 2);
   assert.equal(s2.pendingSubmit?.seq, 2);
 });
 
@@ -254,6 +263,12 @@ test("reducer: clear_pending_submit unsets pendingSubmit", () => {
   const s0 = reduceHost(initialHostAppState(), { type: "submit", text: "x" });
   const s1 = reduceHost(s0, { type: "clear_pending_submit" });
   assert.equal(s1.pendingSubmit, undefined);
+});
+
+test("reducer: clear_pending_submit is referentially stable when already clear", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "clear_pending_submit" });
+  assert.strictEqual(s1, s0);
 });
 
 test("reducer: request_exit sets shouldExit", () => {

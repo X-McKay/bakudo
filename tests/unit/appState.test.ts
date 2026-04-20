@@ -23,4 +23,5 @@ test("initialHostAppState: pendingSubmit and shouldExit are unset", () => {
   const state = initialHostAppState();
   assert.equal(state.pendingSubmit, undefined);
   assert.equal(state.shouldExit, undefined);
+  assert.equal(state.submitSeq, 0);
 });

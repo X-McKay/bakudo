@@ -17,6 +17,9 @@ export const TurnDriver = ({ runTurn }: { runTurn: RunTurn }) => {
       try {
         await runTurn(pending.text, ac.signal);
       } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         store.dispatch({
           type: "append_assistant",

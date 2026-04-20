@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createInterface } from "node:readline/promises";
 import { basename } from "node:path";
 
 import { initialHostAppState, type ComposerMode } from "./appState.js";
@@ -24,13 +25,13 @@ import {
 import { runtimeIo, withCapturedStdout, type TextWriter } from "./io.js";
 import { runInit } from "./init.js";
 import {
+  createSessionRenderer,
   deriveShellContext,
   executePrompt,
   type InteractiveResolution,
   type ShellContext,
   type TickDeps,
 } from "./interactiveRenderLoop.js";
-import { selectRendererBackend, type RendererStdout } from "./rendererBackend.js";
 import type { RunTurn } from "./renderers/ink/TurnDriver.js";
 import { installSignalHandlers, registerCleanupHandler } from "./signalHandlers.js";
 import {
@@ -410,12 +411,7 @@ export const runInteractiveShell = async (): Promise<number> => {
     await persistHostState();
   };
 
-  // Phase 5 Task 3.3: Ink is now the entrypoint. `selectRendererBackend`
-  // chooses InkBackend for TTY stdout and threads `runTurn` into
-  // `<TurnDriver/>`. `<ExitWatcher/>` inside `<App/>` calls ink's `exit()`
-  // when the reducer sets `shouldExit`, which resolves `waitUntilExit`.
-  const backend = selectRendererBackend({
-    stdout: output as unknown as RendererStdout,
+  const { tick: renderTick, backend } = createSessionRenderer({
     store,
     repoLabel,
     runTurn,
@@ -425,15 +421,18 @@ export const runInteractiveShell = async (): Promise<number> => {
     backend.dispose?.();
   });
   const uninstallSignals = installSignalHandlers();
+  let rl: ReturnType<typeof createInterface> | undefined;
 
   const handleSigint = (): void => {
     const head = deps.appState.promptQueue[0];
     if (head === undefined) {
       store.dispatch({ type: "request_exit", code: 130 });
+      rl?.close();
       return;
     }
     cancelPendingPrompt(head.id);
     store.dispatch({ type: "cancel_prompt", id: head.id });
+    renderTick(deps);
   };
   type SignalHandler = (name: string, handler: () => void) => unknown;
   const nodeProcess = (globalThis as { process?: { on?: SignalHandler; off?: SignalHandler } })
@@ -441,11 +440,42 @@ export const runInteractiveShell = async (): Promise<number> => {
   nodeProcess?.on?.("SIGINT", handleSigint);
 
   try {
-    await backend.waitUntilExit?.();
-    return store.getSnapshot().shouldExit?.code ?? 0;
+    renderTick(deps);
+    if (backend.waitUntilExit !== undefined) {
+      await backend.waitUntilExit();
+      return store.getSnapshot().shouldExit?.code ?? 0;
+    }
+
+    rl = createInterface({ input, output });
+    while (true) {
+      let answer: string;
+      try {
+        answer = await rl.question("");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.toLowerCase().includes("readline was closed")) {
+          return store.getSnapshot().shouldExit?.code ?? 0;
+        }
+        throw error;
+      }
+
+      const line = answer.trim();
+      if (line.length === 0) {
+        continue;
+      }
+
+      await runTurn(line, new AbortController().signal);
+      renderTick(deps);
+
+      const exitCode = store.getSnapshot().shouldExit?.code;
+      if (exitCode !== undefined) {
+        return exitCode;
+      }
+    }
   } finally {
     nodeProcess?.off?.("SIGINT", handleSigint);
     resetPromptResolvers();
+    rl?.close();
     uninstallSignals();
     unregisterBackendCleanup();
     backend.dispose?.();

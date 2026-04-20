@@ -41,3 +41,21 @@ test("TurnDriver: runTurn error appends an assistant error message", async () =>
   assert.equal(last?.kind, "assistant");
   if (last?.kind === "assistant") assert.match(last.text, /Error: boom/);
 });
+
+test("TurnDriver: AbortError does not append an assistant error message", async () => {
+  const store = createHostStore(reduceHost, initialHostAppState());
+  const runTurn = async () => {
+    const err = new Error("aborted");
+    err.name = "AbortError";
+    throw err;
+  };
+  render(
+    <StoreProvider store={store}>
+      <TurnDriver runTurn={runTurn} />
+    </StoreProvider>,
+  );
+  store.dispatch({ type: "submit", text: "oops" });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(store.getSnapshot().transcript.length, 0);
+  assert.equal(store.getSnapshot().pendingSubmit, undefined);
+});

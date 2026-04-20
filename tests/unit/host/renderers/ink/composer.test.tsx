@@ -3,6 +3,7 @@ import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
 import { initialHostAppState } from "../../../../../src/host/appState.js";
+import { awaitPrompt, resetPromptResolvers } from "../../../../../src/host/promptResolvers.js";
 import { reduceHost } from "../../../../../src/host/reducer.js";
 import { createHostStore } from "../../../../../src/host/store/index.js";
 import { StoreProvider } from "../../../../../src/host/renderers/ink/StoreProvider.js";
@@ -85,4 +86,111 @@ test("Composer: dispatch_inflight shows spinner glyph alongside label", () => {
   const frame = lastFrame() ?? "";
   assert.match(frame, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
   assert.match(frame, /Dispatching/);
+});
+
+test("Composer: approval prompt digits resolve the queued prompt", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("approval-1");
+    store.dispatch({ type: "dispatch_started", label: "Waiting", startedAt: 1000 });
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "approval-1",
+        kind: "approval_prompt",
+        payload: {
+          sessionId: "session-1",
+          turnId: "turn-1",
+          tool: "shell",
+          argument: "git push origin main",
+          policySnapshot: { agent: "default", composerMode: "standard", autopilot: false },
+        },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    stdin.write("2");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "2" });
+  } finally {
+    resetPromptResolvers();
+  }
+});
+
+test("Composer: command palette input filters and Enter resolves the selected command", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("palette-1");
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "palette-1",
+        kind: "command_palette",
+        payload: {
+          items: [
+            { name: "alpha", description: "first" },
+            { name: "beta", description: "second" },
+          ],
+          input: "",
+          selectedIndex: 0,
+        },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    stdin.write("be");
+    await new Promise((r) => setTimeout(r, 10));
+    const payload = store.getSnapshot().promptQueue[0]?.payload as { input: string };
+    assert.equal(payload.input, "be");
+    stdin.write("\r");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "beta" });
+  } finally {
+    resetPromptResolvers();
+  }
+});
+
+test("Composer: session picker input filters and Enter resolves the selected session", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("session-1");
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "session-1",
+        kind: "session_picker",
+        payload: {
+          items: [
+            { sessionId: "session-alpha", label: "alpha session" },
+            { sessionId: "session-beta", label: "beta session" },
+          ],
+          input: "",
+          selectedIndex: 0,
+        },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    stdin.write("be");
+    await new Promise((r) => setTimeout(r, 10));
+    const payload = store.getSnapshot().promptQueue[0]?.payload as { input: string };
+    assert.equal(payload.input, "be");
+    stdin.write("\r");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "session-beta" });
+  } finally {
+    resetPromptResolvers();
+  }
 });
