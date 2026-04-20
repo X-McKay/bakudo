@@ -1,4 +1,13 @@
+import type { TranscriptItem } from "./renderModel.js";
+
 export type HostScreen = "transcript" | "sessions" | "inspect" | "help";
+
+export type DispatchState =
+  | { inFlight: false }
+  | { inFlight: true; startedAt: number; label: string; detail?: string };
+
+export type PendingSubmit = { seq: number; text: string };
+export type ShouldExit = { code: number };
 
 /**
  * Composer modes presented to the user.
@@ -154,12 +163,19 @@ export type HostAppState = {
     mode: ComposerMode;
     autoApprove: boolean;
     text: string;
+    model: string;
+    agent: string;
+    provider: string;
   };
   activeSessionId?: string;
   activeTurnId?: string;
   inspect: InspectState;
   promptQueue: ReadonlyArray<PromptEntry>;
   notices: string[];
+  transcript: ReadonlyArray<TranscriptItem>;
+  dispatch: DispatchState;
+  pendingSubmit?: PendingSubmit;
+  shouldExit?: ShouldExit;
   /**
    * Cursor index for the approval prompt's [1]/[2]/[3]/[4] option list.
    * Shift+Tab cycles through the options (see `reducer` actions
@@ -181,7 +197,14 @@ export const DEFAULT_INSPECT_SCROLL_HEIGHT = 20;
 
 export const initialHostAppState = (): HostAppState => ({
   screen: "transcript",
-  composer: { mode: "standard", autoApprove: false, text: "" },
+  composer: {
+    mode: "standard",
+    autoApprove: false,
+    text: "",
+    model: "",
+    agent: "",
+    provider: "",
+  },
   inspect: {
     tab: "summary",
     scrollOffset: 0,
@@ -189,5 +212,7 @@ export const initialHostAppState = (): HostAppState => ({
   },
   promptQueue: [],
   notices: [],
+  transcript: [],
+  dispatch: { inFlight: false },
   approvalDialogCursor: 0,
 });
