@@ -12,7 +12,7 @@ test("App: mounts without throwing, shows Bakudo + prompt", () => {
   const { lastFrame } = render(<App store={store} repoLabel="tmp" />);
   const frame = lastFrame() ?? "";
   assert.match(frame, /Bakudo/);
-  assert.match(frame, />/);
+  assert.match(frame, /┃/);
 });
 
 test("App: transcript updates on dispatch", () => {

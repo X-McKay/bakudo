@@ -58,3 +58,31 @@ test("Composer: dispatch_inflight disables text entry and shows label", () => {
   assert.doesNotMatch(lastFrame() ?? "", /ignored/);
   assert.match(lastFrame() ?? "", /Routing/);
 });
+
+test("Composer: shows left rail + metadata row when idle", () => {
+  const store = createHostStore(reduceHost, initialHostAppState());
+  store.dispatch({ type: "set_composer_metadata", model: "sonnet-4.6", agent: "default", provider: "claude" });
+  const { lastFrame } = render(
+    <StoreProvider store={store}>
+      <Composer />
+    </StoreProvider>,
+  );
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /┃/);
+  assert.match(frame, /standard/);
+  assert.match(frame, /sonnet-4\.6/);
+  assert.match(frame, /claude/);
+});
+
+test("Composer: dispatch_inflight shows spinner glyph alongside label", () => {
+  const store = createHostStore(reduceHost, initialHostAppState());
+  store.dispatch({ type: "dispatch_started", label: "Dispatching", startedAt: 1000 });
+  const { lastFrame } = render(
+    <StoreProvider store={store}>
+      <Composer />
+    </StoreProvider>,
+  );
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+  assert.match(frame, /Dispatching/);
+});
