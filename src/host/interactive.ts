@@ -307,6 +307,7 @@ export const runInteractiveShell = async (): Promise<number> => {
     get appState() {
       return store.getSnapshot();
     },
+    dispatch: (action) => store.dispatch(action),
     repoLabel,
     config: configSnapshot.merged,
   } as TickDeps;

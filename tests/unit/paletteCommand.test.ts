@@ -28,6 +28,7 @@ test("/palette handler: dispatches the chosen command via the registry", async (
   const deps: TickDeps = {
     transcript,
     appState: initialHostAppState(),
+    dispatch: () => {},
   };
   const dispatcher = registry.dispatch("/palette", deps);
   // Give the palette launcher a moment to enqueue.
@@ -73,6 +74,7 @@ test("/palette handler: cancel path emits a cancel note", async () => {
   const deps: TickDeps = {
     transcript,
     appState: initialHostAppState(),
+    dispatch: () => {},
   };
   const dispatcher = registry.dispatch("/palette", deps);
   await Promise.resolve();

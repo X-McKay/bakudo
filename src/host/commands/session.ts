@@ -8,7 +8,6 @@ import {
 import { registerKeybinding } from "../keybindings/hooks.js";
 import { storageRootFor } from "../sessionRunSupport.js";
 import { awaitPrompt, newPromptId } from "../promptResolvers.js";
-import { reduceHost } from "../reducer.js";
 import * as timeline from "../timeline.js";
 
 const setSessionAsActive = (
@@ -16,7 +15,7 @@ const setSessionAsActive = (
   session: SessionRecord,
 ): void => {
   const latestTurn = session.turns.at(-1);
-  deps.appState = reduceHost(deps.appState, {
+  deps.dispatch({
     type: "set_active_session",
     sessionId: session.sessionId,
     ...(latestTurn?.turnId ? { turnId: latestTurn.turnId } : {}),
@@ -29,7 +28,7 @@ const setSessionAsActive = (
 };
 
 const clearActiveFields = (deps: Parameters<HostCommandSpec["handler"]>[0]["deps"]): void => {
-  deps.appState = reduceHost(deps.appState, { type: "set_active_session", sessionId: undefined });
+  deps.dispatch({ type: "set_active_session", sessionId: undefined });
 };
 
 export const sessionCommands: readonly HostCommandSpec[] = [
@@ -104,7 +103,7 @@ export const sessionCommands: readonly HostCommandSpec[] = [
         deps.appState.activeSessionId !== target.sessionId
       ) {
         const id = newPromptId();
-        deps.appState = reduceHost(deps.appState, {
+        deps.dispatch({
           type: "enqueue_prompt",
           prompt: {
             id,
@@ -116,7 +115,7 @@ export const sessionCommands: readonly HostCommandSpec[] = [
           },
         });
         const resolution = await awaitPrompt(id);
-        deps.appState = reduceHost(deps.appState, { type: "dequeue_prompt", id });
+        deps.dispatch({ type: "dequeue_prompt", id });
         if (resolution.kind !== "answered" || !/^(y|yes)$/i.test(resolution.value.trim())) {
           deps.transcript.push({
             kind: "assistant",

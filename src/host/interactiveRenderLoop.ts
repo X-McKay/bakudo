@@ -6,6 +6,7 @@ import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 import type { HostCliArgs } from "./parsing.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
+import type { HostAction } from "./reducer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
 import {
   selectRendererBackend,
@@ -59,6 +60,13 @@ export type InteractiveResolution = {
 export type TickDeps = {
   transcript: TranscriptItem[];
   appState: HostAppState;
+  /**
+   * Dispatch a {@link HostAction} into the underlying store. Command handlers
+   * MUST use this instead of reassigning `deps.appState` — the Ink migration
+   * backs `appState` with a getter over `store.getSnapshot()`, so direct
+   * assignment throws at runtime.
+   */
+  dispatch: (action: HostAction) => void;
   /** Short repo basename displayed in the frame header (PR3 follow-up). */
   repoLabel?: string;
   /** Merged config cascade. Populated by the interactive shell bootstrap. */
@@ -223,7 +231,7 @@ export type ExecuteDeps = {
   parse: (argv: string[]) => HostCliArgs;
   dispatch: (args: HostCliArgs) => Promise<number>;
   remember: (
-    state: { appState: HostAppState },
+    state: { appState: HostAppState; dispatch: (action: HostAction) => void },
     args: HostCliArgs,
     resolution: InteractiveResolution,
   ) => void;
@@ -283,7 +291,7 @@ export const executePrompt = async (
     }
 
     if (code !== 1) {
-      exec.remember({ appState: deps.appState }, parsed, resolution);
+      exec.remember({ appState: deps.appState, dispatch: deps.dispatch }, parsed, resolution);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

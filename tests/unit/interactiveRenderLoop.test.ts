@@ -28,6 +28,7 @@ test("executePrompt: non-exec stdout is captured as one output transcript block"
   const deps: TickDeps = {
     transcript: [],
     appState: initialHostAppState(),
+    dispatch: () => {},
   };
   let remembered = false;
   const exec: ExecuteDeps = {

@@ -72,7 +72,7 @@ test("producer B2.1: session renderer's first paint records shell.startup_ms", a
   await withSilentStdout(() => {
     const { tick, backend } = createSessionRenderer({ store: newStore() });
     try {
-      tick({ transcript: [], appState: initialHostAppState() });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
     } finally {
       backend.dispose?.();
     }
@@ -102,9 +102,9 @@ test("producer B2.1: second paint does NOT record a duplicate shell.startup_ms",
   await withSilentStdout(() => {
     const { tick, backend } = createSessionRenderer({ store: newStore() });
     try {
-      tick({ transcript: [], appState: initialHostAppState() });
-      tick({ transcript: [], appState: initialHostAppState() });
-      tick({ transcript: [], appState: initialHostAppState() });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
     } finally {
       backend.dispose?.();
     }

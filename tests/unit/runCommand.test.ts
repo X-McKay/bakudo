@@ -10,6 +10,7 @@ import { buildRunCommandSpec } from "../../src/host/commands/runCommand.js";
 const buildDeps = (): TickDeps => ({
   transcript: [],
   appState: initialHostAppState(),
+  dispatch: () => {},
 });
 
 // ---------------------------------------------------------------------------
