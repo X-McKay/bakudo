@@ -139,7 +139,7 @@ export const normalizeV2Record = (
  */
 export const loadSessionRecord = (raw: unknown): SessionRecord => {
   if (typeof raw !== "object" || raw === null) {
-    throw new Error("unrecognized session record shape");
+    throw new Error(`unrecognized session record shape: got ${raw === null ? "null" : typeof raw}`);
   }
   const candidate = raw as { schemaVersion?: unknown; turns?: unknown };
   if (
@@ -148,5 +148,8 @@ export const loadSessionRecord = (raw: unknown): SessionRecord => {
   ) {
     return normalizeV2Record(raw as SessionRecord);
   }
-  throw new Error("unrecognized session record shape");
+  const turnsShape = Array.isArray(candidate.turns) ? "array" : typeof candidate.turns;
+  throw new Error(
+    `unrecognized session record shape: schemaVersion=${String(candidate.schemaVersion)}, turns=${turnsShape}`,
+  );
 };
