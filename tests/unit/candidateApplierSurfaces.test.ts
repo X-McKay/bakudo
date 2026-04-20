@@ -455,10 +455,14 @@ test("applyPreservedCandidate: submodule surface fails without confirmation", as
     assert.ok(result.applyResult.error);
     // createApplyWorkspace rejects the 160000 gitlink via
     // ApplyWorkspaceUnsupportedSurfaceError before stagePathResolution runs.
-    // Pin the exact workspace-level error string so any re-introduction of a
-    // stagePathResolution submodule branch (which produces a different string)
-    // is caught immediately.
-    assert.match(result.applyResult.error ?? "", /Apply workspace does not support:.*submodule_path/u);
+    // Pin both layers: the wrapping "candidate apply failed:" from the
+    // candidateApplier catch block and the workspace-level fragment, so a
+    // re-introduction of a stagePathResolution submodule branch or a change
+    // that stops recognising ApplyWorkspaceUnsupportedSurfaceError is caught.
+    assert.match(
+      result.applyResult.error ?? "",
+      /candidate apply failed: Apply workspace does not support:.*submodule_path/u,
+    );
     assert.equal(result.candidateUpdates.driftDecision, "allowed");
     await assertSubmoduleHardFailureArtifacts(fixture);
   });
@@ -490,7 +494,10 @@ test("applyPreservedCandidate: submodule surface fails even when explicit confir
     // Same workspace-level rejection as the no-confirmation case: pin the
     // ApplyWorkspaceUnsupportedSurfaceError string so stagePathResolution
     // cannot silently take over this path.
-    assert.match(result.applyResult.error ?? "", /Apply workspace does not support:.*submodule_path/u);
+    assert.match(
+      result.applyResult.error ?? "",
+      /candidate apply failed: Apply workspace does not support:.*submodule_path/u,
+    );
 
     // Sanity: the source repo's gitlink tree is untouched.
     const lsTree = await gitOut(fixture.repoRoot, ["ls-tree", "HEAD", "vendor/mod"]);
