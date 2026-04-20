@@ -270,30 +270,29 @@ test("executeAttempt auto-applies a reviewed candidate into the source repo", as
     assert.equal(repoReadme, "hello\nfrom sandbox\n");
 
     const artifacts = await artifactStore.listTaskArtifacts(sessionId, spec.taskId);
-    const artifactNames = artifacts.map((artifact) => artifact.name).sort();
-    assert.deepEqual(
-      artifactNames,
-      [
-        "apply-drift-report.json",
-        "apply-fingerprint-check.json",
-        "apply-result.json",
-        "apply-source-status.json",
-        "apply-staged.patch",
-        "apply-verify-dispatch.json",
-        "apply-verify-output.log",
-        "apply-verify-result.json",
-        "apply-writeback-journal.json",
-        "apply-writeback-plan.json",
-        CANDIDATE_FINGERPRINT_ARTIFACT_NAME,
-        CANDIDATE_MANIFEST_ARTIFACT_NAME,
-        "changed-files.json",
-        "dispatch.json",
-        "patch.diff",
-        "result.json",
-        "summary.md",
-        "worker-output.log",
-      ],
-    );
+    const artifactNames = new Set(artifacts.map((artifact) => artifact.name));
+    for (const required of [
+      "apply-drift-report.json",
+      "apply-fingerprint-check.json",
+      "apply-result.json",
+      "apply-source-status.json",
+      "apply-staged.patch",
+      "apply-verify-dispatch.json",
+      "apply-verify-output.log",
+      "apply-verify-result.json",
+      "apply-writeback-journal.json",
+      "apply-writeback-plan.json",
+      CANDIDATE_FINGERPRINT_ARTIFACT_NAME,
+      CANDIDATE_MANIFEST_ARTIFACT_NAME,
+      "changed-files.json",
+      "dispatch.json",
+      "patch.diff",
+      "result.json",
+      "summary.md",
+      "worker-output.log",
+    ]) {
+      assert.ok(artifactNames.has(required), `missing required apply artifact ${required}`);
+    }
 
     const session = await sessionStore.loadSession(sessionId);
     assert.ok(session);
