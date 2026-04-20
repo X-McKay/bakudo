@@ -63,6 +63,7 @@ import {
 import { createProgressCoalescer } from "./progressCoalescer.js";
 import { reduceHost } from "./reducer.js";
 import type { TranscriptItem } from "./renderModel.js";
+import { createHostStore } from "./store/index.js";
 import {
   appendTurnToActiveSession,
   createAndRunFirstTurn,
@@ -151,10 +152,13 @@ const buildHostStateFromDeps = (deps: TickDeps): HostStateRecord => ({
   ...(deps.appState.activeTurnId ? { lastActiveTurnId: deps.appState.activeTurnId } : {}),
 });
 
-const applyHostStateToDeps = (deps: TickDeps, record: HostStateRecord): void => {
-  deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: record.lastUsedMode });
+const applyHostStateToStore = (
+  store: ReturnType<typeof createHostStore>,
+  record: HostStateRecord,
+): void => {
+  store.dispatch({ type: "set_mode", mode: record.lastUsedMode });
   if (record.lastActiveSessionId) {
-    deps.appState = reduceHost(deps.appState, {
+    store.dispatch({
       type: "set_active_session",
       sessionId: record.lastActiveSessionId,
       ...(record.lastActiveTurnId ? { turnId: record.lastActiveTurnId } : {}),
@@ -234,8 +238,12 @@ const dispatchThroughController = async (
   }
 };
 
-const applyDispatchResult = (result: SessionDispatchResult, deps: TickDeps): void => {
-  deps.appState = reduceHost(deps.appState, {
+const applyDispatchResult = (
+  result: SessionDispatchResult,
+  deps: TickDeps,
+  store: ReturnType<typeof createHostStore>,
+): void => {
+  store.dispatch({
     type: "set_active_session",
     sessionId: result.sessionId,
     turnId: result.turnId,
@@ -285,21 +293,71 @@ export const runInteractiveShell = async (): Promise<number> => {
   const repoRoot = repoRootFor(undefined);
   const repoLabel = basename(repoRoot) || repoRoot;
   const rl = createInterface({ input, output });
-  const transcript: TranscriptItem[] = [];
 
   // Load config cascade — CLI flag threading deferred to Phase 6.
   const configSnapshot = await loadConfigCascade(repoRoot, {});
+  const store = createHostStore(reduceHost, initialHostAppState());
+
+  const transcriptFacade = {
+    get items() {
+      return store.getSnapshot().transcript;
+    },
+    push(item: TranscriptItem): number {
+      const kindToAction = {
+        user: (i: TranscriptItem & { kind: "user" }) =>
+          ({
+            type: "append_user",
+            text: i.text,
+            ...(i.timestamp ? { timestamp: i.timestamp } : {}),
+          }) as const,
+        assistant: (i: TranscriptItem & { kind: "assistant" }) =>
+          ({
+            type: "append_assistant",
+            text: i.text,
+            ...(i.tone ? { tone: i.tone } : {}),
+          }) as const,
+        event: (i: TranscriptItem & { kind: "event" }) =>
+          ({
+            type: "append_event",
+            label: i.label,
+            ...(i.detail ? { detail: i.detail } : {}),
+          }) as const,
+        output: (i: TranscriptItem & { kind: "output" }) =>
+          ({ type: "append_output", text: i.text }) as const,
+        review: (i: TranscriptItem & { kind: "review" }) => ({
+          type: "append_review" as const,
+          outcome: i.outcome,
+          summary: i.summary,
+          ...(i.nextAction ? { nextAction: i.nextAction } : {}),
+        }),
+      } as const;
+      const action = kindToAction[item.kind](item as never);
+      store.dispatch(action);
+      return store.getSnapshot().transcript.length;
+    },
+    get length() {
+      return store.getSnapshot().transcript.length;
+    },
+    [Symbol.iterator]() {
+      return store.getSnapshot().transcript[Symbol.iterator]();
+    },
+  };
+
   const deps: TickDeps = {
-    transcript,
-    appState: initialHostAppState(),
+    get transcript() {
+      return transcriptFacade as unknown as TranscriptItem[];
+    },
+    get appState() {
+      return store.getSnapshot();
+    },
     repoLabel,
     config: configSnapshot.merged,
-  };
+  } as TickDeps;
 
   resetPromptResolvers();
   const prior = await loadHostState(repoRoot);
   if (prior !== null) {
-    applyHostStateToDeps(deps, prior);
+    applyHostStateToStore(store, prior);
   }
 
   const execDeps: ExecDeps = {
@@ -347,7 +405,7 @@ export const runInteractiveShell = async (): Promise<number> => {
       return;
     }
     cancelPendingPrompt(head.id);
-    deps.appState = reduceHost(deps.appState, { type: "cancel_prompt", id: head.id });
+    store.dispatch({ type: "cancel_prompt", id: head.id });
     renderTick(deps);
   };
   type SignalHandler = (name: string, handler: () => void) => unknown;
@@ -379,7 +437,7 @@ export const runInteractiveShell = async (): Promise<number> => {
         continue;
       }
 
-      transcript.push({ kind: "user", text: line });
+      deps.transcript.push({ kind: "user", text: line });
       const dispatched = await registry.dispatch(line, deps);
       if (dispatched.kind === "exit") {
         await persistHostState();
@@ -400,7 +458,7 @@ export const runInteractiveShell = async (): Promise<number> => {
               deps,
               controllerRoute.overrideMode,
             );
-            applyDispatchResult(result, deps);
+            applyDispatchResult(result, deps, store);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
