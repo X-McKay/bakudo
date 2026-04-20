@@ -43,6 +43,9 @@ import { validateBindings } from "../keybindings/validate.js";
 import { repoRootFor, storageRootFor } from "../sessionRunSupport.js";
 import type { RendererBackend, RendererStdout } from "../rendererBackend.js";
 import { selectRendererBackend } from "../rendererBackend.js";
+import { initialHostAppState } from "../appState.js";
+import { reduceHost } from "../reducer.js";
+import { createHostStore } from "../store/index.js";
 import { resolveEffectiveRedactionPolicy, summarizeRedactionPolicy } from "../redaction.js";
 import { countSpanFilesOnDisk, describeOtlpEndpoint } from "../telemetry/otelSpans.js";
 import { bakudoLogDir } from "../telemetry/xdgPaths.js";
@@ -136,7 +139,11 @@ export const runDoctorChecks = async (ctx: DoctorContext): Promise<DoctorEnvelop
   const terminalCap = describeTerminalCapability({ isTTY: stdout.isTTY === true, env });
 
   // 8. Active renderer backend (probe with a fake stdout structurally).
-  const probeBackend: RendererBackend = selectRendererBackend({ stdout });
+  // The InkBackend constructor captures its `store` for later mount; we pass
+  // a throwaway store here because `doctor` never mounts the backend — it
+  // only reads `constructor.name` via `rendererBackendName`.
+  const probeStore = createHostStore(reduceHost, initialHostAppState());
+  const probeBackend: RendererBackend = selectRendererBackend({ stdout, store: probeStore });
   const backendWithCtor = probeBackend as unknown as { constructor?: { name?: string } };
   const rendererCheck = checkRendererBackend(backendWithCtor);
   const rendererName = rendererBackendName(backendWithCtor);

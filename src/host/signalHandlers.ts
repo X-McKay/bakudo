@@ -1,10 +1,10 @@
 /**
  * Crash-recovery + graceful-shutdown signal handlers for the interactive host.
  *
- * Phase 5 PR5. Complements `TtyBackend.dispose()` — without these handlers a
+ * Phase 5 PR5. Complements `InkBackend.dispose()` — without these handlers a
  * fatal signal (Ctrl+C, process kill, uncaught throw) would leave the terminal
- * stuck in the alt-screen buffer with the cursor hidden. Cleanup handlers run
- * in LIFO order so the TtyBackend (registered early in `runInteractiveShell`)
+ * in whatever alt-screen / raw-mode state Ink was maintaining. Cleanup handlers
+ * run in LIFO order so the InkBackend (registered early in `runInteractiveShell`)
  * disposes after later-registered listeners have had a chance to quiesce.
  *
  * Contract (per scope memo):

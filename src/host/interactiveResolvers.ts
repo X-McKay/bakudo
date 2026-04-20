@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import type { HostAppState } from "./appState.js";
 import type { InteractiveResolution, ShellContext } from "./interactiveRenderLoop.js";
-import { reduceHost } from "./reducer.js";
+import type { HostAction } from "./reducer.js";
 import { tokenizeCommand } from "./parsing.js";
 
 export const createInteractiveSessionIdentity = (): { sessionId: string; taskId: string } => {
@@ -97,14 +97,14 @@ export const resolveInteractiveInput = (
 };
 
 export const rememberInteractiveContext = (
-  deps: { appState: HostAppState },
+  deps: { appState: HostAppState; dispatch: (action: HostAction) => void },
   args: { sessionId?: string; taskId?: string },
   resolution: InteractiveResolution,
 ): void => {
   const nextSessionId = resolution.sessionId ?? args.sessionId;
   const nextTaskId = resolution.taskId ?? args.taskId;
   if (nextSessionId !== undefined) {
-    deps.appState = reduceHost(deps.appState, {
+    deps.dispatch({
       type: "set_active_session",
       sessionId: nextSessionId,
       ...(nextTaskId ? { turnId: nextTaskId } : {}),

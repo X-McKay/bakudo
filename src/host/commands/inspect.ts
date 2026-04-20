@@ -11,7 +11,6 @@ import { formatInspectTab, type InspectTabName } from "../inspectTabs.js";
 import { stdoutWrite } from "../io.js";
 import { storageRootFor } from "../sessionRunSupport.js";
 import { loadAttemptProvenance } from "../timeline.js";
-import { reduceHost } from "../reducer.js";
 
 const KNOWN_TABS: readonly InspectTab[] = [
   "summary",
@@ -171,7 +170,7 @@ export const inspectCommands: readonly HostCommandSpec[] = [
       });
       const turn = session.turns.at(-1);
       const attempt = turn?.attempts.at(-1);
-      deps.appState = reduceHost(deps.appState, {
+      deps.dispatch({
         type: "set_inspect_target",
         sessionId: session.sessionId,
         ...(turn ? { turnId: turn.turnId } : {}),

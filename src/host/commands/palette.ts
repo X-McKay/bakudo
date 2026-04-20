@@ -17,7 +17,6 @@ import type { HostCommandRegistry, HostCommandSpec } from "../commandRegistry.js
 import type { DialogDispatcher } from "../dialogLauncher.js";
 import { launchCommandPaletteDialog } from "../launchCommandPaletteDialog.js";
 import { registerKeybinding } from "../keybindings/hooks.js";
-import { reduceHost } from "../reducer.js";
 
 /**
  * Shared entry point — factored out so both the slash command and the
@@ -56,13 +55,14 @@ export const buildPaletteCommands = (registry: HostCommandRegistry): readonly Ho
       await runCommandPalette({
         registry,
         getState: () => deps.appState,
+        // TODO: remove once launch* dialogs dispatch actions directly instead of computing full next state.
         setState: (next) => {
-          deps.appState = next;
+          deps.dispatch({ type: "replace_state", state: next });
         },
         dispatch: async (line) => {
           const outcome = await registry.dispatch(line, deps);
           if (outcome.kind === "unknown") {
-            deps.appState = reduceHost(deps.appState, {
+            deps.dispatch({
               type: "push_notice",
               notice: `palette: unknown command "${line}"`,
             });

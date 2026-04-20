@@ -32,7 +32,7 @@ import {
   type ShellContext,
   type TickDeps,
 } from "./interactiveRenderLoop.js";
-import { registerKeybinding } from "./keybindings/hooks.js";
+import type { RunTurn } from "./renderers/ink/TurnDriver.js";
 import { installSignalHandlers, registerCleanupHandler } from "./signalHandlers.js";
 import {
   buildInteractiveRunResolution,
@@ -63,6 +63,8 @@ import {
 import { createProgressCoalescer } from "./progressCoalescer.js";
 import { reduceHost } from "./reducer.js";
 import type { TranscriptItem } from "./renderModel.js";
+import { createHostStore } from "./store/index.js";
+import { buildTranscriptFacade } from "./transcriptFacade.js";
 import {
   appendTurnToActiveSession,
   createAndRunFirstTurn,
@@ -151,10 +153,13 @@ const buildHostStateFromDeps = (deps: TickDeps): HostStateRecord => ({
   ...(deps.appState.activeTurnId ? { lastActiveTurnId: deps.appState.activeTurnId } : {}),
 });
 
-const applyHostStateToDeps = (deps: TickDeps, record: HostStateRecord): void => {
-  deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: record.lastUsedMode });
+const applyHostStateToStore = (
+  store: ReturnType<typeof createHostStore>,
+  record: HostStateRecord,
+): void => {
+  store.dispatch({ type: "set_mode", mode: record.lastUsedMode });
   if (record.lastActiveSessionId) {
-    deps.appState = reduceHost(deps.appState, {
+    store.dispatch({
       type: "set_active_session",
       sessionId: record.lastActiveSessionId,
       ...(record.lastActiveTurnId ? { turnId: record.lastActiveTurnId } : {}),
@@ -234,8 +239,12 @@ const dispatchThroughController = async (
   }
 };
 
-const applyDispatchResult = (result: SessionDispatchResult, deps: TickDeps): void => {
-  deps.appState = reduceHost(deps.appState, {
+const applyDispatchResult = (
+  result: SessionDispatchResult,
+  deps: TickDeps,
+  store: ReturnType<typeof createHostStore>,
+): void => {
+  store.dispatch({
     type: "set_active_session",
     sessionId: result.sessionId,
     turnId: result.turnId,
@@ -284,22 +293,30 @@ export const runInteractiveShell = async (): Promise<number> => {
 
   const repoRoot = repoRootFor(undefined);
   const repoLabel = basename(repoRoot) || repoRoot;
-  const rl = createInterface({ input, output });
-  const transcript: TranscriptItem[] = [];
 
   // Load config cascade — CLI flag threading deferred to Phase 6.
   const configSnapshot = await loadConfigCascade(repoRoot, {});
+  const store = createHostStore(reduceHost, initialHostAppState());
+
+  const transcriptFacade = buildTranscriptFacade(store);
+
   const deps: TickDeps = {
-    transcript,
-    appState: initialHostAppState(),
+    get transcript() {
+      // Facade adapts Array-shaped call sites (.push, .length, iterator) to store dispatches; full Array API is intentionally partial.
+      return transcriptFacade as unknown as TranscriptItem[];
+    },
+    get appState() {
+      return store.getSnapshot();
+    },
+    dispatch: (action) => store.dispatch(action),
     repoLabel,
     config: configSnapshot.merged,
-  };
+  } as TickDeps;
 
   resetPromptResolvers();
   const prior = await loadHostState(repoRoot);
   if (prior !== null) {
-    applyHostStateToDeps(deps, prior);
+    applyHostStateToStore(store, prior);
   }
 
   const execDeps: ExecDeps = {
@@ -326,28 +343,95 @@ export const runInteractiveShell = async (): Promise<number> => {
     }
   };
 
-  // Phase 5 PR5: session-scoped renderer + signal handlers. Single backend
-  // across ticks so alt-screen state stays consistent; cleanup runs LIFO on
-  // SIGINT/SIGTERM/uncaughtException.
-  const { tick: renderTick, backend: sessionBackend } = createSessionRenderer();
+  /**
+   * Turn pipeline: mirror of the legacy readline while-loop body. Input now
+   * arrives from `<Composer/>`'s `submit` action via `<TurnDriver/>`; the
+   * rest (prompt routing, command registry dispatch, controller dispatch,
+   * fallthrough, state persistence) is preserved verbatim.
+   *
+   * The transcript push for the user's line is handled here rather than in
+   * `<Composer/>` so the ordering remains identical to the readline path
+   * (prompt-answer case skips the transcript push).
+   */
+  const runTurn: RunTurn = async (line, _signal): Promise<void> => {
+    if (line.length === 0) {
+      return;
+    }
+
+    // Route answers for active prompts first.
+    if (answerHeadPrompt(line, deps)) {
+      return;
+    }
+
+    deps.transcript.push({ kind: "user", text: line });
+    const dispatched = await registry.dispatch(line, deps);
+    if (dispatched.kind === "exit") {
+      await persistHostState();
+      store.dispatch({ type: "request_exit", code: dispatched.code });
+      return;
+    }
+    if (dispatched.kind === "handled") {
+      await persistHostState();
+      return;
+    }
+
+    if (dispatched.kind === "unknown") {
+      const controllerRoute = routePromptToController(line);
+      if (controllerRoute !== null) {
+        try {
+          const result = await dispatchThroughController(
+            controllerRoute.goal,
+            deps,
+            controllerRoute.overrideMode,
+          );
+          applyDispatchResult(result, deps, store);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
+        }
+        await persistHostState();
+        return;
+      }
+      // Unknown slash command: push a notice rather than silently dropping.
+      if (line.startsWith("/")) {
+        deps.transcript.push({
+          kind: "assistant",
+          text: `unknown command: ${line.split(/\s+/)[0] ?? line}. Try /help.`,
+          tone: "warning",
+        });
+        await persistHostState();
+        return;
+      }
+    }
+
+    if (dispatched.kind === "fallthrough") {
+      await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
+    }
+
+    await persistHostState();
+  };
+
+  const { tick: renderTick, backend } = createSessionRenderer({
+    store,
+    repoLabel,
+    runTurn,
+  });
+  backend.mount?.();
   const unregisterBackendCleanup = registerCleanupHandler(() => {
-    sessionBackend.dispose?.();
+    backend.dispose?.();
   });
   const uninstallSignals = installSignalHandlers();
-  // TODO(phase5-pr5): `app:redraw` fires through the registry today; when W3
-  // lands raw-key dispatch, Ctrl+L will invoke this handler on a live key.
-  const unregisterRedraw = registerKeybinding("Global", "app:redraw", () => {
-    renderTick(deps);
-  });
+  let rl: ReturnType<typeof createInterface> | undefined;
 
   const handleSigint = (): void => {
     const head = deps.appState.promptQueue[0];
     if (head === undefined) {
-      rl.close();
+      store.dispatch({ type: "request_exit", code: 130 });
+      rl?.close();
       return;
     }
     cancelPendingPrompt(head.id);
-    deps.appState = reduceHost(deps.appState, { type: "cancel_prompt", id: head.id });
+    store.dispatch({ type: "cancel_prompt", id: head.id });
     renderTick(deps);
   };
   type SignalHandler = (name: string, handler: () => void) => unknown;
@@ -355,8 +439,14 @@ export const runInteractiveShell = async (): Promise<number> => {
     .process;
   nodeProcess?.on?.("SIGINT", handleSigint);
 
-  renderTick(deps);
   try {
+    renderTick(deps);
+    if (backend.waitUntilExit !== undefined) {
+      await backend.waitUntilExit();
+      return store.getSnapshot().shouldExit?.code ?? 0;
+    }
+
+    rl = createInterface({ input, output });
     while (true) {
       let answer: string;
       try {
@@ -364,78 +454,30 @@ export const runInteractiveShell = async (): Promise<number> => {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.toLowerCase().includes("readline was closed")) {
-          return 0;
+          return store.getSnapshot().shouldExit?.code ?? 0;
         }
         throw error;
       }
+
       const line = answer.trim();
       if (line.length === 0) {
         continue;
       }
 
-      // Route answers for active prompts first.
-      if (answerHeadPrompt(line, deps)) {
-        renderTick(deps);
-        continue;
-      }
-
-      transcript.push({ kind: "user", text: line });
-      const dispatched = await registry.dispatch(line, deps);
-      if (dispatched.kind === "exit") {
-        await persistHostState();
-        return dispatched.code;
-      }
-      if (dispatched.kind === "handled") {
-        await persistHostState();
-        renderTick(deps);
-        continue;
-      }
-
-      if (dispatched.kind === "unknown") {
-        const controllerRoute = routePromptToController(line);
-        if (controllerRoute !== null) {
-          try {
-            const result = await dispatchThroughController(
-              controllerRoute.goal,
-              deps,
-              controllerRoute.overrideMode,
-            );
-            applyDispatchResult(result, deps);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
-          }
-          await persistHostState();
-          renderTick(deps);
-          continue;
-        }
-        // Unknown slash command: push a notice rather than silently dropping.
-        if (line.startsWith("/")) {
-          deps.transcript.push({
-            kind: "assistant",
-            text: `unknown command: ${line.split(/\s+/)[0] ?? line}. Try /help.`,
-            tone: "warning",
-          });
-          await persistHostState();
-          renderTick(deps);
-          continue;
-        }
-      }
-
-      if (dispatched.kind === "fallthrough") {
-        await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
-      }
-
-      await persistHostState();
+      await runTurn(line, new AbortController().signal);
       renderTick(deps);
+
+      const exitCode = store.getSnapshot().shouldExit?.code;
+      if (exitCode !== undefined) {
+        return exitCode;
+      }
     }
   } finally {
     nodeProcess?.off?.("SIGINT", handleSigint);
     resetPromptResolvers();
-    rl.close();
-    unregisterRedraw();
+    rl?.close();
     uninstallSignals();
     unregisterBackendCleanup();
-    sessionBackend.dispose?.();
+    backend.dispose?.();
   }
 };

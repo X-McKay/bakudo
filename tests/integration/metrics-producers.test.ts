@@ -32,7 +32,11 @@ import {
 } from "../../src/host/metrics/metricsRecorder.js";
 import { parseHostArgs } from "../../src/host/parsing.js";
 import { initialHostAppState } from "../../src/host/appState.js";
+import { reduceHost } from "../../src/host/reducer.js";
+import { createHostStore } from "../../src/host/store/index.js";
 import { withCapturedStdout } from "../../src/host/io.js";
+
+const newStore = () => createHostStore(reduceHost, initialHostAppState());
 
 const sinkWriter = { write: () => true };
 
@@ -66,9 +70,9 @@ test("producer B2.1: session renderer's first paint records shell.startup_ms", a
   // createSessionRenderer returns a `tick`; the first invocation should
   // close the startup pair.
   await withSilentStdout(() => {
-    const { tick, backend } = createSessionRenderer();
+    const { tick, backend } = createSessionRenderer({ store: newStore() });
     try {
-      tick({ transcript: [], appState: initialHostAppState() });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
     } finally {
       backend.dispose?.();
     }
@@ -96,11 +100,11 @@ test("producer B2.1: second paint does NOT record a duplicate shell.startup_ms",
   recorder.mark("shell.startup_begin");
 
   await withSilentStdout(() => {
-    const { tick, backend } = createSessionRenderer();
+    const { tick, backend } = createSessionRenderer({ store: newStore() });
     try {
-      tick({ transcript: [], appState: initialHostAppState() });
-      tick({ transcript: [], appState: initialHostAppState() });
-      tick({ transcript: [], appState: initialHostAppState() });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
+      tick({ transcript: [], appState: initialHostAppState(), dispatch: () => {} });
     } finally {
       backend.dispose?.();
     }

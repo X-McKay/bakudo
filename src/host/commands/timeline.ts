@@ -11,7 +11,6 @@ import { formatInspectTab } from "../inspectTabs.js";
 import { registerKeybinding } from "../keybindings/hooks.js";
 import { storageRootFor } from "../sessionRunSupport.js";
 import { awaitPrompt, newPromptId } from "../promptResolvers.js";
-import { reduceHost } from "../reducer.js";
 import { loadAttemptProvenance } from "../timeline.js";
 import {
   emitTurnTransition,
@@ -247,7 +246,7 @@ export const timelineCommandSpec: HostCommandSpec = {
     // Enqueue the modal picker. The resolver produces a free-form string
     // that `parseTimelineSelection` folds into an (action, turnId) pair.
     const id = newPromptId();
-    deps.appState = reduceHost(deps.appState, {
+    deps.dispatch({
       type: "enqueue_prompt",
       prompt: {
         id,
@@ -262,7 +261,7 @@ export const timelineCommandSpec: HostCommandSpec = {
       deps.transcript.push({ kind: "event", label: "timeline", detail: row.label });
     }
     const resolution = await awaitPrompt(id);
-    deps.appState = reduceHost(deps.appState, { type: "dequeue_prompt", id });
+    deps.dispatch({ type: "dequeue_prompt", id });
     if (resolution.kind !== "answered") {
       deps.transcript.push({
         kind: "assistant",
@@ -299,7 +298,7 @@ export const timelineCommandSpec: HostCommandSpec = {
       });
       return;
     }
-    deps.appState = reduceHost(deps.appState, {
+    deps.dispatch({
       type: "set_active_session",
       sessionId: session.sessionId,
       turnId: result.newTurn.turnId,

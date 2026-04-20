@@ -20,8 +20,8 @@
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "build:release-bundle": "bash scripts/package-release.sh",
     "prepare": "pnpm build",
-    "test": "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/unit/themes/*.test.js dist/tests/integration/*.test.js dist/tests/regression/*.test.js dist/tests/golden/*.test.js",
-    "test:unit": "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/unit/themes/*.test.js",
+    "test": "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/unit/themes/*.test.js dist/tests/unit/host/*.test.js dist/tests/unit/host/renderers/ink/*.test.js dist/tests/integration/*.test.js dist/tests/regression/*.test.js dist/tests/golden/*.test.js",
+    "test:unit": "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/unit/themes/*.test.js dist/tests/unit/host/*.test.js dist/tests/unit/host/renderers/ink/*.test.js",
     "test:integration": "pnpm build && node --test dist/tests/integration/*.test.js",
     "test:regression": "pnpm build && node --test dist/tests/regression/*.test.js",
     "start": "pnpm build && node dist/src/cli.js",
@@ -34,16 +34,20 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
     "@typescript-eslint/eslint-plugin": "^8.58.1",
     "@typescript-eslint/parser": "^8.58.1",
     "eslint": "^10.2.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
+    "ink-testing-library": "^4.0.0",
     "prettier": "^3.8.2",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"
   },
   "dependencies": {
+    "ink": "^7.0.1",
+    "react": "^19.2.5",
     "zod": "^4.3.6"
   }
 }

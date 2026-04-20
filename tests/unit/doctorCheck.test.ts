@@ -26,7 +26,11 @@ import {
 } from "../../src/host/doctorAboxProbe.js";
 import { JsonBackend } from "../../src/host/renderers/jsonBackend.js";
 import { PlainBackend } from "../../src/host/renderers/plainBackend.js";
-import { TtyBackend } from "../../src/host/renderers/ttyBackend.js";
+// Phase 5-W2: we probe the public `constructor.name` contract against a
+// plain fixture rather than instantiating InkBackend (which requires a React
+// render tree and a host store). `rendererBackendName` depends only on the
+// string shape of `constructor.name`.
+const fakeInkBackend = { constructor: { name: "InkBackend" } };
 
 // ---------------------------------------------------------------------------
 // parseSemverMajor
@@ -142,9 +146,8 @@ test("checkKeybindingsPath reports `(exists)` when file is on disk", async () =>
 // the instance. Cast to the structural shape for the assertion.
 type BackendCtorProbe = { constructor?: { name?: string } };
 
-test("rendererBackendName identifies TtyBackend as 'tty'", () => {
-  const backend = new TtyBackend({ write: () => true, isTTY: true });
-  assert.equal(rendererBackendName(backend as unknown as BackendCtorProbe), "tty");
+test("rendererBackendName identifies InkBackend as 'ink'", () => {
+  assert.equal(rendererBackendName(fakeInkBackend as unknown as BackendCtorProbe), "ink");
 });
 
 test("rendererBackendName identifies PlainBackend as 'plain'", () => {

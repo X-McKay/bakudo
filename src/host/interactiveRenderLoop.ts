@@ -6,12 +6,15 @@ import { getBaseStdout, stderrWrite, withCapturedStdout } from "./io.js";
 import { getMetricsRecorder } from "./metrics/metricsRecorder.js";
 import type { HostCliArgs } from "./parsing.js";
 import { createProgressCoalescer } from "./progressCoalescer.js";
+import type { HostAction } from "./reducer.js";
 import { selectRenderFrame, type TranscriptItem } from "./renderModel.js";
 import {
   selectRendererBackend,
   type RendererBackend,
   type RendererStdout,
 } from "./rendererBackend.js";
+import type { RunTurn } from "./renderers/ink/TurnDriver.js";
+import type { HostStore } from "./store/index.js";
 import type { TextWriter } from "./io.js";
 
 /**
@@ -57,6 +60,13 @@ export type InteractiveResolution = {
 export type TickDeps = {
   transcript: TranscriptItem[];
   appState: HostAppState;
+  /**
+   * Dispatch a {@link HostAction} into the underlying store. Command handlers
+   * MUST use this instead of reassigning `deps.appState` — the Ink migration
+   * backs `appState` with a getter over `store.getSnapshot()`, so direct
+   * assignment throws at runtime.
+   */
+  dispatch: (action: HostAction) => void;
   /** Short repo basename displayed in the frame header (PR3 follow-up). */
   repoLabel?: string;
   /** Merged config cascade. Populated by the interactive shell bootstrap. */
@@ -178,12 +188,21 @@ export const tickRender = (deps: TickDeps): void => {
  * Using this instead of {@link tickRender} guarantees alt-screen enter/exit
  * fires exactly once per interactive session.
  */
-export const createSessionRenderer = (): {
+export const createSessionRenderer = (options: {
+  store: HostStore;
+  repoLabel?: string;
+  runTurn?: RunTurn;
+}): {
   tick: (deps: TickDeps) => void;
   backend: RendererBackend;
 } => {
   const stdout = stdoutAsRendererStdout();
-  const backend = selectRendererBackend({ stdout });
+  const backend = selectRendererBackend({
+    stdout,
+    store: options.store,
+    ...(options.repoLabel !== undefined ? { repoLabel: options.repoLabel } : {}),
+    ...(options.runTurn !== undefined ? { runTurn: options.runTurn } : {}),
+  });
   // Wave 6d PR11 review blocker B2: the first paint of the session renderer
   // is the plan's "time-to-first-render" hook point (plan 06 line 437). On
   // the first tick we close the `shell.startup_begin` → `shell.startup_done`
@@ -212,7 +231,7 @@ export type ExecuteDeps = {
   parse: (argv: string[]) => HostCliArgs;
   dispatch: (args: HostCliArgs) => Promise<number>;
   remember: (
-    state: { appState: HostAppState },
+    state: { appState: HostAppState; dispatch: (action: HostAction) => void },
     args: HostCliArgs,
     resolution: InteractiveResolution,
   ) => void;
@@ -272,7 +291,7 @@ export const executePrompt = async (
     }
 
     if (code !== 1) {
-      exec.remember({ appState: deps.appState }, parsed, resolution);
+      exec.remember({ appState: deps.appState, dispatch: deps.dispatch }, parsed, resolution);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

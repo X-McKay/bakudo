@@ -58,7 +58,32 @@ export type HostAction =
   | { type: "push_notice"; notice: string }
   | { type: "clear_notices" }
   | { type: "open_quick_help"; context: QuickHelpContext; dialogKind?: string }
-  | { type: "close_quick_help" };
+  | { type: "close_quick_help" }
+  | { type: "append_user"; text: string; timestamp?: string }
+  | { type: "append_assistant"; text: string; tone?: "info" | "success" | "warning" | "error" }
+  | { type: "append_event"; label: string; detail?: string }
+  | { type: "append_output"; text: string }
+  | {
+      type: "append_review";
+      outcome: string;
+      summary: string;
+      nextAction?: string;
+    }
+  | { type: "clear_transcript" }
+  | { type: "dispatch_started"; label: string; startedAt: number; detail?: string }
+  | { type: "dispatch_progress"; detail?: string; label?: string }
+  | { type: "dispatch_finished" }
+  | { type: "submit"; text: string }
+  | { type: "clear_pending_submit" }
+  | { type: "request_exit"; code: number }
+  | {
+      type: "set_composer_metadata";
+      model?: string;
+      agent?: string;
+      provider?: string;
+    }
+  // Temporary bridge for DialogDispatcher; remove once launchers dispatch actions directly.
+  | { type: "replace_state"; state: HostAppState };
 
 const withoutOptional = <T extends object, K extends keyof T>(obj: T, key: K): T => {
   if (!(key in obj)) {
@@ -373,6 +398,94 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
         return state;
       }
       return { ...state, notices: [] };
+    case "append_user": {
+      const item = action.timestamp === undefined
+        ? { kind: "user" as const, text: action.text }
+        : { kind: "user" as const, text: action.text, timestamp: action.timestamp };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "append_assistant": {
+      const item = action.tone === undefined
+        ? { kind: "assistant" as const, text: action.text }
+        : { kind: "assistant" as const, text: action.text, tone: action.tone };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "append_event": {
+      const item = action.detail === undefined
+        ? { kind: "event" as const, label: action.label }
+        : { kind: "event" as const, label: action.label, detail: action.detail };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "append_output":
+      return {
+        ...state,
+        transcript: [...state.transcript, { kind: "output", text: action.text }],
+      };
+    case "append_review": {
+      const item = action.nextAction === undefined
+        ? { kind: "review" as const, outcome: action.outcome, summary: action.summary }
+        : {
+            kind: "review" as const,
+            outcome: action.outcome,
+            summary: action.summary,
+            nextAction: action.nextAction,
+          };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "clear_transcript":
+      if (state.transcript.length === 0) {
+        return state;
+      }
+      return { ...state, transcript: [] };
+    case "dispatch_started":
+      return {
+        ...state,
+        dispatch: {
+          inFlight: true,
+          startedAt: action.startedAt,
+          label: action.label,
+          ...(action.detail !== undefined ? { detail: action.detail } : {}),
+        },
+      };
+    case "dispatch_progress":
+      if (!state.dispatch.inFlight) return state;
+      return {
+        ...state,
+        dispatch: {
+          ...state.dispatch,
+          ...(action.label !== undefined ? { label: action.label } : {}),
+          ...(action.detail !== undefined ? { detail: action.detail } : {}),
+        },
+      };
+    case "dispatch_finished":
+      return { ...state, dispatch: { inFlight: false } };
+    case "submit": {
+      const nextSeq = state.submitSeq + 1;
+      return {
+        ...state,
+        submitSeq: nextSeq,
+        pendingSubmit: { seq: nextSeq, text: action.text },
+      };
+    }
+    case "clear_pending_submit": {
+      if (state.pendingSubmit === undefined) {
+        return state;
+      }
+      const { pendingSubmit: _drop, ...rest } = state;
+      return rest as HostAppState;
+    }
+    case "request_exit":
+      return { ...state, shouldExit: { code: action.code } };
+    case "set_composer_metadata":
+      return {
+        ...state,
+        composer: {
+          ...state.composer,
+          ...(action.model !== undefined ? { model: action.model } : {}),
+          ...(action.agent !== undefined ? { agent: action.agent } : {}),
+          ...(action.provider !== undefined ? { provider: action.provider } : {}),
+        },
+      };
     case "open_quick_help": {
       // Toggle-off semantics: re-dispatching with same context+dialogKind closes.
       const existing = state.quickHelp;
@@ -401,5 +514,8 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
       delete (rest as { quickHelp?: unknown }).quickHelp;
       return rest;
     }
+    // Temporary bridge for DialogDispatcher; remove once launchers dispatch actions directly.
+    case "replace_state":
+      return action.state;
   }
 };

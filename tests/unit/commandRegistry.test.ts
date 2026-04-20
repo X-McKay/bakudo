@@ -5,11 +5,18 @@ import { initialHostAppState } from "../../src/host/appState.js";
 import { createCommandRegistry } from "../../src/host/commandRegistry.js";
 import { buildDefaultCommandRegistry } from "../../src/host/commandRegistryDefaults.js";
 import type { TickDeps } from "../../src/host/interactiveRenderLoop.js";
+import { reduceHost } from "../../src/host/reducer.js";
 
-const buildDeps = (): TickDeps => ({
-  transcript: [],
-  appState: initialHostAppState(),
-});
+const buildDeps = (): TickDeps => {
+  const deps: TickDeps = {
+    transcript: [],
+    appState: initialHostAppState(),
+    dispatch: (action) => {
+      deps.appState = reduceHost(deps.appState, action);
+    },
+  };
+  return deps;
+};
 
 test("command registry: register + get matches by name and alias", () => {
   const registry = createCommandRegistry();

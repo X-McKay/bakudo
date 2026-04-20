@@ -1,6 +1,5 @@
 import type { ComposerMode } from "../appState.js";
 import type { HostCommandSpec } from "../commandRegistry.js";
-import { reduceHost } from "../reducer.js";
 
 const KNOWN_MODES: readonly ComposerMode[] = ["standard", "plan", "autopilot"];
 
@@ -15,7 +14,7 @@ export const composerCommands: readonly HostCommandSpec[] = [
     handler: ({ args, deps }) => {
       const requested = args[0];
       if (requested === undefined) {
-        deps.appState = reduceHost(deps.appState, { type: "cycle_mode" });
+        deps.dispatch({ type: "cycle_mode" });
         deps.transcript.push({
           kind: "event",
           label: "mode",
@@ -32,7 +31,7 @@ export const composerCommands: readonly HostCommandSpec[] = [
         });
         return;
       }
-      deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: normalized });
+      deps.dispatch({ type: "set_mode", mode: normalized });
       deps.transcript.push({ kind: "event", label: "mode", detail: normalized });
     },
   },
@@ -42,7 +41,7 @@ export const composerCommands: readonly HostCommandSpec[] = [
     group: "composer",
     description: "Shortcut for /mode autopilot.",
     handler: ({ deps }) => {
-      deps.appState = reduceHost(deps.appState, { type: "set_mode", mode: "autopilot" });
+      deps.dispatch({ type: "set_mode", mode: "autopilot" });
       deps.transcript.push({ kind: "event", label: "mode", detail: "autopilot" });
     },
   },

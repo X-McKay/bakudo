@@ -1,4 +1,13 @@
+import type { TranscriptItem } from "./renderModel.js";
+
 export type HostScreen = "transcript" | "sessions" | "inspect" | "help";
+
+export type DispatchState =
+  | { inFlight: false }
+  | { inFlight: true; startedAt: number; label: string; detail?: string };
+
+export type PendingSubmit = { seq: number; text: string };
+export type ShouldExit = { code: number };
 
 /**
  * Composer modes presented to the user.
@@ -77,7 +86,7 @@ export type ApprovalPromptRequest = {
 /**
  * Count of options the approval prompt cursor cycles through: [1] allow
  * once, [2] allow always, [3] deny, [4] show context. Exported so reducers
- * and renderers stay in sync with the option list in `approvalPromptCopy`.
+ * and renderers stay in sync with the option list in `plainRenderer.ts`.
  */
 export const APPROVAL_DIALOG_CURSOR_COUNT = 4;
 
@@ -154,12 +163,20 @@ export type HostAppState = {
     mode: ComposerMode;
     autoApprove: boolean;
     text: string;
+    model: string;
+    agent: string;
+    provider: string;
   };
   activeSessionId?: string;
   activeTurnId?: string;
   inspect: InspectState;
   promptQueue: ReadonlyArray<PromptEntry>;
   notices: string[];
+  transcript: ReadonlyArray<TranscriptItem>;
+  dispatch: DispatchState;
+  pendingSubmit?: PendingSubmit;
+  shouldExit?: ShouldExit;
+  submitSeq: number;
   /**
    * Cursor index for the approval prompt's [1]/[2]/[3]/[4] option list.
    * Shift+Tab cycles through the options (see `reducer` actions
@@ -181,7 +198,14 @@ export const DEFAULT_INSPECT_SCROLL_HEIGHT = 20;
 
 export const initialHostAppState = (): HostAppState => ({
   screen: "transcript",
-  composer: { mode: "standard", autoApprove: false, text: "" },
+  composer: {
+    mode: "standard",
+    autoApprove: false,
+    text: "",
+    model: "",
+    agent: "",
+    provider: "",
+  },
   inspect: {
     tab: "summary",
     scrollOffset: 0,
@@ -189,5 +213,8 @@ export const initialHostAppState = (): HostAppState => ({
   },
   promptQueue: [],
   notices: [],
+  transcript: [],
+  dispatch: { inFlight: false },
+  submitSeq: 0,
   approvalDialogCursor: 0,
 });
