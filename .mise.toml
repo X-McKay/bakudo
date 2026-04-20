@@ -10,7 +10,7 @@ run = "pnpm lint"
 description = "Run ESLint"
 
 [tasks.test]
-run = "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/unit/themes/*.test.js dist/tests/integration/*.test.js dist/tests/regression/*.test.js dist/tests/golden/*.test.js"
+run = "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/unit/themes/*.test.js dist/tests/unit/host/*.test.js dist/tests/unit/host/renderers/ink/*.test.js dist/tests/integration/*.test.js dist/tests/regression/*.test.js dist/tests/golden/*.test.js"
 description = "Build and run all tests (explicit paths so bash globstar isn't required)"
 
 [tasks.check]
