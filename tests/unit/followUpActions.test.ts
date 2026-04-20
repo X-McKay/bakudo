@@ -754,6 +754,93 @@ test("accept: low-confidence automatic resolution preserves the candidate for co
   });
 });
 
+test("accept: resumes a needs_confirmation candidate and applies it when confirmed", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-needs-confirmation";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    // Overlap: source and candidate both diverge from the baseline on the same
+    // line. Without explicit confirmation this path would stall in
+    // needs_confirmation; resuming from needs_confirmation sets
+    // explicitConfirmation=true and the text conflict resolves to
+    // take_candidate.
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "needs_confirmation",
+        candidate: {
+          state: "needs_confirmation",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          confirmationReason: "overlapping edits need confirmation",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      aboxBin: join(process.cwd(), "tests/helpers/mockAbox.sh"),
+      runner: createApplyRunner(),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /accepted/u);
+    // Proof that explicitConfirmation=true was honored: take_candidate wrote
+    // the candidate content into the source repo despite the overlap.
+    assert.equal(
+      await readFile(join(repoRoot, "README.md"), "utf8"),
+      "hello\nfrom preserved candidate\n",
+    );
+
+    const session = await store.loadSession(sessionId);
+    const turn = session?.turns.find((entry) => entry.turnId === turnId);
+    const attempt = turn?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(session?.status, "completed");
+    assert.equal(turn?.status, "completed");
+    assert.equal(attempt?.status, "succeeded");
+    assert.equal(attempt?.candidateState, "applied");
+    assert.equal(attempt?.candidate?.state, "applied");
+    assert.equal(attempt?.candidate?.driftDecision, "allowed");
+    assert.equal(attempt?.reviewRecord?.outcome, "success");
+    assert.equal(attempt?.reviewRecord?.action, "accept");
+    assert.equal(turn?.latestReview?.action, "accept");
+
+    const { ArtifactStore } = await import("../../src/artifactStore.js");
+    const artifactStore = new ArtifactStore(storageRoot);
+    const artifacts = await artifactStore.listArtifacts(sessionId);
+    const applyResult = artifacts.find((entry) => entry.name === "apply-result.json");
+    assert.ok(applyResult, "expected apply-result.json to be registered");
+    assert.equal(applyResult?.metadata?.confirmed, true);
+    assert.ok(artifacts.some((entry) => entry.name === "apply-verify-result.json"));
+
+    const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
+    assert.equal(discovered, null);
+  });
+});
+
 test("accept: failed verification after automatic resolution falls back to needs_confirmation", async () => {
   await withTempRoot(async (storageRoot) => {
     const sessionId = "session-accept-resolve-verify-fail";
@@ -1126,6 +1213,80 @@ test("halt: candidate-ready follow-up discards the preserved candidate", async (
     assert.equal(attempt?.candidate?.state, "discarded");
     assert.equal(attempt?.reviewRecord?.action, "halt");
     assert.equal(turn?.latestReview?.action, "halt");
+
+    const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
+    assert.equal(discovered, null);
+  });
+});
+
+test("halt: discards a needs_confirmation candidate and transitions the turn to cancelled", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-halt-needs-confirmation";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    const aboxBin = join(process.cwd(), "tests/helpers/mockAbox.sh");
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "needs_confirmation",
+        candidate: {
+          state: "needs_confirmation",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          confirmationReason: "overlapping edits need confirmation",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      aboxBin,
+      action: { kind: "halt" },
+    });
+
+    assert.match(result.message, /preserved candidate discarded/u);
+    // halt must not touch the source repo.
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\nfrom source repo\n");
+
+    const session = await store.loadSession(sessionId);
+    const turn = session?.turns.find((entry) => entry.turnId === turnId);
+    const attempt = turn?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(session?.status, "cancelled");
+    assert.equal(turn?.status, "cancelled");
+    assert.equal(attempt?.status, "cancelled");
+    assert.equal(attempt?.candidateState, "discarded");
+    assert.equal(attempt?.candidate?.state, "discarded");
+    assert.equal(attempt?.reviewRecord?.action, "halt");
+    assert.equal(turn?.latestReview?.action, "halt");
+
+    const transitions = await listTurnTransitions(storageRoot, sessionId);
+    assert.ok(
+      transitions.some((entry) => entry.reason === "user_halt" && entry.toStatus === "cancelled"),
+      "expected a user_halt transition",
+    );
 
     const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
     assert.equal(discovered, null);
