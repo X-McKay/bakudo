@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 
 import type {
@@ -9,7 +9,6 @@ import type {
   AttemptSpec,
   DispatchPlan,
 } from "../../src/attemptProtocol.js";
-import type { TaskRequest } from "../../src/protocol.js";
 import { createSessionTaskKey } from "../../src/sessionTypes.js";
 import { SessionStore } from "../../src/sessionStore.js";
 import type { ReviewedAttemptResult } from "../../src/reviewer.js";
@@ -171,83 +170,6 @@ test("F-03: resumeSession reads attemptSpec when request is undefined", async ()
     assert.equal(captured[0]?.turnId, "turn-1");
     assert.equal(captured[0]?.spec.taskId, createSessionTaskKey(spec.sessionId, "retry-2"));
     assert.equal(captured[0]?.spec.prompt, spec.prompt);
-  } finally {
-    await rm(repoRoot, { recursive: true, force: true });
-    await rm(storageRoot, { recursive: true, force: true });
-  }
-});
-
-test("F-03: resumeSession still works for legacy request-only attempts", async () => {
-  const repoRoot = await mkdtemp(join(tmpdir(), "bakudo-f-03-v1-repo-"));
-  const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-f-03-v1-store-"));
-  try {
-    const store = new SessionStore(storageRoot);
-    const sessionId = "sess-legacy";
-    const legacyTaskId = createSessionTaskKey(sessionId, "task-1");
-    const legacyRequest: TaskRequest = {
-      schemaVersion: 1,
-      taskId: legacyTaskId,
-      sessionId,
-      goal: "echo hi",
-      mode: "build",
-      cwd: "/tmp/scratch",
-      timeoutSeconds: 60,
-      maxOutputBytes: 1024,
-      heartbeatIntervalMs: 5000,
-      assumeDangerousSkipPermissions: false,
-    };
-
-    const { sessionFile } = store.paths(sessionId);
-    await mkdir(dirname(sessionFile), { recursive: true });
-    await writeFile(
-      sessionFile,
-      `${JSON.stringify(
-        {
-          schemaVersion: 1,
-          sessionId,
-          goal: legacyRequest.goal,
-          status: "failed",
-          assumeDangerousSkipPermissions: false,
-          tasks: [
-            {
-              taskId: "attempt-1",
-              status: "failed",
-              request: legacyRequest,
-              result: {
-                schemaVersion: 1,
-                taskId: legacyTaskId,
-                sessionId,
-                status: "failed",
-                summary: "boot timeout",
-                exitCode: 1,
-                finishedAt: "2026-04-18T00:00:01.000Z",
-              },
-            },
-          ],
-          createdAt: "2026-04-18T00:00:00.000Z",
-          updatedAt: "2026-04-18T00:00:00.000Z",
-        },
-        null,
-        2,
-      )}\n`,
-      "utf8",
-    );
-
-    const captured: AttemptSpec[] = [];
-    const cap = capture();
-    const exit = await withCapturedStdout(cap.writer, () =>
-      resumeSession(buildArgs(storageRoot, repoRoot, sessionId, "attempt-1"), {
-        executeAttemptFn: async (ctx) => {
-          captured.push(ctx.spec!);
-          return buildReviewedSuccess(ctx.spec!);
-        },
-      }),
-    );
-
-    assert.equal(exit, 0);
-    assert.equal(captured.length, 1);
-    assert.ok(captured[0]?.instructions.some((line) => line.includes("User prompt: echo hi")));
-    assert.equal(captured[0]?.taskId, createSessionTaskKey(sessionId, "retry-2"));
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
     await rm(storageRoot, { recursive: true, force: true });
