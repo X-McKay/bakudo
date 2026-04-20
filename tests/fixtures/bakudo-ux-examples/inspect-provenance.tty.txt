@@ -1,0 +1,70 @@
+# Scenario: inspect-provenance-tty
+# Invocation: `/inspect provenance` on session ses_01HXYZABCDEF01 turn 1 attempt 1.
+# Layout MUST follow Phase 4 Workstream 4 "Provenance Tab Layout" in order:
+#   1. active agent profile (name + permission snapshot)
+#   2. attempt spec (compiled JSON — the exact thing sent to worker)
+#   3. abox dispatch command (array, not joined string)
+#   4. sandbox task ID and worktree path
+#   5. permission rule matches during the run (which rules fired, in order)
+#   6. approval timeline
+#   7. env allowlist snapshot
+#   8. exit details
+
+\e[36m\e[1mInspect\e[0m  \e[2msession ses_01HXYZ…F01 / turn 1 / attempt 1\e[0m  summary  \e[1m[provenance]\e[0m  review  artifacts  approvals  logs
+
+\e[1m1. Agent profile\e[0m
+  name: standard
+  permissions: { edit: ask, bash: ask, write: ask, network: deny }
+  maxAutopilotContinues: 0
+  source: ~/.config/bakudo/config.json (user)
+
+\e[1m2. Attempt spec\e[0m
+  {
+    "attemptId": "attempt_01HXYZABCDEFA1",
+    "turnId": "turn_01HXYZABCDEFT1",
+    "sessionId": "ses_01HXYZABCDEF01",
+    "mode": "standard",
+    "prompt": "add a richer review surface for sandbox results",
+    "permissions": { "write": true, "network": false, "assumeDangerousSkipPermissions": false },
+    "workerEngine": "claude-code@1.4.2"
+  }
+
+\e[1m3. abox dispatch command\e[0m
+  [
+    "abox",
+    "--repo", "/home/al/git/bakudo-abox",
+    "run",
+    "--task", "bakudo-ses_01HXYZABCDEF01-t1-a1",
+    "--ephemeral",
+    "--",
+    "claude", "code", "--prompt-file", "/tmp/bakudo-prompt-t1-a1.txt"
+  ]
+
+\e[1m4. Sandbox\e[0m
+  task id:      bakudo-ses_01HXYZABCDEF01-t1-a1
+  worktree:     /var/lib/abox/worktrees/bakudo-ses_01HXYZABCDEF01-t1-a1
+  rootfs image: abox-guest-2026.04.14
+  engine:       cloud-hypervisor
+
+\e[1m5. Permission rule matches (in order)\e[0m
+  12:00:04Z  write(**)           allow   scope=session  src=agent_profile   (ruleId=r_std_write_session)
+  12:00:09Z  shell(git status)   allow   scope=session  src=agent_profile   (ruleId=r_std_git_read)
+  12:00:12Z  shell(pnpm test)    allow   scope=session  src=repo_config     (ruleId=r_repo_test_allow)
+  12:00:15Z  network(*)          deny    scope=always   src=agent_profile   (ruleId=r_std_net_deny)
+
+\e[1m6. Approval timeline\e[0m
+  12:00:02Z  dispatch              auto_approved  agent=standard  autopilot=false
+  12:00:12Z  shell(pnpm test)      auto_approved  matched ruleId=r_repo_test_allow
+  12:00:15Z  network(registry.npmjs.org)  auto_denied  matched ruleId=r_std_net_deny
+
+\e[1m7. Env allowlist snapshot\e[0m
+  PATH, HOME, USER, LANG, LC_ALL, TERM, CI, NODE_VERSION, BAKUDO_SESSION_ID, BAKUDO_TURN_ID
+  (12 keys allowed; 47 host env vars redacted by redactor v2)
+
+\e[1m8. Exit details\e[0m
+  started:   2026-05-01T12:00:02Z
+  finished:  2026-05-01T12:00:17Z
+  exit code: 0
+  signal:    none
+  timed out: false
+  stdout:    2.1 KiB    stderr: 0 B

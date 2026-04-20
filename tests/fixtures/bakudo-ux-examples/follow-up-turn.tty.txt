@@ -1,0 +1,24 @@
+# Scenario: follow-up-turn-tty
+# Preconditions: session ses_01HXYZABCDEF01 is active from first-prompt-new-session.tty.txt.
+# Rule (Phase 1 truth table): plain text + active session -> append new turn (turn 2), do NOT create a new session.
+# Turn ID:    turn_01HXYZABCDEFT2
+# Attempt:    attempt_01HXYZABCDEFA2  (fresh attempt_id; same session)
+# Sandbox:    bakudo-ses_01HXYZABCDEF01-t2-a1
+# Clock:      2026-05-01T12:02:30Z .. 2026-05-01T12:02:41Z
+#
+# Narration must NOT say "Starting new session". It MUST say "Continuing session ...".
+
+\e[36m\e[1mBakudo\e[0m  \e[1mstandard\e[0m  \e[2msession ses_01HXYZ…F01\e[0m  \e[2mrepo bakudo-abox\e[0m
+
+\e[2m> now make the summary more concise\e[0m
+
+\e[1mYou:\e[0m now make the summary more concise
+\e[36mBakudo:\e[0m Continuing session ses_01HXYZ…F01 in \e[1mstandard\e[0m mode.
+\e[36mBakudo:\e[0m Dispatching a new sandbox attempt for turn 2.
+\e[2m       task bakudo-ses_01HXYZ…F01-t2-a1\e[0m
+\e[36mBakudo:\e[0m Sandbox worker started.
+\e[36mBakudo:\e[0m Worker completed. Reviewing result.
+\e[32mBakudo:\e[0m Accepted. 1 file changed and targeted tests passed.
+
+\e[33m[inspect] [inspect provenance] [new]\e[0m
+>

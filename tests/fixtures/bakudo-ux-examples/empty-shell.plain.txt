@@ -1,0 +1,11 @@
+# Scenario: empty-shell-plain
+# Invocation: `bakudo --plain` (or non-TTY stdout, or NO_COLOR=1)
+# Renderer: plainRenderer (ANSI stripped, no 256-color, no bold)
+# frame.mode = "prompt"
+
+Bakudo  standard  no active session  repo bakudo-abox
+
+Bakudo: Ready. Ask for a plan or build change, or use /resume to reopen a prior session.
+
+[new] [resume] [help]
+>

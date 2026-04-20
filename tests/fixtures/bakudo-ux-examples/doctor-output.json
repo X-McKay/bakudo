@@ -1,0 +1,126 @@
+{
+  "name": "bakudo-doctor",
+  "bakudoVersion": "0.11.0",
+  "status": "pass",
+  "checks": [
+    {
+      "name": "node-version",
+      "status": "pass",
+      "summary": "node v22.11.0 satisfies required major v22"
+    },
+    {
+      "name": "abox-available",
+      "status": "pass",
+      "summary": "abox 0.9.1 at /home/al/git/bakudo-abox/abox/target/release/abox"
+    },
+    {
+      "name": "abox-capabilities",
+      "status": "pass",
+      "summary": "protocols advertised: 1,2,3"
+    },
+    {
+      "name": "repo-writeable",
+      "status": "pass",
+      "summary": "repo root writeable at /home/al/git/bakudo-abox"
+    },
+    {
+      "name": "terminal-capability",
+      "status": "pass",
+      "summary": "TTY with ANSI (TERM=xterm-256color)"
+    },
+    {
+      "name": "renderer-backend",
+      "status": "pass",
+      "summary": "transcript (TtyBackend)"
+    },
+    {
+      "name": "config-cascade",
+      "status": "pass",
+      "summary": "3 config layer(s) present (repo_local, user, compiled_defaults)"
+    },
+    {
+      "name": "agent-profile",
+      "status": "pass",
+      "summary": "active agent profile: standard"
+    },
+    {
+      "name": "keybindings-path",
+      "status": "pass",
+      "summary": "user keybindings at /home/al/.config/bakudo/keybindings.json"
+    },
+    {
+      "name": "keybindings-conflicts",
+      "status": "pass",
+      "summary": "no reserved-shortcut conflicts"
+    },
+    {
+      "name": "telemetry",
+      "status": "pass",
+      "summary": "local-only OTel spans; no OTLP endpoint configured"
+    }
+  ],
+  "node": {
+    "runtime": "v22.11.0",
+    "required": 22
+  },
+  "abox": {
+    "available": true,
+    "version": "0.9.1",
+    "capabilities": "protocols=1,2,3; taskKinds=explicit_command,assistant_turn; engines=cloud-hypervisor",
+    "bin": "/home/al/git/bakudo-abox/abox/target/release/abox"
+  },
+  "rendererBackend": "transcript",
+  "agentProfile": "standard",
+  "configCascadePaths": [
+    "/home/al/git/bakudo-abox/.bakudo/config.json",
+    "/home/al/.config/bakudo/config.json",
+    "compiled_defaults"
+  ],
+  "keybindingsPath": "/home/al/.config/bakudo/keybindings.json",
+  "keybindingsConflicts": [],
+  "terminal": {
+    "isTty": true,
+    "supportsAnsi": true,
+    "noColor": false,
+    "term": "xterm-256color",
+    "colorfgbg": "15;0"
+  },
+  "telemetry": {
+    "enabled": false,
+    "note": "local-only (spans recorded on disk; no OTLP export)",
+    "logDir": "/home/al/.local/state/bakudo/logs",
+    "spansOnDisk": 12,
+    "droppedEventBatches": 0,
+    "otlp": {
+      "configured": false
+    }
+  },
+  "uiMode": {
+    "active": "transcript-first",
+    "description": "Transcript-first UI (Phase 6 W1 default) — composer + inline narration, overlays for /inspect and approvals."
+  },
+  "storage": {
+    "storageRoot": "/home/al/.local/share/bakudo",
+    "totalArtifactBytes": 4825193,
+    "retentionPolicy": {
+      "intermediateMaxAgeMs": 604800000,
+      "intermediateKinds": [
+        "worker-output.log",
+        "dispatch.json",
+        "stderr.log"
+      ],
+      "protectedKinds": [
+        "result.json",
+        "patch.diff",
+        "attempt-spec.json",
+        "provenance.json"
+      ]
+    }
+  },
+  "redaction": {
+    "active": true,
+    "envAllowlistCount": 12,
+    "envDenyPatternCount": 9,
+    "textPatternCount": 14
+  }
+}
