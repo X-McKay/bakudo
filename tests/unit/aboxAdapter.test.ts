@@ -145,10 +145,7 @@ test("ABoxAdapter streams live output events and aggregates the final result", a
     errorType: "ok",
     code: "0",
     signal: "",
-    cmd: [
-      "/tmp/abox",
-      ...args,
-    ],
+    cmd: ["/tmp/abox", ...args],
     taskId,
   });
 });

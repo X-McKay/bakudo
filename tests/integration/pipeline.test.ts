@@ -28,8 +28,7 @@ const git = async (cwd: string, args: string[]): Promise<void> => {
   await execFileAsync("git", args, { cwd });
 };
 
-const createTempRoot = async (): Promise<string> =>
-  mkdtemp(join(tmpdir(), "bakudo-pipeline-int-"));
+const createTempRoot = async (): Promise<string> => mkdtemp(join(tmpdir(), "bakudo-pipeline-int-"));
 
 const baseArgs = (storageRoot: string, aboxBin: string): HostCliArgs => ({
   command: "run",
@@ -220,18 +219,15 @@ test("executeAttempt auto-merges preserved worktree artifacts and cleans up sand
 
     const artifacts = await artifactStore.listTaskArtifacts(sessionId, spec.taskId);
     const artifactNames = artifacts.map((artifact) => artifact.name).sort();
-    assert.deepEqual(
-      artifactNames,
-      [
-        "changed-files.json",
-        "dispatch.json",
-        "merge-result.json",
-        "patch.diff",
-        "result.json",
-        "summary.md",
-        "worker-output.log",
-      ],
-    );
+    assert.deepEqual(artifactNames, [
+      "changed-files.json",
+      "dispatch.json",
+      "merge-result.json",
+      "patch.diff",
+      "result.json",
+      "summary.md",
+      "worker-output.log",
+    ]);
 
     const mergeArtifact = artifacts.find((artifact) => artifact.name === "merge-result.json");
     assert.ok(mergeArtifact);

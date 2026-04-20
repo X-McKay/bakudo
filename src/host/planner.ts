@@ -1,4 +1,9 @@
-import type { AttemptSpec, DispatchPlan, ExecutionProfile, TurnIntent } from "../attemptProtocol.js";
+import type {
+  AttemptSpec,
+  DispatchPlan,
+  ExecutionProfile,
+  TurnIntent,
+} from "../attemptProtocol.js";
 import type { ComposerMode } from "./appState.js";
 import { compileAttemptSpec, type CompilerContext } from "./attemptCompiler.js";
 import { buildTurnIntent } from "./intentClassifier.js";

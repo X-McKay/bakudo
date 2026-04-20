@@ -332,10 +332,7 @@ export const parseHostArgs = (argv: string[]): HostCliArgs => {
       i += consumed - 1;
       continue;
     }
-    if (
-      result.command === "inspect" &&
-      (arg === "--session" || arg.startsWith("--session="))
-    ) {
+    if (result.command === "inspect" && (arg === "--session" || arg.startsWith("--session="))) {
       const { value, consumed } = readLongFlag(argv, i, "--session");
       result.sessionId = value;
       i += consumed - 1;

@@ -34,7 +34,9 @@ test("transcriptFacade: push preserves optional fields (assistant tone)", () => 
   const store = createHostStore(reduceHost, initialHostAppState());
   const facade = buildTranscriptFacade(store);
   facade.push({ kind: "assistant", text: "ok", tone: "success" });
-  assert.deepEqual(store.getSnapshot().transcript, [{ kind: "assistant", text: "ok", tone: "success" }]);
+  assert.deepEqual(store.getSnapshot().transcript, [
+    { kind: "assistant", text: "ok", tone: "success" },
+  ]);
 });
 
 test("transcriptFacade: push omits optional when undefined", () => {

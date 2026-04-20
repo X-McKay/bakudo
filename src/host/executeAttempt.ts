@@ -312,19 +312,18 @@ export const executeAttempt = async (
       ...(plan?.profile !== undefined ? { profile: plan.profile } : {}),
       inspection,
     });
-    let mergeResult:
-      | {
-          merged?: boolean;
-          discarded?: boolean;
-          error?: string;
-        }
-      | null = null;
+    let mergeResult: {
+      merged?: boolean;
+      discarded?: boolean;
+      error?: string;
+    } | null = null;
     let sandboxLifecycleState:
       | "ephemeral"
       | "preserved_active"
       | "preserved_merged"
       | "preserved_discarded"
-      | "merge_failed" = plan?.profile.sandboxLifecycle === "preserved" ? "preserved_active" : "ephemeral";
+      | "merge_failed" =
+      plan?.profile.sandboxLifecycle === "preserved" ? "preserved_active" : "ephemeral";
     const reviewedAt = new Date().toISOString();
 
     if (plan?.profile.sandboxLifecycle === "preserved" && sandboxTaskId !== undefined) {
@@ -391,7 +390,9 @@ export const executeAttempt = async (
         ...(discoveredWorktree?.branch !== undefined
           ? { branchName: discoveredWorktree.branch }
           : {}),
-        ...(discoveredWorktree?.path !== undefined ? { worktreePath: discoveredWorktree.path } : {}),
+        ...(discoveredWorktree?.path !== undefined
+          ? { worktreePath: discoveredWorktree.path }
+          : {}),
         ...(inspection?.reservedOutputDir !== undefined
           ? { reservedOutputDir: inspection.reservedOutputDir }
           : {}),
@@ -408,8 +409,12 @@ export const executeAttempt = async (
       },
       metadata: {
         sandboxTaskId,
-        ...(discoveredWorktree?.path !== undefined ? { worktreePath: discoveredWorktree.path } : {}),
-        ...(discoveredWorktree?.branch !== undefined ? { branchName: discoveredWorktree.branch } : {}),
+        ...(discoveredWorktree?.path !== undefined
+          ? { worktreePath: discoveredWorktree.path }
+          : {}),
+        ...(discoveredWorktree?.branch !== undefined
+          ? { branchName: discoveredWorktree.branch }
+          : {}),
         ...(inspection?.repoChangedFiles !== undefined
           ? { changedFiles: inspection.repoChangedFiles }
           : {}),

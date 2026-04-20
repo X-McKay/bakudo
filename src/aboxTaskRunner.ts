@@ -63,7 +63,7 @@ const inputHeartbeatIntervalMs = (spec: WorkerDispatchInput): number | undefined
 const inputCommandLabel = (spec: WorkerDispatchInput): string =>
   isAttemptSpec(spec) ? spec.prompt : spec.goal;
 const inputReportedCwd = (spec: WorkerDispatchInput): string =>
-  isAttemptSpec(spec) ? "/workspace" : spec.cwd ?? ".";
+  isAttemptSpec(spec) ? "/workspace" : (spec.cwd ?? ".");
 const inputAssumeDangerousSkipPermissions = (spec: WorkerDispatchInput): boolean =>
   isAttemptSpec(spec) ? spec.permissions.allowAllTools : spec.assumeDangerousSkipPermissions;
 const inputRepoRoot = (spec: WorkerDispatchInput): string | undefined => spec.cwd;
@@ -382,14 +382,9 @@ export class ABoxTaskRunner {
     // clean env unless the user has opted in to specific names.
     const filteredEnv = filterEnv(this.envSource(), this.envPolicy);
     const sandboxTaskId = generateSandboxTaskId(
-      isAttemptSpec(spec) ? spec.attemptId : spec.streamId ?? spec.taskId,
+      isAttemptSpec(spec) ? spec.attemptId : (spec.streamId ?? spec.taskId),
     );
-    const args = buildAboxShellCommandArgs(
-      sandboxTaskId,
-      command,
-      profile,
-      inputRepoRoot(spec),
-    );
+    const args = buildAboxShellCommandArgs(sandboxTaskId, command, profile, inputRepoRoot(spec));
     let rawOutput = "";
     const execution = await this.adapter.spawnLive(
       args,

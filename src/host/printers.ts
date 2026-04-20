@@ -2,7 +2,6 @@ import { ArtifactStore } from "../artifactStore.js";
 import type { SessionEventEnvelope } from "../protocol.js";
 import type { ReviewClassification } from "../resultClassifier.js";
 import { reviewTaskResult } from "../reviewer.js";
-import { SessionStore } from "../sessionStore.js";
 import type { SessionAttemptRecord, SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
 import {
   blue,

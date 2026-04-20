@@ -156,7 +156,8 @@ export const reviewAttemptResult = (
       return {
         outcome: "retryable_failure",
         action: "retry",
-        reason: "report-only attempt modified repository files outside the reserved output directory",
+        reason:
+          "report-only attempt modified repository files outside the reserved output directory",
         retryable: true,
         needsUser: false,
         confidence: hints.confidence ?? "high",
@@ -252,7 +253,8 @@ export const reviewAttemptResult = (
     return {
       outcome: "success",
       action: "accept",
-      reason: mergeResult?.merged === true ? `${changeSummary}; auto-merge succeeded` : changeSummary,
+      reason:
+        mergeResult?.merged === true ? `${changeSummary}; auto-merge succeeded` : changeSummary,
       retryable: false,
       needsUser: false,
       confidence: hints.confidence ?? "high",

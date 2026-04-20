@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { reservedOutputRelativeDirForAttempt, inspectWorktree } from "../../src/host/worktreeInspector.js";
+import {
+  reservedOutputRelativeDirForAttempt,
+  inspectWorktree,
+} from "../../src/host/worktreeInspector.js";
 
 const execFileAsync = promisify(execFile);
 

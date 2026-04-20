@@ -38,9 +38,7 @@ const resolveInspectTab = (
   if (invalidMode === "default_summary") {
     return "summary";
   }
-  throw new Error(
-    `unknown inspect tab: ${requestedTab} (expected ${KNOWN_TABS.join("|")})`,
-  );
+  throw new Error(`unknown inspect tab: ${requestedTab} (expected ${KNOWN_TABS.join("|")})`);
 };
 
 type InspectView = {

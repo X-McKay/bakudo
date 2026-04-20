@@ -21,7 +21,8 @@ export type WorktreeInspection = {
   diffBytes: number;
 };
 
-const guestToWorktreeRelative = (guestPath: string): string => guestPath.replace(/^\/workspace\//u, "");
+const guestToWorktreeRelative = (guestPath: string): string =>
+  guestPath.replace(/^\/workspace\//u, "");
 
 export const reservedOutputRelativeDirForAttempt = (attemptId: string): string =>
   guestToWorktreeRelative(reservedGuestOutputDirForAttempt(attemptId));
@@ -109,7 +110,9 @@ export const inspectWorktree = async (args: {
   const untrackedPatches = await Promise.all(
     untrackedFiles.map((path) => readUntrackedPatch(snapshot.path, path)),
   );
-  const patchDiff = [trackedPatch, ...untrackedPatches].filter((entry) => entry.length > 0).join("");
+  const patchDiff = [trackedPatch, ...untrackedPatches]
+    .filter((entry) => entry.length > 0)
+    .join("");
 
   return {
     sandboxTaskId: taskId,

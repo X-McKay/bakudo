@@ -268,29 +268,25 @@ test("reviewAttemptResult: explicit_command is accepted without repo mutation ev
 });
 
 test("reviewAttemptResult: report-only attempt rejects repo mutation", () => {
-  const review = reviewAttemptResult(
-    { ...baseSpec, mode: "plan" },
-    makeExecResult(),
-    {
-      profile: {
-        agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
-        sandboxLifecycle: "preserved",
-        mergeStrategy: "none",
-      },
-      inspection: {
-        sandboxTaskId: "bakudo-attempt-1",
-        branchName: "refs/heads/agent/bakudo-attempt-1",
-        worktreePath: "/tmp/worktree",
-        reservedOutputDir: ".bakudo/out/attempt-1",
-        dirty: true,
-        changedFiles: ["README.md"],
-        repoChangedFiles: ["README.md"],
-        outputArtifacts: ["summary.md"],
-        patchDiff: "diff",
-        diffBytes: 4,
-      },
+  const review = reviewAttemptResult({ ...baseSpec, mode: "plan" }, makeExecResult(), {
+    profile: {
+      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      sandboxLifecycle: "preserved",
+      mergeStrategy: "none",
     },
-  );
+    inspection: {
+      sandboxTaskId: "bakudo-attempt-1",
+      branchName: "refs/heads/agent/bakudo-attempt-1",
+      worktreePath: "/tmp/worktree",
+      reservedOutputDir: ".bakudo/out/attempt-1",
+      dirty: true,
+      changedFiles: ["README.md"],
+      repoChangedFiles: ["README.md"],
+      outputArtifacts: ["summary.md"],
+      patchDiff: "diff",
+      diffBytes: 4,
+    },
+  });
   assert.equal(review.outcome, "retryable_failure");
   assert.equal(review.action, "retry");
 });

@@ -28,7 +28,8 @@ export const writeHostArtifacts = async (args: {
   inspection: WorktreeInspection;
   mergeResult?: Record<string, unknown>;
 }): Promise<string[]> => {
-  const { artifactStore, storageRoot, sessionId, turnId, attemptId, inspection, mergeResult } = args;
+  const { artifactStore, storageRoot, sessionId, turnId, attemptId, inspection, mergeResult } =
+    args;
   const written: string[] = [];
   if (inspection.patchDiff.length > 0) {
     await writeSessionArtifact(

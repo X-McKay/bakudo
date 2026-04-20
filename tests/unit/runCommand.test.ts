@@ -114,7 +114,14 @@ test("/run-command: passes --yes when in autopilot mode", async () => {
   const deps = buildDeps();
   deps.appState = {
     ...deps.appState,
-    composer: { mode: "autopilot", autoApprove: true, text: "", model: "", agent: "", provider: "" },
+    composer: {
+      mode: "autopilot",
+      autoApprove: true,
+      text: "",
+      model: "",
+      agent: "",
+      provider: "",
+    },
   };
   const outcome = await registry.dispatch("/run-command npm test", deps);
   assert.equal(outcome.kind, "fallthrough");
