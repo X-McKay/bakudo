@@ -7,7 +7,7 @@
  * captured by `./ptyHarness.ts`.
  *
  * Fixture-byte-direction: fixtures use LITERAL `\e[1m` escapes for
- * reviewer readability (`plans/bakudo-ux/examples/README.md:138-140`).
+ * reviewer readability (`tests/fixtures/bakudo-ux-examples/README.md:138-140`).
  * This module decodes literal → byte bytes on LOAD so the canonical
  * compare form is the raw PTY byte stream. On mismatch, diffs render
  * back to literal form for human review (plan line 611).
