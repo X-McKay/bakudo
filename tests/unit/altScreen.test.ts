@@ -141,7 +141,13 @@ test("TtyBackend: render uses \\x1B[H\\x1B[2J (not \\x1Bc) for per-tick clear", 
   assert.equal(clears.length, 2, "one targeted clear per render tick");
 });
 
-test("TtyBackend: with TTY stdin enables raw mode on enter and restores on dispose", () => {
+test("TtyBackend: TTY stdin is NOT switched to raw mode (readline needs cooked input)", () => {
+  // Phase-5 handoff lock-in 11 notes that raw-key dispatch is not yet wired —
+  // the interactive shell is still readline-based (`rl.question("")`). When
+  // TtyBackend used to toggle raw mode on alt-screen enter, the readline
+  // `line` event never fired (Enter keystrokes were delivered raw), which
+  // effectively froze the default TUI. Raw-mode ownership moves back here
+  // the day raw-key dispatch lands; today it must stay off.
   const stdout = captureStdout();
   const rawCalls: boolean[] = [];
   const stdin: TtyBackendStdin = {
@@ -158,8 +164,8 @@ test("TtyBackend: with TTY stdin enables raw mode on enter and restores on dispo
 
   assert.deepEqual(
     rawCalls,
-    [true, false],
-    "setRawMode(true) on enter, setRawMode(false) on dispose",
+    [],
+    "setRawMode must not be invoked while the interactive loop uses readline",
   );
 });
 

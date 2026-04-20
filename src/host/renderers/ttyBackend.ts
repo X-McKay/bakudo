@@ -6,16 +6,23 @@ import { renderTranscriptFrame } from "./transcriptRenderer.js";
  * ANSI-aware backend for interactive terminals. Wraps {@link renderTranscriptFrame}
  * and writes its output to stdout.
  *
- * Phase 5 PR5 scope: alt-screen entry/exit, cursor show/hide, and optional
- * raw-mode toggling land here. Each tick uses the targeted
- * cursor-home + clear-screen (`\x1B[H\x1B[2J`) sequence rather than the older
- * per-render `\x1Bc` so the alt-screen buffer stays coherent across redraws.
+ * Phase 5 PR5 scope: alt-screen entry/exit and cursor show/hide land here.
+ * Each tick uses the targeted cursor-home + clear-screen (`\x1B[H\x1B[2J`)
+ * sequence rather than the older per-render `\x1Bc` so the alt-screen buffer
+ * stays coherent across redraws.
  *
  * Lifecycle:
- *  - Construction (or first `render()`): emit enter-alt-screen + hide-cursor
- *    + (if stdin is a TTY) enable raw mode.
- *  - `dispose()`: emit exit-alt-screen + show-cursor + restore raw mode.
- *    Idempotent — calling twice is a no-op on the second call.
+ *  - Construction (or first `render()`): emit enter-alt-screen + hide-cursor.
+ *  - `dispose()`: emit show-cursor + exit-alt-screen. Idempotent — calling
+ *    twice is a no-op on the second call.
+ *
+ * Raw mode: NOT toggled here. Phase 5 experimented with owning raw-mode
+ * lifecycle in this backend, but the interactive shell (`interactive.ts`)
+ * still reads input through `readline.question()` — which silently drops
+ * line events when stdin is in raw mode. The result was a frozen TUI under
+ * the default alt-screen path (only `BAKUDO_NO_ALT_SCREEN=1` worked). Raw
+ * mode returns here the day raw-key dispatch replaces readline (phase-5
+ * handoff lock-in 11); until then the shell stays cooked.
  *
  * Opt-out: `BAKUDO_NO_ALT_SCREEN=1` forces the backend to skip alt-screen
  * (useful for debugging and for terminals that misbehave under mode 1049).
@@ -65,16 +72,16 @@ const readStdin = (): TtyBackendStdin | undefined => {
 
 export class TtyBackend implements RendererBackend {
   readonly #stdout: RendererStdout;
-  readonly #stdin: TtyBackendStdin | undefined;
   readonly #altScreenEnabled: boolean;
   #entered = false;
   #disposed = false;
-  /** Whether we toggled raw-mode on enter, so we know whether to restore. */
-  #rawModeToggled = false;
 
   constructor(stdout: RendererStdout, options: TtyBackendOptions = {}) {
     this.#stdout = stdout;
-    this.#stdin = options.stdin ?? readStdin();
+    // `options.stdin` / `readStdin()` intentionally ignored: TtyBackend no
+    // longer owns raw-mode (see class doc). The field on the options type is
+    // kept so tests that want to assert absence can still pass a stub stdin.
+    void options.stdin;
     const env = options.env ?? readEnv();
     this.#altScreenEnabled = env.BAKUDO_NO_ALT_SCREEN !== "1";
   }
@@ -114,14 +121,6 @@ export class TtyBackend implements RendererBackend {
     } else {
       void this.#stdout.write(SHOW_CURSOR);
     }
-    if (this.#rawModeToggled && this.#stdin?.setRawMode) {
-      try {
-        this.#stdin.setRawMode(false);
-      } catch {
-        // Best-effort: failing to restore raw mode must not mask a real error.
-      }
-      this.#rawModeToggled = false;
-    }
   }
 
   /** Test-only hook: has enter() run? */
@@ -146,14 +145,6 @@ export class TtyBackend implements RendererBackend {
       // Even in opt-out mode, hide cursor during active rendering — exiting
       // still restores it. This matches Copilot v1.0.24's behavior.
       void this.#stdout.write(HIDE_CURSOR);
-    }
-    if (this.#stdin?.isTTY === true && this.#stdin.setRawMode && this.#stdin.isRaw !== true) {
-      try {
-        this.#stdin.setRawMode(true);
-        this.#rawModeToggled = true;
-      } catch {
-        // Best-effort: raw mode not being available must not block rendering.
-      }
     }
   }
 }
