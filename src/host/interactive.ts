@@ -64,6 +64,7 @@ import { createProgressCoalescer } from "./progressCoalescer.js";
 import { reduceHost } from "./reducer.js";
 import type { TranscriptItem } from "./renderModel.js";
 import { createHostStore } from "./store/index.js";
+import { buildTranscriptFacade } from "./transcriptFacade.js";
 import {
   appendTurnToActiveSession,
   createAndRunFirstTurn,
@@ -298,53 +299,11 @@ export const runInteractiveShell = async (): Promise<number> => {
   const configSnapshot = await loadConfigCascade(repoRoot, {});
   const store = createHostStore(reduceHost, initialHostAppState());
 
-  const transcriptFacade = {
-    get items() {
-      return store.getSnapshot().transcript;
-    },
-    push(item: TranscriptItem): number {
-      const kindToAction = {
-        user: (i: TranscriptItem & { kind: "user" }) =>
-          ({
-            type: "append_user",
-            text: i.text,
-            ...(i.timestamp ? { timestamp: i.timestamp } : {}),
-          }) as const,
-        assistant: (i: TranscriptItem & { kind: "assistant" }) =>
-          ({
-            type: "append_assistant",
-            text: i.text,
-            ...(i.tone ? { tone: i.tone } : {}),
-          }) as const,
-        event: (i: TranscriptItem & { kind: "event" }) =>
-          ({
-            type: "append_event",
-            label: i.label,
-            ...(i.detail ? { detail: i.detail } : {}),
-          }) as const,
-        output: (i: TranscriptItem & { kind: "output" }) =>
-          ({ type: "append_output", text: i.text }) as const,
-        review: (i: TranscriptItem & { kind: "review" }) => ({
-          type: "append_review" as const,
-          outcome: i.outcome,
-          summary: i.summary,
-          ...(i.nextAction ? { nextAction: i.nextAction } : {}),
-        }),
-      } as const;
-      const action = kindToAction[item.kind](item as never);
-      store.dispatch(action);
-      return store.getSnapshot().transcript.length;
-    },
-    get length() {
-      return store.getSnapshot().transcript.length;
-    },
-    [Symbol.iterator]() {
-      return store.getSnapshot().transcript[Symbol.iterator]();
-    },
-  };
+  const transcriptFacade = buildTranscriptFacade(store);
 
   const deps: TickDeps = {
     get transcript() {
+      // Facade adapts Array-shaped call sites (.push, .length, iterator) to store dispatches; full Array API is intentionally partial.
       return transcriptFacade as unknown as TranscriptItem[];
     },
     get appState() {
