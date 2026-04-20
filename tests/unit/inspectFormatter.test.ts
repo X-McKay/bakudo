@@ -165,6 +165,41 @@ test("formatInspectSandbox: includes safety + abox command", () => {
   const session = buildSession();
   const attempt = {
     ...buildAttempt(),
+    candidateState: "needs_confirmation" as const,
+    candidate: {
+      state: "needs_confirmation" as const,
+      updatedAt: "2026-04-14T12:05:00.000Z",
+      sourceBaseline: {
+        repoRoot: "/tmp/repo",
+        repoIdentity: "/tmp/repo/.git",
+        headSha: "abc123",
+        branchName: "main",
+        detachedHead: false,
+        clean: false,
+        capturedAt: "2026-04-14T12:04:00.000Z",
+      },
+      driftDecision: "blocked_branch_switched" as const,
+      confirmationReason: "inspect the drift before continuing",
+      applyDispatches: [
+        {
+          kind: "apply_resolve" as const,
+          attemptId: "attempt-xyz-apply-resolve",
+          taskId: "attempt-xyz-apply-resolve",
+          status: "failed" as const,
+          recordedAt: "2026-04-14T12:05:10.000Z",
+          error: "resolution stayed low confidence",
+        },
+      ],
+      resolutions: [
+        {
+          path: "README.md",
+          confidence: "medium" as const,
+          rationale: "kept the local note and preserved the candidate request",
+          status: "needs_confirmation" as const,
+          recordedAt: "2026-04-14T12:05:30.000Z",
+        },
+      ],
+    },
     metadata: {
       sandboxTaskId: "abox-1",
       aboxCommand: ["abox", "run", "--task", "abox-1"],
@@ -174,10 +209,17 @@ test("formatInspectSandbox: includes safety + abox command", () => {
   assert.equal(lines[0], "Sandbox");
   const joined = lines.join("\n");
   assert.match(joined, /abox run --task abox-1/);
+  assert.match(joined, /Candidate.*needs_confirmation/);
+  assert.match(joined, /Baseline.*branch=main.*head=abc123/);
+  assert.match(joined, /Confirm.*inspect the drift before continuing/);
+  assert.match(joined, /Drift.*blocked_branch_switched/);
+  assert.match(joined, /ApplyRun.*apply_resolve failed error=resolution stayed low confidence/);
+  assert.match(joined, /Resolution.*README\.md needs_confirmation confidence=medium/);
+  assert.match(joined, /kept the local note and preserved the candidate request/u);
   assert.match(joined, /dangerous-skip-permissions enabled/);
 });
 
-test("formatInspectArtifacts: counts + renders rows", () => {
+test("formatInspectArtifacts: counts + groups rows by producer and phase", () => {
   const session = buildSession();
   const lines = formatInspectArtifacts({
     session,
@@ -190,13 +232,31 @@ test("formatInspectArtifacts: counts + renders rows", () => {
         kind: "log",
         name: "worker.log",
         path: "/tmp/w.log",
+        producer: "guest",
+        phase: "execution",
         createdAt: "2026-04-14T12:00:00.000Z",
+      },
+      {
+        schemaVersion: 1,
+        artifactId: "a2",
+        sessionId: session.sessionId,
+        taskId: "t",
+        kind: "report",
+        name: "apply-result.json",
+        path: "/tmp/apply-result.json",
+        producer: "host.executeAttempt",
+        phase: "finalize",
+        role: "apply-result",
+        createdAt: "2026-04-14T12:00:01.000Z",
       },
     ],
   });
   const joined = lines.join("\n");
-  assert.match(joined, /Count.*1/);
+  assert.match(joined, /Count.*2/);
+  assert.match(joined, /guest \/ execution/);
+  assert.match(joined, /host\.executeAttempt \/ finalize/);
   assert.match(joined, /worker\.log.*log.*\/tmp\/w\.log/);
+  assert.match(joined, /apply-result\.json.*role=apply-result.*\/tmp\/apply-result\.json/);
 });
 
 test("formatInspectArtifacts: empty list renders '(no artifacts registered)'", () => {

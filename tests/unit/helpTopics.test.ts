@@ -10,8 +10,15 @@ import {
   unknownTopicMessage,
 } from "../../src/host/helpTopicLoader.js";
 
-test("KNOWN_HELP_TOPICS contains the five Phase-5 topics", () => {
-  for (const expected of ["config", "hooks", "permissions", "monitoring", "sandbox"]) {
+test("KNOWN_HELP_TOPICS contains the candidate/apply help surface plus the Phase-5 topics", () => {
+  for (const expected of [
+    "candidate-apply",
+    "config",
+    "hooks",
+    "permissions",
+    "monitoring",
+    "sandbox",
+  ]) {
     assert.ok(
       KNOWN_HELP_TOPICS.includes(expected as (typeof KNOWN_HELP_TOPICS)[number]),
       `missing topic: ${expected}`,
@@ -45,6 +52,13 @@ test("loadHelpTopic('hooks') includes event-name documentation", async () => {
   const loaded = await loadHelpTopic("hooks");
   assert.ok(loaded);
   assert.match(loaded.content, /host\.approval_requested/u);
+});
+
+test("loadHelpTopic('candidate-apply') documents apply_verify and apply_resolve", async () => {
+  const loaded = await loadHelpTopic("candidate-apply");
+  assert.ok(loaded);
+  assert.match(loaded.content, /apply_verify/u);
+  assert.match(loaded.content, /apply_resolve/u);
 });
 
 test("loadHelpTopic('permissions') covers the deny-precedence invariant", async () => {

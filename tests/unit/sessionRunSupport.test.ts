@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { resolveEffectiveAboxBin, resolveRuntimeHostArgs } from "../../src/host/sessionRunSupport.js";
+import {
+  resolveEffectiveAboxBin,
+  resolveRuntimeHostArgs,
+} from "../../src/host/sessionRunSupport.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
 
 const createExecutable = async (path: string): Promise<void> => {

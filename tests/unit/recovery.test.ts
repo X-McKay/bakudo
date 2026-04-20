@@ -194,6 +194,76 @@ test("recovery: latestReview pointing at an older attempt → still finished_no_
   assert.equal(verdict.kind, "finished_no_review");
 });
 
+for (const candidateState of ["apply_staging", "apply_verifying", "apply_writeback"] as const) {
+  test(`recovery: ${candidateState} blocks resume until apply recovery runs`, () => {
+    const session = baseSession({
+      turns: [
+        {
+          turnId: "turn-1",
+          prompt: "x",
+          mode: "build",
+          status: "reviewing",
+          attempts: [
+            {
+              attemptId: "a-1",
+              status: "needs_review",
+              candidateState,
+            },
+          ],
+          latestReview: {
+            reviewId: "r-1",
+            attemptId: "a-1",
+            outcome: "success",
+            action: "accept",
+            reviewedAt: NOW_ISO,
+          },
+          createdAt: NOW_ISO,
+          updatedAt: NOW_ISO,
+        },
+      ],
+    });
+    const verdict = classifyRecoveryVerdict(
+      session,
+      new Set<SessionEventKind>(["worker.attempt_completed", "host.review_completed"]),
+    );
+    assert.equal(verdict.kind, "apply_incomplete");
+  });
+}
+
+test("recovery: candidate_ready is persisted truth, not an incomplete worker/review verdict", () => {
+  const session = baseSession({
+    turns: [
+      {
+        turnId: "turn-1",
+        prompt: "x",
+        mode: "build",
+        status: "awaiting_user",
+        attempts: [
+          {
+            attemptId: "a-1",
+            status: "blocked",
+            candidateState: "candidate_ready",
+          },
+        ],
+        latestReview: {
+          reviewId: "r-1",
+          attemptId: "a-1",
+          outcome: "blocked_needs_user",
+          action: "ask_user",
+          reviewedAt: NOW_ISO,
+        },
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+      },
+    ],
+  });
+  const verdict = classifyRecoveryVerdict(
+    session,
+    new Set<SessionEventKind>(["worker.attempt_completed", "host.review_completed"]),
+  );
+  assert.equal(verdict.kind, "healthy");
+});
+
 // ---------------------------------------------------------------------------
 // Stale-lock detection (plan 187-196)
 // ---------------------------------------------------------------------------

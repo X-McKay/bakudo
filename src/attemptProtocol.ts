@@ -1,9 +1,6 @@
 import { z } from "zod";
 
-export {
-  reservedGuestOutputDirForAttempt,
-  sanitizeAttemptPathSegment,
-} from "./attemptPath.js";
+export { reservedGuestOutputDirForAttempt, sanitizeAttemptPathSegment } from "./attemptPath.js";
 import type { ComposerMode } from "./host/appState.js";
 import type { ArtifactKind } from "./host/artifactStore.js";
 
@@ -32,7 +29,12 @@ export type TurnIntent = {
 // AttemptSpec helpers
 // ---------------------------------------------------------------------------
 
-export type AttemptTaskKind = "assistant_job" | "explicit_command" | "verification_check";
+export type AttemptTaskKind =
+  | "assistant_job"
+  | "explicit_command"
+  | "verification_check"
+  | "apply_verify"
+  | "apply_resolve";
 
 export type PermissionEffect = "allow" | "ask" | "deny";
 export type KnownPermissionTool = "shell" | "write" | "network" | "edit" | "task";
@@ -96,7 +98,7 @@ export type AttemptSpec = {
 export type ExecutionProfile = {
   agentBackend: string;
   sandboxLifecycle: "preserved" | "ephemeral";
-  mergeStrategy: "auto" | "interactive" | "none";
+  candidatePolicy: "auto_apply" | "manual_apply" | "discard";
 };
 
 export type DispatchPlan = {
@@ -263,7 +265,13 @@ const ArtifactRequestSchema = z
   })
   .strip();
 
-const AttemptTaskKindSchema = z.enum(["assistant_job", "explicit_command", "verification_check"]);
+const AttemptTaskKindSchema = z.enum([
+  "assistant_job",
+  "explicit_command",
+  "verification_check",
+  "apply_verify",
+  "apply_resolve",
+]);
 
 export const AttemptSpecSchema = z
   .object({
@@ -308,7 +316,7 @@ export const ExecutionProfileSchema = z
   .object({
     agentBackend: z.string(),
     sandboxLifecycle: z.enum(["preserved", "ephemeral"]),
-    mergeStrategy: z.enum(["auto", "interactive", "none"]),
+    candidatePolicy: z.enum(["auto_apply", "manual_apply", "discard"]),
   })
   .strip();
 

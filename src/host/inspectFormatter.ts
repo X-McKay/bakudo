@@ -1,9 +1,13 @@
 import type { AttemptSpec } from "../attemptProtocol.js";
 import type { ArtifactStore } from "../artifactStore.js";
-import { type ReviewedTaskResult, reviewTaskResult } from "../reviewer.js";
+import {
+  persistedReviewForAttempt,
+  type ReviewedTaskResult,
+  reviewTaskResult,
+} from "../reviewer.js";
 import type { ReviewConfidence } from "../resultClassifier.js";
-import { synthesizeLegacySpec } from "../sessionMigration.js";
 import type {
+  CandidateRecord,
   SessionAttemptRecord,
   SessionRecord,
   SessionReviewRecord,
@@ -96,20 +100,17 @@ const renderProtocolMismatchLines = (view: ProtocolMismatchView): string[] => {
 
 /**
  * Resolve the {@link AttemptSpec} for display. Returns the persisted spec when
- * available, or synthesizes a read-only legacy spec for v2 sessions.
+ * available. Post-cutover every attempt is created with an `attemptSpec`, so
+ * attempts lacking one simply omit the spec-derived summary lines.
  */
 const resolveAttemptSpec = (
   attempt: SessionAttemptRecord | undefined,
-  turn: SessionTurnRecord | undefined,
 ): Partial<AttemptSpec> | undefined => {
   if (attempt?.dispatchPlan?.spec !== undefined) {
     return attempt.dispatchPlan.spec;
   }
   if (attempt?.attemptSpec !== undefined) {
     return attempt.attemptSpec;
-  }
-  if (attempt !== undefined && turn !== undefined) {
-    return synthesizeLegacySpec(attempt, turn);
   }
   return undefined;
 };
@@ -123,6 +124,28 @@ const dispatchCommandOf = (attempt: SessionAttemptRecord): string[] | undefined 
   }
   return undefined;
 };
+
+const artifactMetadataString = (artifact: ArtifactRow, key: string): string | undefined => {
+  const value = artifact.metadata?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+};
+
+const artifactProducerOf = (artifact: ArtifactRow): string =>
+  artifact.producer ??
+  artifactMetadataString(artifact, "producer") ??
+  artifactMetadataString(artifact, "generatedBy") ??
+  "unknown";
+
+const artifactPhaseOf = (artifact: ArtifactRow): string =>
+  artifact.phase ?? artifactMetadataString(artifact, "phase") ?? "unknown";
+
+const artifactRoleOf = (artifact: ArtifactRow): string | undefined =>
+  artifact.role ?? artifactMetadataString(artifact, "role");
+
+const artifactSourceRelativePathOf = (artifact: ArtifactRow): string | undefined =>
+  artifact.sourceRelativePath ??
+  artifactMetadataString(artifact, "sourceRelativePath") ??
+  artifactMetadataString(artifact, "originalPath");
 
 const countDisplayLines = (value: string): number => value.split(/\r\n|\r|\n/u).length;
 
@@ -177,14 +200,16 @@ const summarizeSandboxDispatchCommand = (args: {
 
 type ReviewLike = Pick<ReviewedTaskResult, "outcome" | "action"> & { reason?: string };
 
-const reviewFromTurn = (turn: SessionTurnRecord | undefined): SessionReviewRecord | undefined =>
-  turn?.latestReview;
+const reviewFromTurn = (
+  turn: SessionTurnRecord | undefined,
+  attempt: SessionAttemptRecord | undefined,
+): SessionReviewRecord | undefined => persistedReviewForAttempt(turn, attempt);
 
 const selectReviewView = (
   turn: SessionTurnRecord | undefined,
   attempt: SessionAttemptRecord | undefined,
 ): ReviewLike | null => {
-  const fromTurn = reviewFromTurn(turn);
+  const fromTurn = reviewFromTurn(turn, attempt);
   if (fromTurn !== undefined) {
     return {
       outcome: fromTurn.outcome,
@@ -199,11 +224,98 @@ const selectReviewView = (
   return null;
 };
 
-const formatArtifactRows = (artifacts: ArtifactRow[]): string[] =>
-  artifacts.map(
-    (artifact) =>
-      `  - ${safe(artifact.name)} (${artifact.kind}${typeof artifact.metadata?.generatedBy === "string" ? `, ${safe(artifact.metadata.generatedBy)}` : ""}) -> ${safe(artifact.path)}`,
-  );
+const formatArtifactRows = (artifacts: ArtifactRow[]): string[] => {
+  const grouped = new Map<string, ArtifactRow[]>();
+  for (const artifact of artifacts) {
+    const key = `${artifactProducerOf(artifact)}\u0000${artifactPhaseOf(artifact)}`;
+    const existing = grouped.get(key);
+    if (existing === undefined) {
+      grouped.set(key, [artifact]);
+    } else {
+      existing.push(artifact);
+    }
+  }
+
+  const lines: string[] = [];
+  for (const [key, rows] of grouped) {
+    const [producer = "unknown", phase = "unknown"] = key.split("\u0000");
+    lines.push(`  ${safe(producer)} / ${safe(phase)}`);
+    for (const artifact of rows) {
+      const detailParts = [artifact.kind];
+      const role = artifactRoleOf(artifact);
+      const sourceRelativePath = artifactSourceRelativePathOf(artifact);
+      if (role !== undefined && role !== artifact.kind) {
+        detailParts.push(`role=${safe(role)}`);
+      }
+      if (sourceRelativePath !== undefined) {
+        detailParts.push(`source=${safe(sourceRelativePath)}`);
+      }
+      lines.push(
+        `    - ${safe(artifact.name)} (${detailParts.join(", ")}) -> ${safe(artifact.path)}`,
+      );
+    }
+  }
+  return lines;
+};
+
+const formatCandidateDetails = (candidate: CandidateRecord | undefined): string[] => {
+  if (candidate === undefined) {
+    return [];
+  }
+  const lines: string[] = [];
+  if (candidate.changeKind !== undefined) {
+    lines.push(renderKv("Changes", candidate.changeKind));
+  }
+  if (candidate.sourceBaseline !== undefined) {
+    const baseline = candidate.sourceBaseline;
+    const branch = baseline.branchName === undefined ? "<detached>" : safe(baseline.branchName);
+    lines.push(
+      renderKv(
+        "Baseline",
+        `repo=${safe(baseline.repoRoot)} branch=${branch} head=${safe(baseline.headSha)} detached=${String(baseline.detachedHead)} clean=${String(baseline.clean)}`,
+      ),
+    );
+    lines.push(renderKv("Captured", formatUtc(baseline.capturedAt)));
+  }
+  if (candidate.driftDecision !== undefined) {
+    lines.push(renderKv("Drift", candidate.driftDecision));
+  }
+  if (candidate.confirmationReason !== undefined) {
+    lines.push(renderKv("Confirm", safe(candidate.confirmationReason)));
+  }
+  if (candidate.applyError !== undefined) {
+    lines.push(renderKv("ApplyErr", safe(candidate.applyError)));
+  }
+  if (candidate.stagedAt !== undefined) {
+    lines.push(renderKv("Staged", formatUtc(candidate.stagedAt)));
+  }
+  if (candidate.verifiedAt !== undefined) {
+    lines.push(renderKv("Verified", formatUtc(candidate.verifiedAt)));
+  }
+  if (candidate.writebackAt !== undefined) {
+    lines.push(renderKv("Writeback", formatUtc(candidate.writebackAt)));
+  }
+  if (candidate.appliedAt !== undefined) {
+    lines.push(renderKv("Applied", formatUtc(candidate.appliedAt)));
+  }
+  for (const dispatch of candidate.applyDispatches ?? []) {
+    const fragments: string[] = [dispatch.kind, dispatch.status];
+    if (dispatch.error !== undefined) {
+      fragments.push(`error=${safe(dispatch.error)}`);
+    }
+    lines.push(renderKv("ApplyRun", fragments.join(" ")));
+  }
+  for (const resolution of candidate.resolutions ?? []) {
+    lines.push(
+      renderKv(
+        "Resolution",
+        `${safe(resolution.path)} ${resolution.status} confidence=${resolution.confidence}`,
+      ),
+    );
+    lines.push(renderKv("", safe(resolution.rationale)));
+  }
+  return lines;
+};
 
 export type InspectSummaryInput = {
   session: SessionRecord;
@@ -239,11 +351,11 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
       renderKv("Attempt", `${attempt.attemptId} mode=${modeOf(attempt)} status=${attempt.status}`),
     );
     lines.push(renderKv("Sandbox", sandboxOf(attempt)));
-    if (attempt.sandboxLifecycleState !== undefined) {
-      lines.push(renderKv("Lifecycle", attempt.sandboxLifecycleState));
+    if (attempt.candidateState !== undefined) {
+      lines.push(renderKv("Candidate", attempt.candidateState));
     }
   }
-  const spec = resolveAttemptSpec(attempt, turn);
+  const spec = resolveAttemptSpec(attempt);
   if (spec?.taskKind !== undefined) {
     lines.push(renderKv("TaskKind", spec.taskKind));
   }
@@ -269,10 +381,14 @@ export const formatInspectSummary = (input: InspectSummaryInput): string[] => {
  * legacy callers that still hand in a {@link ReviewedTaskResult} (which gets
  * `confidence` for free via the classifier) continue to work unchanged.
  */
-export type InspectReviewPayload = ReviewedTaskResult & {
+export type InspectReviewPayload = {
+  outcome: string;
+  action: string;
+  reason?: string;
   confidence?: ReviewConfidence;
   userExplanation?: string;
   remediationHint?: string;
+  reviewedAt?: string;
 };
 
 export type InspectReviewInput = {
@@ -295,16 +411,23 @@ export const formatInspectReview = (input: InspectReviewInput): string[] => {
     renderKv("Outcome", reviewed.outcome),
     renderKv("Action", reviewed.action),
   ];
+  if (attempt.candidateState !== undefined) {
+    lines.push(renderKv("Candidate", attempt.candidateState));
+  }
   if (reviewed.confidence !== undefined) {
     lines.push(renderKv("Confidence", reviewed.confidence));
   }
   if (reviewed.userExplanation !== undefined && reviewed.userExplanation.length > 0) {
     lines.push(renderKv("Explain", safe(reviewed.userExplanation)));
   }
-  lines.push(renderKv("Reason", safe(reviewed.reason)));
+  lines.push(renderKv("Reason", safe(reviewed.reason ?? "n/a")));
   if (reviewed.remediationHint !== undefined && reviewed.remediationHint.length > 0) {
     lines.push(renderKv("Remedy", safe(reviewed.remediationHint)));
   }
+  if (reviewed.reviewedAt !== undefined) {
+    lines.push(renderKv("Reviewed", formatUtc(reviewed.reviewedAt)));
+  }
+  lines.push(...formatCandidateDetails(attempt.candidate));
   if (result) {
     lines.push(renderKv("Summary", safe(result.summary)));
     if (result.exitCode !== undefined && result.exitCode !== null) {
@@ -341,8 +464,8 @@ export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
     renderKv("Task", attempt.attemptId),
     renderKv("Mode", modeOf(attempt)),
     renderKv("Status", attempt.status),
-    ...(attempt.sandboxLifecycleState !== undefined
-      ? [renderKv("Lifecycle", attempt.sandboxLifecycleState)]
+    ...(attempt.candidateState !== undefined
+      ? [renderKv("Candidate", attempt.candidateState)]
       : []),
     renderKv("Sandbox", sandboxOf(attempt)),
     ...summarizeSandboxDispatchCommand({
@@ -359,6 +482,7 @@ export const formatInspectSandbox = (input: InspectSandboxInput): string[] => {
   if (typeof attempt.metadata?.worktreePath === "string") {
     lines.push(renderKv("Worktree", safe(attempt.metadata.worktreePath)));
   }
+  lines.push(...formatCandidateDetails(attempt.candidate));
   if (artifacts.length > 0) {
     lines.push("Artifacts:");
     lines.push(...formatArtifactRows(artifacts));

@@ -1,8 +1,22 @@
 import { randomUUID } from "node:crypto";
 
+import { ABoxAdapter } from "../aboxAdapter.js";
+import { ABoxTaskRunner } from "../aboxTaskRunner.js";
+import { ArtifactStore } from "../artifactStore.js";
+import { createAttemptReviewRecord } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
-import type { SessionAttemptRecord, SessionRecord, SessionTurnRecord } from "../sessionTypes.js";
-import { discardSandbox, mergeSandbox } from "./mergeController.js";
+import type {
+  SessionAttemptRecord,
+  SessionRecord,
+  SessionReviewAction,
+  SessionReviewOutcome,
+  SessionTurnRecord,
+} from "../sessionTypes.js";
+import { applyPreservedCandidate } from "./candidateApplier.js";
+import { inspectWorktree } from "./worktreeInspector.js";
+import { upsertTurnLatestReview } from "./orchestrationSupport.js";
+import { resolveEnvPolicyForHost } from "./envPolicy.js";
+import { discardSandbox } from "./sandboxCleanup.js";
 import {
   emitTurnTransition,
   findLatestTurnTransition,
@@ -54,6 +68,8 @@ export type FollowUpInput = {
   action: FollowUpAction;
   storageRoot: string;
   aboxBin?: string;
+  runner?: ABoxTaskRunner;
+  artifactStore?: ArtifactStore;
 };
 
 /**
@@ -121,78 +137,265 @@ const loadTurnAndAttemptOrThrow = async (
   return { session, turn, attempt };
 };
 
-const resolvePreservedSandbox = async (args: {
+const persistCandidateAttempt = async (args: {
+  store: SessionStore;
+  input: FollowUpInput;
+  attempt: SessionAttemptRecord;
+  status: SessionAttemptRecord["status"];
+  message: string;
+  candidateState: NonNullable<SessionAttemptRecord["candidateState"]>;
+  recordedAt: string;
+  extra?: Record<string, unknown>;
+}): Promise<void> => {
+  const { store, input, attempt, status, message, candidateState, recordedAt, extra } = args;
+  await store.upsertAttempt(input.sessionId, input.turnId, {
+    ...attempt,
+    status,
+    lastMessage: message,
+    candidateState,
+    candidate: {
+      ...(attempt.candidate ?? { state: candidateState }),
+      state: candidateState,
+      updatedAt: recordedAt,
+      ...(candidateState === "discarded" ? { discardedAt: recordedAt } : {}),
+      ...(candidateState === "apply_staging" ? { stagedAt: recordedAt } : {}),
+      ...(candidateState === "apply_failed" ? { failureAt: recordedAt, applyError: message } : {}),
+      ...(extra ?? {}),
+    },
+  });
+};
+
+const buildFollowUpReview = (args: {
+  attempt: SessionAttemptRecord;
+  decision: "accept" | "halt";
+}): {
+  outcome: SessionReviewOutcome;
+  action: SessionReviewAction;
+  reason?: string;
+} => {
+  const { attempt, decision } = args;
+  const reason = attempt.lastMessage ?? attempt.candidate?.confirmationReason ?? attempt.candidate?.applyError;
+  switch (attempt.candidateState) {
+    case "applied":
+      return {
+        outcome: "success",
+        action: "accept",
+        reason: reason ?? "candidate applied into the source checkout",
+      };
+    case "needs_confirmation":
+      return {
+        outcome: "blocked_needs_user",
+        action: "ask_user",
+        reason: reason ?? "candidate apply needs explicit confirmation",
+      };
+    case "apply_failed":
+      return {
+        outcome: "retryable_failure",
+        action: "retry",
+        reason: reason ?? "candidate apply failed",
+      };
+    case "discarded":
+      return {
+        outcome: "blocked_needs_user",
+        action: "halt",
+        reason: reason ?? "preserved candidate discarded",
+      };
+    default:
+      return decision === "halt"
+        ? {
+            outcome: "blocked_needs_user",
+            action: "halt",
+            reason: reason ?? "turn halted by follow-up action",
+          }
+        : {
+            outcome: "success",
+            action: "accept",
+            reason: reason ?? "turn accepted",
+          };
+  }
+};
+
+const persistFollowUpReview = async (args: {
+  store: SessionStore;
+  sessionId: string;
+  turnId: string;
+  attempt: SessionAttemptRecord;
+  decision: "accept" | "halt";
+  recordedAt: string;
+}): Promise<void> => {
+  const { store, sessionId, turnId, attempt, decision, recordedAt } = args;
+  const reviewed = buildFollowUpReview({ attempt, decision });
+  const spec = attempt.dispatchPlan?.spec ?? attempt.attemptSpec;
+  const reviewRecord =
+    spec !== undefined
+      ? createAttemptReviewRecord({
+          spec,
+          reviewed: {
+            outcome: reviewed.outcome,
+            action: reviewed.action,
+            reason: reviewed.reason ?? "",
+          },
+          reviewedAt: recordedAt,
+        })
+      : {
+          reviewId: `review-${Date.now()}-${randomUUID().slice(0, 8)}`,
+          attemptId: attempt.attemptId,
+          outcome: reviewed.outcome,
+          action: reviewed.action,
+          ...(reviewed.reason === undefined ? {} : { reason: reviewed.reason }),
+          reviewedAt: recordedAt,
+        };
+  await store.upsertAttempt(sessionId, turnId, { ...attempt, reviewRecord });
+  await upsertTurnLatestReview(store, sessionId, turnId, reviewRecord);
+};
+
+const resolvePreservedCandidate = async (args: {
   store: SessionStore;
   input: FollowUpInput;
   session: SessionRecord;
-  turn: SessionTurnRecord;
   attempt: SessionAttemptRecord;
   decision: "accept" | "halt";
-}): Promise<"merged" | "discarded" | null> => {
-  const { store, input, session, turn, attempt, decision } = args;
-  if (attempt.sandbox?.state !== "preserved_active") {
+}): Promise<"apply_failed" | "discarded" | "needs_confirmation" | null> => {
+  const { store, input, session, attempt, decision } = args;
+  const candidate = attempt.candidate;
+  const candidateState = attempt.candidateState ?? candidate?.state;
+  if (
+    candidateState !== "candidate_ready" &&
+    candidateState !== "needs_confirmation" &&
+    candidateState !== "apply_failed"
+  ) {
     return null;
   }
 
-  const sandboxTaskId = attempt.sandbox.sandboxTaskId;
-  if (sandboxTaskId === undefined) {
-    throw new Error(
-      `applyFollowUpAction: preserved attempt ${attempt.attemptId} is missing sandboxTaskId`,
-    );
-  }
+  const sandboxTaskId = candidate?.sandboxTaskId;
 
   const recordedAt = nowIso();
   const aboxBin = input.aboxBin ?? "abox";
   try {
-    if (decision === "accept") {
-      await mergeSandbox(aboxBin, session.repoRoot, sandboxTaskId);
+    if (decision === "halt") {
+      if (sandboxTaskId === undefined) {
+        await persistCandidateAttempt({
+          store,
+          input,
+          attempt,
+          status: "failed",
+          message: "candidate discard failed: preserved candidate is missing sandboxTaskId",
+          candidateState: "apply_failed",
+          recordedAt,
+        });
+        return "apply_failed";
+      }
       await discardSandbox(aboxBin, session.repoRoot, sandboxTaskId);
-      await store.upsertAttempt(input.sessionId, turn.turnId, {
-        ...attempt,
-        status: "succeeded",
-        lastMessage: "preserved candidate merged and cleaned up by follow-up accept",
-        sandboxLifecycleState: "preserved_merged",
-        sandbox: {
-          ...attempt.sandbox,
-          state: "preserved_merged",
-          updatedAt: recordedAt,
-          mergedAt: recordedAt,
-          discardedAt: recordedAt,
-        },
+      await persistCandidateAttempt({
+        store,
+        input,
+        attempt,
+        status: "cancelled",
+        message: "preserved candidate discarded by follow-up halt",
+        candidateState: "discarded",
+        recordedAt,
       });
-      return "merged";
+      return "discarded";
     }
 
-    await discardSandbox(aboxBin, session.repoRoot, sandboxTaskId);
-    await store.upsertAttempt(input.sessionId, turn.turnId, {
-      ...attempt,
-      status: "cancelled",
-      lastMessage: "preserved candidate discarded by follow-up halt",
-      sandboxLifecycleState: "preserved_discarded",
-      sandbox: {
-        ...attempt.sandbox,
-        state: "preserved_discarded",
-        updatedAt: recordedAt,
-        discardedAt: recordedAt,
-      },
+    const sourceBaseline = candidate?.sourceBaseline;
+    if (sourceBaseline === undefined) {
+      await persistCandidateAttempt({
+        store,
+        input,
+        attempt,
+        status: "failed",
+        message: "candidate apply failed: preserved candidate is missing source baseline metadata",
+        candidateState: "apply_failed",
+        recordedAt,
+      });
+      return "apply_failed";
+    }
+    const attemptSpec = attempt.dispatchPlan?.spec ?? attempt.attemptSpec;
+    if (attemptSpec === undefined) {
+      await persistCandidateAttempt({
+        store,
+        input,
+        attempt,
+        status: "failed",
+        message: "candidate apply failed: preserved candidate is missing attempt spec metadata",
+        candidateState: "apply_failed",
+        recordedAt,
+      });
+      return "apply_failed";
+    }
+    const aboxRunner =
+      input.runner ??
+      new ABoxTaskRunner(
+        new ABoxAdapter(aboxBin),
+        undefined,
+        resolveEnvPolicyForHost({}),
+      );
+    const artifactStore = input.artifactStore ?? new ArtifactStore(input.storageRoot);
+    const refreshedInspection =
+      sandboxTaskId === undefined || candidate?.worktreePath === undefined || candidate?.branchName === undefined
+        ? undefined
+        : await inspectWorktree({
+            snapshot: {
+              path: candidate.worktreePath,
+              branch: candidate.branchName,
+              head: "",
+            },
+            taskId: sandboxTaskId,
+            attemptId: attempt.attemptId,
+            baselineHeadSha: sourceBaseline.headSha,
+          });
+    const applied = await applyPreservedCandidate({
+      sessionStore: store,
+      artifactStore,
+      runner: aboxRunner,
+      storageRoot: input.storageRoot,
+      session,
+      turnId: input.turnId,
+      attempt,
+      attemptSpec,
+      aboxBin,
+      explicitConfirmation: candidateState === "needs_confirmation",
+      sourceBaseline,
+      ...(refreshedInspection === undefined ? {} : { inspection: refreshedInspection }),
+      ...(candidate?.fingerprint === undefined
+        ? {}
+        : { expectedFingerprint: candidate.fingerprint }),
     });
-    return "discarded";
+    await persistCandidateAttempt({
+      store,
+      input,
+      attempt: (await loadTurnAndAttemptOrThrow(store, input.sessionId, input.turnId, input.sourceAttemptId))
+        .attempt,
+      status:
+        applied.candidateState === "applied"
+          ? "succeeded"
+          : applied.candidateState === "needs_confirmation"
+            ? "blocked"
+            : "failed",
+      message: applied.message,
+      candidateState: applied.candidateState,
+      recordedAt: nowIso(),
+      extra: applied.candidateUpdates,
+    });
+    return applied.candidateState === "applied"
+      ? null
+      : applied.candidateState === "needs_confirmation"
+        ? "needs_confirmation"
+        : "apply_failed";
   } catch (error) {
     const message =
       decision === "accept"
-        ? `follow-up merge failed: ${error instanceof Error ? error.message : String(error)}`
+        ? `candidate apply failed: ${error instanceof Error ? error.message : String(error)}`
         : `follow-up discard failed: ${error instanceof Error ? error.message : String(error)}`;
-    await store.upsertAttempt(input.sessionId, turn.turnId, {
-      ...attempt,
+    await persistCandidateAttempt({
+      store,
+      input,
+      attempt,
       status: "failed",
-      lastMessage: message,
-      sandboxLifecycleState: "merge_failed",
-      sandbox: {
-        ...attempt.sandbox,
-        state: "merge_failed",
-        updatedAt: recordedAt,
-        mergeError: message,
-      },
+      message,
+      candidateState: "apply_failed",
+      recordedAt,
     });
     throw new Error(message);
   }
@@ -320,26 +523,52 @@ export const applyFollowUpAction = async (input: FollowUpInput): Promise<FollowU
         message: `Turn ${input.turnId} already accepted (status=completed).`,
       };
     }
-    const preservedOutcome = await resolvePreservedSandbox({
+    const preservedOutcome = await resolvePreservedCandidate({
       store,
       input,
       session,
-      turn,
       attempt,
       decision: "accept",
     });
+    const reviewedAttempt = (
+      await loadTurnAndAttemptOrThrow(store, input.sessionId, input.turnId, input.sourceAttemptId)
+    ).attempt;
+    if (reviewedAttempt.candidateState !== undefined) {
+      await persistFollowUpReview({
+        store,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        attempt: reviewedAttempt,
+        decision: "accept",
+        recordedAt: nowIso(),
+      });
+    }
     const refreshedTurn = await loadTurnOrThrow(store, input.sessionId, input.turnId);
+    const turnStatus =
+      preservedOutcome === "needs_confirmation"
+        ? "awaiting_user"
+        : preservedOutcome === "apply_failed"
+          ? "failed"
+          : "completed";
     const updated = await store.upsertTurn(input.sessionId, {
       ...refreshedTurn,
-      status: "completed",
+      status: turnStatus,
       updatedAt: nowIso(),
     });
-    await store.saveSession({ ...updated, status: "completed" });
+    const sessionStatus =
+      preservedOutcome === "needs_confirmation"
+        ? "awaiting_user"
+        : preservedOutcome === "apply_failed"
+          ? "failed"
+          : "completed";
+    await store.saveSession({ ...updated, status: sessionStatus });
     return {
       recordedAt: nowIso(),
       message:
-        preservedOutcome === "merged"
-          ? `Turn ${input.turnId} accepted and preserved sandbox merged.`
+        preservedOutcome === "needs_confirmation"
+          ? `Turn ${input.turnId} needs confirmation before candidate apply can continue.`
+          : preservedOutcome === "apply_failed"
+            ? `Turn ${input.turnId} could not apply the preserved candidate.`
           : `Turn ${input.turnId} accepted.`,
     };
   }
@@ -357,13 +586,23 @@ export const applyFollowUpAction = async (input: FollowUpInput): Promise<FollowU
       message: `Turn ${input.turnId} already halted (status=cancelled).`,
     };
   }
-  const preservedOutcome = await resolvePreservedSandbox({
+  const preservedOutcome = await resolvePreservedCandidate({
     store,
     input,
     session,
-    turn,
     attempt,
     decision: "halt",
+  });
+  const reviewedAttempt = (
+    await loadTurnAndAttemptOrThrow(store, input.sessionId, input.turnId, input.sourceAttemptId)
+  ).attempt;
+  await persistFollowUpReview({
+    store,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    attempt: reviewedAttempt,
+    decision: "halt",
+    recordedAt: nowIso(),
   });
   const refreshedTurn = await loadTurnOrThrow(store, input.sessionId, input.turnId);
   const transition = await emitExtendingTransition(
@@ -383,7 +622,7 @@ export const applyFollowUpAction = async (input: FollowUpInput): Promise<FollowU
     transition,
     message:
       preservedOutcome === "discarded"
-        ? `Turn ${input.turnId} halted and preserved sandbox discarded.`
+        ? `Turn ${input.turnId} halted and preserved candidate discarded.`
         : `Turn ${input.turnId} halted.`,
   };
 };

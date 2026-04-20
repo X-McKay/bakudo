@@ -38,6 +38,17 @@ test("SessionStore computes a stable layout and persists session state", async (
       assumeDangerousSkipPermissions: true,
       status: "planned",
       createdAt: "2026-04-13T10:00:00.000Z",
+      turns: [
+        {
+          turnId: "turn-1",
+          prompt: "ship the host-side persistence scaffold",
+          mode: "build",
+          status: "queued",
+          attempts: [],
+          createdAt: "2026-04-13T10:00:00.000Z",
+          updatedAt: "2026-04-13T10:00:00.000Z",
+        },
+      ],
     });
 
     assert.equal(created.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
@@ -53,13 +64,13 @@ test("SessionStore computes a stable layout and persists session state", async (
       finishedAt: "2026-04-13T10:05:00.000Z",
     } satisfies TaskResult;
 
-    await store.upsertTask(sessionId, {
-      taskId: "task-1",
+    await store.upsertAttempt(sessionId, "turn-1", {
+      attemptId: "task-1",
       status: "running",
       lastMessage: "starting",
     });
-    await store.upsertTask(sessionId, {
-      taskId: "task-1",
+    await store.upsertAttempt(sessionId, "turn-1", {
+      attemptId: "task-1",
       status: "succeeded",
       result: firstResult,
       lastMessage: "done",

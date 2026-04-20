@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
  * `docs/help/`. Additions require both a new file AND an entry here.
  */
 export const KNOWN_HELP_TOPICS: readonly string[] = [
+  "candidate-apply",
   "config",
   "hooks",
   "permissions",

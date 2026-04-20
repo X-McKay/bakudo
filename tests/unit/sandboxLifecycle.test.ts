@@ -10,13 +10,13 @@ import {
 const preserved = {
   agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
   sandboxLifecycle: "preserved" as const,
-  mergeStrategy: "interactive" as const,
+  candidatePolicy: "manual_apply" as const,
 };
 
 const ephemeral = {
   ...preserved,
   sandboxLifecycle: "ephemeral" as const,
-  mergeStrategy: "none" as const,
+  candidatePolicy: "discard" as const,
 };
 
 test("generateSandboxTaskId sanitizes and prefixes attempt id", () => {

@@ -1,0 +1,37 @@
+# Scenario: inspect-retry-lineage-tty
+# Invocation: `/inspect retry` on session ses_01HXYZABCDEF01 turn 5.
+# Phase 4 rule: lineage UI reads TurnTransition[] (Phase 2 Workstream 3), NOT attempt-array traversal.
+# Transition reason codes come from Phase 2:
+#   next_turn | user_retry | host_retry | recovery_required | approval_denied_retry | protocol_mismatch_recovery
+# Vertical chain format from Phase 4 Workstream section "Retry Lineage Uses Transition Records".
+#
+# This scenario: turn 5 failed twice, succeeded on attempt 3.
+#   attempt 1 -> host_retry (tests failed)
+#   attempt 2 -> approval_denied_retry (rule tightened)
+#   attempt 3 -> succeeded (terminal)
+
+\e[36m\e[1mInspect\e[0m  \e[2msession ses_01HXYZ…F01 / turn 5\e[0m  summary  provenance  review  artifacts  approvals  \e[1m[retry]\e[0m  logs
+
+\e[1mTurn 5 lineage\e[0m  chainId=chain_01HXYZCHAIN5  depth=3
+
+  \e[1mattempt_01HXYZT5A1\e[0m  standard  \e[31mfailed (exit 1)\e[0m
+     │  transition: \e[33mhost_retry\e[0m   chainId=chain_01HXYZCHAIN5  depth=1
+     │  reason: "tests failed; retrying with verbose output"
+     │  transitionId: tr_01HXYZT5TR1  at 2026-05-01T12:21:04Z
+     ▼
+  \e[1mattempt_01HXYZT5A2\e[0m  standard  \e[31mblocked (exit 2)\e[0m
+     │  transition: \e[33mapproval_denied_retry\e[0m   chainId=chain_01HXYZCHAIN5  depth=2
+     │  reason: "network(api.github.com) denied; retrying without net fetch"
+     │  transitionId: tr_01HXYZT5TR2  at 2026-05-01T12:21:33Z
+     ▼
+  \e[1mattempt_01HXYZT5A3\e[0m  standard  \e[32msucceeded (exit 0)\e[0m
+     (terminal — reviewed outcome: accepted)
+
+\e[1mSummary\e[0m
+  attempts:     3
+  transitions:  2
+  initiator:    host (2 of 2)
+  final:        succeeded
+  total time:   118s
+
+\e[33m[q]uit  [p]rovenance attempt-3  [l]ogs attempt-3\e[0m

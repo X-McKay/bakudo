@@ -1,12 +1,12 @@
 import { ArtifactStore } from "../../artifactStore.js";
-import { type ReviewedTaskResult, reviewTaskResult } from "../../reviewer.js";
+import { persistedReviewForAttempt, reviewTaskResult } from "../../reviewer.js";
 import { SessionStore } from "../../sessionStore.js";
 import type { SessionRecord } from "../../sessionTypes.js";
 import type { InspectTab } from "../appState.js";
 import { listTurnApprovals } from "../approvalStore.js";
 import type { HostCommandSpec } from "../commandRegistry.js";
 import { readSessionEventLog } from "../eventLogWriter.js";
-import { formatInspectSandbox } from "../inspectFormatter.js";
+import { formatInspectSandbox, type InspectReviewPayload } from "../inspectFormatter.js";
 import { formatInspectTab, type InspectTabName } from "../inspectTabs.js";
 import { stdoutWrite } from "../io.js";
 import { storageRootFor } from "../sessionRunSupport.js";
@@ -38,9 +38,7 @@ const resolveInspectTab = (
   if (invalidMode === "default_summary") {
     return "summary";
   }
-  throw new Error(
-    `unknown inspect tab: ${requestedTab} (expected ${KNOWN_TABS.join("|")})`,
-  );
+  throw new Error(`unknown inspect tab: ${requestedTab} (expected ${KNOWN_TABS.join("|")})`);
 };
 
 type InspectView = {
@@ -75,8 +73,21 @@ export const buildInspectView = async (input: BuildInspectViewInput): Promise<In
     };
   }
 
-  const reviewed: ReviewedTaskResult | undefined =
-    attempt?.result === undefined ? undefined : reviewTaskResult(attempt.result);
+  const reviewed: InspectReviewPayload | undefined =
+    attempt === undefined
+      ? undefined
+      : (() => {
+          const persisted = persistedReviewForAttempt(turn, attempt);
+          if (persisted !== undefined) {
+            return {
+              outcome: persisted.outcome,
+              action: persisted.action,
+              ...(persisted.reason === undefined ? {} : { reason: persisted.reason }),
+              reviewedAt: persisted.reviewedAt,
+            };
+          }
+          return attempt.result === undefined ? undefined : reviewTaskResult(attempt.result);
+        })();
   const approvals =
     turn === undefined ? [] : await listTurnApprovals(rootDir, session.sessionId, turn.turnId);
   const provenance =

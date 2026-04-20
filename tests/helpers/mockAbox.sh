@@ -13,7 +13,7 @@ while [[ $# -gt 0 ]]; do
       REPO="$2"
       shift 2
       ;;
-    run|merge|stop)
+    run|stop)
       COMMAND="$1"
       shift
       break
@@ -47,6 +47,9 @@ while [[ $# -gt 0 ]]; do
       break
       ;;
     *)
+      if [[ -z "$TASK_ID" ]]; then
+        TASK_ID="$1"
+      fi
       shift
       ;;
   esac
@@ -54,7 +57,7 @@ done
 
 if [[ "$COMMAND" == "--capabilities" ]]; then
   cat <<'JSON'
-{"protocolVersions":[1,3],"taskKinds":["assistant_job","explicit_command","verification_check"],"executionEngines":["agent_cli","shell"]}
+{"protocolVersions":[1,3],"taskKinds":["assistant_job","explicit_command","verification_check","apply_verify","apply_resolve"],"executionEngines":["agent_cli","shell"]}
 JSON
   exit 0
 fi
@@ -93,20 +96,6 @@ case "$COMMAND" in
       mkdir -p "$worktree_path/.bakudo/out/$TASK_ID"
       printf 'mock run for %s\n' "$TASK_ID" > "$worktree_path/.bakudo/out/$TASK_ID/summary.md"
     fi
-    ;;
-  merge)
-    worktree_path="$(find_worktree || true)"
-    if [[ -z "$worktree_path" ]]; then
-      echo "no preserved worktree found for task $TASK_ID" >&2
-      exit 3
-    fi
-    if [[ -n "$(git -C "$worktree_path" status --porcelain)" ]]; then
-      git -C "$worktree_path" add -A
-      if ! git -C "$worktree_path" diff --cached --quiet; then
-        git -C "$worktree_path" commit -m "mock merge ${TASK_ID}" >/dev/null
-      fi
-    fi
-    git -C "$REPO" merge --ff-only "agent/$TASK_ID" >/dev/null
     ;;
   stop)
     if [[ $CLEAN -eq 1 ]]; then

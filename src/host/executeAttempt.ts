@@ -1,11 +1,10 @@
-import { randomUUID } from "node:crypto";
-
 import type { ABoxTaskRunner, TaskExecutionRecord } from "../aboxTaskRunner.js";
 import type { ArtifactStore } from "../artifactStore.js";
 import type { AttemptExecutionResult, AttemptSpec, DispatchPlan } from "../attemptProtocol.js";
 import type { TaskMode } from "../protocol.js";
-import { type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js";
+import { createAttemptReviewRecord, type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
+import type { CandidateState } from "../sessionTypes.js";
 import type { WorkerTaskProgressEvent } from "../workerRuntime.js";
 import type { ComposerMode } from "./appState.js";
 import {
@@ -19,8 +18,13 @@ import { createSessionEventLogWriter, type EventLogWriter } from "./eventLogWrit
 import { projectLegacyWorkerEvent } from "./eventProjector.js";
 import type { HookRegistry } from "./hooks.js";
 import { startDispatchProgress } from "./dispatchProgress.js";
-import { discardSandbox, mergeSandbox } from "./mergeController.js";
+import { discardSandbox } from "./sandboxCleanup.js";
 import { stdoutWrite } from "./io.js";
+import { applyPreservedCandidate } from "./candidateApplier.js";
+import {
+  CANDIDATE_MANIFEST_ARTIFACT_NAME,
+  describeCandidateManifest,
+} from "./candidateManifest.js";
 import { harvestGuestArtifacts, writeHostArtifacts } from "./hostArtifactGenerator.js";
 import { inspectWorktree, type WorktreeInspection } from "./worktreeInspector.js";
 import { discoverWorktree } from "./worktreeDiscovery.js";
@@ -33,9 +37,11 @@ import {
 } from "./orchestrationSupport.js";
 import type { HostCliArgs } from "./parsing.js";
 import { recordProvenanceFinalize, recordProvenanceStart } from "./provenanceProducer.js";
-import { writeExecutionArtifacts, writeSessionArtifact } from "./sessionArtifactWriter.js";
+import { captureSourceBaseline } from "./sourceBaseline.js";
+import { writeExecutionArtifacts } from "./sessionArtifactWriter.js";
 import { WorkerProtocolMismatchError } from "./errors.js";
 import { persistProtocolMismatchAttempt } from "./protocolMismatchPersist.js";
+import { turnStatusFromReview } from "./sessionRunSupport.js";
 
 /**
  * Infer the host-level {@link ComposerMode} from the worker-level AttemptSpec.
@@ -63,7 +69,30 @@ type EventLogWriterFactory = (storageRoot: string, sessionId: string) => EventLo
 
 const attemptStatusFromReview = (
   reviewed: ReviewedAttemptResult,
-): "succeeded" | "failed" | "blocked" | "needs_review" => {
+  candidateState?: CandidateState,
+): "succeeded" | "failed" | "blocked" | "cancelled" | "needs_review" => {
+  if (candidateState === "candidate_ready") {
+    return reviewed.action === "ask_user" ? "blocked" : "needs_review";
+  }
+  if (
+    candidateState === "apply_staging" ||
+    candidateState === "apply_verifying" ||
+    candidateState === "apply_writeback"
+  ) {
+    return "needs_review";
+  }
+  if (candidateState === "needs_confirmation") {
+    return "blocked";
+  }
+  if (candidateState === "applied") {
+    return "succeeded";
+  }
+  if (candidateState === "apply_failed") {
+    return "failed";
+  }
+  if (candidateState === "discarded") {
+    return "cancelled";
+  }
   if (reviewed.outcome === "success") {
     return "succeeded";
   }
@@ -143,7 +172,11 @@ export const toAttemptExecutionResult = (
 export const executeAttempt = async (
   ctx: ExecuteAttemptContext,
   plan?: DispatchPlan,
-): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
+): Promise<{
+  reviewed: ReviewedAttemptResult;
+  executionResult: AttemptExecutionResult;
+  candidateState?: CandidateState;
+}> => {
   const spec = plan?.spec ?? ctx.spec;
   if (spec === undefined) {
     throw new Error("executeAttempt requires either plan.spec or ctx.spec");
@@ -199,6 +232,10 @@ export const executeAttempt = async (
       envAllowlist: [],
     });
     await writer.append(started.envelope);
+    const sourceBaseline =
+      plan?.profile.sandboxLifecycle === "preserved"
+        ? await captureSourceBaseline(spec.cwd)
+        : undefined;
 
     let execution: TaskExecutionRecord;
     const dispatchProgress = startDispatchProgress({
@@ -265,6 +302,9 @@ export const executeAttempt = async (
           snapshot: discoveredWorktree,
           taskId: sandboxTaskId,
           attemptId: spec.attemptId,
+          ...(sourceBaseline?.headSha === undefined
+            ? {}
+            : { baselineHeadSha: sourceBaseline.headSha }),
         });
       } catch {
         inspection = null;
@@ -312,104 +352,182 @@ export const executeAttempt = async (
       ...(plan?.profile !== undefined ? { profile: plan.profile } : {}),
       inspection,
     });
-    let mergeResult:
+    let applyResult:
       | {
-          merged?: boolean;
+          applied?: boolean;
           discarded?: boolean;
           error?: string;
+          needsConfirmation?: boolean;
+          confirmationReason?: string;
         }
       | null = null;
-    let sandboxLifecycleState:
-      | "ephemeral"
-      | "preserved_active"
-      | "preserved_merged"
-      | "preserved_discarded"
-      | "merge_failed" = plan?.profile.sandboxLifecycle === "preserved" ? "preserved_active" : "ephemeral";
+    let candidateState: CandidateState =
+      plan?.profile.sandboxLifecycle === "preserved" &&
+      (inspection?.repoChangedFiles.length ?? 0) > 0
+        ? "candidate_ready"
+        : "ephemeral";
     const reviewedAt = new Date().toISOString();
+    const candidateFingerprint =
+      inspection === null ? undefined : describeCandidateManifest(inspection).fingerprint;
+    let appliedCandidateUpdates: Record<string, unknown> = {};
 
-    if (plan?.profile.sandboxLifecycle === "preserved" && sandboxTaskId !== undefined) {
-      if (plan.profile.mergeStrategy === "auto" && reviewed.outcome === "success") {
-        try {
-          await mergeSandbox(args.aboxBin, spec.cwd, sandboxTaskId);
-          await discardSandbox(args.aboxBin, spec.cwd, sandboxTaskId);
-          mergeResult = { merged: true, discarded: true };
-          sandboxLifecycleState = "preserved_merged";
-        } catch (error) {
-          mergeResult = {
-            error: `auto-merge failed: ${error instanceof Error ? error.message : String(error)}`,
-          };
-          sandboxLifecycleState = "merge_failed";
-        }
-      } else if (plan.profile.mergeStrategy === "none") {
+    if (plan?.profile.sandboxLifecycle === "preserved") {
+      if (sandboxTaskId === undefined) {
+        applyResult = {
+          error: "preserved candidate execution finished without a sandbox task id",
+        };
+        candidateState = "apply_failed";
+      } else if (plan.profile.candidatePolicy === "discard") {
         try {
           await discardSandbox(args.aboxBin, spec.cwd, sandboxTaskId);
-          mergeResult = { discarded: true };
-          sandboxLifecycleState = "preserved_discarded";
+          applyResult = { discarded: true };
+          candidateState = "discarded";
         } catch (error) {
-          mergeResult = {
+          applyResult = {
             error: `sandbox cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
           };
-          sandboxLifecycleState = "merge_failed";
+          candidateState = "apply_failed";
         }
+      } else if (
+        plan.profile.candidatePolicy === "auto_apply" &&
+        inspection !== null &&
+        sourceBaseline !== undefined &&
+        candidateState === "candidate_ready"
+      ) {
+        const applied = await applyPreservedCandidate({
+          sessionStore,
+          artifactStore,
+          runner,
+          storageRoot,
+          session: (await sessionStore.loadSession(sessionId)) ?? {
+            sessionId,
+            repoRoot: spec.cwd,
+            title: sessionId,
+            status: "running",
+            schemaVersion: 2,
+            turns: [],
+            createdAt: reviewedAt,
+            updatedAt: reviewedAt,
+          },
+          turnId,
+          attempt: {
+            attemptId: spec.attemptId,
+            status: "needs_review",
+            candidateState,
+            candidate: {
+              state: candidateState,
+              ...(plan.candidateId === undefined ? {} : { candidateId: plan.candidateId }),
+              sandboxTaskId,
+              ...(discoveredWorktree?.branch === undefined
+                ? {}
+                : { branchName: discoveredWorktree.branch }),
+              ...(discoveredWorktree?.path === undefined
+                ? {}
+                : { worktreePath: discoveredWorktree.path }),
+              ...(inspection.reservedOutputDir === undefined
+                ? {}
+                : { reservedOutputDir: inspection.reservedOutputDir }),
+              updatedAt: reviewedAt,
+              ...(candidateFingerprint === undefined ? {} : { fingerprint: candidateFingerprint }),
+            },
+          },
+          attemptSpec: spec,
+          aboxBin: args.aboxBin,
+          explicitConfirmation: false,
+          sourceBaseline,
+          inspection,
+          ...(candidateFingerprint === undefined
+            ? {}
+            : { expectedFingerprint: candidateFingerprint }),
+        });
+        candidateState = applied.candidateState;
+        applyResult = applied.applyResult;
+        appliedCandidateUpdates = applied.candidateUpdates;
       }
       reviewed = reviewAttemptResult(spec, executionResult, {
         profile: plan.profile,
         inspection,
-        ...(mergeResult === null ? {} : { mergeResult }),
+        ...(applyResult === null ? {} : { applyResult }),
       });
-      if (mergeResult !== null) {
-        await writeSessionArtifact(
-          artifactStore,
-          storageRoot,
-          sessionId,
-          turnId,
-          spec.attemptId,
-          "merge-result.json",
-          `${JSON.stringify(mergeResult, null, 2)}\n`,
-          "report",
-          { generatedBy: "host.executeAttempt" },
-        );
-        executionResult.artifacts.push("merge-result.json");
-      }
     }
+    const reviewRecord = createAttemptReviewRecord({
+      spec,
+      reviewed,
+      reviewedAt,
+    });
 
     await writer.append(
       buildReviewStartedEnvelope({ sessionId, turnId, attemptId: spec.attemptId }),
     );
     await sessionStore.upsertAttempt(sessionId, turnId, {
       attemptId: spec.attemptId,
-      status: attemptStatusFromReview(reviewed),
+      status: attemptStatusFromReview(reviewed, candidateState),
       result: execution.result,
       lastMessage: reviewed.reason,
       attemptSpec: spec,
       ...(plan !== undefined ? { dispatchPlan: plan } : {}),
-      sandboxLifecycleState,
-      sandbox: {
-        state: sandboxLifecycleState,
-        ...(plan?.candidateId !== undefined ? { candidateId: plan.candidateId } : {}),
-        ...(sandboxTaskId !== undefined ? { sandboxTaskId } : {}),
+      reviewRecord,
+      candidateState,
+      ...(plan?.profile.sandboxLifecycle === "preserved"
+        ? {
+            candidate: {
+              state: candidateState,
+              ...(plan?.candidateId !== undefined ? { candidateId: plan.candidateId } : {}),
+              ...(sandboxTaskId !== undefined ? { sandboxTaskId } : {}),
+              ...(discoveredWorktree?.branch !== undefined
+                ? { branchName: discoveredWorktree.branch }
+                : {}),
+              ...(discoveredWorktree?.path !== undefined
+                ? { worktreePath: discoveredWorktree.path }
+                : {}),
+              ...(inspection?.reservedOutputDir !== undefined
+                ? { reservedOutputDir: inspection.reservedOutputDir }
+                : {}),
+              ...(inspection?.changeKind !== undefined ? { changeKind: inspection.changeKind } : {}),
+              ...(inspection?.repoChangedFiles !== undefined
+                ? { changedFiles: inspection.repoChangedFiles }
+                : {}),
+              ...(inspection?.dirtyFiles !== undefined ? { dirtyFiles: inspection.dirtyFiles } : {}),
+              ...(inspection?.committedFiles !== undefined
+                ? { committedFiles: inspection.committedFiles }
+                : {}),
+              ...(inspection?.outputArtifacts !== undefined
+                ? { outputArtifacts: inspection.outputArtifacts }
+                : {}),
+              ...(candidateFingerprint === undefined ? {} : { fingerprint: candidateFingerprint }),
+              ...(candidateFingerprint === undefined
+                ? {}
+                : { manifestArtifact: CANDIDATE_MANIFEST_ARTIFACT_NAME }),
+              ...(sourceBaseline !== undefined
+                ? { sourceBaseline, driftDecision: "not_checked" }
+                : {}),
+              ...appliedCandidateUpdates,
+              ...(applyResult?.error !== undefined || applyResult?.confirmationReason !== undefined
+                ? {
+                    ...(applyResult.error === undefined ? {} : { applyError: applyResult.error }),
+                    ...(applyResult.confirmationReason === undefined
+                      ? {}
+                      : { confirmationReason: applyResult.confirmationReason }),
+                  }
+                : {}),
+              ...(candidateState === "applied" ? { appliedAt: reviewedAt } : {}),
+              updatedAt: reviewedAt,
+              reviewedAt,
+              ...(candidateState === "discarded" ? { discardedAt: reviewedAt } : {}),
+              ...(applyResult?.error !== undefined
+                ? { failureAt: reviewedAt, applyError: applyResult.error }
+                : {}),
+            },
+          }
+        : {}),
+      metadata: {
+        sandboxTaskId,
+        ...(discoveredWorktree?.path !== undefined
+          ? { worktreePath: discoveredWorktree.path }
+          : {}),
         ...(discoveredWorktree?.branch !== undefined
           ? { branchName: discoveredWorktree.branch }
           : {}),
-        ...(discoveredWorktree?.path !== undefined ? { worktreePath: discoveredWorktree.path } : {}),
-        ...(inspection?.reservedOutputDir !== undefined
-          ? { reservedOutputDir: inspection.reservedOutputDir }
-          : {}),
-        ...(inspection?.repoChangedFiles !== undefined
-          ? { changedFiles: inspection.repoChangedFiles }
-          : {}),
-        ...(inspection?.outputArtifacts !== undefined
-          ? { outputArtifacts: inspection.outputArtifacts }
-          : {}),
-        updatedAt: reviewedAt,
-        ...(sandboxLifecycleState === "preserved_merged" ? { mergedAt: reviewedAt } : {}),
-        ...(sandboxLifecycleState === "preserved_discarded" ? { discardedAt: reviewedAt } : {}),
-        ...(mergeResult?.error !== undefined ? { mergeError: mergeResult.error } : {}),
-      },
-      metadata: {
-        sandboxTaskId,
-        ...(discoveredWorktree?.path !== undefined ? { worktreePath: discoveredWorktree.path } : {}),
-        ...(discoveredWorktree?.branch !== undefined ? { branchName: discoveredWorktree.branch } : {}),
         ...(inspection?.repoChangedFiles !== undefined
           ? { changedFiles: inspection.repoChangedFiles }
           : {}),
@@ -420,15 +538,16 @@ export const executeAttempt = async (
       },
       ...(dispatchCommand === undefined ? {} : { dispatchCommand }),
     });
-    await upsertTurnLatestReview(sessionStore, sessionId, turnId, {
-      reviewId: `review-${Date.now()}-${randomUUID().slice(0, 8)}`,
-      attemptId: spec.attemptId,
-      intentId: spec.intentId,
-      outcome: reviewed.outcome,
-      action: reviewed.action,
-      reason: reviewed.reason,
-      reviewedAt,
-    });
+    const sessionAfterAttempt = await sessionStore.loadSession(sessionId);
+    const turnAfterAttempt = sessionAfterAttempt?.turns.find((entry) => entry.turnId === turnId);
+    if (turnAfterAttempt !== undefined) {
+      await sessionStore.upsertTurn(sessionId, {
+        ...turnAfterAttempt,
+        status: turnStatusFromReview(reviewed, candidateState),
+        updatedAt: reviewedAt,
+      });
+    }
+    await upsertTurnLatestReview(sessionStore, sessionId, turnId, reviewRecord);
 
     await writer.append(
       buildReviewCompletedEnvelope({
@@ -436,7 +555,7 @@ export const executeAttempt = async (
         turnId,
         attemptId: spec.attemptId,
         reviewed,
-        sandboxLifecycleState,
+        candidateState,
       }),
     );
 
@@ -457,7 +576,7 @@ export const executeAttempt = async (
       reviewedAction: reviewed.action,
     });
 
-    return { reviewed, executionResult };
+    return { reviewed, executionResult, candidateState };
   } finally {
     await writer.close();
   }
@@ -529,7 +648,11 @@ const handleBlockedDispatch = async (args: {
   writer: EventLogWriter;
   rationale: string;
   spec: AttemptSpec;
-}): Promise<{ reviewed: ReviewedAttemptResult; executionResult: AttemptExecutionResult }> => {
+}): Promise<{
+  reviewed: ReviewedAttemptResult;
+  executionResult: AttemptExecutionResult;
+  candidateState?: CandidateState;
+}> => {
   const { ctx, rationale, spec } = args;
   // `args.writer` is accepted for symmetry with the proceed path and so
   // future consumers can emit an additional "blocked" envelope here without

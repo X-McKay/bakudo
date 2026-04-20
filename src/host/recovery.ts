@@ -73,6 +73,12 @@ export type RecoveryVerdict =
       turnId: string;
       attemptId: string;
       detail: string;
+    }
+  | {
+      kind: "apply_incomplete";
+      turnId: string;
+      attemptId: string;
+      detail: string;
     };
 
 export type RecoveryLockReport =
@@ -105,6 +111,7 @@ export type RecoveryCode =
   | "recovery.queued_no_attempt"
   | "recovery.running_incomplete"
   | "recovery.finished_no_review"
+  | "recovery.apply_incomplete"
   | "recovery.stale_lock_cleared"
   | "recovery.stale_lock_detected";
 
@@ -173,6 +180,7 @@ export const classifyRecoveryVerdict = (
   }
 
   const attemptStatus = lastAttempt.status;
+  const candidateState = lastAttempt.candidateState;
   const hasTerminalWorkerEvent = TERMINAL_WORKER_KINDS.some((kind) => emittedKinds.has(kind));
   const hasReviewCompleted = emittedKinds.has(REVIEW_COMPLETED_KIND);
 
@@ -206,6 +214,19 @@ export const classifyRecoveryVerdict = (
       attemptId: lastAttempt.attemptId,
       detail:
         "worker completed but the review pass did not persist; run review recovery before resume",
+    };
+  }
+
+  if (
+    candidateState === "apply_staging" ||
+    candidateState === "apply_verifying" ||
+    candidateState === "apply_writeback"
+  ) {
+    return {
+      kind: "apply_incomplete",
+      turnId: lastTurn.turnId,
+      attemptId: lastAttempt.attemptId,
+      detail: `host crashed during ${candidateState}; inspect before resuming apply`,
     };
   }
 
@@ -273,7 +294,7 @@ export const recoverState = async (
     ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
   });
 
-  const blocksResume = verdict.kind === "running_incomplete";
+  const blocksResume = verdict.kind === "running_incomplete" || verdict.kind === "apply_incomplete";
   const code = codeForReport(verdict, lock);
 
   return { sessionId: session.sessionId, verdict, lock, blocksResume, code };
@@ -283,6 +304,7 @@ const codeForReport = (verdict: RecoveryVerdict, lock: RecoveryLockReport): Reco
   if (verdict.kind === "queued_no_attempt") return "recovery.queued_no_attempt";
   if (verdict.kind === "running_incomplete") return "recovery.running_incomplete";
   if (verdict.kind === "finished_no_review") return "recovery.finished_no_review";
+  if (verdict.kind === "apply_incomplete") return "recovery.apply_incomplete";
   if (lock.kind === "stale") return "recovery.stale_lock_detected";
   return "recovery.healthy";
 };

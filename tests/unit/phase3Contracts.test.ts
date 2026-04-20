@@ -14,8 +14,6 @@ import { BakudoConfigDefaults } from "../../src/host/config.js";
 import { evaluatePermission } from "../../src/host/permissionEvaluator.js";
 import { planAttempt } from "../../src/host/planner.js";
 import { reviewAttemptResult } from "../../src/reviewer.js";
-import { synthesizeLegacySpec } from "../../src/sessionMigration.js";
-import type { SessionAttemptRecord, SessionTurnRecord } from "../../src/sessionTypes.js";
 import {
   type ABoxTaskRunner,
   type TaskExecutionRecord,
@@ -28,7 +26,6 @@ import type { WorkerTaskProgressEvent } from "../../src/workerRuntime.js";
 import type { EventLogWriter } from "../../src/host/eventLogWriter.js";
 import type { HostCliArgs } from "../../src/host/parsing.js";
 import { executeAttempt } from "../../src/host/executeAttempt.js";
-import { formatInspectSummary } from "../../src/host/inspectFormatter.js";
 
 // -- Shared helpers ----------------------------------------------------------
 
@@ -302,66 +299,7 @@ test("phase3: reviewer uses checkResults for structured review", () => {
   assert.equal(reviewAttemptResult(spec, fail).outcome, "retryable_failure");
 });
 
-// -- 10. Legacy spec without taskKind → bash -lc fallback --------------------
-
-test("phase3: legacy attempt → synthesized bash -lc fallback", () => {
-  const attempt: SessionAttemptRecord = {
-    attemptId: "attempt-old",
-    status: "succeeded",
-    request: {
-      schemaVersion: 1,
-      taskId: "t",
-      sessionId: "s",
-      goal: "run lint",
-      assumeDangerousSkipPermissions: false,
-    },
-  };
-  const turn: SessionTurnRecord = {
-    turnId: "turn-1",
-    prompt: "run lint",
-    mode: "build",
-    status: "completed",
-    attempts: [attempt],
-    createdAt: ISO,
-    updatedAt: ISO,
-  };
-  const legacy = synthesizeLegacySpec(attempt, turn);
-  assert.equal(legacy.taskKind, "explicit_command");
-  assert.equal(legacy.execution?.engine, "shell");
-  assert.deepEqual(legacy.execution?.command, ["bash", "-lc", "run lint"]);
-});
-
-// -- 11. v2 session without attemptSpec → inspect shows synthesized spec -----
-
-test("phase3: v2 session → inspect shows synthesized spec", () => {
-  const attempt: SessionAttemptRecord = { attemptId: "a-v2", status: "succeeded" };
-  const turn: SessionTurnRecord = {
-    turnId: "turn-1",
-    prompt: "fix the bug",
-    mode: "build",
-    status: "completed",
-    attempts: [attempt],
-    createdAt: ISO,
-    updatedAt: ISO,
-  };
-  const session = {
-    schemaVersion: 2,
-    sessionId: "session-v2-inspect",
-    repoRoot: "/tmp/repo",
-    title: "fix the bug",
-    status: "completed" as const,
-    turns: [turn],
-    createdAt: ISO,
-    updatedAt: ISO,
-  };
-  const lines = formatInspectSummary({ session, turn, attempt }).join("\n");
-  assert.ok(lines.includes("TaskKind"));
-  assert.ok(lines.includes("explicit_command"));
-  assert.ok(lines.includes("Engine"));
-  assert.ok(lines.includes("shell"));
-});
-
-// -- 12. intentId threads through intent → spec → review --------------------
+// -- 10. intentId threads through intent → spec → review --------------------
 
 test("phase3: intentId threads through intent → spec → review", async () => {
   const rootDir = await createTempRoot();

@@ -79,13 +79,14 @@ const ABOX_GUEST_WORKSPACE_CWD = "/workspace";
 const DEFAULT_EXECUTION_PROFILE: ExecutionProfile = {
   agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
   sandboxLifecycle: "ephemeral",
-  mergeStrategy: "none",
+  candidatePolicy: "discard",
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isAttemptSpec = (value: WorkerDispatchInput): value is AttemptSpec => value.schemaVersion === 3;
+const isAttemptSpec = (value: WorkerDispatchInput): value is AttemptSpec =>
+  value.schemaVersion === 3;
 
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((entry) => typeof entry === "string");
@@ -100,9 +101,9 @@ const isExecutionProfile = (value: unknown): value is ExecutionProfile => {
   return (
     typeof value.agentBackend === "string" &&
     (value.sandboxLifecycle === "preserved" || value.sandboxLifecycle === "ephemeral") &&
-    (value.mergeStrategy === "auto" ||
-      value.mergeStrategy === "interactive" ||
-      value.mergeStrategy === "none")
+    (value.candidatePolicy === "auto_apply" ||
+      value.candidatePolicy === "manual_apply" ||
+      value.candidatePolicy === "discard")
   );
 };
 
@@ -198,10 +199,7 @@ const resolveCommand = (
 
 const nowIso = (now?: () => Date): string => (now ?? (() => new Date()))().toISOString();
 
-const resolveWorkingDirectory = (
-  spec: WorkerDispatchInput,
-  fallbackCwd: string,
-): string => {
+const resolveWorkingDirectory = (spec: WorkerDispatchInput, fallbackCwd: string): string => {
   if (!isAttemptSpec(spec)) {
     return spec.cwd ?? fallbackCwd;
   }
@@ -369,16 +367,10 @@ const validateAttemptSpec = (value: unknown): AttemptSpec => {
     invalidAttemptSpec("budget: expected object");
   }
   const budget = spec.budget as Record<string, unknown>;
-  if (
-    typeof budget.timeoutSeconds !== "number" ||
-    !Number.isFinite(budget.timeoutSeconds)
-  ) {
+  if (typeof budget.timeoutSeconds !== "number" || !Number.isFinite(budget.timeoutSeconds)) {
     invalidAttemptSpec("budget.timeoutSeconds: expected finite number");
   }
-  if (
-    typeof budget.maxOutputBytes !== "number" ||
-    !Number.isFinite(budget.maxOutputBytes)
-  ) {
+  if (typeof budget.maxOutputBytes !== "number" || !Number.isFinite(budget.maxOutputBytes)) {
     invalidAttemptSpec("budget.maxOutputBytes: expected finite number");
   }
   if (
@@ -420,7 +412,7 @@ export const decodeExecutionProfile = (encoded: string): ExecutionProfile => {
   const parsed = decodeJson(encoded);
   if (!isExecutionProfile(parsed)) {
     throw new Error(
-      "invalid execution profile: expected agentBackend plus valid sandboxLifecycle and mergeStrategy",
+      "invalid execution profile: expected agentBackend plus valid sandboxLifecycle and candidatePolicy",
     );
   }
   return parsed;

@@ -200,7 +200,7 @@ test("DispatchPlanSchema accepts optional batchId/candidateId", () => {
     profile: ExecutionProfileSchema.parse({
       agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
       sandboxLifecycle: "preserved",
-      mergeStrategy: "interactive",
+      candidatePolicy: "manual_apply",
     }),
     spec: validAttemptSpec,
   });
@@ -219,7 +219,7 @@ test("BatchSpecSchema accepts dispatch-plan candidates", () => {
         profile: ExecutionProfileSchema.parse({
           agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
           sandboxLifecycle: "preserved",
-          mergeStrategy: "interactive",
+          candidatePolicy: "manual_apply",
         }),
         spec: validAttemptSpec,
       },
@@ -239,7 +239,7 @@ test("CandidateSetSchema aliases the batch candidate shape", () => {
         profile: ExecutionProfileSchema.parse({
           agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
           sandboxLifecycle: "preserved",
-          mergeStrategy: "interactive",
+          candidatePolicy: "manual_apply",
         }),
         spec: validAttemptSpec,
       },

@@ -75,6 +75,8 @@ const ENGINE_MAP: Record<AttemptTaskKind, "agent_cli" | "shell"> = {
   assistant_job: "agent_cli",
   explicit_command: "shell",
   verification_check: "shell",
+  apply_verify: "shell",
+  apply_resolve: "agent_cli",
 };
 
 // ---------------------------------------------------------------------------
@@ -104,6 +106,8 @@ const PROMPT_MAP: Record<AttemptTaskKind, string> = {
     "Implement the requested change, make a minimal patch, and run targeted verification.",
   verification_check: "Execute the requested check command and capture outputs.",
   explicit_command: "", // overridden with raw command
+  apply_verify: "Run the requested apply verification commands in the staged workspace.",
+  apply_resolve: "Resolve the staged apply conflict in the staged workspace and explain the result.",
 };
 
 // ---------------------------------------------------------------------------
@@ -118,6 +122,8 @@ const ARTIFACT_REQUESTS: Record<AttemptTaskKind, ArtifactRequest[]> = {
   ],
   explicit_command: [{ name: "result.json", kind: "result", required: true }],
   verification_check: [{ name: "result.json", kind: "result", required: true }],
+  apply_verify: [{ name: "result.json", kind: "result", required: true }],
+  apply_resolve: [{ name: "result.json", kind: "result", required: true }],
 };
 
 // ---------------------------------------------------------------------------

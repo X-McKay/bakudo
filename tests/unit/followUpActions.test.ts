@@ -7,11 +7,17 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import type { ABoxTaskRunner, TaskExecutionRecord } from "../../src/aboxTaskRunner.js";
+import type { AttemptSpec } from "../../src/attemptProtocol.js";
 import { applyFollowUpAction } from "../../src/host/followUpActions.js";
+import { captureSourceBaseline } from "../../src/host/sourceBaseline.js";
 import { emitTurnTransition, listTurnTransitions } from "../../src/host/transitionStore.js";
 import { discoverWorktree } from "../../src/host/worktreeDiscovery.js";
+import { reservedOutputRelativeDirForAttempt } from "../../src/host/worktreeInspector.js";
+import { BAKUDO_PROTOCOL_SCHEMA_VERSION } from "../../src/protocol.js";
 import { SessionStore } from "../../src/sessionStore.js";
 import type { SessionAttemptRecord, SessionTurnRecord } from "../../src/sessionTypes.js";
+import { createCandidateApplyFixture } from "../helpers/candidateApplyFixtures.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -104,8 +110,89 @@ const createPreservedSandboxFixture = async (root: string) => {
   await git(repoRoot, ["add", "README.md"]);
   await git(repoRoot, ["commit", "-m", "initial"]);
   await git(repoRoot, ["worktree", "add", "-b", `agent/${sandboxTaskId}`, worktreePath, "HEAD"]);
-  return { repoRoot, worktreePath, sandboxTaskId };
+  const sourceBaseline = await captureSourceBaseline(repoRoot);
+  return { repoRoot, worktreePath, sandboxTaskId, sourceBaseline };
 };
+
+const createAttemptSpec = (sessionId: string, turnId: string, attemptId: string, repoRoot: string): AttemptSpec => ({
+  schemaVersion: 3,
+  sessionId,
+  turnId,
+  attemptId,
+  taskId: attemptId,
+  intentId: `${attemptId}-intent`,
+  mode: "build",
+  taskKind: "assistant_job",
+  prompt: "apply the preserved candidate",
+  instructions: ["Apply the preserved candidate into the source repository."],
+  cwd: repoRoot,
+  execution: { engine: "agent_cli" },
+  permissions: { rules: [], allowAllTools: false, noAskUser: false },
+  budget: { timeoutSeconds: 60, maxOutputBytes: 1024 * 1024, heartbeatIntervalMs: 5000 },
+  acceptanceChecks: [],
+  artifactRequests: [],
+});
+
+const createApplyRunner = (options: {
+  failVerify?: boolean;
+  resolvePath?: string;
+  resolveConfidence?: "high" | "medium" | "low";
+  resolveRationale?: string;
+  resolveContent?: string | null;
+} = {}): ABoxTaskRunner =>
+  ({
+    runAttempt: async (spec: AttemptSpec): Promise<TaskExecutionRecord> => {
+      const verificationFailure = options.failVerify === true && spec.taskKind === "apply_verify";
+      if (spec.taskKind === "apply_resolve") {
+        const outputDir = join(spec.cwd, reservedOutputRelativeDirForAttempt(spec.attemptId));
+        await mkdir(outputDir, { recursive: true });
+        await writeFile(
+          join(outputDir, "result.json"),
+          `${JSON.stringify(
+            {
+              path: options.resolvePath ?? "README.md",
+              resolvedContent: options.resolveContent ?? "hello\nfrom source and candidate\n",
+              rationale:
+                options.resolveRationale ?? "reconciled the source context with the candidate change",
+              confidence: options.resolveConfidence ?? "high",
+            },
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+      }
+      return {
+        events: [],
+        result: {
+          schemaVersion: BAKUDO_PROTOCOL_SCHEMA_VERSION,
+          taskId: spec.taskId,
+          sessionId: spec.sessionId,
+          status: verificationFailure ? "failed" : "succeeded",
+          summary: verificationFailure ? "verification failed" : "verification passed",
+          startedAt: "2026-04-19T00:00:00.000Z",
+          finishedAt: "2026-04-19T00:00:01.000Z",
+          exitCode: verificationFailure ? 1 : 0,
+          command: spec.prompt,
+          cwd: spec.cwd,
+          shell: "bash",
+          timeoutSeconds: spec.budget.timeoutSeconds,
+          durationMs: 1000,
+          exitSignal: null,
+          stdout: verificationFailure ? "verification failed" : "verification passed",
+          stderr: "",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          timedOut: false,
+          assumeDangerousSkipPermissions: false,
+        },
+        workerErrors: [],
+        rawOutput: verificationFailure ? "verification failed" : "verification passed",
+        ok: !verificationFailure,
+        metadata: {},
+      };
+    },
+  }) as ABoxTaskRunner;
 
 // ---------------------------------------------------------------------------
 // retry
@@ -320,15 +407,15 @@ test("accept: idempotent — calling twice is safe and the second call is a no-o
   });
 });
 
-test("accept: preserved_active sandbox merges and cleans up the candidate", async () => {
+test("accept: candidate-ready follow-up applies the preserved candidate through the host apply flow", async () => {
   await withTempRoot(async (storageRoot) => {
     const sessionId = "session-accept-preserved";
     const turnId = "turn-1";
     const attemptId = "attempt-1";
-    const { repoRoot, worktreePath, sandboxTaskId } =
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
       await createPreservedSandboxFixture(storageRoot);
-    const aboxBin = join(process.cwd(), "tests/helpers/mockAbox.sh");
     await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
 
     const store = await seedSession({
       storageRoot,
@@ -339,17 +426,20 @@ test("accept: preserved_active sandbox merges and cleans up the candidate", asyn
       turnStatus: "awaiting_user",
       attemptStatus: "blocked",
       attemptOverrides: {
-        sandboxLifecycleState: "preserved_active",
-        sandbox: {
-          state: "preserved_active",
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
           sandboxTaskId,
           worktreePath,
           branchName: `refs/heads/agent/${sandboxTaskId}`,
           reservedOutputDir: ".bakudo/out/attempt-1",
           changedFiles: ["README.md"],
           outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
           updatedAt: "2026-04-19T00:00:00.000Z",
         },
+        attemptSpec,
       },
     });
 
@@ -358,13 +448,14 @@ test("accept: preserved_active sandbox merges and cleans up the candidate", asyn
       turnId,
       sourceAttemptId: attemptId,
       storageRoot,
-      aboxBin,
+      aboxBin: join(process.cwd(), "tests/helpers/mockAbox.sh"),
+      runner: createApplyRunner(),
       action: { kind: "accept" },
     });
 
-    assert.match(result.message, /preserved sandbox merged/u);
-    const mergedReadme = await readFile(join(repoRoot, "README.md"), "utf8");
-    assert.equal(mergedReadme, "hello\nfrom preserved candidate\n");
+    assert.match(result.message, /accepted/u);
+    const repoReadme = await readFile(join(repoRoot, "README.md"), "utf8");
+    assert.equal(repoReadme, "hello\nfrom preserved candidate\n");
 
     const session = await store.loadSession(sessionId);
     const turn = session?.turns.find((entry) => entry.turnId === turnId);
@@ -372,11 +463,617 @@ test("accept: preserved_active sandbox merges and cleans up the candidate", asyn
     assert.equal(session?.status, "completed");
     assert.equal(turn?.status, "completed");
     assert.equal(attempt?.status, "succeeded");
-    assert.equal(attempt?.sandboxLifecycleState, "preserved_merged");
-    assert.equal(attempt?.sandbox?.state, "preserved_merged");
+    assert.equal(attempt?.candidateState, "applied");
+    assert.equal(attempt?.candidate?.state, "applied");
+    assert.equal(attempt?.candidate?.driftDecision, "allowed");
+    assert.equal(attempt?.reviewRecord?.outcome, "success");
+    assert.equal(attempt?.reviewRecord?.action, "accept");
+    assert.equal(turn?.latestReview?.action, "accept");
 
     const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
     assert.equal(discovered, null);
+  });
+});
+
+test("accept: committed-only preserved candidates apply through the same host flow", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-committed";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const fixture = await createCandidateApplyFixture(storageRoot, {
+      candidateState: "committed",
+      sourceState: "clean",
+    });
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, fixture.repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot: fixture.repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId: fixture.sandboxTaskId,
+          worktreePath: fixture.worktreePath,
+          branchName: `refs/heads/agent/${fixture.sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changeKind: "committed",
+          changedFiles: ["README.md", "src/candidate-only.txt"],
+          committedFiles: ["README.md", "src/candidate-only.txt"],
+          dirtyFiles: [],
+          outputArtifacts: [],
+          sourceBaseline: fixture.sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      aboxBin: join(process.cwd(), "tests/helpers/mockAbox.sh"),
+      runner: createApplyRunner(),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /accepted/u);
+    assert.match(await readFile(join(fixture.repoRoot, "README.md"), "utf8"), /Alpha candidate/u);
+    assert.equal(
+      await readFile(join(fixture.repoRoot, "src", "candidate-only.txt"), "utf8"),
+      "committed candidate file\n",
+    );
+
+    const attempt = (await store.loadSession(sessionId))?.turns[0]?.attempts[0];
+    assert.equal(attempt?.candidateState, "applied");
+    assert.equal(attempt?.candidate?.changeKind, "committed");
+  });
+});
+
+test("accept: mixed preserved candidates reconcile non-overlapping local edits", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-mixed";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const fixture = await createCandidateApplyFixture(storageRoot, {
+      candidateState: "mixed",
+      sourceState: "non_overlap",
+    });
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, fixture.repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot: fixture.repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId: fixture.sandboxTaskId,
+          worktreePath: fixture.worktreePath,
+          branchName: `refs/heads/agent/${fixture.sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changeKind: "mixed",
+          changedFiles: ["README.md", "src/candidate-only.txt", "src/module.txt"],
+          committedFiles: ["README.md", "src/candidate-only.txt"],
+          dirtyFiles: ["src/module.txt"],
+          outputArtifacts: [],
+          sourceBaseline: fixture.sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      aboxBin: join(process.cwd(), "tests/helpers/mockAbox.sh"),
+      runner: createApplyRunner(),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /accepted/u);
+    assert.equal(
+      await readFile(join(fixture.repoRoot, "README.md"), "utf8"),
+      [
+        "# Candidate Apply Fixture",
+        "",
+        "Alpha candidate",
+        "Beta source",
+        "Gamma candidate",
+        "",
+      ].join("\n"),
+    );
+    assert.equal(await readFile(join(fixture.repoRoot, "src", "local-note.txt"), "utf8"), "source local note\n");
+    assert.equal(
+      await readFile(join(fixture.repoRoot, "src", "candidate-only.txt"), "utf8"),
+      "committed candidate file\n",
+    );
+    assert.equal(
+      await readFile(join(fixture.repoRoot, "src", "module.txt"), "utf8"),
+      "base module\nmixed dirty tail\n",
+    );
+
+    const attempt = (await store.loadSession(sessionId))?.turns[0]?.attempts[0];
+    assert.equal(attempt?.candidateState, "applied");
+    assert.equal(attempt?.candidate?.changeKind, "mixed");
+  });
+});
+
+test("accept: overlapping text conflicts auto-resolve through apply_resolve when confidence is high", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-auto-resolve";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      aboxBin: join(process.cwd(), "tests/helpers/mockAbox.sh"),
+      runner: createApplyRunner({
+        resolvePath: "README.md",
+        resolveContent: "hello\nfrom source and candidate\n",
+        resolveRationale: "kept the source note and preserved the candidate update",
+        resolveConfidence: "high",
+      }),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /accepted/u);
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\nfrom source and candidate\n");
+
+    const session = await store.loadSession(sessionId);
+    const attempt = session?.turns[0]?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(attempt?.candidateState, "applied");
+    assert.deepEqual(
+      attempt?.candidate?.applyDispatches?.map((entry) => entry.kind),
+      ["apply_resolve", "apply_verify"],
+    );
+    assert.equal(attempt?.candidate?.resolutions?.[0]?.status, "auto_applied");
+    assert.equal(attempt?.candidate?.resolutions?.[0]?.confidence, "high");
+    assert.match(attempt?.candidate?.resolutions?.[0]?.rationale ?? "", /source note/u);
+  });
+});
+
+test("accept: low-confidence automatic resolution preserves the candidate for confirmation", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-low-confidence";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      runner: createApplyRunner({
+        resolvePath: "README.md",
+        resolveContent: "hello\nfrom source and candidate\n",
+        resolveRationale: "this still needs user confirmation",
+        resolveConfidence: "medium",
+      }),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /needs confirmation/u);
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\nfrom source repo\n");
+
+    const session = await store.loadSession(sessionId);
+    const turn = session?.turns.find((entry) => entry.turnId === turnId);
+    const attempt = turn?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(session?.status, "awaiting_user");
+    assert.equal(turn?.status, "awaiting_user");
+    assert.equal(attempt?.status, "blocked");
+    assert.equal(attempt?.candidateState, "needs_confirmation");
+    assert.equal(attempt?.candidate?.resolutions?.[0]?.status, "needs_confirmation");
+    assert.equal(attempt?.candidate?.resolutions?.[0]?.confidence, "medium");
+    assert.deepEqual(attempt?.candidate?.applyDispatches?.map((entry) => entry.kind), ["apply_resolve"]);
+    assert.equal(attempt?.reviewRecord?.outcome, "blocked_needs_user");
+    assert.equal(attempt?.reviewRecord?.action, "ask_user");
+    assert.equal(turn?.latestReview?.action, "ask_user");
+  });
+});
+
+test("accept: resumes a needs_confirmation candidate and applies it when confirmed", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-needs-confirmation";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    // Overlap: source and candidate both diverge from the baseline on the same
+    // line. Without explicit confirmation this path would stall in
+    // needs_confirmation; resuming from needs_confirmation sets
+    // explicitConfirmation=true and the text conflict resolves to
+    // take_candidate.
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "needs_confirmation",
+        candidate: {
+          state: "needs_confirmation",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          confirmationReason: "overlapping edits need confirmation",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      aboxBin: join(process.cwd(), "tests/helpers/mockAbox.sh"),
+      runner: createApplyRunner(),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /accepted/u);
+    // Proof that explicitConfirmation=true was honored: take_candidate wrote
+    // the candidate content into the source repo despite the overlap.
+    assert.equal(
+      await readFile(join(repoRoot, "README.md"), "utf8"),
+      "hello\nfrom preserved candidate\n",
+    );
+
+    const session = await store.loadSession(sessionId);
+    const turn = session?.turns.find((entry) => entry.turnId === turnId);
+    const attempt = turn?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(session?.status, "completed");
+    assert.equal(turn?.status, "completed");
+    assert.equal(attempt?.status, "succeeded");
+    assert.equal(attempt?.candidateState, "applied");
+    assert.equal(attempt?.candidate?.state, "applied");
+    assert.equal(attempt?.candidate?.driftDecision, "allowed");
+    assert.equal(attempt?.reviewRecord?.outcome, "success");
+    assert.equal(attempt?.reviewRecord?.action, "accept");
+    assert.equal(turn?.latestReview?.action, "accept");
+
+    const { ArtifactStore } = await import("../../src/artifactStore.js");
+    const artifactStore = new ArtifactStore(storageRoot);
+    const artifacts = await artifactStore.listArtifacts(sessionId);
+    const applyResult = artifacts.find((entry) => entry.name === "apply-result.json");
+    assert.ok(applyResult, "expected apply-result.json to be registered");
+    assert.equal(applyResult?.metadata?.confirmed, true);
+    assert.ok(artifacts.some((entry) => entry.name === "apply-verify-result.json"));
+
+    const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
+    assert.equal(discovered, null);
+  });
+});
+
+test("accept: failed verification after automatic resolution falls back to needs_confirmation", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-resolve-verify-fail";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      runner: createApplyRunner({
+        resolvePath: "README.md",
+        resolveContent: "hello\nfrom source and candidate\n",
+        resolveRationale: "resolved both sides before verification",
+        resolveConfidence: "high",
+        failVerify: true,
+      }),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /needs confirmation/u);
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\nfrom source repo\n");
+
+    const session = await store.loadSession(sessionId);
+    const attempt = session?.turns[0]?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(attempt?.candidateState, "needs_confirmation");
+    assert.equal(attempt?.candidate?.resolutions?.[0]?.status, "auto_applied");
+    assert.equal(attempt?.candidate?.applyDispatches?.map((entry) => entry.kind).join(","), "apply_resolve,apply_verify");
+  });
+});
+
+test("accept: verification failure preserves the candidate and leaves the source repo unchanged", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-verify-fail";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      runner: createApplyRunner({ failVerify: true }),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /could not apply the preserved candidate/u);
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\n");
+
+    const session = await store.loadSession(sessionId);
+    const turn = session?.turns.find((entry) => entry.turnId === turnId);
+    const attempt = turn?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(session?.status, "failed");
+    assert.equal(turn?.status, "failed");
+    assert.equal(attempt?.status, "failed");
+    assert.equal(attempt?.candidateState, "apply_failed");
+    assert.equal(attempt?.candidate?.state, "apply_failed");
+    assert.equal(attempt?.candidate?.driftDecision, "allowed");
+
+    const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
+    assert.ok(discovered);
+  });
+});
+
+test("accept: candidate fingerprint mismatch blocks apply before source mutation", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-fingerprint-mismatch";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          fingerprint: "deadbeef",
+          sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      runner: createApplyRunner(),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /could not apply the preserved candidate/u);
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\n");
+
+    const attempt = (await store.loadSession(sessionId))?.turns[0]?.attempts[0];
+    assert.equal(attempt?.candidateState, "apply_failed");
+    assert.match(attempt?.candidate?.applyError ?? "", /changed after review/u);
+  });
+});
+
+test("accept: drift gate blocks branch-switched source repos before apply starts", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-accept-drift-branch-switch";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await git(repoRoot, ["checkout", "-b", "other-branch"]);
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      runner: createApplyRunner(),
+      action: { kind: "accept" },
+    });
+
+    assert.match(result.message, /could not apply the preserved candidate/u);
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\n");
+
+    const attempt = (await store.loadSession(sessionId))?.turns[0]?.attempts[0];
+    assert.equal(attempt?.candidateState, "apply_failed");
+    assert.equal(attempt?.candidate?.driftDecision, "blocked_branch_switched");
   });
 });
 
@@ -458,12 +1155,12 @@ test("halt: idempotent — second call is a no-op and does not emit a second tra
   });
 });
 
-test("halt: preserved_active sandbox discards the candidate without merging", async () => {
+test("halt: candidate-ready follow-up discards the preserved candidate", async () => {
   await withTempRoot(async (storageRoot) => {
     const sessionId = "session-halt-preserved";
     const turnId = "turn-1";
     const attemptId = "attempt-1";
-    const { repoRoot, worktreePath, sandboxTaskId } =
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
       await createPreservedSandboxFixture(storageRoot);
     const aboxBin = join(process.cwd(), "tests/helpers/mockAbox.sh");
     await writeFile(join(worktreePath, "README.md"), "hello\nfrom discarded candidate\n", "utf8");
@@ -477,15 +1174,17 @@ test("halt: preserved_active sandbox discards the candidate without merging", as
       turnStatus: "awaiting_user",
       attemptStatus: "blocked",
       attemptOverrides: {
-        sandboxLifecycleState: "preserved_active",
-        sandbox: {
-          state: "preserved_active",
+        candidateState: "candidate_ready",
+        candidate: {
+          state: "candidate_ready",
           sandboxTaskId,
           worktreePath,
           branchName: `refs/heads/agent/${sandboxTaskId}`,
           reservedOutputDir: ".bakudo/out/attempt-1",
           changedFiles: ["README.md"],
           outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
           updatedAt: "2026-04-19T00:00:00.000Z",
         },
       },
@@ -500,7 +1199,7 @@ test("halt: preserved_active sandbox discards the candidate without merging", as
       action: { kind: "halt" },
     });
 
-    assert.match(result.message, /preserved sandbox discarded/u);
+    assert.match(result.message, /preserved candidate discarded/u);
     const repoReadme = await readFile(join(repoRoot, "README.md"), "utf8");
     assert.equal(repoReadme, "hello\n");
 
@@ -510,8 +1209,84 @@ test("halt: preserved_active sandbox discards the candidate without merging", as
     assert.equal(session?.status, "cancelled");
     assert.equal(turn?.status, "cancelled");
     assert.equal(attempt?.status, "cancelled");
-    assert.equal(attempt?.sandboxLifecycleState, "preserved_discarded");
-    assert.equal(attempt?.sandbox?.state, "preserved_discarded");
+    assert.equal(attempt?.candidateState, "discarded");
+    assert.equal(attempt?.candidate?.state, "discarded");
+    assert.equal(attempt?.reviewRecord?.action, "halt");
+    assert.equal(turn?.latestReview?.action, "halt");
+
+    const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
+    assert.equal(discovered, null);
+  });
+});
+
+test("halt: discards a needs_confirmation candidate and transitions the turn to cancelled", async () => {
+  await withTempRoot(async (storageRoot) => {
+    const sessionId = "session-halt-needs-confirmation";
+    const turnId = "turn-1";
+    const attemptId = "attempt-1";
+    const { repoRoot, worktreePath, sandboxTaskId, sourceBaseline } =
+      await createPreservedSandboxFixture(storageRoot);
+    const aboxBin = join(process.cwd(), "tests/helpers/mockAbox.sh");
+    await writeFile(join(worktreePath, "README.md"), "hello\nfrom preserved candidate\n", "utf8");
+    await writeFile(join(repoRoot, "README.md"), "hello\nfrom source repo\n", "utf8");
+    const attemptSpec = createAttemptSpec(sessionId, turnId, attemptId, repoRoot);
+
+    const store = await seedSession({
+      storageRoot,
+      sessionId,
+      turnId,
+      attemptId,
+      repoRoot,
+      turnStatus: "awaiting_user",
+      attemptStatus: "blocked",
+      attemptOverrides: {
+        candidateState: "needs_confirmation",
+        candidate: {
+          state: "needs_confirmation",
+          sandboxTaskId,
+          worktreePath,
+          branchName: `refs/heads/agent/${sandboxTaskId}`,
+          reservedOutputDir: ".bakudo/out/attempt-1",
+          changedFiles: ["README.md"],
+          outputArtifacts: [],
+          sourceBaseline,
+          driftDecision: "not_checked",
+          confirmationReason: "overlapping edits need confirmation",
+          updatedAt: "2026-04-19T00:00:00.000Z",
+        },
+        attemptSpec,
+      },
+    });
+
+    const result = await applyFollowUpAction({
+      sessionId,
+      turnId,
+      sourceAttemptId: attemptId,
+      storageRoot,
+      aboxBin,
+      action: { kind: "halt" },
+    });
+
+    assert.match(result.message, /preserved candidate discarded/u);
+    // halt must not touch the source repo.
+    assert.equal(await readFile(join(repoRoot, "README.md"), "utf8"), "hello\nfrom source repo\n");
+
+    const session = await store.loadSession(sessionId);
+    const turn = session?.turns.find((entry) => entry.turnId === turnId);
+    const attempt = turn?.attempts.find((entry) => entry.attemptId === attemptId);
+    assert.equal(session?.status, "cancelled");
+    assert.equal(turn?.status, "cancelled");
+    assert.equal(attempt?.status, "cancelled");
+    assert.equal(attempt?.candidateState, "discarded");
+    assert.equal(attempt?.candidate?.state, "discarded");
+    assert.equal(attempt?.reviewRecord?.action, "halt");
+    assert.equal(turn?.latestReview?.action, "halt");
+
+    const transitions = await listTurnTransitions(storageRoot, sessionId);
+    assert.ok(
+      transitions.some((entry) => entry.reason === "user_halt" && entry.toStatus === "cancelled"),
+      "expected a user_halt transition",
+    );
 
     const discovered = await discoverWorktree(repoRoot, sandboxTaskId);
     assert.equal(discovered, null);

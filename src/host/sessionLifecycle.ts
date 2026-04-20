@@ -3,7 +3,6 @@ import { ABoxAdapter } from "../aboxAdapter.js";
 import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
 import type { TaskRequest } from "../protocol.js";
-import { reviewTaskResult } from "../reviewer.js";
 import { SessionStore } from "../sessionStore.js";
 import { createSessionTaskKey } from "../sessionTypes.js";
 import { BakudoConfigDefaults, loadConfigCascade } from "./config.js";
@@ -12,7 +11,13 @@ import { executeAttempt } from "./executeAttempt.js";
 import { stdoutWrite } from "./io.js";
 import type { HostCliArgs } from "./parsing.js";
 import { planAttempt } from "./planner.js";
-import { latestAttempt, latestTurn, printRunSummary, reviewedOutcomeExitCode } from "./printers.js";
+import {
+  latestAttempt,
+  latestTurn,
+  printRunSummary,
+  reviewViewFor,
+  reviewedOutcomeExitCode,
+} from "./printers.js";
 import { resolveRedactionPolicyForHost } from "./redaction.js";
 import {
   promptForApproval,
@@ -23,6 +28,7 @@ import {
 } from "./sessionRunSupport.js";
 import { createAndRunFirstTurn } from "./sessionController.js";
 import { emitTurnTransition, findLatestTurnTransition } from "./transitionStore.js";
+import { recoverInterruptedApplyIfNeeded } from "./applyRecovery.js";
 
 export const runNewSession = async (args: HostCliArgs): Promise<number> => {
   if (requiresSandboxApproval(args) && !args.yes) {
@@ -137,6 +143,12 @@ export const resumeSession = async (
       : {}),
   });
   const artifactStore = new ArtifactStore(rootDir, redactionPolicy);
+  await recoverInterruptedApplyIfNeeded({
+    sessionStore,
+    artifactStore,
+    storageRoot: rootDir,
+    sessionId: args.sessionId ?? "",
+  });
   const session = await sessionStore.loadSession(args.sessionId ?? "");
   if (session === null) {
     throw new Error(`unknown session: ${args.sessionId}`);
@@ -151,7 +163,19 @@ export const resumeSession = async (
     throw new Error(`no resumable attempt found for session ${session.sessionId}`);
   }
 
-  const priorReview = attempt.result === undefined ? null : reviewTaskResult(attempt.result);
+  const priorReview = reviewViewFor(turn, attempt);
+  if (attempt.candidateState === "candidate_ready" || attempt.candidateState === "needs_confirmation") {
+    if (priorReview !== null) {
+      printRunSummary(session, priorReview);
+    }
+    return 2;
+  }
+  if (attempt.candidateState === "apply_failed") {
+    if (priorReview !== null) {
+      printRunSummary(session, priorReview);
+    }
+    return 1;
+  }
   if (priorReview?.outcome === "success") {
     printRunSummary(session, priorReview);
     return 0;
@@ -197,7 +221,7 @@ export const resumeSession = async (
   });
 
   await sessionStore.saveSession({ ...session, status: "running" });
-  const { reviewed } = await executeAttemptFn(
+  const { reviewed, candidateState } = await executeAttemptFn(
     {
       sessionStore,
       artifactStore,
@@ -211,7 +235,7 @@ export const resumeSession = async (
   );
   const updated = await sessionStore.saveSession({
     ...(await sessionStore.loadSession(session.sessionId))!,
-    status: sessionStatusFromReview(reviewed),
+    status: sessionStatusFromReview(reviewed, candidateState),
   });
   printRunSummary(updated, reviewed);
   return reviewedOutcomeExitCode(reviewed);

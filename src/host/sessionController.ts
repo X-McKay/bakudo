@@ -18,6 +18,7 @@ import { emitSessionEvent, readSessionEventLog, type JsonEventSink } from "./eve
 import { executeAttempt } from "./executeAttempt.js";
 import { createSessionProbeFailureEmitter } from "./workerCapabilities.js";
 import { acquireSessionLock, type SessionLockHandle } from "./lockFile.js";
+import { recoverInterruptedApplyIfNeeded } from "./applyRecovery.js";
 import {
   buildEventKindLoader,
   logRecoveryNotice,
@@ -158,16 +159,33 @@ const withAcquiredLock = async (
  */
 const runRecoveryGate = async (
   sessionStore: SessionStore,
+  artifactStore: ArtifactStore,
   sessionId: string,
   storageRoot: string,
 ): Promise<RecoveryReport | null> => {
-  const session = await sessionStore.loadSession(sessionId);
+  let session = await sessionStore.loadSession(sessionId);
   if (session === null) {
     return null;
   }
-  const sessionDir = sessionStore.paths(sessionId).sessionDir;
   const loadEventKinds = buildEventKindLoader((sid) => readSessionEventLog(storageRoot, sid));
-  const report = await recoverState(session, sessionDir, { loadEventKinds });
+  let sessionDir = sessionStore.paths(sessionId).sessionDir;
+  let report = await recoverState(session, sessionDir, { loadEventKinds });
+  if (report.verdict.kind === "apply_incomplete") {
+    const recovered = await recoverInterruptedApplyIfNeeded({
+      sessionStore,
+      artifactStore,
+      storageRoot,
+      sessionId,
+    });
+    if (recovered) {
+      session = await sessionStore.loadSession(sessionId);
+      if (session === null) {
+        return null;
+      }
+      sessionDir = sessionStore.paths(sessionId).sessionDir;
+      report = await recoverState(session, sessionDir, { loadEventKinds });
+    }
+  }
   if (
     report.verdict.kind === "healthy" &&
     report.lock.kind !== "stale" &&
@@ -326,7 +344,7 @@ export const createAndRunFirstTurn = async (
       plannerOpts,
     );
 
-    const { reviewed } = await executeAttempt(
+    const { reviewed, candidateState } = await executeAttempt(
       {
         sessionStore,
         artifactStore,
@@ -344,7 +362,7 @@ export const createAndRunFirstTurn = async (
 
     const updated = await sessionStore.saveSession({
       ...(await sessionStore.loadSession(session.sessionId))!,
-      status: sessionStatusFromReview(reviewed),
+      status: sessionStatusFromReview(reviewed, candidateState),
     });
 
     return { sessionId: updated.sessionId, turnId, attemptId, reviewed, session: updated };
@@ -365,7 +383,7 @@ export const appendTurnToActiveSession = async (
   // Recovery gate — runs BEFORE we acquire the lock. If the prior host
   // crashed in the middle of a dispatch, we must surface the verdict (and
   // possibly block resume) before the append path overwrites any state.
-  await runRecoveryGate(sessionStore, sessionId, storageRoot);
+  await runRecoveryGate(sessionStore, artifactStore, sessionId, storageRoot);
 
   const { release: releaseLock } = await withAcquiredLock(sessionStore, sessionId);
   try {
@@ -437,7 +455,7 @@ export const appendTurnToActiveSession = async (
     );
 
     await sessionStore.saveSession({ ...withTurn, status: "running" });
-    const { reviewed } = await executeAttempt(
+    const { reviewed, candidateState } = await executeAttempt(
       {
         sessionStore,
         artifactStore,
@@ -455,7 +473,7 @@ export const appendTurnToActiveSession = async (
 
     const updated = await sessionStore.saveSession({
       ...(await sessionStore.loadSession(sessionId))!,
-      status: sessionStatusFromReview(reviewed),
+      status: sessionStatusFromReview(reviewed, candidateState),
     });
 
     return { sessionId, turnId, attemptId, reviewed, session: updated };
@@ -468,11 +486,11 @@ export const resumeNamedSession = async (
   sessionId: string,
   args: HostCliArgs,
 ): Promise<SessionRecord | null> => {
-  const { sessionStore } = await buildRunnerContext(args);
+  const { sessionStore, artifactStore } = await buildRunnerContext(args);
   const storageRoot = storageRootFor(args.repo, args.storageRoot);
   // Recovery gate: run BEFORE handing the session back to the caller so the
   // caller never sees a session that must be inspected before further writes.
   // A blocked-resume verdict throws `SessionResumeBlockedError` here.
-  await runRecoveryGate(sessionStore, sessionId, storageRoot);
+  await runRecoveryGate(sessionStore, artifactStore, sessionId, storageRoot);
   return sessionStore.loadSession(sessionId);
 };

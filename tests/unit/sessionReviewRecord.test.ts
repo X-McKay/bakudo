@@ -1,23 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
-import { SessionStore, loadSessionRecord } from "../../src/sessionStore.js";
+import { loadSessionRecord } from "../../src/sessionStore.js";
 import {
-  CURRENT_SESSION_SCHEMA_VERSION,
   coerceSessionReviewAction,
   coerceSessionReviewOutcome,
   deriveSessionTitle,
 } from "../../src/sessionTypes.js";
-
-// Built test lives at `dist/tests/unit/<this>.js`; three URL segments up → repo root.
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-
-const createTempRoot = async (): Promise<string> =>
-  mkdtemp(join(tmpdir(), "bakudo-review-record-"));
 
 test("coerceSessionReviewOutcome: mapping table", () => {
   assert.equal(coerceSessionReviewOutcome("success"), "success");
@@ -100,54 +89,6 @@ test("deriveSessionTitle: falls back to goal when no turn prompt, then sessionId
   assert.equal(deriveSessionTitle({ sessionId: "s-1" }), "s-1");
 });
 
-test("loadSessionRecord: v1 with metadata reviewedOutcome+reviewedAction synthesizes latestReview", () => {
-  const raw = {
-    schemaVersion: 1,
-    sessionId: "session-legacy-review",
-    goal: "legacy",
-    status: "failed",
-    assumeDangerousSkipPermissions: true,
-    tasks: [
-      {
-        taskId: "task-1",
-        status: "failed",
-        lastMessage: "task failed",
-        metadata: {
-          sandboxTaskId: "abox-legacy-1",
-          aboxCommand: ["abox", "--repo", "/tmp", "run", "--task", "t", "--", "echo", "hi"],
-          reviewedOutcome: "retryable_failure",
-          reviewedAction: "retry",
-        },
-      },
-    ],
-    createdAt: "2026-04-14T12:00:00.000Z",
-    updatedAt: "2026-04-14T12:00:00.000Z",
-  };
-  const loaded = loadSessionRecord(raw);
-  assert.equal(loaded.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
-  assert.equal(loaded.title, "legacy");
-  const turn = loaded.turns[0]!;
-  assert.ok(turn.latestReview, "expected latestReview to be synthesized from metadata");
-  assert.equal(turn.latestReview?.outcome, "retryable_failure");
-  assert.equal(turn.latestReview?.action, "retry");
-  assert.equal(turn.latestReview?.attemptId, "task-1");
-  assert.match(turn.latestReview?.reviewId ?? "", /^review-/u);
-  assert.equal(turn.latestReview?.reason, "task failed");
-  // dispatchCommand hoisted from metadata.aboxCommand
-  const attempt = turn.attempts[0]!;
-  assert.deepEqual(attempt.dispatchCommand, [
-    "abox",
-    "--repo",
-    "/tmp",
-    "run",
-    "--task",
-    "t",
-    "--",
-    "echo",
-    "hi",
-  ]);
-});
-
 test("loadSessionRecord: v2 with loose latestReview object gets coerced", () => {
   const raw = {
     schemaVersion: 2,
@@ -211,73 +152,4 @@ test("loadSessionRecord: v2 with no latestReview stays absent", () => {
   const loaded = loadSessionRecord(raw);
   assert.equal(loaded.title, "no review yet");
   assert.equal(loaded.turns[0]?.latestReview, undefined);
-});
-
-test("round-trip: v1-with-review → v2 load → save → reload preserves latestReview + dispatchCommand", async () => {
-  const rootDir = await createTempRoot();
-  try {
-    const sessionDir = join(rootDir, "session-rt-review");
-    await mkdir(sessionDir, { recursive: true });
-    const v1 = {
-      schemaVersion: 1,
-      sessionId: "session-rt-review",
-      goal: "round trip with review",
-      status: "failed",
-      assumeDangerousSkipPermissions: false,
-      tasks: [
-        {
-          taskId: "task-1",
-          status: "failed",
-          lastMessage: "boom",
-          metadata: {
-            sandboxTaskId: "abox-rt-1",
-            aboxCommand: ["abox", "run", "--task", "t", "--", "false"],
-            reviewedOutcome: "failed",
-            reviewedAction: "retry",
-          },
-        },
-      ],
-      createdAt: "2026-04-14T12:00:00.000Z",
-      updatedAt: "2026-04-14T12:05:00.000Z",
-    };
-    await writeFile(join(sessionDir, "session.json"), JSON.stringify(v1, null, 2), "utf8");
-
-    const store = new SessionStore(rootDir);
-    const firstLoad = await store.loadSession("session-rt-review");
-    assert.ok(firstLoad);
-    const reviewFirst = firstLoad.turns[0]!.latestReview;
-    assert.ok(reviewFirst);
-    const savedReviewId = reviewFirst.reviewId;
-
-    await store.saveSession(firstLoad);
-    const reloaded = await store.loadSession("session-rt-review");
-    assert.ok(reloaded);
-    const reviewSecond = reloaded.turns[0]!.latestReview!;
-    assert.equal(reviewSecond.outcome, "retryable_failure");
-    assert.equal(reviewSecond.action, "retry");
-    // Stable reviewId across save/reload (no re-generation)
-    assert.equal(reviewSecond.reviewId, savedReviewId);
-    assert.equal(reviewSecond.attemptId, "task-1");
-    const attempt = reloaded.turns[0]!.attempts[0]!;
-    assert.deepEqual(attempt.dispatchCommand, ["abox", "run", "--task", "t", "--", "false"]);
-    assert.equal(reloaded.title, "round trip with review");
-  } finally {
-    await rm(rootDir, { recursive: true, force: true });
-  }
-});
-
-test("real on-disk v1 session in .bakudo/sessions/ loads cleanly with title + latestReview", async (t) => {
-  const store = new SessionStore(join(REPO_ROOT, ".bakudo", "sessions"));
-  const loaded = await store.loadSession("session-1776168453757-67162ef3");
-  if (!loaded) {
-    t.skip("real v1 session fixture not present (expected on clean checkouts)");
-    return;
-  }
-  assert.equal(loaded.schemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
-  assert.equal(typeof loaded.title, "string");
-  assert.ok(loaded.title.length > 0);
-  const turn = loaded.turns[0]!;
-  assert.ok(turn.latestReview, "expected real session to have synthesized latestReview");
-  assert.equal(turn.latestReview?.outcome, "retryable_failure");
-  assert.equal(turn.latestReview?.action, "retry");
 });

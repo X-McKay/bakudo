@@ -10,10 +10,7 @@ export type HostStore = {
   dispatch(action: HostAction): void;
 };
 
-export const createHostStore = (
-  reducer: Reducer,
-  initialState: HostAppState,
-): HostStore => {
+export const createHostStore = (reducer: Reducer, initialState: HostAppState): HostStore => {
   let state = initialState;
   const subscribers = new Set<Subscriber>();
 

@@ -1,11 +1,13 @@
 /**
  * Phase 6 Workstream 10 (PR15) — Golden fixture comparator.
  *
- * Loads the 14 canonical fixtures from `plans/bakudo-ux/examples/` and
- * compares them against output captured by `./ptyHarness.ts`.
+ * Loads the 14 canonical fixtures from the vendored tree at
+ * `tests/fixtures/bakudo-ux-examples/` (or from
+ * `$BAKUDO_GOLDEN_EXAMPLES_DIR` when set) and compares them against output
+ * captured by `./ptyHarness.ts`.
  *
  * Fixture-byte-direction: fixtures use LITERAL `\e[1m` escapes for
- * reviewer readability (`plans/bakudo-ux/examples/README.md:138-140`).
+ * reviewer readability (`tests/fixtures/bakudo-ux-examples/README.md:138-140`).
  * This module decodes literal → byte bytes on LOAD so the canonical
  * compare form is the raw PTY byte stream. On mismatch, diffs render
  * back to literal form for human review (plan line 611).
@@ -66,26 +68,78 @@ export const STABLE_EVENT_ID = "evt_deterministic_0000000000";
 export const STABLE_APPROVAL_ID = "apr_deterministic_0000000000";
 export const STABLE_ARTIFACT_ID = "art_deterministic_0000000000";
 
+const README_PROBE_MARKER = "Bakudo UX Golden Fixtures";
+const VENDORED_FIXTURES_SUBPATH = "tests/fixtures/bakudo-ux-examples";
+
 /**
- * Walk up from the compiled test file location until the parent workspace
- * `plans/bakudo-ux/examples/` directory is located.
+ * Confirm a candidate directory contains the vendored UX fixture tree by
+ * reading its `README.md` and matching the canonical probe marker.
  */
-export const locateExamplesDir = async (): Promise<string | null> => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  let dir = here;
+const probeExamplesDir = async (candidate: string): Promise<boolean> => {
+  try {
+    const probe = await readFile(resolve(candidate, "README.md"), "utf8");
+    return probe.includes(README_PROBE_MARKER);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Walk up from `start` looking for a `package.json` whose `name` is `"bakudo"`
+ * and return that directory. This is the bakudo repo root regardless of
+ * whether this module is loaded from `tests/helpers/` (source) or
+ * `dist/tests/helpers/` (compiled).
+ */
+const findBakudoRepoRoot = async (start: string): Promise<string | null> => {
+  let dir = start;
   for (let i = 0; i < 12; i += 1) {
-    const candidate = resolve(dir, "plans", "bakudo-ux", "examples");
     try {
-      const probe = await readFile(resolve(candidate, "README.md"), "utf8");
-      if (probe.includes("Bakudo UX Golden Fixtures")) {
-        return candidate;
+      const pkgRaw = await readFile(resolve(dir, "package.json"), "utf8");
+      const pkg = JSON.parse(pkgRaw) as { name?: unknown };
+      if (pkg.name === "bakudo") {
+        return dir;
       }
     } catch {
-      // keep walking
+      // not a package.json boundary; keep walking
     }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
+  }
+  return null;
+};
+
+/**
+ * Resolve the directory that holds the canonical UX fixture tree.
+ *
+ * Resolution order (plan: stop assuming parent-workspace sibling tree):
+ *   1. `BAKUDO_GOLDEN_EXAMPLES_DIR` env override — must contain the README
+ *      probe file, otherwise the override is rejected.
+ *   2. Vendored copy at `<bakudo-repo-root>/tests/fixtures/bakudo-ux-examples/`
+ *      where the repo root is found by walking up from this module to the
+ *      nearest `package.json` whose `name` is `"bakudo"`.
+ *
+ * No silent fallbacks. If neither source resolves, callers get `null` and the
+ * consumer (`loadFixture`) throws a clear error.
+ */
+export const locateExamplesDir = async (): Promise<string | null> => {
+  const override = runtimeProcess.env.BAKUDO_GOLDEN_EXAMPLES_DIR;
+  if (override !== undefined && override !== "") {
+    const absolute = resolve(override);
+    if (await probeExamplesDir(absolute)) {
+      return absolute;
+    }
+    return null;
+  }
+
+  const here = dirname(fileURLToPath(import.meta.url));
+  const repoRoot = await findBakudoRepoRoot(here);
+  if (repoRoot === null) {
+    return null;
+  }
+  const vendored = resolve(repoRoot, VENDORED_FIXTURES_SUBPATH);
+  if (await probeExamplesDir(vendored)) {
+    return vendored;
   }
   return null;
 };
@@ -168,7 +222,10 @@ export type LoadedFixture = {
 export const loadFixture = async (id: FixtureId): Promise<LoadedFixture> => {
   const dir = await locateExamplesDir();
   if (dir === null) {
-    throw new Error("could not locate plans/bakudo-ux/examples directory");
+    throw new Error(
+      "could not locate bakudo UX golden fixtures: set BAKUDO_GOLDEN_EXAMPLES_DIR " +
+        "or ensure <bakudo-repo-root>/tests/fixtures/bakudo-ux-examples/ is present",
+    );
   }
   const absolutePath = resolve(dir, id);
   const raw = await readFile(absolutePath, "utf8");

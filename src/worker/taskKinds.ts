@@ -24,6 +24,8 @@ export const taskRunners: Record<AttemptTaskKind, TaskRunner> = {
   assistant_job: runAssistantJob,
   explicit_command: runExplicitCommand,
   verification_check: runVerificationCheck,
+  apply_verify: runVerificationCheck,
+  apply_resolve: runAssistantJob,
 };
 
 /**

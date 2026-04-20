@@ -21,7 +21,13 @@ const captureStdout = async <T>(fn: () => Promise<T>): Promise<{ value: T; outpu
   }
 };
 
-const seedV2Session = async (storageRoot: string): Promise<string> => {
+const seedV2Session = async (
+  storageRoot: string,
+  overrides: {
+    attempt?: Record<string, unknown>;
+    latestReview?: Record<string, unknown>;
+  } = {},
+): Promise<string> => {
   const sessionId = "session-compat";
   const dir = join(storageRoot, sessionId);
   await mkdir(dir, { recursive: true });
@@ -45,6 +51,7 @@ const seedV2Session = async (storageRoot: string): Promise<string> => {
       finishedAt: "2026-04-15T00:00:00.000Z",
     },
     metadata: { sandboxTaskId: "abox-abc" },
+    ...(overrides.attempt ?? {}),
   };
   const session = {
     schemaVersion: 2,
@@ -62,6 +69,7 @@ const seedV2Session = async (storageRoot: string): Promise<string> => {
         attempts: [attempt],
         createdAt: "2026-04-15T00:00:00.000Z",
         updatedAt: "2026-04-15T00:00:00.000Z",
+        ...(overrides.latestReview === undefined ? {} : { latestReview: overrides.latestReview }),
       },
     ],
     createdAt: "2026-04-15T00:00:00.000Z",
@@ -135,6 +143,35 @@ test("runHostCli: review routes through inspect formatter against a v2 session",
   assert.match(output, new RegExp(sessionId));
   assert.match(output, /Outcome/);
   assert.match(output, /success/);
+});
+
+test("runHostCli: review prefers persisted apply-state review over raw worker success", async () => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "bakudo-compat-"));
+  const sessionId = await seedV2Session(storageRoot, {
+    attempt: {
+      candidateState: "apply_failed",
+      candidate: {
+        state: "apply_failed",
+        applyError: "candidate apply failed after review",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+      },
+      reviewRecord: {
+        reviewId: "review-1",
+        attemptId: "attempt-1",
+        outcome: "retryable_failure",
+        action: "retry",
+        reason: "candidate apply failed after review",
+        reviewedAt: "2026-04-15T00:00:00.000Z",
+      },
+    },
+  });
+  const { value, output } = await captureStdout(() =>
+    runHostCli(["review", sessionId, "--storage-root", storageRoot]),
+  );
+  assert.equal(value, 1);
+  assert.match(output, /Outcome.*retryable_failure/);
+  assert.match(output, /Action.*retry/);
+  assert.match(output, /Candidate.*apply_failed/);
 });
 
 test("runHostCli: sandbox command routes through inspect formatter", async () => {

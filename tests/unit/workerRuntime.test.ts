@@ -213,16 +213,13 @@ test("workerRuntime round-trips AttemptSpec transport and executes with the reso
   assert.equal(decoded.taskKind, "explicit_command");
   assert.deepEqual(decoded.execution.command, ["printf", "dispatched"]);
 
-  const result = await runWorkerTask(
-    decoded,
-    {
-      timeoutSeconds: 10,
-      maxOutputBytes: 4096,
-      heartbeatIntervalMs: 25,
-      killGraceMs: 100,
-      emit: () => undefined,
-    },
-  );
+  const result = await runWorkerTask(decoded, {
+    timeoutSeconds: 10,
+    maxOutputBytes: 4096,
+    heartbeatIntervalMs: 25,
+    killGraceMs: 100,
+    emit: () => undefined,
+  });
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.stdout.trim(), "dispatched");

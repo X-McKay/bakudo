@@ -38,9 +38,15 @@ export type ArtifactRecord = {
   attemptId?: string;
   kind: ArtifactKind;
   name: string;
+  /** Collision-proof persisted filename distinct from display `name`. */
+  storageKey?: string;
   /** Relative to `<storageRoot>/sessions/<sessionId>/`. */
   path: string;
   createdAt: string;
+  producer?: string;
+  phase?: string;
+  role?: string;
+  sourceRelativePath?: string;
   metadata?: Record<string, unknown>;
 };
 

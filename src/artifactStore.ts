@@ -17,8 +17,14 @@ export type ArtifactRecord = {
   taskId?: string;
   kind: string;
   name: string;
+  /** Collision-proof persisted filename distinct from display `name`. */
+  storageKey?: string;
   path: string;
   createdAt: string;
+  producer?: string;
+  phase?: string;
+  role?: string;
+  sourceRelativePath?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -65,7 +71,14 @@ const normalizeArtifactRecord = (
   name: record.name,
   path: record.path,
   createdAt,
+  ...(record.storageKey === undefined ? {} : { storageKey: record.storageKey }),
   ...(record.taskId === undefined ? {} : { taskId: record.taskId }),
+  ...(record.producer === undefined ? {} : { producer: record.producer }),
+  ...(record.phase === undefined ? {} : { phase: record.phase }),
+  ...(record.role === undefined ? {} : { role: record.role }),
+  ...(record.sourceRelativePath === undefined
+    ? {}
+    : { sourceRelativePath: record.sourceRelativePath }),
   ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
 });
 
@@ -99,7 +112,14 @@ export class ArtifactStore {
       name: input.name,
       path: input.path,
       createdAt: input.createdAt ?? nowIso(),
+      ...(input.storageKey === undefined ? {} : { storageKey: input.storageKey }),
       ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+      ...(input.producer === undefined ? {} : { producer: input.producer }),
+      ...(input.phase === undefined ? {} : { phase: input.phase }),
+      ...(input.role === undefined ? {} : { role: input.role }),
+      ...(input.sourceRelativePath === undefined
+        ? {}
+        : { sourceRelativePath: input.sourceRelativePath }),
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
     });
 
