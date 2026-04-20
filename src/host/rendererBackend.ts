@@ -1,5 +1,6 @@
 import type { RenderFrame } from "./renderModel.js";
 import { InkBackend } from "./renderers/inkBackend.js";
+import type { RunTurn } from "./renderers/ink/TurnDriver.js";
 import { JsonBackend } from "./renderers/jsonBackend.js";
 import { PlainBackend } from "./renderers/plainBackend.js";
 import type { HostStore } from "./store/index.js";
@@ -46,6 +47,13 @@ export type SelectRendererBackendArgs = {
   store?: HostStore;
   /** Short repo basename displayed in the Ink frame header. */
   repoLabel?: string;
+  /**
+   * Closure invoked by `<TurnDriver/>` when the Composer submits text. Only
+   * the Ink backend consumes this; Plain/Json ignore it. Callers that merely
+   * probe the backend (e.g. `doctor`) may omit it — the Ink backend then runs
+   * without a turn driver.
+   */
+  runTurn?: RunTurn;
 };
 
 /**
@@ -75,5 +83,5 @@ export const selectRendererBackend = (args: SelectRendererBackendArgs): Renderer
       "selectRendererBackend: `store` is required when the interactive Ink backend is selected",
     );
   }
-  return new InkBackend(args.store, args.repoLabel);
+  return new InkBackend(args.store, args.repoLabel, args.runTurn);
 };

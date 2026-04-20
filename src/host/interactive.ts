@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { createInterface } from "node:readline/promises";
 import { basename } from "node:path";
 
 import { initialHostAppState, type ComposerMode } from "./appState.js";
@@ -25,14 +24,14 @@ import {
 import { runtimeIo, withCapturedStdout, type TextWriter } from "./io.js";
 import { runInit } from "./init.js";
 import {
-  createSessionRenderer,
   deriveShellContext,
   executePrompt,
   type InteractiveResolution,
   type ShellContext,
   type TickDeps,
 } from "./interactiveRenderLoop.js";
-import { registerKeybinding } from "./keybindings/hooks.js";
+import { selectRendererBackend, type RendererStdout } from "./rendererBackend.js";
+import type { RunTurn } from "./renderers/ink/TurnDriver.js";
 import { installSignalHandlers, registerCleanupHandler } from "./signalHandlers.js";
 import {
   buildInteractiveRunResolution,
@@ -293,7 +292,6 @@ export const runInteractiveShell = async (): Promise<number> => {
 
   const repoRoot = repoRootFor(undefined);
   const repoLabel = basename(repoRoot) || repoRoot;
-  const rl = createInterface({ input, output });
 
   // Load config cascade — CLI flag threading deferred to Phase 6.
   const configSnapshot = await loadConfigCascade(repoRoot, {});
@@ -343,122 +341,112 @@ export const runInteractiveShell = async (): Promise<number> => {
     }
   };
 
-  // Phase 5 PR5: session-scoped renderer + signal handlers. Single backend
-  // across ticks so terminal state stays consistent; cleanup runs LIFO on
-  // SIGINT/SIGTERM/uncaughtException. Phase 5-W2: the Ink backend is
-  // state-driven, so `mount()` boots the React render loop once; subsequent
-  // ticks are no-ops. Plain/Json backends still render per frame.
-  const { tick: renderTick, backend: sessionBackend } = createSessionRenderer({
+  /**
+   * Turn pipeline: mirror of the legacy readline while-loop body. Input now
+   * arrives from `<Composer/>`'s `submit` action via `<TurnDriver/>`; the
+   * rest (prompt routing, command registry dispatch, controller dispatch,
+   * fallthrough, state persistence) is preserved verbatim.
+   *
+   * The transcript push for the user's line is handled here rather than in
+   * `<Composer/>` so the ordering remains identical to the readline path
+   * (prompt-answer case skips the transcript push).
+   */
+  const runTurn: RunTurn = async (line, _signal): Promise<void> => {
+    if (line.length === 0) {
+      return;
+    }
+
+    // Route answers for active prompts first.
+    if (answerHeadPrompt(line, deps)) {
+      return;
+    }
+
+    deps.transcript.push({ kind: "user", text: line });
+    const dispatched = await registry.dispatch(line, deps);
+    if (dispatched.kind === "exit") {
+      await persistHostState();
+      store.dispatch({ type: "request_exit", code: dispatched.code });
+      return;
+    }
+    if (dispatched.kind === "handled") {
+      await persistHostState();
+      return;
+    }
+
+    if (dispatched.kind === "unknown") {
+      const controllerRoute = routePromptToController(line);
+      if (controllerRoute !== null) {
+        try {
+          const result = await dispatchThroughController(
+            controllerRoute.goal,
+            deps,
+            controllerRoute.overrideMode,
+          );
+          applyDispatchResult(result, deps, store);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
+        }
+        await persistHostState();
+        return;
+      }
+      // Unknown slash command: push a notice rather than silently dropping.
+      if (line.startsWith("/")) {
+        deps.transcript.push({
+          kind: "assistant",
+          text: `unknown command: ${line.split(/\s+/)[0] ?? line}. Try /help.`,
+          tone: "warning",
+        });
+        await persistHostState();
+        return;
+      }
+    }
+
+    if (dispatched.kind === "fallthrough") {
+      await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
+    }
+
+    await persistHostState();
+  };
+
+  // Phase 5 Task 3.3: Ink is now the entrypoint. `selectRendererBackend`
+  // chooses InkBackend for TTY stdout and threads `runTurn` into
+  // `<TurnDriver/>`. `<ExitWatcher/>` inside `<App/>` calls ink's `exit()`
+  // when the reducer sets `shouldExit`, which resolves `waitUntilExit`.
+  const backend = selectRendererBackend({
+    stdout: output as unknown as RendererStdout,
     store,
     repoLabel,
+    runTurn,
   });
-  sessionBackend.mount?.();
+  backend.mount?.();
   const unregisterBackendCleanup = registerCleanupHandler(() => {
-    sessionBackend.dispose?.();
+    backend.dispose?.();
   });
   const uninstallSignals = installSignalHandlers();
-  // TODO(phase5-pr5): `app:redraw` fires through the registry today; when W3
-  // lands raw-key dispatch, Ctrl+L will invoke this handler on a live key.
-  const unregisterRedraw = registerKeybinding("Global", "app:redraw", () => {
-    renderTick(deps);
-  });
 
   const handleSigint = (): void => {
     const head = deps.appState.promptQueue[0];
     if (head === undefined) {
-      rl.close();
+      store.dispatch({ type: "request_exit", code: 130 });
       return;
     }
     cancelPendingPrompt(head.id);
     store.dispatch({ type: "cancel_prompt", id: head.id });
-    renderTick(deps);
   };
   type SignalHandler = (name: string, handler: () => void) => unknown;
   const nodeProcess = (globalThis as { process?: { on?: SignalHandler; off?: SignalHandler } })
     .process;
   nodeProcess?.on?.("SIGINT", handleSigint);
 
-  renderTick(deps);
   try {
-    while (true) {
-      let answer: string;
-      try {
-        answer = await rl.question("");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (message.toLowerCase().includes("readline was closed")) {
-          return 0;
-        }
-        throw error;
-      }
-      const line = answer.trim();
-      if (line.length === 0) {
-        continue;
-      }
-
-      // Route answers for active prompts first.
-      if (answerHeadPrompt(line, deps)) {
-        renderTick(deps);
-        continue;
-      }
-
-      deps.transcript.push({ kind: "user", text: line });
-      const dispatched = await registry.dispatch(line, deps);
-      if (dispatched.kind === "exit") {
-        await persistHostState();
-        return dispatched.code;
-      }
-      if (dispatched.kind === "handled") {
-        await persistHostState();
-        renderTick(deps);
-        continue;
-      }
-
-      if (dispatched.kind === "unknown") {
-        const controllerRoute = routePromptToController(line);
-        if (controllerRoute !== null) {
-          try {
-            const result = await dispatchThroughController(
-              controllerRoute.goal,
-              deps,
-              controllerRoute.overrideMode,
-            );
-            applyDispatchResult(result, deps, store);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            deps.transcript.push({ kind: "assistant", text: `Error: ${message}`, tone: "error" });
-          }
-          await persistHostState();
-          renderTick(deps);
-          continue;
-        }
-        // Unknown slash command: push a notice rather than silently dropping.
-        if (line.startsWith("/")) {
-          deps.transcript.push({
-            kind: "assistant",
-            text: `unknown command: ${line.split(/\s+/)[0] ?? line}. Try /help.`,
-            tone: "warning",
-          });
-          await persistHostState();
-          renderTick(deps);
-          continue;
-        }
-      }
-
-      if (dispatched.kind === "fallthrough") {
-        await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
-      }
-
-      await persistHostState();
-      renderTick(deps);
-    }
+    await backend.waitUntilExit?.();
+    return store.getSnapshot().shouldExit?.code ?? 0;
   } finally {
     nodeProcess?.off?.("SIGINT", handleSigint);
     resetPromptResolvers();
-    rl.close();
-    unregisterRedraw();
     uninstallSignals();
     unregisterBackendCleanup();
-    sessionBackend.dispose?.();
+    backend.dispose?.();
   }
 };

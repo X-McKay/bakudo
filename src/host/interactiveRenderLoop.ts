@@ -12,6 +12,7 @@ import {
   type RendererBackend,
   type RendererStdout,
 } from "./rendererBackend.js";
+import type { RunTurn } from "./renderers/ink/TurnDriver.js";
 import type { HostStore } from "./store/index.js";
 import type { TextWriter } from "./io.js";
 
@@ -182,6 +183,7 @@ export const tickRender = (deps: TickDeps): void => {
 export const createSessionRenderer = (options: {
   store: HostStore;
   repoLabel?: string;
+  runTurn?: RunTurn;
 }): {
   tick: (deps: TickDeps) => void;
   backend: RendererBackend;
@@ -191,6 +193,7 @@ export const createSessionRenderer = (options: {
     stdout,
     store: options.store,
     ...(options.repoLabel !== undefined ? { repoLabel: options.repoLabel } : {}),
+    ...(options.runTurn !== undefined ? { runTurn: options.runTurn } : {}),
   });
   // Wave 6d PR11 review blocker B2: the first paint of the session renderer
   // is the plan's "time-to-first-render" hook point (plan 06 line 437). On
