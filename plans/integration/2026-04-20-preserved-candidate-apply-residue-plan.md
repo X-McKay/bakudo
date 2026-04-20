@@ -177,3 +177,11 @@ disposable. Bakudo still carries legacy migration logic and tests for older sess
 - Workspace-root `just integration-test` still only exercises the live E2E apply flow when
   `BAKUDO_INTEGRATION_E2E=1` is set.
 - `abox` still needs its own CLI/E2E regression for the hardened non-`CONFLICT` merge failure path.
+- Submodule paths short-circuit in `createApplyWorkspace` via
+  `ApplyWorkspaceUnsupportedSurfaceError` before `stagePathResolution` runs, so
+  `apply-conflicts.json` is never emitted for submodule surfaces. The submodule
+  branch inside `stagePathResolution` is therefore unreachable from the main
+  apply path. Consider either (a) emitting a dedicated structured artifact on
+  the `createApplyWorkspace` throw path or (b) removing the unreachable
+  `stagePathResolution` submodule branch. Tracked as R3-followup; not in scope
+  for this residue branch.
