@@ -77,7 +77,7 @@ test("runDoctorChecks: picks 'plain' renderer for non-TTY stdout", async () => {
   });
 });
 
-test("runDoctorChecks: picks 'tty' renderer for TTY stdout without NO_COLOR", async () => {
+test("runDoctorChecks: picks 'ink' renderer for TTY stdout without NO_COLOR", async () => {
   await withTempRepo(async (repoRoot) => {
     const prior = process.env.NO_COLOR;
     delete process.env.NO_COLOR;
@@ -88,7 +88,7 @@ test("runDoctorChecks: picks 'tty' renderer for TTY stdout without NO_COLOR", as
         nodeRuntime: "v22.0.0",
         stdout: { isTTY: true, write: () => true },
       });
-      assert.equal(env.rendererBackend, "tty");
+      assert.equal(env.rendererBackend, "ink");
     } finally {
       if (prior !== undefined) {
         process.env.NO_COLOR = prior;

@@ -8,8 +8,10 @@ import {
 } from "../../src/host/appState.js";
 import { reduceHost } from "../../src/host/reducer.js";
 import { selectRenderFrame } from "../../src/host/renderModel.js";
-import { renderTranscriptFramePlain } from "../../src/host/renderers/plainRenderer.js";
-import { renderApprovalPromptLines } from "../../src/host/renderers/approvalPromptCopy.js";
+import {
+  renderApprovalPromptLines,
+  renderTranscriptFramePlain,
+} from "../../src/host/renderers/plainRenderer.js";
 import { stripAnsi } from "../../src/host/ansi.js";
 
 /**

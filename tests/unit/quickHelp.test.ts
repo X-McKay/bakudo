@@ -15,7 +15,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { stripAnsi } from "../../src/host/ansi.js";
 import { initialHostAppState, type HostAppState } from "../../src/host/appState.js";
 import { DEFAULT_BINDINGS } from "../../src/host/keybindings/defaults.js";
 import {
@@ -31,7 +30,6 @@ import {
 } from "../../src/host/overlayBindings.js";
 import { reduceHost } from "../../src/host/reducer.js";
 import { selectRenderFrame } from "../../src/host/renderModel.js";
-import { renderTranscriptFrame } from "../../src/host/renderers/transcriptRenderer.js";
 import { renderTranscriptFramePlain } from "../../src/host/renderers/plainRenderer.js";
 
 test("buildQuickHelpContents: composer context includes composer + global bindings", () => {
@@ -177,18 +175,6 @@ test("selectRenderFrame: quick_help inherits pending prompt's kind as dialogKind
   if (frame.overlay?.kind === "quick_help") {
     assert.equal(frame.overlay.dialogKind, "approval");
   }
-});
-
-test("transcript renderer: quick_help emits a box containing the heading", () => {
-  const state = reduceHost(initialHostAppState(), {
-    type: "open_quick_help",
-    context: "composer",
-  });
-  const frame = selectRenderFrame({ state, transcript: [] });
-  const lines = renderTranscriptFrame(frame).map(stripAnsi);
-  // The box header row uses Unicode box-drawing: "╭─ ? ─..."
-  assert.ok(lines.some((line) => line.includes("─ ?") || line.includes("? ─")));
-  assert.ok(lines.some((line) => line.includes("Quick help — composer")));
 });
 
 test("plain renderer: quick_help emits the same box sans ANSI", () => {

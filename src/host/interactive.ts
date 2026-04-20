@@ -344,9 +344,15 @@ export const runInteractiveShell = async (): Promise<number> => {
   };
 
   // Phase 5 PR5: session-scoped renderer + signal handlers. Single backend
-  // across ticks so alt-screen state stays consistent; cleanup runs LIFO on
-  // SIGINT/SIGTERM/uncaughtException.
-  const { tick: renderTick, backend: sessionBackend } = createSessionRenderer();
+  // across ticks so terminal state stays consistent; cleanup runs LIFO on
+  // SIGINT/SIGTERM/uncaughtException. Phase 5-W2: the Ink backend is
+  // state-driven, so `mount()` boots the React render loop once; subsequent
+  // ticks are no-ops. Plain/Json backends still render per frame.
+  const { tick: renderTick, backend: sessionBackend } = createSessionRenderer({
+    store,
+    repoLabel,
+  });
+  sessionBackend.mount?.();
   const unregisterBackendCleanup = registerCleanupHandler(() => {
     sessionBackend.dispose?.();
   });

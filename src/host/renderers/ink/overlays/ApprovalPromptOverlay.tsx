@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { renderApprovalPromptLines } from "../../approvalPromptCopy.js";
+import { renderApprovalPromptLines } from "../../plainRenderer.js";
 import type { ApprovalPromptRequest } from "../../../appState.js";
 
 export const ApprovalPromptOverlay = ({

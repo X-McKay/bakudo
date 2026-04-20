@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { renderCommandPaletteOverlayLines } from "../../commandPaletteOverlay.js";
+import { renderCommandPaletteOverlayLines } from "../../plainRenderer.js";
 import type { CommandPaletteRequest } from "../../../appState.js";
 
 export const CommandPaletteOverlay = ({ request }: { request: CommandPaletteRequest }) => {

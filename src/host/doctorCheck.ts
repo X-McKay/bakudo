@@ -180,7 +180,7 @@ export const checkKeybindingsPath = async (
   return base;
 };
 
-export type RendererBackendName = "tty" | "plain" | "json";
+export type RendererBackendName = "ink" | "plain" | "json";
 
 /**
  * Map a `RendererBackend` instance to a short name. We avoid importing
@@ -194,8 +194,8 @@ export const rendererBackendName = (
   if (raw === "JsonBackend") {
     return "json";
   }
-  if (raw === "TtyBackend") {
-    return "tty";
+  if (raw === "InkBackend") {
+    return "ink";
   }
   return "plain";
 };

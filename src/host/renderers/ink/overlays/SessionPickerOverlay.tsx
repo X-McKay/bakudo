@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { renderSessionPickerOverlayLines } from "../../sessionPickerOverlay.js";
+import { renderSessionPickerOverlayLines } from "../../plainRenderer.js";
 import type { SessionPickerPayload } from "../../../appState.js";
 
 export const SessionPickerOverlay = ({ request }: { request: SessionPickerPayload }) => {

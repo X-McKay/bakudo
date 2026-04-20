@@ -12,6 +12,7 @@ import {
   type RendererBackend,
   type RendererStdout,
 } from "./rendererBackend.js";
+import type { HostStore } from "./store/index.js";
 import type { TextWriter } from "./io.js";
 
 /**
@@ -178,12 +179,19 @@ export const tickRender = (deps: TickDeps): void => {
  * Using this instead of {@link tickRender} guarantees alt-screen enter/exit
  * fires exactly once per interactive session.
  */
-export const createSessionRenderer = (): {
+export const createSessionRenderer = (options: {
+  store: HostStore;
+  repoLabel?: string;
+}): {
   tick: (deps: TickDeps) => void;
   backend: RendererBackend;
 } => {
   const stdout = stdoutAsRendererStdout();
-  const backend = selectRendererBackend({ stdout });
+  const backend = selectRendererBackend({
+    stdout,
+    store: options.store,
+    ...(options.repoLabel !== undefined ? { repoLabel: options.repoLabel } : {}),
+  });
   // Wave 6d PR11 review blocker B2: the first paint of the session renderer
   // is the plan's "time-to-first-render" hook point (plan 06 line 437). On
   // the first tick we close the `shell.startup_begin` → `shell.startup_done`

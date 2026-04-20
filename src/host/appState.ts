@@ -86,7 +86,7 @@ export type ApprovalPromptRequest = {
 /**
  * Count of options the approval prompt cursor cycles through: [1] allow
  * once, [2] allow always, [3] deny, [4] show context. Exported so reducers
- * and renderers stay in sync with the option list in `approvalPromptCopy`.
+ * and renderers stay in sync with the option list in `plainRenderer.ts`.
  */
 export const APPROVAL_DIALOG_CURSOR_COUNT = 4;
 
