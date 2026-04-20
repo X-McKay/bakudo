@@ -55,8 +55,9 @@ export const buildPaletteCommands = (registry: HostCommandRegistry): readonly Ho
       await runCommandPalette({
         registry,
         getState: () => deps.appState,
+        // TODO: remove once launch* dialogs dispatch actions directly instead of computing full next state.
         setState: (next) => {
-          deps.appState = next;
+          deps.dispatch({ type: "replace_state", state: next });
         },
         dispatch: async (line) => {
           const outcome = await registry.dispatch(line, deps);

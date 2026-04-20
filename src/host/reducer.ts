@@ -81,7 +81,9 @@ export type HostAction =
       model?: string;
       agent?: string;
       provider?: string;
-    };
+    }
+  // Temporary bridge for DialogDispatcher; remove once launchers dispatch actions directly.
+  | { type: "replace_state"; state: HostAppState };
 
 const withoutOptional = <T extends object, K extends keyof T>(obj: T, key: K): T => {
   if (!(key in obj)) {
@@ -503,5 +505,8 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
       delete (rest as { quickHelp?: unknown }).quickHelp;
       return rest;
     }
+    // Temporary bridge for DialogDispatcher; remove once launchers dispatch actions directly.
+    case "replace_state":
+      return action.state;
   }
 };

@@ -57,10 +57,11 @@ export const sessionCommands: readonly HostCommandSpec[] = [
       if (requestedId === undefined) {
         // Phase 5 PR7 — no-arg resume opens the session picker so the user
         // can pick from all saved sessions (newest-first with fuzzy-match).
+        // TODO: remove once launch* dialogs dispatch actions directly instead of computing full next state.
         const dispatcher: DialogDispatcher = {
           getState: () => deps.appState,
           setState: (next) => {
-            deps.appState = next;
+            deps.dispatch({ type: "replace_state", state: next });
           },
         };
         const reader: SessionIndexReader = {

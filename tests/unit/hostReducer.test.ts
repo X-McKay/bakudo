@@ -274,3 +274,10 @@ test("reducer: set_composer_metadata updates model/agent/provider", () => {
   assert.equal(s1.composer.agent, "default");
   assert.equal(s1.composer.provider, "claude");
 });
+
+test("reducer: replace_state swaps the full state", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "append_user", text: "x" });
+  const sReplaced = reduceHost(s0, { type: "replace_state", state: s1 });
+  assert.strictEqual(sReplaced, s1); // same reference
+});

@@ -20,16 +20,25 @@ import { clearKeybindings, getKeybindingsFor } from "../../src/host/keybindings/
 import { registerPaletteKeybinding } from "../../src/host/commands/palette.js";
 import { registerSessionPickerKeybinding } from "../../src/host/commands/session.js";
 import { resetPromptResolvers } from "../../src/host/promptResolvers.js";
+import { reduceHost, type HostAction } from "../../src/host/reducer.js";
+
+// Build a TickDeps whose dispatch routes actions through the real reducer,
+// so test mutations flow into deps.appState just like production.
+const makeDeps = (): TickDeps => {
+  const deps: TickDeps = {
+    transcript: [],
+    appState: initialHostAppState(),
+    dispatch: (action: HostAction) => {
+      deps.appState = reduceHost(deps.appState, action);
+    },
+  };
+  return deps;
+};
 
 test("/palette handler: dispatches the chosen command via the registry", async () => {
   resetPromptResolvers();
   const registry = buildDefaultCommandRegistry();
-  const transcript: TickDeps["transcript"] = [];
-  const deps: TickDeps = {
-    transcript,
-    appState: initialHostAppState(),
-    dispatch: () => {},
-  };
+  const deps = makeDeps();
   const dispatcher = registry.dispatch("/palette", deps);
   // Give the palette launcher a moment to enqueue.
   await Promise.resolve();
@@ -41,7 +50,7 @@ test("/palette handler: dispatches the chosen command via the registry", async (
     {
       getState: () => deps.appState,
       setState: (next) => {
-        deps.appState = next;
+        deps.dispatch({ type: "replace_state", state: next });
       },
     },
     "compact",
@@ -50,14 +59,14 @@ test("/palette handler: dispatches the chosen command via the registry", async (
   const outcome = await dispatcher;
   assert.equal(outcome.kind, "handled");
   assert.ok(
-    transcript.some(
+    deps.transcript.some(
       (item) =>
         item.kind === "event" && item.label === "palette" && /\/compact/.test(item.detail ?? ""),
     ),
     "expected palette event with /compact detail",
   );
   assert.ok(
-    transcript.some(
+    deps.transcript.some(
       (item) =>
         item.kind === "event" &&
         item.label === "compact" &&
@@ -70,12 +79,7 @@ test("/palette handler: dispatches the chosen command via the registry", async (
 test("/palette handler: cancel path emits a cancel note", async () => {
   resetPromptResolvers();
   const registry = buildDefaultCommandRegistry();
-  const transcript: TickDeps["transcript"] = [];
-  const deps: TickDeps = {
-    transcript,
-    appState: initialHostAppState(),
-    dispatch: () => {},
-  };
+  const deps = makeDeps();
   const dispatcher = registry.dispatch("/palette", deps);
   await Promise.resolve();
   await Promise.resolve();
@@ -84,7 +88,7 @@ test("/palette handler: cancel path emits a cancel note", async () => {
     {
       getState: () => deps.appState,
       setState: (next) => {
-        deps.appState = next;
+        deps.dispatch({ type: "replace_state", state: next });
       },
     },
     "",
@@ -92,7 +96,7 @@ test("/palette handler: cancel path emits a cancel note", async () => {
   const outcome = await dispatcher;
   assert.equal(outcome.kind, "handled");
   assert.ok(
-    transcript.some(
+    deps.transcript.some(
       (item) =>
         item.kind === "event" && item.label === "palette" && /cancelled/.test(item.detail ?? ""),
     ),
