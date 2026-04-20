@@ -236,8 +236,6 @@ const setMode = (state: HostAppState, mode: ComposerMode): HostAppState => {
   return { ...state, composer: { ...state.composer, mode, autoApprove } };
 };
 
-let submitSeqCounter = 0;
-
 export const reduceHost = (state: HostAppState, action: HostAction): HostAppState => {
   switch (action.type) {
     case "set_mode":
@@ -462,13 +460,20 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
       };
     case "dispatch_finished":
       return { ...state, dispatch: { inFlight: false } };
-    case "submit":
-      submitSeqCounter += 1;
-      return { ...state, pendingSubmit: { seq: submitSeqCounter, text: action.text } };
+    case "submit": {
+      const nextSeq = state.submitSeq + 1;
+      return {
+        ...state,
+        submitSeq: nextSeq,
+        pendingSubmit: { seq: nextSeq, text: action.text },
+      };
+    }
     case "clear_pending_submit": {
-      const next = { ...state };
-      delete next.pendingSubmit;
-      return next;
+      if (state.pendingSubmit === undefined) {
+        return state;
+      }
+      const { pendingSubmit: _drop, ...rest } = state;
+      return rest as HostAppState;
     }
     case "request_exit":
       return { ...state, shouldExit: { code: action.code } };

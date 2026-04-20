@@ -176,6 +176,7 @@ export type HostAppState = {
   dispatch: DispatchState;
   pendingSubmit?: PendingSubmit;
   shouldExit?: ShouldExit;
+  submitSeq: number;
   /**
    * Cursor index for the approval prompt's [1]/[2]/[3]/[4] option list.
    * Shift+Tab cycles through the options (see `reducer` actions
@@ -214,5 +215,6 @@ export const initialHostAppState = (): HostAppState => ({
   notices: [],
   transcript: [],
   dispatch: { inFlight: false },
+  submitSeq: 0,
   approvalDialogCursor: 0,
 });

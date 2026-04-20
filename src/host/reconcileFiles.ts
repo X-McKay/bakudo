@@ -108,13 +108,11 @@ const mergeTextConflict = async (
     await writeFile(sourcePath, input.sourceContent, "utf8");
     await writeFile(candidatePath, input.candidateContent, "utf8");
     try {
-      const { stdout } = await execFileAsync("git", [
-        "merge-file",
-        "-p",
-        sourcePath,
-        basePath,
-        candidatePath,
-      ]);
+      const { stdout } = await execFileAsync(
+        "git",
+        ["merge-file", "-p", sourcePath, basePath, candidatePath],
+        { maxBuffer: 10_000_000 },
+      );
       return stdout;
     } catch (error) {
       const err = error as { code?: number; stdout?: string };
@@ -164,14 +162,11 @@ const diffLineEdits = async (basePath: string, targetPath: string): Promise<Line
   };
 
   try {
-    const { stdout } = await execFileAsync("git", [
-      "diff",
-      "--no-index",
-      "--unified=0",
-      "--",
-      basePath,
-      targetPath,
-    ]);
+    const { stdout } = await execFileAsync(
+      "git",
+      ["diff", "--no-index", "--unified=0", "--", basePath, targetPath],
+      { maxBuffer: 10_000_000 },
+    );
     return parseOutput(stdout);
   } catch (error) {
     const err = error as { code?: number; stdout?: string };

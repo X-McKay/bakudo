@@ -261,6 +261,9 @@ const readGitSnapshot = async (
     return { kind: "missing" };
   }
   const [mode, type, oid] = left.split(/\s+/u);
+  if (mode === "040000" || type === "tree") {
+    return { kind: "directory" };
+  }
   if (mode === "160000" || type === "commit") {
     return { kind: "submodule", oid: oid ?? "" };
   }

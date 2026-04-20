@@ -467,10 +467,17 @@ export const recoverInterruptedApplyIfNeeded = async (args: {
     const current = await readFsSnapshot(session.repoRoot, entry.path);
     const before = deserializeApplySnapshot(entry.before);
     const after = deserializeApplySnapshot(entry.after);
+    // A path is safe to restore when the current state matches either the
+    // recorded before or after snapshot (i.e. the crash happened before or
+    // after this path was written).  A deletion is only safe when it matches
+    // one of those two recorded states; an unexpected deletion (both before
+    // and after are non-missing) means the user deleted the file after the
+    // crash and we must not silently overwrite that intentional change.
     if (
       snapshotEquals(current, before) ||
       snapshotEquals(current, after) ||
-      current.kind === "missing"
+      (current.kind === "missing" &&
+        (before.kind === "missing" || after.kind === "missing"))
     ) {
       continue;
     }
