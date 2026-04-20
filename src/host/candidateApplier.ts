@@ -532,22 +532,6 @@ const stagePathResolution = async (args: {
   }
 
   if (
-    baseSnapshot.kind === "submodule" ||
-    candidateSnapshot.kind === "submodule" ||
-    sourceSnapshot.kind === "submodule"
-  ) {
-    return {
-      conflict: unsupportedConflictFor({
-        path: args.path,
-        class: "structural_conflict",
-        decision: "apply_failed",
-        reason: `submodule surfaces are not supported for ${args.path}`,
-        detail: `snapshots=${summarizeSnapshot(baseSnapshot)},${summarizeSnapshot(candidateSnapshot)},${summarizeSnapshot(sourceSnapshot)}`,
-      }),
-    };
-  }
-
-  if (
     baseSnapshot.kind === "symlink" ||
     candidateSnapshot.kind === "symlink" ||
     sourceSnapshot.kind === "symlink"
