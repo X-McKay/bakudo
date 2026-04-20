@@ -58,7 +58,18 @@ export type HostAction =
   | { type: "push_notice"; notice: string }
   | { type: "clear_notices" }
   | { type: "open_quick_help"; context: QuickHelpContext; dialogKind?: string }
-  | { type: "close_quick_help" };
+  | { type: "close_quick_help" }
+  | { type: "append_user"; text: string; timestamp?: string }
+  | { type: "append_assistant"; text: string; tone?: "info" | "success" | "warning" | "error" }
+  | { type: "append_event"; label: string; detail?: string }
+  | { type: "append_output"; text: string }
+  | {
+      type: "append_review";
+      outcome: string;
+      summary: string;
+      nextAction?: string;
+    }
+  | { type: "clear_transcript" };
 
 const withoutOptional = <T extends object, K extends keyof T>(obj: T, key: K): T => {
   if (!(key in obj)) {
@@ -373,6 +384,42 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
         return state;
       }
       return { ...state, notices: [] };
+    case "append_user": {
+      const item = action.timestamp === undefined
+        ? { kind: "user" as const, text: action.text }
+        : { kind: "user" as const, text: action.text, timestamp: action.timestamp };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "append_assistant": {
+      const item = action.tone === undefined
+        ? { kind: "assistant" as const, text: action.text }
+        : { kind: "assistant" as const, text: action.text, tone: action.tone };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "append_event": {
+      const item = action.detail === undefined
+        ? { kind: "event" as const, label: action.label }
+        : { kind: "event" as const, label: action.label, detail: action.detail };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "append_output":
+      return {
+        ...state,
+        transcript: [...state.transcript, { kind: "output", text: action.text }],
+      };
+    case "append_review": {
+      const item = action.nextAction === undefined
+        ? { kind: "review" as const, outcome: action.outcome, summary: action.summary }
+        : {
+            kind: "review" as const,
+            outcome: action.outcome,
+            summary: action.summary,
+            nextAction: action.nextAction,
+          };
+      return { ...state, transcript: [...state.transcript, item] };
+    }
+    case "clear_transcript":
+      return { ...state, transcript: [] };
     case "open_quick_help": {
       // Toggle-off semantics: re-dispatching with same context+dialogKind closes.
       const existing = state.quickHelp;

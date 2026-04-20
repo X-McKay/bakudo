@@ -163,3 +163,46 @@ test("reducer: clear_notices on empty list returns same reference", () => {
   const next = reduceHost(state, { type: "clear_notices" });
   assert.strictEqual(next, state);
 });
+
+test("reducer: append_user adds a user transcript item", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "append_user", text: "hi" });
+  assert.deepEqual(s1.transcript, [{ kind: "user", text: "hi" }]);
+});
+
+test("reducer: append_assistant adds an assistant item with tone", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "append_assistant", text: "done", tone: "success" });
+  assert.deepEqual(s1.transcript, [{ kind: "assistant", text: "done", tone: "success" }]);
+});
+
+test("reducer: append_event adds an event item", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "append_event", label: "version", detail: "bakudo 0.2.0" });
+  assert.deepEqual(s1.transcript, [{ kind: "event", label: "version", detail: "bakudo 0.2.0" }]);
+});
+
+test("reducer: append_output adds an output block", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "append_output", text: "line1\nline2" });
+  assert.deepEqual(s1.transcript, [{ kind: "output", text: "line1\nline2" }]);
+});
+
+test("reducer: append_review adds a review card", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, {
+    type: "append_review",
+    outcome: "success",
+    summary: "ok",
+    nextAction: "continue",
+  });
+  assert.deepEqual(s1.transcript, [
+    { kind: "review", outcome: "success", summary: "ok", nextAction: "continue" },
+  ]);
+});
+
+test("reducer: clear_transcript empties the transcript", () => {
+  const s0 = reduceHost(initialHostAppState(), { type: "append_user", text: "hi" });
+  const s1 = reduceHost(s0, { type: "clear_transcript" });
+  assert.deepEqual(s1.transcript, []);
+});
