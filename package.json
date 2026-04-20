@@ -34,16 +34,20 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
     "@typescript-eslint/eslint-plugin": "^8.58.1",
     "@typescript-eslint/parser": "^8.58.1",
     "eslint": "^10.2.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.5",
+    "ink-testing-library": "^4.0.0",
     "prettier": "^3.8.2",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"
   },
   "dependencies": {
+    "ink": "^7.0.1",
+    "react": "^19.2.5",
     "zod": "^4.3.6"
   }
 }
