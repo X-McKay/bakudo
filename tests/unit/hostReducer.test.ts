@@ -206,3 +206,71 @@ test("reducer: clear_transcript empties the transcript", () => {
   const s1 = reduceHost(s0, { type: "clear_transcript" });
   assert.deepEqual(s1.transcript, []);
 });
+
+test("reducer: dispatch_started sets inflight with label", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "dispatch_started", label: "Routing", startedAt: 1000 });
+  assert.equal(s1.dispatch.inFlight, true);
+  if (s1.dispatch.inFlight) {
+    assert.equal(s1.dispatch.label, "Routing");
+    assert.equal(s1.dispatch.startedAt, 1000);
+  }
+});
+
+test("reducer: dispatch_progress updates detail without clearing", () => {
+  const s0 = reduceHost(initialHostAppState(), {
+    type: "dispatch_started",
+    label: "Working",
+    startedAt: 1000,
+  });
+  const s1 = reduceHost(s0, { type: "dispatch_progress", detail: "compiling" });
+  assert.equal(s1.dispatch.inFlight, true);
+  if (s1.dispatch.inFlight) {
+    assert.equal(s1.dispatch.detail, "compiling");
+    assert.equal(s1.dispatch.label, "Working");
+  }
+});
+
+test("reducer: dispatch_finished resets to idle", () => {
+  const s0 = reduceHost(initialHostAppState(), {
+    type: "dispatch_started",
+    label: "Routing",
+    startedAt: 1000,
+  });
+  const s1 = reduceHost(s0, { type: "dispatch_finished" });
+  assert.deepEqual(s1.dispatch, { inFlight: false });
+});
+
+test("reducer: submit sets pendingSubmit with monotonic seq", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "submit", text: "hello" });
+  assert.equal(s1.pendingSubmit?.text, "hello");
+  assert.equal(s1.pendingSubmit?.seq, 1);
+  const s2 = reduceHost(s1, { type: "submit", text: "again" });
+  assert.equal(s2.pendingSubmit?.seq, 2);
+});
+
+test("reducer: clear_pending_submit unsets pendingSubmit", () => {
+  const s0 = reduceHost(initialHostAppState(), { type: "submit", text: "x" });
+  const s1 = reduceHost(s0, { type: "clear_pending_submit" });
+  assert.equal(s1.pendingSubmit, undefined);
+});
+
+test("reducer: request_exit sets shouldExit", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, { type: "request_exit", code: 0 });
+  assert.deepEqual(s1.shouldExit, { code: 0 });
+});
+
+test("reducer: set_composer_metadata updates model/agent/provider", () => {
+  const s0 = initialHostAppState();
+  const s1 = reduceHost(s0, {
+    type: "set_composer_metadata",
+    model: "sonnet-4.6",
+    agent: "default",
+    provider: "claude",
+  });
+  assert.equal(s1.composer.model, "sonnet-4.6");
+  assert.equal(s1.composer.agent, "default");
+  assert.equal(s1.composer.provider, "claude");
+});

@@ -69,7 +69,19 @@ export type HostAction =
       summary: string;
       nextAction?: string;
     }
-  | { type: "clear_transcript" };
+  | { type: "clear_transcript" }
+  | { type: "dispatch_started"; label: string; startedAt: number; detail?: string }
+  | { type: "dispatch_progress"; detail?: string; label?: string }
+  | { type: "dispatch_finished" }
+  | { type: "submit"; text: string }
+  | { type: "clear_pending_submit" }
+  | { type: "request_exit"; code: number }
+  | {
+      type: "set_composer_metadata";
+      model?: string;
+      agent?: string;
+      provider?: string;
+    };
 
 const withoutOptional = <T extends object, K extends keyof T>(obj: T, key: K): T => {
   if (!(key in obj)) {
@@ -221,6 +233,8 @@ const setMode = (state: HostAppState, mode: ComposerMode): HostAppState => {
   }
   return { ...state, composer: { ...state.composer, mode, autoApprove } };
 };
+
+let submitSeqCounter = 0;
 
 export const reduceHost = (state: HostAppState, action: HostAction): HostAppState => {
   switch (action.type) {
@@ -420,6 +434,47 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
     }
     case "clear_transcript":
       return { ...state, transcript: [] };
+    case "dispatch_started":
+      return {
+        ...state,
+        dispatch: {
+          inFlight: true,
+          startedAt: action.startedAt,
+          label: action.label,
+          ...(action.detail !== undefined ? { detail: action.detail } : {}),
+        },
+      };
+    case "dispatch_progress":
+      if (!state.dispatch.inFlight) return state;
+      return {
+        ...state,
+        dispatch: {
+          ...state.dispatch,
+          ...(action.label !== undefined ? { label: action.label } : {}),
+          ...(action.detail !== undefined ? { detail: action.detail } : {}),
+        },
+      };
+    case "dispatch_finished":
+      return { ...state, dispatch: { inFlight: false } };
+    case "submit":
+      submitSeqCounter += 1;
+      return { ...state, pendingSubmit: { seq: submitSeqCounter, text: action.text } };
+    case "clear_pending_submit": {
+      const { pendingSubmit: _drop, ...rest } = state;
+      return rest as HostAppState;
+    }
+    case "request_exit":
+      return { ...state, shouldExit: { code: action.code } };
+    case "set_composer_metadata":
+      return {
+        ...state,
+        composer: {
+          ...state.composer,
+          ...(action.model !== undefined ? { model: action.model } : {}),
+          ...(action.agent !== undefined ? { agent: action.agent } : {}),
+          ...(action.provider !== undefined ? { provider: action.provider } : {}),
+        },
+      };
     case "open_quick_help": {
       // Toggle-off semantics: re-dispatching with same context+dialogKind closes.
       const existing = state.quickHelp;
