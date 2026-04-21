@@ -120,3 +120,17 @@ providerRegistry.register({
   command: ["opendevin", "--headless"],
   requiredPolicies: ["openai-api", "github-api"],
 });
+
+/**
+ * Wave 2: Chaos Monkey — adversarial evaluator that runs in the same
+ * preserved sandbox as the Worker to find edge cases and write failing
+ * tests. Uses the Claude Code CLI as its backbone but is invoked with
+ * a strictly adversarial system prompt (see `chaosMonkeyRunner.ts`).
+ * Requires the `anthropic-api` abox proxy policy.
+ */
+providerRegistry.register({
+  id: "chaos-monkey",
+  name: "Adversarial Evaluator",
+  command: ["claude", "--print-responses"],
+  requiredPolicies: ["anthropic-api"],
+});
