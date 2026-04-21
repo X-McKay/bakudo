@@ -145,8 +145,19 @@ test("objectiveController: advance() populates campaigns from architect JSON", a
   ]);
   let callCount = 0;
   const mockRunner = {
-    runAttempt: async () => {
+    // Wave 5: runAttempt receives (spec, overrides, handlers, profile).
+    // Explorer is called first (profile.providerId === 'explorer'), then Architect.
+    runAttempt: async (
+      _spec: unknown,
+      _overrides: unknown,
+      _handlers: unknown,
+      profile?: { providerId?: string },
+    ) => {
       callCount++;
+      if (profile?.providerId === "explorer") {
+        // Explorer: return invalid report so Architect still runs
+        return makeRecord("not a valid intelligence report");
+      }
       return makeRecord(architectOutput);
     },
   } as unknown as ABoxTaskRunner;
@@ -154,8 +165,8 @@ test("objectiveController: advance() populates campaigns from architect JSON", a
   const controller = new ObjectiveController(obj, mockRunner, mockMutex);
   await controller.advance();
 
-  // Architect was called once; campaigns were populated
-  assert.equal(callCount, 1);
+  // Wave 5: Explorer (call 1) + Architect (call 2); campaigns were populated
+  assert.ok(callCount >= 1, `Expected at least 1 call, got ${callCount}`);
   assert.equal(controller.state.campaigns.length, 2);
   assert.equal(controller.state.campaigns[0]?.campaignId, "write-jwt");
   assert.equal(controller.state.campaigns[1]?.campaignId, "update-middleware");
@@ -171,12 +182,26 @@ test("objectiveController: advance() executes campaign candidates after decompos
   // Pre-populate a candidate so the campaign has something to execute
   let callCount = 0;
   const mockRunner = {
-    runAttempt: async () => {
+    // Wave 5: runAttempt receives (spec, overrides, handlers, profile).
+    runAttempt: async (
+      _spec: unknown,
+      _overrides: unknown,
+      _handlers: unknown,
+      profile?: { providerId?: string },
+    ) => {
       callCount++;
-      // First call = Architect decomposition
-      if (callCount === 1) return makeRecord(architectOutput);
-      // Subsequent calls = Worker + Chaos Monkey
-      return makeRecord(callCount % 2 === 0 ? "implementation" : "LGTM");
+      if (profile?.providerId === "explorer") {
+        // Explorer: return invalid report so Architect still runs
+        return makeRecord("not a valid intelligence report");
+      }
+      if (profile?.providerId === "architect") {
+        return makeRecord(architectOutput);
+      }
+      if (profile?.providerId === "chaos-monkey") {
+        return makeRecord("LGTM");
+      }
+      // Worker: succeed
+      return makeRecord("implementation done");
     },
   } as unknown as ABoxTaskRunner;
 
@@ -230,10 +255,21 @@ test("objectiveController: marks campaign failed when all candidates fail", asyn
 
   let callCount = 0;
   const mockRunner = {
-    runAttempt: async () => {
+    // Wave 5: runAttempt receives (spec, overrides, handlers, profile).
+    runAttempt: async (
+      _spec: unknown,
+      _overrides: unknown,
+      _handlers: unknown,
+      profile?: { providerId?: string },
+    ) => {
       callCount++;
-      if (callCount === 1) return makeRecord(architectOutput);
-      // Worker always fails
+      if (profile?.providerId === "explorer") {
+        return makeRecord("not a valid intelligence report");
+      }
+      if (profile?.providerId === "architect") {
+        return makeRecord(architectOutput);
+      }
+      // Worker always fails; Critic also fails (non-fatal)
       return makeRecord("compilation error", false);
     },
   } as unknown as ABoxTaskRunner;

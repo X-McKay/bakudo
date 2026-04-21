@@ -100,6 +100,20 @@ export const isValidPostMortem = (output: string): boolean => {
 };
 
 /**
+ * Wave 5: Determine whether a Critic output signals that the Explorer should
+ * be re-run. The Critic signals this by including "NEEDS_EXPLORATION" in its
+ * output instead of (or in addition to) "LESSON LEARNED:".
+ *
+ * This is the Explorer-stuck fallback: when the Critic determines that the
+ * Worker failed due to insufficient codebase context (rather than a logic
+ * error), it signals that the Explorer should re-run with the failure context
+ * before the Architect re-decomposes the Campaign.
+ */
+export const criticNeedsExploration = (criticOutput: string): boolean => {
+  return criticOutput.includes("NEEDS_EXPLORATION");
+};
+
+/**
  * Extract the Post-Mortem text from a Critic output string.
  * Returns the text from "LESSON LEARNED:" to the end of the output.
  * Returns `null` if no valid Post-Mortem is found.

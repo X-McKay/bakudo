@@ -174,3 +174,44 @@ providerRegistry.register({
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api", "git-write"],
 });
+
+/**
+ * Wave 5: Explorer — Reconnaissance Agent that performs proactive codebase
+ * discovery before the Architect decomposes an Objective. Read-only access
+ * to the repo plus broad egress for documentation and API references.
+ * Requires `anthropic-api`, `read-only-repo`, and `web-read` policies.
+ */
+providerRegistry.register({
+  id: "explorer",
+  name: "Reconnaissance Agent",
+  command: ["claude", "--print-responses"],
+  requiredPolicies: ["anthropic-api", "read-only-repo", "web-read"],
+});
+
+/**
+ * Wave 5: Synthesizer — Parallel Merge Agent that reads multiple winning
+ * Candidate diffs and produces a single unified result. Requires read access
+ * to multiple worktrees and write access to commit the merged result.
+ * Requires `anthropic-api`, `multi-worktree-read`, and `git-write` policies.
+ * MUST NEVER push or merge PRs.
+ */
+providerRegistry.register({
+  id: "synthesizer",
+  name: "Parallel Merge Agent",
+  command: ["claude", "--print-responses"],
+  requiredPolicies: ["anthropic-api", "multi-worktree-read", "git-write"],
+});
+
+/**
+ * Wave 5: Janitor (LLM hygiene) — Codebase Hygiene Agent that runs during
+ * Daemon idle time to find low-risk cleanups and open atomic PRs.
+ * Requires `anthropic-api` and `git-write` policies.
+ * MUST NEVER push to protected branches, merge PRs, or open more than one
+ * PR per invocation.
+ */
+providerRegistry.register({
+  id: "janitor",
+  name: "Codebase Hygiene Agent",
+  command: ["claude", "--print-responses"],
+  requiredPolicies: ["anthropic-api", "git-write"],
+});

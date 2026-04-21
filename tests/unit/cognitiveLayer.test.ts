@@ -243,13 +243,28 @@ test("objectiveController: triggers Critic when campaign fails", async () => {
   const calls: string[] = [];
   let callCount = 0;
   const mockRunner = {
-    runAttempt: async (spec: { sessionId: string }) => {
+    // Wave 5: runAttempt receives (spec, overrides, handlers, profile).
+    // Explorer is called before Architect, so we use profile-based routing.
+    runAttempt: async (
+      spec: { sessionId: string },
+      _overrides: unknown,
+      _handlers: unknown,
+      profile?: { providerId?: string },
+    ) => {
       callCount++;
       calls.push(spec.sessionId);
-      if (callCount === 1) return makeRecord(architectOutput); // Architect
-      if (callCount === 2) return makeRecord("compilation error", false); // Worker fails
-      // Critic call
-      return makeRecord("LESSON LEARNED: Worker used wrong command.\nRoot cause: test.");
+      if (profile?.providerId === "explorer") {
+        return makeRecord("not a valid intelligence report"); // Explorer (non-fatal)
+      }
+      if (profile?.providerId === "architect") {
+        return makeRecord(architectOutput); // Architect
+      }
+      if (profile?.providerId === "chaos-monkey" || profile?.providerId === "critic") {
+        // Critic call
+        return makeRecord("LESSON LEARNED: Worker used wrong command.\nRoot cause: test.");
+      }
+      // Worker fails
+      return makeRecord("compilation error", false);
     },
   } as unknown as ABoxTaskRunner;
 
@@ -302,11 +317,25 @@ test("objectiveController: Critic failure is non-fatal", async () => {
 
   let callCount = 0;
   const mockRunner = {
-    runAttempt: async () => {
+    // Wave 5: runAttempt receives (spec, overrides, handlers, profile).
+    runAttempt: async (
+      _spec: unknown,
+      _overrides: unknown,
+      _handlers: unknown,
+      profile?: { providerId?: string },
+    ) => {
       callCount++;
-      if (callCount === 1) return makeRecord(architectOutput); // Architect
-      if (callCount === 2) return makeRecord("compilation error", false); // Worker fails
-      throw new Error("Critic agent crashed"); // Critic throws
+      if (profile?.providerId === "explorer") {
+        return makeRecord("not a valid intelligence report"); // Explorer (non-fatal)
+      }
+      if (profile?.providerId === "architect") {
+        return makeRecord(architectOutput); // Architect
+      }
+      if (profile?.providerId === "critic") {
+        throw new Error("Critic agent crashed"); // Critic throws
+      }
+      // Worker fails
+      return makeRecord("compilation error", false);
     },
   } as unknown as ABoxTaskRunner;
 

@@ -1,15 +1,20 @@
 /**
- * Wave 3: Daemon Gateway
+ * Wave 3 + 5: Daemon Gateway
  *
  * A lightweight HTTP server that accepts Objectives and manages their
  * lifecycle via the ObjectiveController. This is the long-running background
  * process that replaces the foreground CLI for autonomous operation.
  *
  * Endpoints:
- *   POST /objective   — Submit a new Objective
- *   GET  /objective/:id — Get the current state of an Objective
- *   GET  /objectives  — List all active Objectives
+ *   POST /objective       — Submit a new Objective
+ *   GET  /objective/:id   — Get the current state of an Objective
+ *   GET  /objectives      — List all active Objectives
  *   DELETE /objective/:id — Pause/cancel an Objective
+ *   GET  /metrics         — Wave 5: Observability metrics for all roles
+ *
+ * Wave 5 additions:
+ * - GET /metrics: per-role invocation counts, durations, success/failure.
+ * - Idle Janitor tick: `setInterval` that calls `maybeRunJanitor` every minute.
  *
  * Git Mutex:
  * The `gitWriteMutex` is exported from this module so it can be imported by
@@ -26,6 +31,7 @@ import { ABoxAdapter } from "../aboxAdapter.js";
 import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ObjectiveController } from "../host/orchestration/objectiveController.js";
 import { createObjective, type Objective } from "../host/orchestration/objectiveState.js";
+import { maybeRunJanitor } from "./janitor.js";
 
 // ---------------------------------------------------------------------------
 // Git Write Mutex
@@ -45,6 +51,67 @@ import { createObjective, type Objective } from "../host/orchestration/objective
  * - NEVER merge PRs or push to protected branches.
  */
 export const gitWriteMutex = new Mutex();
+
+// ---------------------------------------------------------------------------
+// Wave 5: Observability metrics
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-role metrics for observability.
+ * Tracks invocation count, total duration, success/failure counts.
+ */
+export interface RoleMetrics {
+  /** Total number of invocations. */
+  invocations: number;
+  /** Total duration in milliseconds across all invocations. */
+  totalDurationMs: number;
+  /** Number of successful invocations. */
+  successes: number;
+  /** Number of failed invocations. */
+  failures: number;
+}
+
+/** Global metrics registry keyed by provider ID. */
+const metricsRegistry = new Map<string, RoleMetrics>();
+
+/**
+ * Record a role invocation in the metrics registry.
+ */
+export const recordMetric = (
+  roleId: string,
+  durationMs: number,
+  success: boolean,
+): void => {
+  const existing = metricsRegistry.get(roleId) ?? {
+    invocations: 0,
+    totalDurationMs: 0,
+    successes: 0,
+    failures: 0,
+  };
+  metricsRegistry.set(roleId, {
+    invocations: existing.invocations + 1,
+    totalDurationMs: existing.totalDurationMs + durationMs,
+    successes: existing.successes + (success ? 1 : 0),
+    failures: existing.failures + (success ? 0 : 1),
+  });
+};
+
+/**
+ * Get a snapshot of all role metrics.
+ */
+export const getMetrics = (): Record<string, RoleMetrics & { avgDurationMs: number }> => {
+  const result: Record<string, RoleMetrics & { avgDurationMs: number }> = {};
+  for (const [roleId, metrics] of metricsRegistry.entries()) {
+    result[roleId] = {
+      ...metrics,
+      avgDurationMs:
+        metrics.invocations > 0
+          ? Math.round(metrics.totalDurationMs / metrics.invocations)
+          : 0,
+    };
+  }
+  return result;
+};
 
 // ---------------------------------------------------------------------------
 // Daemon state
@@ -127,6 +194,7 @@ export const createGateway = (runner: ABoxTaskRunner = buildRunner()) => {
       goal: c.state.goal,
       status: c.state.status,
       campaignCount: c.state.campaigns.length,
+      hasExplorerReport: c.state.explorerReport !== undefined,
     }));
     res.json({ objectives });
   });
@@ -146,6 +214,20 @@ export const createGateway = (runner: ABoxTaskRunner = buildRunner()) => {
     res.json({ objectiveId: req.params["id"], status: "paused" });
   });
 
+  // -------------------------------------------------------------------------
+  // Wave 5: GET /metrics — Observability metrics for all roles
+  // -------------------------------------------------------------------------
+  app.get("/metrics", (_req, res) => {
+    res.json({
+      roles: getMetrics(),
+      daemon: {
+        activeObjectives: [...activeControllers.values()].filter((c) => c.isActive()).length,
+        totalObjectives: activeControllers.size,
+        gitMutexLocked: gitWriteMutex.isLocked(),
+      },
+    });
+  });
+
   return app;
 };
 
@@ -156,11 +238,39 @@ export const createGateway = (runner: ABoxTaskRunner = buildRunner()) => {
 /**
  * Start the Daemon Gateway HTTP server.
  * Called by the CLI when the user runs `bakudo daemon start`.
+ *
+ * Wave 5: Also starts the idle Janitor tick that runs every minute.
  */
 export const startDaemon = (port = 3000): void => {
-  const app = createGateway();
+  const runner = buildRunner();
+  const app = createGateway(runner);
+  let janitorLastRunAt: Date | undefined;
+
   app.listen(port, "127.0.0.1", () => {
     console.log(`[Daemon] Gateway listening on http://127.0.0.1:${port}`);
     console.log("[Daemon] Git Write Mutex: active");
+    console.log("[Daemon] Janitor idle tick: every 60s");
   });
+
+  // Wave 5: Idle Janitor tick — runs every minute, only when Daemon is idle.
+  setInterval(() => {
+    const activeSandboxCount = 0; // TODO: wire to real sandbox registry
+    const schedState = {
+        activeObjectives: () =>
+          [...activeControllers.values()].filter((c) => c.isActive()).length,
+        activeSandboxes: () => activeSandboxCount,
+        ...(janitorLastRunAt !== undefined ? { lastRunAt: janitorLastRunAt } : {}),
+      };
+    maybeRunJanitor(
+      schedState,
+      runner,
+      process.cwd(),
+    )
+      .then(() => {
+        janitorLastRunAt = new Date();
+      })
+      .catch((error: unknown) => {
+        console.warn("[Daemon] Janitor tick failed:", error);
+      });
+  }, 60_000);
 };
