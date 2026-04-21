@@ -22,7 +22,6 @@ test("saveSession persists the summary index to .bakudo/sessions/index.json", as
       sessionId: "session-persist",
       goal: "persist me",
       repoRoot: ".",
-
       status: "planned",
       createdAt: "2026-04-14T10:00:00.000Z",
       updatedAt: "2026-04-14T10:00:00.000Z",
@@ -51,7 +50,6 @@ test("listSessions reads the fast-path index without touching session directorie
       sessionId: "session-fastpath",
       goal: "fast",
       repoRoot: ".",
-
       createdAt: "2026-04-14T10:00:00.000Z",
       updatedAt: "2026-04-14T10:00:00.000Z",
     });
@@ -78,7 +76,6 @@ test("listSessions rebuilds the index from a directory scan when the file is mis
       sessionId: "session-rebuild-old",
       goal: "older",
       repoRoot: ".",
-
       createdAt: "2026-04-14T09:00:00.000Z",
       updatedAt: "2026-04-14T09:00:00.000Z",
     });
@@ -86,7 +83,6 @@ test("listSessions rebuilds the index from a directory scan when the file is mis
       sessionId: "session-rebuild-new",
       goal: "newer",
       repoRoot: ".",
-
       createdAt: "2026-04-14T12:00:00.000Z",
       updatedAt: "2026-04-14T12:00:00.000Z",
     });
@@ -119,7 +115,6 @@ test("listSessions treats a malformed index as missing and rebuilds in place", a
       sessionId: "session-malformed",
       goal: "malformed cache",
       repoRoot: ".",
-
       createdAt: "2026-04-14T10:00:00.000Z",
       updatedAt: "2026-04-14T10:00:00.000Z",
     });
