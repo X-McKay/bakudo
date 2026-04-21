@@ -83,25 +83,29 @@ Inside the tree, one `<App/>` mounts `<Header/> <Transcript/> <OverlayStack/> <C
 ```
 <App store config>
   <StoreProvider>
-    <Box flexDirection="column" height="100%">
-      <Header/>
-      <Box flexGrow={1}><Transcript/></Box>
-      <OverlayStack/>
-      <Composer/>
-      <Footer/>
+    <Box flexDirection="row" height="100%">
+      <MainPanel flexGrow={1}>
+        <Header/>
+        <Box flexGrow={1}><Transcript/></Box>
+        <OverlayStack/>
+        <Composer/>
+        <Footer/>
+      </MainPanel>
+      <Sidebar/>          // collapsible; hidden by default
     </Box>
-    <TurnDriver/>        // renderless
+    <TurnDriver/>         // renderless
   </StoreProvider>
 </App>
 ```
 
 - **`<Header/>`** — title, mode chip (PLAN/STD/AUTO tinted from theme), dim session label, repo label. Width-responsive truncation of session id. No border.
 - **`<Transcript/>`** — maps over `state.transcript`. Per-item components: `<UserMessage/>` (dim `›` gutter), `<AssistantMessage/>` (dim `•` gutter, tone-colored text), `<EventLine/>` (tone symbol + detail; no more `· kind` leak), `<OutputBlock/>` (indented dim multiline), `<ReviewCard/>` (status symbol + outcome + `→ nextAction`). No virtualization in P1.
-- **`<Composer/>`** — left-rail `┃`/`╹` border via Ink custom box chars, color tinted to mode. Custom `useInput`-based text entry (~150 LoC, single-line in P1). Metadata row beneath: `mode · model · agent · PROMPT|AUTO`, muted `·` separators. When `state.dispatch.inFlight`: input disabled, spinner + `{label} · {elapsed}` replaces placeholder, `Esc to cancel` shown.
-- **`<Footer/>`** — single dim line. Default: `[/] commands  [?] help  [Ctrl+C] exit`. Context-aware: overlays swap their own hints; inspect screen shows scroll hints. Right-aligned `context —%` placeholder until P2.
+- **`<Composer/>`** — left-rail `┃`/`╹` border via Ink custom box chars, color tinted to mode. Custom `useInput`-based text entry (~150 LoC, single-line in P1). Metadata row beneath: `mode · model · agent · PROMPT|AUTO`, muted `·` separators. When `state.dispatch.inFlight`: input disabled, spinner + `{label} · {elapsed}` replaces placeholder, `Esc to cancel` shown. When buffer is empty and no overlay is active, `[Tab]` toggles the orchestrator sidebar.
+- **`<Footer/>`** — single dim line. Default: `[/] commands  [?] help  [Tab] sidebar  [Ctrl+C] exit`. Context-aware: overlays swap their own hints; inspect screen shows scroll hints. Right-aligned `context —%` placeholder until P2.
 - **`<OverlayStack/>`** — `switch(overlay?.kind)` into one of seven overlay components. Each renders inline above the composer with a rounded `<Box borderStyle="round"/>`; anchored positioning is P2.
 - **`<Spinner/>`** — Braille `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` via `useEffect` + `setInterval`, ~30 LoC. Reusable.
 - **`<TurnDriver/>`** — one `useEffect` on `state.pendingSubmit.seq`. Body is an async function that runs the existing pipeline (`registry.dispatch` → `answerHeadPrompt` → `dispatchThroughController` → `executePromptFromResolution`) with an `AbortController`. Dispatches store actions as progress arrives. Always closes with `dispatch_finished` + `clear_pending_submit`.
+- **`<Sidebar/>`** — collapsible right-hand panel bound to `state.orchestrator`. Renders the active `Objective` goal and status badge, the `Campaign` tree with per-campaign status icons (⏳ pending, ▶ running, ✓ completed, ✗ failed), the `Git Mutex` lock state, and the latest Critic/Synthesizer verdict. Uses the GitHub-dark palette (`#161b22` background, `#30363d` borders, `#c9d1d9` text). Hidden by default; toggled via `toggle_sidebar` action. See `docs/superspecs/2026-04-21-orchestrator-tui-design.md` for the full design rationale.
 
 ## Input pump & turn driver
 
@@ -138,6 +142,15 @@ Per-keystroke state stays **local** to `<Composer/>` (`useState`) — only submi
 - `tests/unit/host/store.test.ts`
 - `tests/unit/host/renderers/ink/{header,transcript,composer,footer,overlayStack,spinner,turnDriver}.test.tsx`
 - `tests/integration/ink-interaction.test.tsx`
+
+**Add (Orchestrator TUI, 2026-04-21):**
+- `src/host/orchestration/routingClassifier.ts` — heuristic goal classifier
+- `src/host/orchestration/orchestratorDriver.ts` — TUI-to-headless bridge
+- `src/host/renderers/ink/Sidebar.tsx` — collapsible orchestrator panel
+- `tests/unit/routingClassifier.test.ts`
+- `tests/unit/orchestratorReducer.test.ts`
+- `tests/unit/host/renderers/ink/sidebar.test.tsx`
+- `docs/superspecs/2026-04-21-orchestrator-tui-design.md`
 
 **Modify (6 files):**
 - `src/host/reducer.ts` — new action types

@@ -154,3 +154,12 @@ Manus reviewed both parallel implementations (Claude Code `claude/manus-implemen
 - `git grep BAKUDO_EPHEMERAL` in `src/` — nothing
 - `git grep executeTask` in `src/` — nothing
 - `git grep WorkerTaskSpec` in `src/` — nothing
+
+### 2026-04-21: Orchestrator TUI Delivered
+
+Implemented the live interactive surface for the Cognitive Meta-Orchestrator:
+- **Routing Classifier:** Heuristic-based intent routing (`src/host/orchestration/routingClassifier.ts`) branches simple queries to the standard loop and complex goals to the orchestrator loop.
+- **Orchestrator Driver:** Headless bridge (`src/host/orchestration/orchestratorDriver.ts`) syncs `ObjectiveController` state to the Redux store and streams progress/verdict events to the transcript.
+- **Sidebar UI:** A collapsible GitHub-dark Ink component (`src/host/renderers/ink/Sidebar.tsx`) rendering the active Objective, Campaign tree, Mutex state, and Verdicts.
+- **App Layout:** Horizontal flex split in `App.tsx` and `[Tab]` toggle logic in `Composer.tsx`.
+- **Docs:** Updated `README.md` and added `docs/superspecs/2026-04-21-orchestrator-tui-design.md` detailing the architecture.

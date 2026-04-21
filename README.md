@@ -2,7 +2,7 @@
 
 `Bakudo` is a lightweight, robust custom agent harness designed for high-autonomy operation within `abox` sandboxing environments. Built with TypeScript and a focus on functional programming, it provides a secure and scalable foundation for building autonomous agents.
 
-> Current status: the interactive shell is transcript-first with persisted active-session continuity. Plain text continues the active session by default; explicit slash commands manage sessions, modes, inspection, and approvals. Legacy `--goal` mode still exists as a compatibility path.
+> Current status: the interactive shell is transcript-first with persisted active-session continuity. Plain text continues the active session by default; complex engineering goals are automatically routed to the **Cognitive Meta-Orchestrator** pipeline with a live collapsible sidebar, while simple queries use the single-shot session path. Explicit slash commands manage sessions, modes, inspection, and approvals. Legacy `--goal` mode still exists as a compatibility path.
 
 ### On-disk layout
 
@@ -47,7 +47,19 @@ user prompt → intent classification → attempt compilation → bounded sandbo
 
 ## Cognitive Meta-Orchestrator (Phase 7 / Revamp)
 
-Bakudo has evolved into a "Cognitive Meta-Orchestrator" running on top of the `abox` secure sandbox. The architecture is defined by five implementation waves:
+Bakudo has evolved into a "Cognitive Meta-Orchestrator" running on top of the `abox` secure sandbox. Complex goals are automatically routed to a multi-agent decomposition and synthesis pipeline, visible live in the interactive shell.
+
+### Orchestrator TUI & Routing
+
+The interactive shell now seamlessly bridges simple Q&A and complex autonomous engineering:
+
+- **Routing Classifier:** A heuristic engine (`src/host/orchestration/routingClassifier.ts`) intercepts user input. Simple questions ("what is", "how do") and file lookups run through the standard single-shot `SessionController`. Complex goals ("refactor", "implement", or long multi-step prompts) are routed to the `OrchestratorDriver`.
+- **Live Sidebar:** When a complex goal is running, the TUI exposes a collapsible right-hand sidebar (GitHub-dark palette) showing the active `Objective`, the tree of parallel `Campaigns` and their statuses (⏳, ▶, ✓, ✗), the `Git Mutex` lock state, and the latest Critic/Synthesizer verdict.
+- **Tab Toggle:** Press `[Tab]` in the composer (when empty) to toggle the orchestrator sidebar visibility.
+
+### Daemon & Background Architecture
+
+The underlying orchestration architecture is defined by five implementation waves:
 
 1. **Provider Registry**: A centralized, Zod-validated registry (`src/host/providerRegistry.ts`) defining all agent profiles (e.g., `codex`, `claude-code`, `explorer`, `synthesizer`) and their required `abox` policies.
 2. **Chaos Monkey Evaluator**: An adversarial loop (`headlessExecute.ts`) that runs the worker, evaluates the result via a Critic/Chaos Monkey agent, and forces up to 3 retries if the result is substandard.
@@ -124,7 +136,7 @@ Start the interactive shell:
 bakudo
 ```
 
-Inside the interactive shell, plain text continues the active session as a new turn. Slash commands manage session state, mode, and inspection:
+Inside the interactive shell, plain text continues the active session as a new turn. The `RoutingClassifier` automatically decides whether the text is a simple prompt or a complex goal requiring the meta-orchestrator. Slash commands manage session state, mode, and inspection:
 
 ```text
 /new                                    # start a fresh session

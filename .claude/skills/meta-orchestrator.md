@@ -33,3 +33,11 @@ All worker executions in the headless path are subject to the Chaos Monkey adver
 - The `Critic` agent evaluates the worker's output.
 - If the output is substandard, the orchestrator forces a retry (up to 3 times).
 - When implementing new agents, assume their output will be criticized and ensure they can handle iterative refinement.
+
+## 6. Interactive TUI Routing
+
+The interactive shell (`interactive.ts`) routes user input through a `RoutingClassifier` before dispatching work.
+- **Simple goals** (short questions, slash commands, file lookups) are routed to the standard `SessionController` path.
+- **Complex goals** (refactors, implementations, multi-step changes) are routed to `runObjectiveInTUI()` in `orchestratorDriver.ts`, which drives `ObjectiveController` and streams state updates back to the Ink store.
+- The `OrchestratorDriver` is the **only** permitted bridge between the interactive shell and the headless orchestration layer. It MUST NOT call `SessionController` or `executePromptFromResolution` directly for complex goals.
+- The `Sidebar` component (`src/host/renderers/ink/Sidebar.tsx`) reads from the `orchestrator` slice of `HostAppState` and is the sole visual surface for orchestrator state in the TUI. It is collapsible via `[Tab]`.
