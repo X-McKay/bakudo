@@ -182,28 +182,71 @@ export const answerApprovalDialog = (
 };
 
 // ---------------------------------------------------------------------------
-// Stub launchers — same shape, future phases implement
+// Recovery dialog — retry / halt / edit after a failed attempt
 // ---------------------------------------------------------------------------
-
 export type RecoveryRequest = {
   sessionId: string;
   turnId: string;
   reason: string;
 };
-
 export type RecoveryDialogChoice = { kind: "retry" } | { kind: "halt" } | { kind: "edit" };
 
+const RECOVERY_CHOICE_BY_KEY: ReadonlyMap<string, RecoveryDialogChoice> = new Map([
+  ["r", { kind: "retry" }],
+  ["h", { kind: "halt" }],
+  ["e", { kind: "edit" }],
+] as const);
+
 /**
- * Planned for Phase 5 — retry/halt/edit after a failed attempt. Implementing
- * the shape now so callers can pre-wire `await launchRecoveryDialog(...)`
- * against the same `promptQueue`-backed mutual-exclusion contract.
+ * Parse the raw string resolution the interactive loop delivers into a
+ * {@link RecoveryDialogChoice}. Accepts single-character keys `r`, `h`, `e`
+ * (case-insensitive). Unknown input defaults to `halt` — the safer fallback.
+ */
+export const parseRecoveryChoice = (raw: string): RecoveryDialogChoice =>
+  RECOVERY_CHOICE_BY_KEY.get(raw.trim().toLowerCase()) ?? { kind: "halt" };
+
+/**
+ * Enqueue a `recovery_dialog` onto `promptQueue` and return a promise that
+ * resolves once the user presses `r`, `h`, or `e`. The dialog is removed
+ * from the queue before the promise resolves so follow-up launches can run.
+ *
+ * Uses the same `promptResolvers` mutual-exclusion contract as
+ * `launchApprovalDialog` — only one dialog is visible at a time.
  */
 export const launchRecoveryDialog = async (
-  _dispatcher: DialogDispatcher,
-  _request: RecoveryRequest,
+  dispatcher: DialogDispatcher,
+  request: RecoveryRequest,
 ): Promise<RecoveryDialogChoice> => {
-  // TODO(phase5): implement once the recovery UX is specced.
-  throw new Error("launchRecoveryDialog: not implemented");
+  const id = newPromptId();
+  const entry: PromptEntry = { id, kind: "recovery_dialog", payload: request };
+  const enqueueAction: HostAction = { type: "enqueue_prompt", prompt: entry };
+  dispatcher.setState(reduceHost(dispatcher.getState(), enqueueAction));
+  try {
+    const resolution = await awaitPrompt(id);
+    if (resolution.kind !== "answered") {
+      return { kind: "halt" };
+    }
+    return parseRecoveryChoice(resolution.value);
+  } finally {
+    const dequeueAction: HostAction = { type: "dequeue_prompt", id };
+    dispatcher.setState(reduceHost(dispatcher.getState(), dequeueAction));
+  }
+};
+
+/**
+ * Test-facing hook: answer the head `recovery_dialog` entry. Returns the
+ * queue id that was resolved so tests can sanity-check the contract.
+ */
+export const answerRecoveryDialog = (
+  dispatcher: DialogDispatcher,
+  key: string,
+): string | null => {
+  const head = dispatcher.getState().promptQueue[0];
+  if (head === undefined || head.kind !== "recovery_dialog") {
+    return null;
+  }
+  const ok = answerPrompt(head.id, key);
+  return ok ? head.id : null;
 };
 
 /**

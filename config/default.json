@@ -14,6 +14,9 @@
     "requireEscalationForWrite": false,
     "requireEscalationForNetwork": false
   },
+  "provider": {
+    "defaultProviderId": "codex"
+  },
   "budget": {
     "maxTotalSteps": 60,
     "maxWriteOps": 20,

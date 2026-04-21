@@ -5,6 +5,7 @@ import type {
   HostAppState,
   HostOverlay,
   PromptEntry,
+  RecoveryDialogPayload,
   SessionPickerPayload,
 } from "./appState.js";
 
@@ -83,6 +84,9 @@ const footerHintsFor = (state: HostAppState, overlay: HostOverlay | undefined): 
   if (overlay?.kind === "approval_prompt") {
     return ["[1/2/3/4] choose", "[Shift+Tab] cycle", "[?] help", "[Ctrl+C] exit"];
   }
+  if (overlay?.kind === "recovery_dialog") {
+    return ["[r] retry", "[h] halt", "[e] edit", "[?] help", "[Ctrl+C] exit"];
+  }
   if (overlay?.kind === "command_palette" || overlay?.kind === "session_picker") {
     return ["[↑/↓] move", "[Enter] select", "[?] help", "[Ctrl+C] exit"];
   }
@@ -123,6 +127,10 @@ const deriveOverlay = (
       request,
       cursorIndex: state.approvalDialogCursor,
     };
+  }
+  if (prompt.kind === "recovery_dialog") {
+    const payload = prompt.payload as RecoveryDialogPayload;
+    return { kind: "recovery_dialog", payload };
   }
   if (prompt.kind === "resume_confirm") {
     const payload = prompt.payload as { message?: unknown } | null;

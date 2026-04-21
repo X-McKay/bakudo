@@ -77,7 +77,11 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 5000;
 const DEFAULT_KILL_GRACE_MS = 2000;
 const ABOX_GUEST_WORKSPACE_CWD = "/workspace";
 const DEFAULT_EXECUTION_PROFILE: ExecutionProfile = {
-  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  // Wave 1: Use registered provider ID instead of raw command string.
+  // resolvedCommand is populated by the host before serialisation; the
+  // worker fallback uses the codex command directly to avoid importing the registry.
+  providerId: "codex",
+  resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
   sandboxLifecycle: "ephemeral",
   candidatePolicy: "discard",
 };
@@ -98,8 +102,14 @@ const isExecutionProfile = (value: unknown): value is ExecutionProfile => {
   if (!isObject(value)) {
     return false;
   }
+  // Wave 1: providerId is required; resolvedCommand must be a non-empty string array.
+  if (typeof value.providerId !== "string") {
+    return false;
+  }
+  if (!isStringArray(value.resolvedCommand) || (value.resolvedCommand as string[]).length === 0) {
+    return false;
+  }
   return (
-    typeof value.agentBackend === "string" &&
     (value.sandboxLifecycle === "preserved" || value.sandboxLifecycle === "ephemeral") &&
     (value.candidatePolicy === "auto_apply" ||
       value.candidatePolicy === "manual_apply" ||
@@ -412,7 +422,7 @@ export const decodeExecutionProfile = (encoded: string): ExecutionProfile => {
   const parsed = decodeJson(encoded);
   if (!isExecutionProfile(parsed)) {
     throw new Error(
-      "invalid execution profile: expected agentBackend plus valid sandboxLifecycle and candidatePolicy",
+      "invalid execution profile: expected providerId (string), resolvedCommand (non-empty string[]), sandboxLifecycle, and candidatePolicy",
     );
   }
   return parsed;

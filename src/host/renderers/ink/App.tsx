@@ -7,6 +7,7 @@ import { Transcript } from "./Transcript.js";
 import { Composer } from "./Composer.js";
 import { Footer } from "./Footer.js";
 import { OverlayStack } from "./OverlayStack.js";
+import { Sidebar } from "./Sidebar.js";
 import { TurnDriver, type RunTurn } from "./TurnDriver.js";
 import { useAppState } from "./hooks/useAppState.js";
 
@@ -24,6 +25,22 @@ const ExitWatcher = () => {
   return null;
 };
 
+/**
+ * Left panel: the main transcript + composer area.
+ * Takes all remaining horizontal space when the sidebar is visible.
+ */
+const MainPanel = ({ repoLabel }: { repoLabel?: string | undefined }) => (
+  <Box flexDirection="column" flexGrow={1}>
+    {repoLabel !== undefined ? <Header repoLabel={repoLabel} /> : <Header />}
+    <Box height={1} />
+    <Transcript />
+    <Box height={1} />
+    <OverlayStack />
+    <Footer />
+    <Composer />
+  </Box>
+);
+
 export const App = ({
   store,
   repoLabel,
@@ -34,14 +51,10 @@ export const App = ({
   runTurn?: RunTurn;
 }) => (
   <StoreProvider store={store}>
-    <Box flexDirection="column">
-      {repoLabel !== undefined ? <Header repoLabel={repoLabel} /> : <Header />}
-      <Box height={1} />
-      <Transcript />
-      <Box height={1} />
-      <OverlayStack />
-      <Footer />
-      <Composer />
+    {/* Horizontal split: left panel (transcript + composer) + right sidebar */}
+    <Box flexDirection="row">
+      <MainPanel repoLabel={repoLabel} />
+      <Sidebar />
     </Box>
     {runTurn !== undefined ? <TurnDriver runTurn={runTurn} /> : null}
     <ExitWatcher />

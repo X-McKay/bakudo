@@ -2,7 +2,7 @@
 
 `Bakudo` is a lightweight, robust custom agent harness designed for high-autonomy operation within `abox` sandboxing environments. Built with TypeScript and a focus on functional programming, it provides a secure and scalable foundation for building autonomous agents.
 
-> Current status: the interactive shell is transcript-first with persisted active-session continuity. Plain text continues the active session by default; explicit slash commands manage sessions, modes, inspection, and approvals. Legacy `--goal` mode still exists as a compatibility path.
+> Current status: the interactive shell is transcript-first with persisted active-session continuity. Plain text continues the active session by default; complex engineering goals are automatically routed to the **Cognitive Meta-Orchestrator** pipeline with a live collapsible sidebar, while simple queries use the single-shot session path. Explicit slash commands manage sessions, modes, inspection, and approvals. Legacy `--goal` mode still exists as a compatibility path.
 
 ### On-disk layout
 
@@ -43,7 +43,34 @@ user prompt → intent classification → attempt compilation → bounded sandbo
 
 **`/run-command` escape hatch**: bypasses intent classification, compiles directly to `explicit_command` with `engine: "shell"` and `command: ["bash", "-lc", "<raw>"]`.
 
-**Control-plane dispatch** (`planner.ts` / `executeAttempt.ts`): the planner produces a `DispatchPlan` with an `ExecutionProfile` (`agentBackend`, `sandboxLifecycle`). `executeAttempt` drives the abox sandbox via `WorkerDispatchInput`. The legacy `createTaskSpec` → `executeTask` path and `WorkerTaskSpec` type have been removed.
+**Control-plane dispatch** (`planner.ts` / `executeAttempt.ts`): the planner produces a `DispatchPlan` with an `ExecutionProfile` containing the resolved provider ID and its executable command. `executeAttempt` drives the abox sandbox via `WorkerDispatchInput`. The legacy `agentBackend` field and the `createTaskSpec` → `executeTask` path have been entirely removed.
+
+## Cognitive Meta-Orchestrator (Phase 7 / Revamp)
+
+Bakudo has evolved into a "Cognitive Meta-Orchestrator" running on top of the `abox` secure sandbox. Complex goals are automatically routed to a multi-agent decomposition and synthesis pipeline, visible live in the interactive shell.
+
+### Orchestrator TUI & Routing
+
+The interactive shell now seamlessly bridges simple Q&A and complex autonomous engineering:
+
+- **Routing Classifier:** A heuristic engine (`src/host/orchestration/routingClassifier.ts`) intercepts user input. Simple questions ("what is", "how do") and file lookups run through the standard single-shot `SessionController`. Complex goals ("refactor", "implement", or long multi-step prompts) are routed to the `OrchestratorDriver`.
+- **Live Sidebar:** When a complex goal is running, the TUI exposes a collapsible right-hand sidebar (GitHub-dark palette) showing the active `Objective`, the tree of parallel `Campaigns` and their statuses (⏳, ▶, ✓, ✗), the `Git Mutex` lock state, and the latest Critic/Synthesizer verdict.
+- **Tab Toggle:** Press `[Tab]` in the composer (when empty) to toggle the orchestrator sidebar visibility.
+
+### Daemon & Background Architecture
+
+The underlying orchestration architecture is defined by five implementation waves:
+
+1. **Provider Registry**: A centralized, Zod-validated registry (`src/host/providerRegistry.ts`) defining all agent profiles (e.g., `codex`, `claude-code`, `explorer`, `synthesizer`) and their required `abox` policies.
+2. **Chaos Monkey Evaluator**: An adversarial loop (`headlessExecute.ts`) that runs the worker, evaluates the result via a Critic/Chaos Monkey agent, and forces up to 3 retries if the result is substandard.
+3. **Daemon Gateway & Git Mutex**: A background daemon (`src/daemon/gateway.ts`) that orchestrates asynchronous campaigns. A strict `gitWriteMutex` ensures only one agent modifies the repository at a time.
+4. **Cognitive Layer**: Background agents including the **Curator** (maintains the `AGENTS.md` index) and the **Janitor** (performs LLM-based codebase hygiene during idle cycles).
+5. **Extended Autonomy**: Multi-winner decomposition where the **Explorer** performs read-only reconnaissance, multiple workers execute in parallel, and the **Synthesizer** merges the results.
+
+**Critical Invariants:**
+- **Headless Execution Boundary**: All background daemon logic routes exclusively through `headlessExecute()`. The interactive `SessionController` is strictly isolated.
+- **No Auto-Merge**: Background agents (Curator, Janitor, Synthesizer) must never push to protected branches or auto-merge PRs. They operate on branches and require manual review.
+- **No Raw Credentials**: The orchestrator defines *which* policies an agent needs, but `abox` handles the actual TLS-proxy stub injection. Credentials are never injected via environment variables.
 
 ## Project Structure
 
@@ -109,7 +136,7 @@ Start the interactive shell:
 bakudo
 ```
 
-Inside the interactive shell, plain text continues the active session as a new turn. Slash commands manage session state, mode, and inspection:
+Inside the interactive shell, plain text continues the active session as a new turn. The `RoutingClassifier` automatically decides whether the text is a simple prompt or a complex goal requiring the meta-orchestrator. Slash commands manage session state, mode, and inspection:
 
 ```text
 /new                                    # start a fresh session

@@ -64,7 +64,7 @@ test("HostBootstrap type includes config field", () => {
     repoRoot: "/tmp",
     hostState: null,
     config: { ...BakudoConfigDefaults },
-    aboxCapabilities: { kind: "stub" },
+    aboxCapabilities: { kind: "available", version: "0.3.0", capabilities: "v3" },
     logLevel: "info",
     dispose: async () => {},
   };

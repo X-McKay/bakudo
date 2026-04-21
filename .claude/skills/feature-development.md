@@ -13,6 +13,7 @@ When asked to add new functionality to the `bakudo` agent harness.
 1.  **Analyze the Requirement**: Understand the goal and identify which component of the harness needs modification (`orchestrator`, `tools`, `adapter`, `policy`, etc.).
 2.  **Design the Change**:
     - Follow the **Planner → Executor contract** for any new step-based functionality.
+    - If you are implementing background agents, orchestration logic, or interacting with the `abox` sandbox, you MUST strictly follow the invariants defined in `.claude/skills/meta-orchestrator.md`.
     - Maintain **Mode-aware policy** by updating the tool allowlists if necessary.
     - Ensure any new external interaction is handled via an adapter or a tool.
 3.  **Implement the Feature**:

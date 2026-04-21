@@ -20,13 +20,22 @@ import {
 import { resolveLogLevel, type LogLevel } from "./telemetry/logLevel.js";
 import { bakudoLogDir } from "./telemetry/xdgPaths.js";
 import { migrateToXdg, realMigrationFs, type MigrationPaths } from "./xdgMigration.js";
+import { probeAbox } from "./doctorAboxProbe.js";
 
-export type AboxCapabilityProbe = {
-  /** Stubbed until Phase 6 Workstream 3 wires the real probe. */
-  kind: "stub";
-  /** Best-effort hint only; actual capability negotiation happens in the sandbox. */
-  version?: string;
-};
+/**
+ * Result of the bootstrap-time `abox --capabilities` probe. Replaces the
+ * former `{ kind: "stub" }` placeholder (Phase 6 Workstream 3 completion).
+ *
+ * `kind: "available"` — abox binary found; `version` and `capabilities` are
+ * populated from `abox --version` / `abox --capabilities` output.
+ *
+ * `kind: "unavailable"` — binary not found or timed out. The host falls back
+ * to the hard-coded capability defaults in `workerCapabilities.ts` and emits
+ * a `worker.capability_probe_failed` diagnostic.
+ */
+export type AboxCapabilityProbe =
+  | { kind: "available"; version: string; capabilities: string }
+  | { kind: "unavailable"; error: string };
 
 export type HostBootstrap = {
   repoRoot: string;
@@ -153,10 +162,23 @@ const prefetchHostState = async (repoRoot: string): Promise<HostStateRecord | nu
   }
 };
 
-const probeAboxCapabilities = async (): Promise<AboxCapabilityProbe> =>
-  // Deliberate stub — Phase 6 Workstream 3 replaces with a real
-  // `abox --probe` roundtrip.
-  ({ kind: "stub" });
+/**
+ * Bootstrap-time capability probe. Calls `abox --version` and
+ * `abox --capabilities` via {@link probeAbox} and maps the result onto
+ * {@link AboxCapabilityProbe}. Failure is non-fatal — the host falls back to
+ * the hard-coded defaults in `workerCapabilities.ts`.
+ */
+const probeAboxCapabilities = async (): Promise<AboxCapabilityProbe> => {
+  const result = await probeAbox({ timeoutMs: 3000 });
+  if (!result.available) {
+    return { kind: "unavailable", error: result.error ?? "abox binary not found" };
+  }
+  return {
+    kind: "available",
+    version: result.version ?? "(unknown)",
+    capabilities: result.capabilities,
+  };
+};
 
 /**
  * Phase 6 Wave 6e PR16 — append the migration envelope to a dedicated

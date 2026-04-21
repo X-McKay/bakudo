@@ -4,9 +4,11 @@ import test from "node:test";
 import { initialHostAppState, type HostAppState } from "../../src/host/appState.js";
 import {
   answerApprovalDialog,
+  answerRecoveryDialog,
   launchApprovalDialog,
   launchRecoveryDialog,
   parseApprovalChoice,
+  parseRecoveryChoice,
   type ApprovalRequest,
   type DialogDispatcher,
 } from "../../src/host/dialogLauncher.js";
@@ -140,16 +142,91 @@ test("launchApprovalDialog: dequeues the prompt regardless of outcome", async ()
   assert.equal(dispatcher.getState().promptQueue.length, 0);
 });
 
-test("launchRecoveryDialog: stub throws not-implemented", async () => {
+// ---------------------------------------------------------------------------
+// launchRecoveryDialog — real implementation tests
+// ---------------------------------------------------------------------------
+
+test("launchRecoveryDialog: enqueues recovery_dialog prompt", async () => {
+  resetPromptResolvers();
   const dispatcher = makeDispatcher();
-  await assert.rejects(
-    launchRecoveryDialog(dispatcher, {
-      sessionId: "s",
-      turnId: "t",
-      reason: "failed",
-    }),
-    /not implemented/,
-  );
+  const pending = launchRecoveryDialog(dispatcher, {
+    sessionId: "s1",
+    turnId: "t1",
+    reason: "worker exited non-zero",
+  });
+  await Promise.resolve();
+  assert.equal(dispatcher.getState().promptQueue.length, 1);
+  assert.equal(dispatcher.getState().promptQueue[0]?.kind, "recovery_dialog");
+  answerRecoveryDialog(dispatcher, "h");
+  await pending;
+});
+
+test("launchRecoveryDialog: resolves retry on 'r'", async () => {
+  resetPromptResolvers();
+  const dispatcher = makeDispatcher();
+  const pending = launchRecoveryDialog(dispatcher, {
+    sessionId: "s2",
+    turnId: "t2",
+    reason: "chaos monkey rejected",
+  });
+  await Promise.resolve();
+  answerRecoveryDialog(dispatcher, "r");
+  const choice = await pending;
+  assert.deepEqual(choice, { kind: "retry" });
+  assert.equal(dispatcher.getState().promptQueue.length, 0);
+});
+
+test("launchRecoveryDialog: resolves halt on 'h'", async () => {
+  resetPromptResolvers();
+  const dispatcher = makeDispatcher();
+  const pending = launchRecoveryDialog(dispatcher, {
+    sessionId: "s3",
+    turnId: "t3",
+    reason: "critic score too low",
+  });
+  await Promise.resolve();
+  answerRecoveryDialog(dispatcher, "h");
+  const choice = await pending;
+  assert.deepEqual(choice, { kind: "halt" });
+});
+
+test("launchRecoveryDialog: resolves edit on 'e'", async () => {
+  resetPromptResolvers();
+  const dispatcher = makeDispatcher();
+  const pending = launchRecoveryDialog(dispatcher, {
+    sessionId: "s4",
+    turnId: "t4",
+    reason: "synthesis failed",
+  });
+  await Promise.resolve();
+  answerRecoveryDialog(dispatcher, "e");
+  const choice = await pending;
+  assert.deepEqual(choice, { kind: "edit" });
+});
+
+test("launchRecoveryDialog: unknown key defaults to halt", async () => {
+  resetPromptResolvers();
+  const dispatcher = makeDispatcher();
+  const pending = launchRecoveryDialog(dispatcher, {
+    sessionId: "s5",
+    turnId: "t5",
+    reason: "unknown error",
+  });
+  await Promise.resolve();
+  answerRecoveryDialog(dispatcher, "x");
+  const choice = await pending;
+  assert.deepEqual(choice, { kind: "halt" });
+});
+
+test("parseRecoveryChoice: parses all valid keys case-insensitively", () => {
+  assert.deepEqual(parseRecoveryChoice("r"), { kind: "retry" });
+  assert.deepEqual(parseRecoveryChoice("R"), { kind: "retry" });
+  assert.deepEqual(parseRecoveryChoice("h"), { kind: "halt" });
+  assert.deepEqual(parseRecoveryChoice("H"), { kind: "halt" });
+  assert.deepEqual(parseRecoveryChoice("e"), { kind: "edit" });
+  assert.deepEqual(parseRecoveryChoice("E"), { kind: "edit" });
+  assert.deepEqual(parseRecoveryChoice("?"), { kind: "halt" });
+  assert.deepEqual(parseRecoveryChoice(""), { kind: "halt" });
 });
 
 // launchSessionPickerDialog is now fully implemented in its own module

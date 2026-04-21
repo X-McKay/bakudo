@@ -1,4 +1,5 @@
 import type { TranscriptItem } from "./renderModel.js";
+import type { Objective } from "./orchestration/objectiveState.js";
 
 export type HostScreen = "transcript" | "sessions" | "inspect" | "help";
 
@@ -40,6 +41,7 @@ export type InspectTab =
 export type PromptKind =
   | "approval"
   | "approval_prompt"
+  | "recovery_dialog"
   | "resume_confirm"
   | "command_palette"
   | "session_picker"
@@ -128,6 +130,16 @@ export type SessionPickerPayload = {
 };
 
 /**
+ * Payload for the `recovery_dialog` overlay — shown when an attempt fails
+ * and the host needs the user to choose between retry / halt / edit.
+ */
+export type RecoveryDialogPayload = {
+  sessionId: string;
+  turnId: string;
+  reason: string;
+};
+
+/**
  * Derived overlay view used by renderers. Always projected from `promptQueue[0]`.
  */
 export type HostOverlay =
@@ -135,6 +147,7 @@ export type HostOverlay =
   | { kind: "session_picker"; request: SessionPickerPayload }
   | { kind: "approval"; message: string }
   | { kind: "approval_prompt"; request: ApprovalPromptRequest; cursorIndex: number }
+  | { kind: "recovery_dialog"; payload: RecoveryDialogPayload }
   | { kind: "resume_confirm"; message: string }
   | { kind: "timeline_picker" }
   | { kind: "quick_help"; context: QuickHelpContext; dialogKind?: string };
@@ -157,6 +170,57 @@ export type InspectState = {
   scrollHeight: number;
 };
 
+/**
+ * Live state for the Cognitive Meta-Orchestrator pipeline.
+ * Updated by `OrchestratorDriver` as campaigns advance.
+ *
+ * This slice is entirely owned by the `orchestrator_*` and `toggle_sidebar`
+ * reducer actions — no other code should mutate it directly.
+ */
+/**
+ * A single entry in the orchestrator's session memory. Records the goal and
+ * outcome of each objective so the narrator can refer back to prior work.
+ */
+export type ObjectiveMemoryEntry = {
+  objectiveId: string;
+  goal: string;
+  status: "completed" | "failed" | "stopped";
+  /** ISO timestamp when the objective finished. */
+  finishedAt: string;
+  /** Number of campaigns that succeeded. */
+  succeededCampaigns: number;
+  /** Total number of campaigns. */
+  totalCampaigns: number;
+  /** Final verdict one-liner, if any. */
+  verdict: string | undefined;
+};
+
+export type OrchestratorSlice = {
+  /** All objectives submitted in this session, newest first. */
+  objectives: Objective[];
+  /** Whether the collapsible sidebar is currently visible. */
+  sidebarVisible: boolean;
+  /** The objectiveId currently being driven by OrchestratorDriver (undefined when idle). */
+  activeCampaignId: string | undefined;
+  /** Whether the git write mutex is currently held by an agent. */
+  gitMutexLocked: boolean;
+  /** One-liner from the most recent Critic or Synthesizer verdict. */
+  lastVerdict: string | undefined;
+  /**
+   * Session memory: a log of completed/failed objectives for this shell
+   * session. Used by the ConversationalNarrator to answer follow-up questions
+   * like "what did you do earlier?" without re-reading the full transcript.
+   * Capped at 20 entries (oldest dropped first).
+   */
+  sessionMemory: ObjectiveMemoryEntry[];
+  /**
+   * When set, the orchestrator is waiting for the user to answer a clarifying
+   * question before decomposing the pending goal. The goal is stored here so
+   * `runTurn` can resume it once the answer arrives.
+   */
+  pendingClarification: { goal: string; question: string } | undefined;
+};
+
 export type HostAppState = {
   screen: HostScreen;
   composer: {
@@ -177,6 +241,8 @@ export type HostAppState = {
   pendingSubmit?: PendingSubmit;
   shouldExit?: ShouldExit;
   submitSeq: number;
+  /** Cognitive Meta-Orchestrator live state — owned by orchestrator_* actions. */
+  orchestrator: OrchestratorSlice;
   /**
    * Cursor index for the approval prompt's [1]/[2]/[3]/[4] option list.
    * Shift+Tab cycles through the options (see `reducer` actions
@@ -216,5 +282,14 @@ export const initialHostAppState = (): HostAppState => ({
   transcript: [],
   dispatch: { inFlight: false },
   submitSeq: 0,
+  orchestrator: {
+    objectives: [],
+    sidebarVisible: false,
+    activeCampaignId: undefined,
+    gitMutexLocked: false,
+    lastVerdict: undefined,
+    sessionMemory: [],
+    pendingClarification: undefined,
+  },
   approvalDialogCursor: 0,
 });

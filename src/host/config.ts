@@ -109,6 +109,19 @@ export const BakudoConfigSchema = z.preprocess(
        * unknown `type` are stripped to `{ command }` only); the dispatcher
        * is the source of truth for runtime behaviour.
        */
+      /**
+       * Wave 1 Meta-Orchestrator — provider selection. `defaultProviderId`
+       * names the ProviderRegistry entry the planner uses when no per-session
+       * override is in effect. Defaults to `"codex"` to preserve existing
+       * behaviour. Users can override via `.bakudo/config.json`:
+       *   `{ "provider": { "defaultProviderId": "claude-code" } }`
+       */
+      provider: z
+        .object({
+          defaultProviderId: z.string().optional(),
+        })
+        .strip()
+        .optional(),
       hooks: z
         .object({
           sessionStart: z
@@ -182,6 +195,7 @@ export const BakudoConfigDefaults: Required<BakudoConfig> = {
   envPolicy: undefined,
   redaction: undefined,
   hooks: undefined,
+  provider: undefined,
 };
 
 /**

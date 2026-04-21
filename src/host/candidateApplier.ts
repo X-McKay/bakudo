@@ -664,13 +664,12 @@ const resolveTextConflict = async (args: {
     workspaceRoot: args.workspaceRoot,
     prompt: prompt.prompt,
     instructions: prompt.instructions,
-    permissionRules: args.originalSpec.permissions.rules,
-    agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+     permissionRules: args.originalSpec.permissions.rules,
+    providerId: "codex", // Wave 1: use registered provider ID
     timeoutSeconds: args.originalSpec.budget.timeoutSeconds,
     maxOutputBytes: args.originalSpec.budget.maxOutputBytes,
     heartbeatIntervalMs: args.originalSpec.budget.heartbeatIntervalMs,
   });
-
   const artifacts: string[] = [];
   artifacts.push(
     await writeApplyJsonArtifact(
@@ -891,7 +890,7 @@ const verifyApplyWorkspace = async (args: {
     ...(firstCommand === undefined ? {} : { command: firstCommand }),
     acceptanceChecks: checks,
     permissionRules: args.originalSpec.permissions.rules,
-    agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+    providerId: "codex", // Wave 1: use registered provider ID
     timeoutSeconds: args.originalSpec.budget.timeoutSeconds,
     maxOutputBytes: args.originalSpec.budget.maxOutputBytes,
     heartbeatIntervalMs: args.originalSpec.budget.heartbeatIntervalMs,

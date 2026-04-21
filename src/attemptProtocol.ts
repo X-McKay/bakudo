@@ -96,9 +96,31 @@ export type AttemptSpec = {
 };
 
 export type ExecutionProfile = {
-  agentBackend: string;
+  /**
+   * Wave 1: Registered provider ID (e.g. `"claude-code"`, `"codex"`).
+   * Must be a key registered in the {@link providerRegistry}.
+   */
+  providerId: string;
+  /**
+   * The resolved command array for the provider. Set by the host layer
+   * (via {@link providerRegistry}) before the profile is serialised and
+   * sent into the abox sandbox. The worker uses this directly so it does
+   * not need to import or bundle the registry.
+   */
+  resolvedCommand: string[];
   sandboxLifecycle: "preserved" | "ephemeral";
   candidatePolicy: "auto_apply" | "manual_apply" | "discard";
+  /**
+   * abox v0.3.0: Memory allocation in MiB for the sandbox VM.
+   * Overrides the abox config default when set.
+   * Sourced from {@link ResourceBudget} role definitions.
+   */
+  memoryMiB?: number;
+  /**
+   * abox v0.3.0: Number of vCPUs for the sandbox VM.
+   * Overrides the abox config default when set.
+   */
+  cpus?: number;
 };
 
 export type DispatchPlan = {
@@ -115,7 +137,16 @@ export type BatchSpec = {
   candidates: DispatchPlan[];
 };
 
-export type CandidateSet = BatchSpec;
+/**
+ * Wave 3: CandidateSet extends BatchSpec with Objective/Campaign tracking
+ * fields so it survives serialisation through the Daemon Gateway.
+ */
+export type CandidateSet = BatchSpec & {
+  /** Wave 3: ID of the parent Objective this set belongs to. */
+  objectiveId?: string;
+  /** Wave 3: ID of the Campaign within the Objective. */
+  campaignId?: string;
+};
 
 export type CandidateSetResult = {
   batchId: string;
@@ -314,9 +345,19 @@ export const AttemptSpecSchema = z
 
 export const ExecutionProfileSchema = z
   .object({
-    agentBackend: z.string(),
+    /** Wave 1: registered provider ID. Must be a key in the providerRegistry. */
+    providerId: z.string(),
+    /**
+     * Resolved command array, set by the host before serialisation.
+     * The worker uses this directly; it does not import the registry.
+     */
+    resolvedCommand: z.array(z.string()),
     sandboxLifecycle: z.enum(["preserved", "ephemeral"]),
     candidatePolicy: z.enum(["auto_apply", "manual_apply", "discard"]),
+    /** abox v0.3.0: Memory allocation in MiB. Overrides config default. */
+    memoryMiB: z.number().int().positive().optional(),
+    /** abox v0.3.0: Number of vCPUs. Overrides config default. */
+    cpus: z.number().int().positive().optional(),
   })
   .strip();
 
@@ -363,7 +404,14 @@ export const BatchSpecSchema = z
   })
   .strip();
 
-export const CandidateSetSchema = BatchSpecSchema;
+/**
+ * Wave 3: CandidateSet schema extends BatchSpec with optional Objective/Campaign
+ * tracking fields for the Daemon Gateway state model.
+ */
+export const CandidateSetSchema = BatchSpecSchema.extend({
+  objectiveId: z.string().optional(),
+  campaignId: z.string().optional(),
+});
 
 export const CandidateSetResultSchema = z
   .object({

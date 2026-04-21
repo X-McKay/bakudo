@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { ABoxAdapter } from "./aboxAdapter.js";
 import type { AttemptSpec, ExecutionProfile } from "./attemptProtocol.js";
 import { DEFAULT_ENV_POLICY, filterEnv, type EnvPolicy } from "./host/envPolicy.js";
+import { providerRegistry } from "./host/providerRegistry.js";
 import { buildAboxShellCommandArgs, generateSandboxTaskId } from "./host/sandboxLifecycle.js";
 import {
   getCachedWorkerCapabilities,
@@ -47,8 +48,41 @@ type WorkerModuleSources = {
   workerCheckRunnerJs: string;
 };
 
+/**
+ * Resolve an ExecutionProfile against the provider registry.
+ *
+ * - Fills in `resolvedCommand` from the registry if it is missing or empty.
+ * - Fills in `memoryMiB` and `cpus` from the registry spec if not already set
+ *   on the profile. These are forwarded to `abox run --memory` / `--cpus`
+ *   (abox v0.3.0 resource-constraint flags).
+ *
+ * This is the single host-side resolution point — the worker never imports
+ * the registry.
+ */
+const resolveProfileCommand = (profile: ExecutionProfile): ExecutionProfile => {
+  const provider = providerRegistry.get(profile.providerId);
+  const resolved: ExecutionProfile = {
+    ...profile,
+    resolvedCommand:
+      profile.resolvedCommand && profile.resolvedCommand.length > 0
+        ? profile.resolvedCommand
+        : provider.command,
+  };
+  // Inject resource constraints from the registry only when the caller has not
+  // already set them explicitly (caller-supplied values take precedence).
+  if (resolved.memoryMiB === undefined && provider.memoryMiB !== undefined) {
+    resolved.memoryMiB = provider.memoryMiB;
+  }
+  if (resolved.cpus === undefined && provider.cpus !== undefined) {
+    resolved.cpus = provider.cpus;
+  }
+  return resolved;
+};
+
 const DEFAULT_WORKER_EXECUTION_PROFILE: ExecutionProfile = {
-  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  // Wave 1: Use registered provider ID instead of raw command string.
+  providerId: "codex",
+  resolvedCommand: providerRegistry.get("codex").command,
   sandboxLifecycle: "ephemeral",
   candidatePolicy: "discard",
 };
@@ -374,7 +408,7 @@ export class ABoxTaskRunner {
     handlers: TaskRunnerHandlers = {},
     executionProfile?: ExecutionProfile,
   ): Promise<TaskExecutionRecord> {
-    const profile = executionProfile ?? DEFAULT_WORKER_EXECUTION_PROFILE;
+    const profile = resolveProfileCommand(executionProfile ?? DEFAULT_WORKER_EXECUTION_PROFILE);
     const command = await buildWorkerLaunchCommand(spec, overrides, profile);
     const timeoutSeconds = (overrides.timeoutSeconds ?? inputTimeoutSeconds(spec) ?? 120) + 20;
     // Phase 6 W5 — route the host env through the allowlist BEFORE building

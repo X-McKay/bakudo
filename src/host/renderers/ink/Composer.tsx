@@ -1,6 +1,6 @@
 import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import type { CommandPaletteRequest, SessionPickerPayload } from "../../appState.js";
+import type { CommandPaletteRequest, RecoveryDialogPayload, SessionPickerPayload } from "../../appState.js";
 import { matchesFuzzy } from "../../fuzzyFilter.js";
 import { answerPrompt, cancelPrompt } from "../../promptResolvers.js";
 import { useAppState } from "./hooks/useAppState.js";
@@ -148,6 +148,26 @@ export const Composer = () => {
         return;
       }
 
+      if (headPrompt.kind === "recovery_dialog") {
+        // [r] retry  [h] halt  [e] edit  — Esc is handled above by cancelPrompt
+        const _payload = headPrompt.payload as RecoveryDialogPayload;
+        void _payload;
+        if (input.toLowerCase() === "r") {
+          answerPrompt(headPrompt.id, "retry");
+          return;
+        }
+        if (input.toLowerCase() === "h") {
+          answerPrompt(headPrompt.id, "halt");
+          return;
+        }
+        if (input.toLowerCase() === "e") {
+          answerPrompt(headPrompt.id, "edit");
+          return;
+        }
+        // Swallow all other keys while the recovery dialog is active.
+        return;
+      }
+
       if (key.return) {
         answerPrompt(headPrompt.id, bufferRef.current.trim());
         updateBuffer("");
@@ -166,6 +186,12 @@ export const Composer = () => {
 
     // Disable text entry while a dispatch is in flight and no prompt is active.
     if (dispatch.inFlight) return;
+
+    // [Tab] (no modifier) toggles the sidebar when the buffer is empty and idle.
+    if (input === "\t" && !key.shift && bufferRef.current.length === 0) {
+      store.dispatch({ type: "toggle_sidebar" });
+      return;
+    }
 
     if (key.return) {
       const text = bufferRef.current.trim();

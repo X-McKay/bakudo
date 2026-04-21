@@ -194,3 +194,143 @@ test("Composer: session picker input filters and Enter resolves the selected ses
     resetPromptResolvers();
   }
 });
+
+// ─── recovery_dialog keybinding tests ────────────────────────────────────────
+
+test("Composer: recovery_dialog [r] resolves with 'retry'", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("recovery-1");
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "recovery-1",
+        kind: "recovery_dialog",
+        payload: { sessionId: "s1", turnId: "t1", reason: "chaos monkey rejected" },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    stdin.write("r");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "retry" });
+  } finally {
+    resetPromptResolvers();
+  }
+});
+
+test("Composer: recovery_dialog [h] resolves with 'halt'", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("recovery-2");
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "recovery-2",
+        kind: "recovery_dialog",
+        payload: { sessionId: "s1", turnId: "t1", reason: "worker timed out" },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    stdin.write("h");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "halt" });
+  } finally {
+    resetPromptResolvers();
+  }
+});
+
+test("Composer: recovery_dialog [e] resolves with 'edit'", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("recovery-3");
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "recovery-3",
+        kind: "recovery_dialog",
+        payload: { sessionId: "s1", turnId: "t1", reason: "plan rejected" },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    stdin.write("e");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "edit" });
+  } finally {
+    resetPromptResolvers();
+  }
+});
+
+test("Composer: recovery_dialog swallows unrecognised keys without resolving", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("recovery-4");
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "recovery-4",
+        kind: "recovery_dialog",
+        payload: { sessionId: "s1", turnId: "t1", reason: "plan rejected" },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    // Type unrecognised keys — they should NOT resolve the prompt.
+    stdin.write("x");
+    stdin.write("y");
+    stdin.write("z");
+    await new Promise((r) => setTimeout(r, 20));
+    // Prompt must still be in the queue.
+    assert.equal(store.getSnapshot().promptQueue.length, 1);
+    // Resolve properly.
+    stdin.write("h");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "halt" });
+  } finally {
+    resetPromptResolvers();
+  }
+});
+
+test("Composer: recovery_dialog uppercase [R] also resolves with 'retry'", async () => {
+  resetPromptResolvers();
+  try {
+    const store = createHostStore(reduceHost, initialHostAppState());
+    const pending = awaitPrompt("recovery-5");
+    store.dispatch({
+      type: "enqueue_prompt",
+      prompt: {
+        id: "recovery-5",
+        kind: "recovery_dialog",
+        payload: { sessionId: "s1", turnId: "t1", reason: "chaos monkey rejected" },
+      },
+    });
+    const { stdin } = render(
+      <StoreProvider store={store}>
+        <Composer />
+      </StoreProvider>,
+    );
+    stdin.write("R");
+    const resolution = await pending;
+    assert.deepEqual(resolution, { kind: "answered", value: "retry" });
+  } finally {
+    resetPromptResolvers();
+  }
+});

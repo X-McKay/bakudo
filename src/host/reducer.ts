@@ -9,6 +9,7 @@ import {
   type QuickHelpContext,
   type SessionPickerPayload,
 } from "./appState.js";
+import type { Objective } from "./orchestration/objectiveState.js";
 import { matchesFuzzy } from "./fuzzyFilter.js";
 import {
   cycleApprovalCursor,
@@ -83,7 +84,39 @@ export type HostAction =
       provider?: string;
     }
   // Temporary bridge for DialogDispatcher; remove once launchers dispatch actions directly.
-  | { type: "replace_state"; state: HostAppState };
+  | { type: "replace_state"; state: HostAppState }
+  // ---------------------------------------------------------------------------
+  // Cognitive Meta-Orchestrator actions
+  // ---------------------------------------------------------------------------
+  /** OrchestratorDriver calls this when a new Objective is created. */
+  | { type: "orchestrator_start"; objective: Objective }
+  /** OrchestratorDriver calls this after each advance() to stream campaign progress. */
+  | { type: "orchestrator_objective_update"; objective: Objective }
+  /** OrchestratorDriver calls this when the Objective reaches completed/failed. */
+  | { type: "orchestrator_complete"; objectiveId: string }
+  /** OrchestratorDriver calls this on unrecoverable error. */
+  | { type: "orchestrator_failed"; objectiveId: string; reason: string }
+  /** OrchestratorDriver calls this to update the git mutex indicator. */
+  | { type: "orchestrator_git_mutex"; locked: boolean }
+  /** OrchestratorDriver calls this to surface a Critic/Synthesizer verdict. */
+  | { type: "orchestrator_verdict"; verdict: string }
+  /** Composer Tab key toggles the sidebar. */
+  | { type: "toggle_sidebar" }
+  /** Record a completed/failed objective into session memory (capped at 20). */
+  | {
+      type: "orchestrator_memory_record";
+      entry: import("./appState.js").ObjectiveMemoryEntry;
+    }
+  /**
+   * ConversationalNarrator has emitted a clarifying question and is waiting
+   * for the user's answer before decomposing `goal`.
+   */
+  | { type: "orchestrator_clarification_pending"; goal: string; question: string }
+  /**
+   * The user has answered the clarifying question. Clear the pending state so
+   * `runTurn` can proceed with the original goal.
+   */
+  | { type: "orchestrator_clarification_resolved" };
 
 const withoutOptional = <T extends object, K extends keyof T>(obj: T, key: K): T => {
   if (!(key in obj)) {
@@ -521,5 +554,107 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
     // Temporary bridge for DialogDispatcher; remove once launchers dispatch actions directly.
     case "replace_state":
       return action.state;
+    // ---------------------------------------------------------------------------
+    // Cognitive Meta-Orchestrator reducer cases
+    // ---------------------------------------------------------------------------
+    case "orchestrator_start": {
+      const existing = state.orchestrator.objectives.find(
+        (o) => o.objectiveId === action.objective.objectiveId,
+      );
+      if (existing !== undefined) {
+        return state;
+      }
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          objectives: [action.objective, ...state.orchestrator.objectives],
+          activeCampaignId: action.objective.objectiveId,
+        },
+      };
+    }
+    case "orchestrator_objective_update": {
+      const nextObjectives = state.orchestrator.objectives.map((o) =>
+        o.objectiveId === action.objective.objectiveId ? action.objective : o,
+      );
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          objectives: nextObjectives,
+        },
+      };
+    }
+    case "orchestrator_complete": {
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          activeCampaignId:
+            state.orchestrator.activeCampaignId === action.objectiveId
+              ? undefined
+              : state.orchestrator.activeCampaignId,
+        },
+      };
+    }
+    case "orchestrator_failed": {
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          activeCampaignId:
+            state.orchestrator.activeCampaignId === action.objectiveId
+              ? undefined
+              : state.orchestrator.activeCampaignId,
+        },
+      };
+    }
+    case "orchestrator_git_mutex": {
+      return {
+        ...state,
+        orchestrator: { ...state.orchestrator, gitMutexLocked: action.locked },
+      };
+    }
+    case "orchestrator_verdict": {
+      return {
+        ...state,
+        orchestrator: { ...state.orchestrator, lastVerdict: action.verdict },
+      };
+    }
+    case "toggle_sidebar": {
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          sidebarVisible: !state.orchestrator.sidebarVisible,
+        },
+      };
+    }
+    case "orchestrator_memory_record": {
+      const MAX_MEMORY = 20;
+      const next = [action.entry, ...state.orchestrator.sessionMemory].slice(0, MAX_MEMORY);
+      return {
+        ...state,
+        orchestrator: { ...state.orchestrator, sessionMemory: next },
+      };
+    }
+    case "orchestrator_clarification_pending": {
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          pendingClarification: { goal: action.goal, question: action.question },
+        },
+      };
+    }
+    case "orchestrator_clarification_resolved": {
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          pendingClarification: undefined,
+        },
+      };
+    }
   }
 };

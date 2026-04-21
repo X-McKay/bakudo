@@ -29,7 +29,8 @@ const createMockChildProcess = (): MockChildProcess => {
 };
 
 const EPHEMERAL_PROFILE = {
-  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  providerId: "codex",
+  resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
   sandboxLifecycle: "ephemeral" as const,
   candidatePolicy: "discard" as const,
 };

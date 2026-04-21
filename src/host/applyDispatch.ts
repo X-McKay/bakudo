@@ -5,6 +5,7 @@ import type {
   DispatchPlan,
   PermissionRule,
 } from "../attemptProtocol.js";
+import { providerRegistry } from "./providerRegistry.js";
 
 export type ApplyDispatchKind = Extract<AttemptTaskKind, "apply_verify" | "apply_resolve">;
 
@@ -21,7 +22,8 @@ export type BuildApplyDispatchInput = {
   command?: string[];
   acceptanceChecks?: AcceptanceCheck[];
   permissionRules?: PermissionRule[];
-  agentBackend?: string;
+  /** Wave 1: registered provider ID. Defaults to "codex" if omitted. */
+  providerId?: string;
   timeoutSeconds?: number;
   maxOutputBytes?: number;
   heartbeatIntervalMs?: number;
@@ -60,11 +62,16 @@ export const buildApplyDispatchPlan = (input: BuildApplyDispatchInput): Dispatch
     acceptanceChecks: input.acceptanceChecks ?? [],
     artifactRequests: [{ name: "result.json", kind: "result", required: true }],
   };
+
+  const providerId = input.providerId ?? "codex";
+  const provider = providerRegistry.get(providerId);
+
   return {
     schemaVersion: 1,
     candidateId: input.attemptId,
     profile: {
-      agentBackend: input.agentBackend ?? "codex exec --dangerously-bypass-approvals-and-sandbox",
+      providerId,
+      resolvedCommand: provider.command,
       sandboxLifecycle: "ephemeral",
       candidatePolicy: "discard",
     },

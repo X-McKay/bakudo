@@ -34,12 +34,45 @@ test("Footer: shows /-commands + ? + Ctrl+C hints in idle state", () => {
   assert.match(frame, /\[Ctrl\+C\] exit/);
 });
 
-test("Footer: shows context placeholder", () => {
+test("Footer: shows em-dash when no provider is set", () => {
   const store = createHostStore(reduceHost, initialHostAppState());
   const { lastFrame } = render(
     <StoreProvider store={store}>
       <Footer />
     </StoreProvider>,
   );
-  assert.match(lastFrame() ?? "", /context —%/);
+  // composer.provider is "" in the initial state, so the footer shows an em-dash.
+  assert.match(lastFrame() ?? "", /—/);
+});
+
+test("Footer: shows provider ID when composer.provider is set", () => {
+  const store = createHostStore(reduceHost, initialHostAppState());
+  store.dispatch({ type: "set_composer_metadata", provider: "claude-code" });
+  const { lastFrame } = render(
+    <StoreProvider store={store}>
+      <Footer />
+    </StoreProvider>,
+  );
+  assert.match(lastFrame() ?? "", /claude-code/);
+});
+
+test("Footer: shows recovery_dialog hints when overlay is active", () => {
+  const store = createHostStore(reduceHost, initialHostAppState());
+  store.dispatch({
+    type: "enqueue_prompt",
+    prompt: {
+      id: "p-1",
+      kind: "recovery_dialog",
+      payload: { sessionId: "s1", turnId: "t1", reason: "chaos monkey rejected" },
+    },
+  });
+  const { lastFrame } = render(
+    <StoreProvider store={store}>
+      <Footer />
+    </StoreProvider>,
+  );
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /\[r\] retry/);
+  assert.match(frame, /\[h\] halt/);
+  assert.match(frame, /\[e\] edit/);
 });

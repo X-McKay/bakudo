@@ -9,7 +9,8 @@ import { buildAboxShellCommandArgs } from "../../src/host/sandboxLifecycle.js";
 import { DEFAULT_ENV_POLICY, filterEnv } from "../../src/host/envPolicy.js";
 
 const EPHEMERAL_PROFILE = {
-  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  providerId: "codex",
+  resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
   sandboxLifecycle: "ephemeral" as const,
   candidatePolicy: "discard" as const,
 };
