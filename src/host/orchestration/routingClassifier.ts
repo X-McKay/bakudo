@@ -1,143 +1,97 @@
 /**
  * Routing Classifier
  *
- * Decides whether a user's natural-language input should be routed through
- * the Cognitive Meta-Orchestrator pipeline (complex goal → ObjectiveController)
- * or the existing single-shot SessionController path (simple request).
+ * Classifies a user's natural-language input into one of four routing
+ * categories by sending a `classify` task to the persistent
+ * `MacroOrchestrationSession`. There are no regex patterns, no keyword lists,
+ * and no heuristic fallbacks — the model is the sole decision-maker.
  *
- * Classification is intentionally heuristic — no LLM call, no latency.
- * The goal is to route correctly for the common cases:
+ * Four categories:
  *
- * Simple (SessionController path):
- *   - Slash commands (`/version`, `/help`, etc.)
- *   - Very short queries (< 60 chars) with no multi-step keywords
- *   - Questions ("what is", "how do", "explain", "show me")
- *   - Single-file lookups ("read", "open", "cat", "print")
+ * `simple`           — Single-shot SessionController path (questions, lookups,
+ *                      slash commands, short factual requests).
  *
- * Complex (ObjectiveController / meta-orchestrator path):
- *   - Multi-step engineering goals ("refactor", "implement", "migrate")
- *   - Tasks that imply parallel work ("add tests for", "redesign", "rewrite")
- *   - Goals with conjunctions ("and then", "also", "as well as")
- *   - Long inputs (≥ 60 chars) that don't match the simple-question pattern
+ * `complex`          — Meta-orchestrator path (multi-step engineering goals
+ *                      that require decomposition into campaigns).
+ *                      Routes to OrchestratorDriver → ObjectiveController.
+ *
+ * `status_query`     — Conversational status check about an in-progress or
+ *                      completed objective ("how are things going?", "what's
+ *                      the status?"). Answered by the ConversationalNarrator
+ *                      without starting new work.
+ *
+ * `steering_command` — Mid-run directive to modify the active objective
+ *                      ("skip campaign 2", "focus only on the auth module",
+ *                      "abort"). Only meaningful when an objective is running.
+ *
+ * The `MacroOrchestrationSession` is a persistent Claude Code / Codex process
+ * that lives for the duration of the bakudo interactive shell. It has full
+ * context of the conversation, so classification decisions can reference prior
+ * turns (e.g. "same reason as last time" is understood correctly).
+ *
+ * On session error, `classifyGoal` defaults to `"complex"` so goals are never
+ * silently dropped.
  */
 
-export type GoalComplexity = "simple" | "complex";
+import type { MacroOrchestrationSession } from "./macroOrchestrationSession.js";
 
 // ---------------------------------------------------------------------------
-// Keyword lists
+// Public types
 // ---------------------------------------------------------------------------
 
-/**
- * Keywords that strongly suggest a multi-step engineering goal.
- * Matched case-insensitively against the full input string.
- */
-const COMPLEX_KEYWORDS: readonly string[] = [
-  "refactor",
-  "implement",
-  "add tests",
-  "write tests",
-  "migrate",
-  "redesign",
-  "rewrite",
-  "create a",
-  "build a",
-  "build the",
-  "set up",
-  "set up a",
-  "integrate",
-  "update all",
-  "fix all",
-  "add support",
-  "add feature",
-  "add a feature",
-  "extract",
-  "decompose",
-  "split",
-  "consolidate",
-  "move all",
-  "rename all",
-  "delete all",
-  "remove all",
-];
-
-/**
- * Patterns that strongly suggest a simple question or lookup.
- * Matched case-insensitively against the trimmed input.
- */
-const SIMPLE_PATTERNS: readonly RegExp[] = [
-  /^what\s/i,
-  /^how\s/i,
-  /^why\s/i,
-  /^when\s/i,
-  /^where\s/i,
-  /^who\s/i,
-  /^explain\s/i,
-  /^show\s+me\s/i,
-  /^tell\s+me\s/i,
-  /^list\s/i,
-  /^print\s/i,
-  /^read\s/i,
-  /^open\s/i,
-  /^cat\s/i,
-  /^describe\s/i,
-  /^summarize\s/i,
-  /^check\s/i,
-  /^find\s/i,
-  /^search\s/i,
-  /^look\s+up\s/i,
-  /^is\s/i,
-  /^does\s/i,
-  /^can\s+you\s/i,
-  /^do\s+you\s/i,
-];
+export type GoalComplexity =
+  | "simple"
+  | "complex"
+  | "status_query"
+  | "steering_command";
 
 // ---------------------------------------------------------------------------
-// Classifier
+// Classification result schema
+// ---------------------------------------------------------------------------
+
+type ClassifyResult = {
+  classification: string;
+};
+
+const VALID_CATEGORIES = new Set<string>([
+  "simple",
+  "complex",
+  "status_query",
+  "steering_command",
+]);
+
+// ---------------------------------------------------------------------------
+// Public API
 // ---------------------------------------------------------------------------
 
 /**
- * Classify a user's natural-language goal as `"simple"` or `"complex"`.
+ * Classify a user's natural-language goal using the macro session.
  *
- * The classification drives routing in `runTurn()`:
- * - `"simple"` → existing `executePromptFromResolution` / SessionController path
- * - `"complex"` → `OrchestratorDriver` → ObjectiveController pipeline
+ * @param text               - The raw user input (trimmed).
+ * @param hasActiveObjective - Whether an objective is currently running.
+ * @param session            - The active `MacroOrchestrationSession`.
  *
- * @param text - The raw user input (already trimmed of leading/trailing whitespace).
+ * @returns The four-way classification. On session error, defaults to
+ *          `"complex"` so goals are never silently dropped.
  */
-export const classifyGoal = (text: string): GoalComplexity => {
-  const trimmed = text.trim();
-
-  // Slash commands are always simple (handled by the command registry).
-  if (trimmed.startsWith("/")) {
-    return "simple";
-  }
-
-  // Empty input is simple (no-op).
-  if (trimmed.length === 0) {
-    return "simple";
-  }
-
-  const lower = trimmed.toLowerCase();
-
-  // Check for simple-question patterns first — these override length.
-  for (const pattern of SIMPLE_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      return "simple";
+export const classifyGoal = async (
+  text: string,
+  hasActiveObjective: boolean,
+  session: MacroOrchestrationSession,
+): Promise<GoalComplexity> => {
+  try {
+    const result = await session.send<ClassifyResult>({
+      task: "classify",
+      payload: { text, hasActiveObjective },
+    });
+    const value = result.classification;
+    if (typeof value === "string" && VALID_CATEGORIES.has(value)) {
+      return value as GoalComplexity;
     }
-  }
-
-  // Check for complex-goal keywords.
-  for (const keyword of COMPLEX_KEYWORDS) {
-    if (lower.includes(keyword)) {
-      return "complex";
-    }
-  }
-
-  // Long inputs without a simple-question pattern are treated as complex.
-  if (trimmed.length >= 60) {
+    // Unrecognised value — default to complex.
+    return "complex";
+  } catch {
+    // Session unavailable — default to complex so the goal is not dropped.
     return "complex";
   }
-
-  // Default: short, no keywords → simple.
-  return "simple";
 };

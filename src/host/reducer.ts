@@ -101,7 +101,22 @@ export type HostAction =
   /** OrchestratorDriver calls this to surface a Critic/Synthesizer verdict. */
   | { type: "orchestrator_verdict"; verdict: string }
   /** Composer Tab key toggles the sidebar. */
-  | { type: "toggle_sidebar" };
+  | { type: "toggle_sidebar" }
+  /** Record a completed/failed objective into session memory (capped at 20). */
+  | {
+      type: "orchestrator_memory_record";
+      entry: import("./appState.js").ObjectiveMemoryEntry;
+    }
+  /**
+   * ConversationalNarrator has emitted a clarifying question and is waiting
+   * for the user's answer before decomposing `goal`.
+   */
+  | { type: "orchestrator_clarification_pending"; goal: string; question: string }
+  /**
+   * The user has answered the clarifying question. Clear the pending state so
+   * `runTurn` can proceed with the original goal.
+   */
+  | { type: "orchestrator_clarification_resolved" };
 
 const withoutOptional = <T extends object, K extends keyof T>(obj: T, key: K): T => {
   if (!(key in obj)) {
@@ -612,6 +627,32 @@ export const reduceHost = (state: HostAppState, action: HostAction): HostAppStat
         orchestrator: {
           ...state.orchestrator,
           sidebarVisible: !state.orchestrator.sidebarVisible,
+        },
+      };
+    }
+    case "orchestrator_memory_record": {
+      const MAX_MEMORY = 20;
+      const next = [action.entry, ...state.orchestrator.sessionMemory].slice(0, MAX_MEMORY);
+      return {
+        ...state,
+        orchestrator: { ...state.orchestrator, sessionMemory: next },
+      };
+    }
+    case "orchestrator_clarification_pending": {
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          pendingClarification: { goal: action.goal, question: action.question },
+        },
+      };
+    }
+    case "orchestrator_clarification_resolved": {
+      return {
+        ...state,
+        orchestrator: {
+          ...state.orchestrator,
+          pendingClarification: undefined,
         },
       };
     }

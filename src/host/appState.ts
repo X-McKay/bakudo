@@ -177,6 +177,24 @@ export type InspectState = {
  * This slice is entirely owned by the `orchestrator_*` and `toggle_sidebar`
  * reducer actions — no other code should mutate it directly.
  */
+/**
+ * A single entry in the orchestrator's session memory. Records the goal and
+ * outcome of each objective so the narrator can refer back to prior work.
+ */
+export type ObjectiveMemoryEntry = {
+  objectiveId: string;
+  goal: string;
+  status: "completed" | "failed" | "stopped";
+  /** ISO timestamp when the objective finished. */
+  finishedAt: string;
+  /** Number of campaigns that succeeded. */
+  succeededCampaigns: number;
+  /** Total number of campaigns. */
+  totalCampaigns: number;
+  /** Final verdict one-liner, if any. */
+  verdict: string | undefined;
+};
+
 export type OrchestratorSlice = {
   /** All objectives submitted in this session, newest first. */
   objectives: Objective[];
@@ -188,6 +206,19 @@ export type OrchestratorSlice = {
   gitMutexLocked: boolean;
   /** One-liner from the most recent Critic or Synthesizer verdict. */
   lastVerdict: string | undefined;
+  /**
+   * Session memory: a log of completed/failed objectives for this shell
+   * session. Used by the ConversationalNarrator to answer follow-up questions
+   * like "what did you do earlier?" without re-reading the full transcript.
+   * Capped at 20 entries (oldest dropped first).
+   */
+  sessionMemory: ObjectiveMemoryEntry[];
+  /**
+   * When set, the orchestrator is waiting for the user to answer a clarifying
+   * question before decomposing the pending goal. The goal is stored here so
+   * `runTurn` can resume it once the answer arrives.
+   */
+  pendingClarification: { goal: string; question: string } | undefined;
 };
 
 export type HostAppState = {
@@ -257,6 +288,8 @@ export const initialHostAppState = (): HostAppState => ({
     activeCampaignId: undefined,
     gitMutexLocked: false,
     lastVerdict: undefined,
+    sessionMemory: [],
+    pendingClarification: undefined,
   },
   approvalDialogCursor: 0,
 });

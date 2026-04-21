@@ -218,5 +218,129 @@ test("initialHostAppState: orchestrator slice has correct defaults", () => {
     activeCampaignId: undefined,
     gitMutexLocked: false,
     lastVerdict: undefined,
+    sessionMemory: [],
+    pendingClarification: undefined,
   });
+});
+
+// ---------------------------------------------------------------------------
+// orchestrator_memory_record
+// ---------------------------------------------------------------------------
+
+test("orchestrator_memory_record: prepends entry to sessionMemory", () => {
+  const state = initialHostAppState();
+  const entry = {
+    objectiveId: "obj-001",
+    goal: "refactor the reducer",
+    status: "completed" as const,
+    finishedAt: "2026-01-01T00:00:00.000Z",
+    succeededCampaigns: 2,
+    totalCampaigns: 2,
+    verdict: "all done",
+  };
+  const next = reduceHost(state, { type: "orchestrator_memory_record", entry });
+  assert.equal(next.orchestrator.sessionMemory.length, 1);
+  assert.deepEqual(next.orchestrator.sessionMemory[0], entry);
+});
+
+test("orchestrator_memory_record: newest entry is at index 0", () => {
+  const state = initialHostAppState();
+  const entry1 = {
+    objectiveId: "obj-001",
+    goal: "first goal",
+    status: "completed" as const,
+    finishedAt: "2026-01-01T00:00:00.000Z",
+    succeededCampaigns: 1,
+    totalCampaigns: 1,
+    verdict: undefined,
+  };
+  const entry2 = {
+    objectiveId: "obj-002",
+    goal: "second goal",
+    status: "failed" as const,
+    finishedAt: "2026-01-01T01:00:00.000Z",
+    succeededCampaigns: 0,
+    totalCampaigns: 1,
+    verdict: "all campaigns exhausted",
+  };
+  const s1 = reduceHost(state, { type: "orchestrator_memory_record", entry: entry1 });
+  const s2 = reduceHost(s1, { type: "orchestrator_memory_record", entry: entry2 });
+  assert.equal(s2.orchestrator.sessionMemory[0]!.objectiveId, "obj-002");
+  assert.equal(s2.orchestrator.sessionMemory[1]!.objectiveId, "obj-001");
+});
+
+test("orchestrator_memory_record: caps at 20 entries, dropping oldest", () => {
+  let state = initialHostAppState();
+  for (let i = 0; i < 22; i++) {
+    const entry = {
+      objectiveId: `obj-${String(i).padStart(3, "0")}`,
+      goal: `goal ${i}`,
+      status: "completed" as const,
+      finishedAt: new Date().toISOString(),
+      succeededCampaigns: 1,
+      totalCampaigns: 1,
+      verdict: undefined,
+    };
+    state = reduceHost(state, { type: "orchestrator_memory_record", entry });
+  }
+  assert.equal(state.orchestrator.sessionMemory.length, 20);
+  // Newest (obj-021) should be at index 0.
+  assert.equal(state.orchestrator.sessionMemory[0]!.objectiveId, "obj-021");
+});
+
+// ---------------------------------------------------------------------------
+// orchestrator_clarification_pending
+// ---------------------------------------------------------------------------
+
+test("orchestrator_clarification_pending: sets pendingClarification", () => {
+  const state = initialHostAppState();
+  assert.equal(state.orchestrator.pendingClarification, undefined);
+  const next = reduceHost(state, {
+    type: "orchestrator_clarification_pending",
+    goal: "refactor the auth module",
+    question: "Should I preserve the existing session tokens?",
+  });
+  assert.deepEqual(next.orchestrator.pendingClarification, {
+    goal: "refactor the auth module",
+    question: "Should I preserve the existing session tokens?",
+  });
+});
+
+test("orchestrator_clarification_pending: overwrites any existing pending clarification", () => {
+  const state = initialHostAppState();
+  const s1 = reduceHost(state, {
+    type: "orchestrator_clarification_pending",
+    goal: "first goal",
+    question: "first question",
+  });
+  const s2 = reduceHost(s1, {
+    type: "orchestrator_clarification_pending",
+    goal: "second goal",
+    question: "second question",
+  });
+  assert.equal(s2.orchestrator.pendingClarification!.goal, "second goal");
+});
+
+// ---------------------------------------------------------------------------
+// orchestrator_clarification_resolved
+// ---------------------------------------------------------------------------
+
+test("orchestrator_clarification_resolved: clears pendingClarification", () => {
+  const state = initialHostAppState();
+  const s1 = reduceHost(state, {
+    type: "orchestrator_clarification_pending",
+    goal: "refactor the auth module",
+    question: "Should I preserve the existing session tokens?",
+  });
+  assert.notEqual(s1.orchestrator.pendingClarification, undefined);
+  const s2 = reduceHost(s1, { type: "orchestrator_clarification_resolved" });
+  assert.equal(s2.orchestrator.pendingClarification, undefined);
+});
+
+test("orchestrator_clarification_resolved: is idempotent when already undefined", () => {
+  const state = initialHostAppState();
+  assert.equal(state.orchestrator.pendingClarification, undefined);
+  const next = reduceHost(state, { type: "orchestrator_clarification_resolved" });
+  // Should not throw and pendingClarification should remain undefined.
+  assert.equal(next.orchestrator.pendingClarification, undefined);
 });

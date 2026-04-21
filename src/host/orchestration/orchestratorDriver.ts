@@ -6,14 +6,19 @@
  * of the single-shot SessionController path.
  *
  * Responsibilities:
- * 1. Create an `Objective` and an `ObjectiveController`.
- * 2. Dispatch `orchestrator_start` so the Sidebar shows the new objective.
- * 3. Call `controller.advance()` in a loop until the objective is terminal.
- * 4. After each `advance()`, dispatch `orchestrator_objective_update` so the
+ * 1. Run a pre-flight clarification check via `ConversationalNarrator`.
+ * 2. Create an `Objective` and an `ObjectiveController`.
+ * 3. Dispatch `orchestrator_start` so the Sidebar shows the new objective.
+ * 4. Emit warm, first-person prose narration at key lifecycle moments.
+ * 5. Call `controller.advance()` in a loop until the objective is terminal.
+ * 6. After each `advance()`, dispatch `orchestrator_objective_update` so the
  *    Sidebar reflects the latest campaign tree.
- * 5. Stream human-readable progress events into the transcript.
- * 6. On completion, dispatch `orchestrator_complete` and push a ReviewCard.
- * 7. On failure, dispatch `orchestrator_failed` and push an error message.
+ * 7. Stream human-readable progress events into the transcript.
+ * 8. On completion, record the objective in session memory and emit narration.
+ * 9. On failure, record the objective in session memory and emit narration.
+ *
+ * Also exports `handleSteering()` for mid-run steering commands, and
+ * `handleStatusQuery()` which delegates to `ConversationalNarrator`.
  *
  * Git Mutex:
  * The caller (interactive.ts) constructs a single `Mutex` instance and passes
@@ -28,6 +33,18 @@ import type { ABoxTaskRunner } from "../../aboxTaskRunner.js";
 import type { HostStore } from "../store/index.js";
 import { ObjectiveController } from "./objectiveController.js";
 import { createObjective } from "./objectiveState.js";
+import type { Campaign } from "./objectiveState.js";
+import {
+  narrateObjectiveStart,
+  narrateDecomposition,
+  narrateCampaignComplete,
+  narrateCampaignFailed,
+  narrateObjectiveComplete,
+  narrateObjectiveFailed,
+  acknowledgeSteeringCommand,
+  answerStatusQuery,
+} from "./conversationalNarrator.js";
+import type { MacroOrchestrationSession } from "./macroOrchestrationSession.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,12 +107,47 @@ const campaignStatusIcon = (status: string): string => {
 };
 
 // ---------------------------------------------------------------------------
+// Status query handler (public — called from interactive.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Answer a status query ("how are things going?") by synthesising the current
+ * orchestrator state into a prose summary. Delegates to `answerStatusQuery`.
+ */
+export const handleStatusQuery = async (
+  store: HostStore,
+  session: MacroOrchestrationSession,
+): Promise<void> => {
+  await answerStatusQuery(store, session);
+};
+
+// ---------------------------------------------------------------------------
+// Steering command handler (public — called from interactive.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle a mid-run steering command ("skip campaign 2", "focus on auth", etc.).
+ *
+ * In the current implementation the steering command is acknowledged and
+ * recorded as a narration line. Full steering (actually cancelling or
+ * redirecting a running campaign) requires ObjectiveController support that
+ * is tracked as a P2 item. For now the acknowledgement ensures the user gets
+ * feedback and the command is visible in the transcript.
+ */
+export const handleSteering = (store: HostStore, command: string): void => {
+  acknowledgeSteeringCommand(store, command);
+  // Emit a structured event so it also appears in the sidebar's verdict area.
+  emitEvent(store, "steering", command);
+};
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
 /**
  * Drive an `ObjectiveController` to completion, streaming live progress into
- * the TUI store.
+ * the TUI store with warm, first-person prose narration at each lifecycle
+ * milestone.
  *
  * @param goal           - The user's natural-language goal string.
  * @param runner         - The shared `ABoxTaskRunner` for the session.
@@ -114,13 +166,17 @@ export const runObjectiveInTUI = async (
   // Register the new objective in the store so the Sidebar shows it.
   store.dispatch({ type: "orchestrator_start", objective });
 
-  // Announce to the transcript.
-  emitEvent(store, "orchestrator", `Starting meta-orchestrator for: ${goal}`);
+  // Emit warm, first-person opening narration.
+  narrateObjectiveStart(store, goal);
 
   const controller = new ObjectiveController(objective, runner, gitWriteMutex);
 
-  // Track the last-seen campaign count to detect when new campaigns appear.
+  // Track campaign state across advances to detect transitions.
   let lastCampaignCount = 0;
+  const campaignCompletedIds = new Set<string>();
+  const campaignFailedIds = new Set<string>();
+  let decompositionNarrated = false;
+
   let advanceCount = 0;
   const MAX_ADVANCES = 50; // safety cap — prevents infinite loops
 
@@ -142,7 +198,14 @@ export const runObjectiveInTUI = async (
       // Dispatch the updated objective so the Sidebar re-renders.
       store.dispatch({ type: "orchestrator_objective_update", objective: snap });
 
-      // Emit transcript events for newly-added campaigns.
+      // Narrate decomposition once, when campaigns first appear.
+      if (!decompositionNarrated && snap.campaigns.length > 0) {
+        decompositionNarrated = true;
+        narrateDecomposition(store, snap.campaigns);
+      }
+
+      // Emit transcript events for newly-added campaigns (raw event lines,
+      // complementing the prose narration above).
       if (snap.campaigns.length > lastCampaignCount) {
         const newCampaigns = snap.campaigns.slice(lastCampaignCount);
         for (const campaign of newCampaigns) {
@@ -155,20 +218,33 @@ export const runObjectiveInTUI = async (
         lastCampaignCount = snap.campaigns.length;
       }
 
-      // Emit status changes for existing campaigns.
+      // Emit prose narration and status changes for newly-completed/failed campaigns.
+      const remainingActive = snap.campaigns.filter(
+        (c) => c.status === "pending" || c.status === "running",
+      ).length;
+
       for (const campaign of snap.campaigns) {
-        if (campaign.status === "completed") {
+        if (campaign.status === "completed" && !campaignCompletedIds.has(campaign.campaignId)) {
+          campaignCompletedIds.add(campaign.campaignId);
+
           const verdict = campaign.synthesisRecord
             ? `Synthesizer: ${campaign.synthesisRecord.useCandidateId ?? "merged"}`
             : campaign.winnerCandidateId
               ? `Winner: ${campaign.winnerCandidateId}`
               : "completed";
+
           store.dispatch({ type: "orchestrator_verdict", verdict });
-          emitEvent(store, "success", `✓ [${campaign.campaignId}] ${verdict}`);
-        } else if (campaign.status === "failed") {
+
+          // Prose narration replaces the bare event line for completions.
+          narrateCampaignComplete(store, campaign, remainingActive);
+
+        } else if (campaign.status === "failed" && !campaignFailedIds.has(campaign.campaignId)) {
+          campaignFailedIds.add(campaign.campaignId);
+
           const verdict = `Campaign ${campaign.campaignId} failed`;
           store.dispatch({ type: "orchestrator_verdict", verdict });
-          emitEvent(store, "fail", `✗ [${campaign.campaignId}] failed — Critic/Curator notified`);
+
+          narrateCampaignFailed(store, campaign, remainingActive);
         }
       }
 
@@ -186,15 +262,36 @@ export const runObjectiveInTUI = async (
     if (finalSnap.status === "completed") {
       store.dispatch({ type: "orchestrator_complete", objectiveId });
 
-      const completedCount = finalSnap.campaigns.filter((c) => c.status === "completed").length;
-      const totalCount = finalSnap.campaigns.length;
+      // Prose narration for objective completion.
+      narrateObjectiveComplete(store, finalSnap);
 
+      // Record in session memory.
+      const succeededCampaigns = finalSnap.campaigns.filter(
+        (c: Campaign) => c.status === "completed",
+      ).length;
+      store.dispatch({
+        type: "orchestrator_memory_record",
+        entry: {
+          objectiveId,
+          goal,
+          status: "completed",
+          finishedAt: new Date().toISOString(),
+          succeededCampaigns,
+          totalCampaigns: finalSnap.campaigns.length,
+          verdict: store.getSnapshot().orchestrator.lastVerdict,
+        },
+      });
+
+      // Also emit a structured review card for the inspect screen.
+      const completedCount = succeededCampaigns;
+      const totalCount = finalSnap.campaigns.length;
       emitReview(
         store,
         "completed",
         `Objective complete — ${completedCount}/${totalCount} campaigns succeeded.`,
         completedCount < totalCount ? "Review failed campaigns in the sidebar." : undefined,
       );
+
     } else {
       const reason =
         finalSnap.status === "failed"
@@ -203,8 +300,28 @@ export const runObjectiveInTUI = async (
 
       store.dispatch({ type: "orchestrator_failed", objectiveId, reason });
 
+      // Prose narration for failure.
+      narrateObjectiveFailed(store, reason);
+
+      // Record in session memory.
+      store.dispatch({
+        type: "orchestrator_memory_record",
+        entry: {
+          objectiveId,
+          goal,
+          status: finalSnap.status === "failed" ? "failed" : "stopped",
+          finishedAt: new Date().toISOString(),
+          succeededCampaigns: finalSnap.campaigns.filter(
+            (c: Campaign) => c.status === "completed",
+          ).length,
+          totalCampaigns: finalSnap.campaigns.length,
+          verdict: reason,
+        },
+      });
+
       emitReview(store, "failed", reason, "Check the sidebar for per-campaign details.");
     }
+
   } catch (error) {
     store.dispatch({ type: "orchestrator_git_mutex", locked: false });
 
@@ -212,6 +329,21 @@ export const runObjectiveInTUI = async (
     const reason = `OrchestratorDriver error: ${message}`;
 
     store.dispatch({ type: "orchestrator_failed", objectiveId, reason });
+
+    narrateObjectiveFailed(store, reason);
+
+    store.dispatch({
+      type: "orchestrator_memory_record",
+      entry: {
+        objectiveId,
+        goal,
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        succeededCampaigns: 0,
+        totalCampaigns: 0,
+        verdict: reason,
+      },
+    });
 
     emitReview(store, "failed", reason, "Check logs for details.");
   }

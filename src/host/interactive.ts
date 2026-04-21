@@ -3,7 +3,17 @@ import { Mutex } from "async-mutex";
 import { ABoxAdapter } from "../aboxAdapter.js";
 import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { classifyGoal } from "./orchestration/routingClassifier.js";
-import { runObjectiveInTUI } from "./orchestration/orchestratorDriver.js";
+import {
+  runObjectiveInTUI,
+  handleStatusQuery,
+  handleSteering,
+} from "./orchestration/orchestratorDriver.js";
+import {
+  checkClarification,
+  emitClarification,
+} from "./orchestration/conversationalNarrator.js";
+import { MacroOrchestrationSession } from "./orchestration/macroOrchestrationSession.js";
+import { providerRegistry } from "./providerRegistry.js";
 import { createInterface } from "node:readline/promises";
 import { basename } from "node:path";
 
@@ -308,12 +318,18 @@ export const runInteractiveShell = async (): Promise<number> => {
   const aboxAdapter = new ABoxAdapter();
   const aboxRunner = new ABoxTaskRunner(aboxAdapter);
   const sessionGitMutex = new Mutex();
-
   // Wave 1: Seed the composer with the configured default provider so the
   // Footer displays it immediately, before the first planning pass resolves.
   const initialProviderId =
     configSnapshot.merged.provider?.defaultProviderId ?? "codex";
   store.dispatch({ type: "set_composer_metadata", provider: initialProviderId });
+  // Macro-orchestration session — a single persistent Claude Code / Codex
+  // process that handles all reasoning (classification, clarification,
+  // decomposition, steering, narration). Started here and torn down in the
+  // finally block below. Abox agents remain the sole execution layer.
+  const macroProvider = providerRegistry.get(initialProviderId);
+  const macroSession = new MacroOrchestrationSession({ provider: macroProvider });
+  macroSession.start();
 
   const transcriptFacade = buildTranscriptFacade(store);
 
@@ -422,12 +438,54 @@ export const runInteractiveShell = async (): Promise<number> => {
     }
 
     if (dispatched.kind === "fallthrough") {
-      // Classify the goal: complex goals go through the meta-orchestrator;
-      // simple goals go through the existing SessionController path.
-      const complexity = classifyGoal(line);
-      if (complexity === "complex") {
-        await runObjectiveInTUI(line, aboxRunner, store, sessionGitMutex);
+      const currentState = store.getSnapshot();
+      const hasActiveObjective = currentState.orchestrator.activeCampaignId !== undefined;
+
+      // --- Pending clarification resumption ---
+      // If the user just answered a clarifying question, resume the original goal.
+      if (currentState.orchestrator.pendingClarification !== undefined) {
+        const { goal: pendingGoal } = currentState.orchestrator.pendingClarification;
+        store.dispatch({ type: "orchestrator_clarification_resolved" });
+        // Append the user's answer as context, then run the original goal.
+        store.dispatch({
+          type: "append_assistant",
+          text: `Thanks — running "${pendingGoal}" with that in mind.`,
+          tone: "info",
+        });
+        await runObjectiveInTUI(pendingGoal, aboxRunner, store, sessionGitMutex);
+        await persistHostState();
+        return;
+      }
+
+      // --- Classify the goal via the macro session ---
+      const complexity = await classifyGoal(line, hasActiveObjective, macroSession);
+
+      if (complexity === "status_query") {
+        // Answer the status query with a prose summary — no new work started.
+        await handleStatusQuery(store, macroSession);
+
+      } else if (complexity === "steering_command") {
+        // Acknowledge the steering command and record it in the transcript.
+        handleSteering(store, line);
+
+      } else if (complexity === "complex") {
+        // Pre-flight clarification check via the macro session.
+        const clarification = await checkClarification(line, macroSession);
+        if (clarification.needsClarification) {
+          // Emit the clarifying question and park the goal.
+          emitClarification(store, clarification.question);
+          store.dispatch({
+            type: "orchestrator_clarification_pending",
+            goal: line,
+            question: clarification.question,
+          });
+        } else {
+          // Goal is clear — run it through the meta-orchestrator.
+          await runObjectiveInTUI(line, aboxRunner, store, sessionGitMutex);
+        }
+
       } else {
+        // Simple goal — existing SessionController path.
         await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
       }
     }
@@ -503,5 +561,7 @@ export const runInteractiveShell = async (): Promise<number> => {
     uninstallSignals();
     unregisterBackendCleanup();
     backend.dispose?.();
+    // Tear down the macro-orchestration session cleanly.
+    macroSession.dispose();
   }
 };

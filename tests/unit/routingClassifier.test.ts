@@ -1,181 +1,149 @@
-import test from "node:test";
+/**
+ * Unit tests for RoutingClassifier.
+ *
+ * Since `classifyGoal` now delegates to a `MacroOrchestrationSession`, all
+ * tests use a `MockMacroSession` that returns a pre-configured classification
+ * without spawning a real process. This keeps tests fast, deterministic, and
+ * isolated from the LLM.
+ *
+ * The tests verify:
+ * 1. `classifyGoal` correctly returns whatever the session reports.
+ * 2. `classifyGoal` defaults to "complex" when the session throws.
+ * 3. `classifyGoal` defaults to "complex" when the session returns an
+ *    unrecognised classification value.
+ * 4. The `hasActiveObjective` flag and `text` are forwarded to the session.
+ * 5. The task type sent to the session is always "classify".
+ */
+
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyGoal } from "../../src/host/orchestration/routingClassifier.js";
+import {
+  classifyGoal,
+  type GoalComplexity,
+} from "../../src/host/orchestration/routingClassifier.js";
+import type { MacroOrchestrationSession } from "../../src/host/orchestration/macroOrchestrationSession.js";
+import type { MacroTask } from "../../src/host/orchestration/macroOrchestrationSession.js";
 
 // ---------------------------------------------------------------------------
-// Simple paths
+// Mock session factory
 // ---------------------------------------------------------------------------
 
-test("classifyGoal: empty string is simple", () => {
-  assert.equal(classifyGoal(""), "simple");
+type LastCall = { task: string; payload: Record<string, unknown> };
+
+/**
+ * Create a mock `MacroOrchestrationSession` that resolves `send()` with a
+ * pre-configured result. Captures the last call for assertion.
+ */
+const makeMockSession = (
+  classification: string,
+  shouldThrow = false,
+): { session: MacroOrchestrationSession; lastCall: () => LastCall | undefined } => {
+  let lastCall: LastCall | undefined;
+
+  const session = {
+    start() {},
+    dispose() {},
+    async send<T>(task: MacroTask): Promise<T> {
+      lastCall = {
+        task: task.task,
+        payload: task.payload as Record<string, unknown>,
+      };
+      if (shouldThrow) {
+        throw new Error("mock session error");
+      }
+      return { classification } as T;
+    },
+  } as unknown as MacroOrchestrationSession;
+
+  return { session, lastCall: () => lastCall };
+};
+
+// ---------------------------------------------------------------------------
+// Basic routing — session result is honoured
+// ---------------------------------------------------------------------------
+
+test("classifyGoal: returns 'simple' when session reports simple", async () => {
+  const { session } = makeMockSession("simple");
+  assert.equal(await classifyGoal("what is the current branch?", false, session), "simple");
 });
 
-test("classifyGoal: whitespace-only string is simple", () => {
-  assert.equal(classifyGoal("   "), "simple");
+test("classifyGoal: returns 'complex' when session reports complex", async () => {
+  const { session } = makeMockSession("complex");
+  assert.equal(await classifyGoal("refactor the entire session store", false, session), "complex");
 });
 
-test("classifyGoal: slash command is always simple", () => {
-  assert.equal(classifyGoal("/help"), "simple");
-  assert.equal(classifyGoal("/version"), "simple");
-  assert.equal(classifyGoal("/sessions"), "simple");
+test("classifyGoal: returns 'status_query' when session reports status_query", async () => {
+  const { session } = makeMockSession("status_query");
+  assert.equal(await classifyGoal("how are things going?", true, session), "status_query");
 });
 
-test("classifyGoal: short question starting with 'what' is simple", () => {
-  assert.equal(classifyGoal("what is the current branch?"), "simple");
-});
-
-test("classifyGoal: short question starting with 'how' is simple", () => {
-  assert.equal(classifyGoal("how do I run tests?"), "simple");
-});
-
-test("classifyGoal: short question starting with 'explain' is simple", () => {
-  assert.equal(classifyGoal("explain the reducer"), "simple");
-});
-
-test("classifyGoal: 'show me' prefix is simple", () => {
-  assert.equal(classifyGoal("show me the logs"), "simple");
-});
-
-test("classifyGoal: 'list' prefix is simple", () => {
-  assert.equal(classifyGoal("list all sessions"), "simple");
-});
-
-test("classifyGoal: 'find' prefix is simple", () => {
-  assert.equal(classifyGoal("find the config file"), "simple");
-});
-
-test("classifyGoal: 'check' prefix is simple", () => {
-  assert.equal(classifyGoal("check the build status"), "simple");
-});
-
-test("classifyGoal: 'read' prefix is simple", () => {
-  assert.equal(classifyGoal("read src/host/appState.ts"), "simple");
-});
-
-test("classifyGoal: 'open' prefix is simple", () => {
-  assert.equal(classifyGoal("open the README"), "simple");
-});
-
-test("classifyGoal: 'is' prefix is simple", () => {
-  assert.equal(classifyGoal("is the build passing?"), "simple");
-});
-
-test("classifyGoal: 'does' prefix is simple", () => {
-  assert.equal(classifyGoal("does the reducer handle toggle_sidebar?"), "simple");
-});
-
-test("classifyGoal: 'can you' prefix is simple", () => {
-  assert.equal(classifyGoal("can you show me the diff?"), "simple");
-});
-
-test("classifyGoal: 'summarize' prefix is simple", () => {
-  assert.equal(classifyGoal("summarize the last session"), "simple");
+test("classifyGoal: returns 'steering_command' when session reports steering_command", async () => {
+  const { session } = makeMockSession("steering_command");
+  assert.equal(await classifyGoal("skip campaign 2", true, session), "steering_command");
 });
 
 // ---------------------------------------------------------------------------
-// Complex paths — keyword triggers
+// Error handling — safe defaults
 // ---------------------------------------------------------------------------
 
-test("classifyGoal: 'refactor' keyword is complex", () => {
-  assert.equal(classifyGoal("refactor the reducer into smaller files"), "complex");
+test("classifyGoal: defaults to 'complex' when session throws", async () => {
+  const { session } = makeMockSession("simple", true /* shouldThrow */);
+  assert.equal(await classifyGoal("do something", false, session), "complex");
 });
 
-test("classifyGoal: 'implement' keyword is complex", () => {
-  assert.equal(classifyGoal("implement the new approval dialog"), "complex");
+test("classifyGoal: defaults to 'complex' when session returns unrecognised value", async () => {
+  const { session } = makeMockSession("unknown_category");
+  assert.equal(await classifyGoal("do something", false, session), "complex");
 });
 
-test("classifyGoal: 'add tests' keyword is complex", () => {
-  assert.equal(classifyGoal("add tests for the routing classifier"), "complex");
-});
-
-test("classifyGoal: 'write tests' keyword is complex", () => {
-  assert.equal(classifyGoal("write tests for all orchestration modules"), "complex");
-});
-
-test("classifyGoal: 'migrate' keyword is complex", () => {
-  assert.equal(classifyGoal("migrate the session store to the new schema"), "complex");
-});
-
-test("classifyGoal: 'redesign' keyword is complex", () => {
-  assert.equal(classifyGoal("redesign the sidebar layout"), "complex");
-});
-
-test("classifyGoal: 'rewrite' keyword is complex", () => {
-  assert.equal(classifyGoal("rewrite the planner module"), "complex");
-});
-
-test("classifyGoal: 'create a' keyword is complex", () => {
-  assert.equal(classifyGoal("create a new command for the registry"), "complex");
-});
-
-test("classifyGoal: 'build a' keyword is complex", () => {
-  assert.equal(classifyGoal("build a dashboard for the metrics"), "complex");
-});
-
-test("classifyGoal: 'set up' keyword is complex", () => {
-  assert.equal(classifyGoal("set up the CI pipeline"), "complex");
-});
-
-test("classifyGoal: 'integrate' keyword is complex", () => {
-  assert.equal(classifyGoal("integrate the new provider into the registry"), "complex");
-});
-
-test("classifyGoal: 'extract' keyword is complex", () => {
-  assert.equal(classifyGoal("extract the approval logic into its own module"), "complex");
-});
-
-test("classifyGoal: 'split' keyword is complex", () => {
-  assert.equal(classifyGoal("split the large reducer into smaller slices"), "complex");
-});
-
-test("classifyGoal: 'consolidate' keyword is complex", () => {
-  assert.equal(classifyGoal("consolidate all config loading into one place"), "complex");
+test("classifyGoal: defaults to 'complex' when session returns empty string", async () => {
+  const { session } = makeMockSession("");
+  assert.equal(await classifyGoal("do something", false, session), "complex");
 });
 
 // ---------------------------------------------------------------------------
-// Complex paths — length trigger (≥ 60 chars, no simple-question pattern)
+// Payload forwarding — session receives correct inputs
 // ---------------------------------------------------------------------------
 
-test("classifyGoal: long input without simple-question prefix is complex", () => {
-  const longGoal =
-    "Update the session store to use the new schema and add migration logic for existing records";
-  assert.ok(longGoal.length >= 60);
-  assert.equal(classifyGoal(longGoal), "complex");
+test("classifyGoal: forwards text to session payload", async () => {
+  const { session, lastCall } = makeMockSession("simple");
+  await classifyGoal("explain the reducer", false, session);
+  assert.equal(lastCall()?.payload["text"], "explain the reducer");
 });
 
-test("classifyGoal: long question starting with 'what' is still simple", () => {
-  const longQuestion =
-    "what is the purpose of the session store and how does it relate to the timeline module?";
-  assert.ok(longQuestion.length >= 60);
-  assert.equal(classifyGoal(longQuestion), "simple");
+test("classifyGoal: forwards hasActiveObjective=true to session payload", async () => {
+  const { session, lastCall } = makeMockSession("steering_command");
+  await classifyGoal("abort", true, session);
+  assert.equal(lastCall()?.payload["hasActiveObjective"], true);
 });
 
-test("classifyGoal: long question starting with 'how' is still simple", () => {
-  const longQuestion =
-    "how does the approval dialog cursor cycle through the four options in the reducer?";
-  assert.ok(longQuestion.length >= 60);
-  assert.equal(classifyGoal(longQuestion), "simple");
+test("classifyGoal: forwards hasActiveObjective=false to session payload", async () => {
+  const { session, lastCall } = makeMockSession("simple");
+  await classifyGoal("explain the reducer", false, session);
+  assert.equal(lastCall()?.payload["hasActiveObjective"], false);
+});
+
+test("classifyGoal: sends task type 'classify' to session", async () => {
+  const { session, lastCall } = makeMockSession("simple");
+  await classifyGoal("explain the reducer", false, session);
+  assert.equal(lastCall()?.task, "classify");
 });
 
 // ---------------------------------------------------------------------------
-// Edge cases
+// All four valid categories are accepted
 // ---------------------------------------------------------------------------
 
-test("classifyGoal: exactly 59 chars without keywords is simple", () => {
-  // 59 chars, no keyword, no simple-question pattern
-  const text = "update the config file to use the new provider format here";
-  assert.ok(text.length < 60);
-  // 'update' is not in the keyword list, so this should be simple
-  assert.equal(classifyGoal(text), "simple");
-});
+const VALID_CATEGORIES: GoalComplexity[] = [
+  "simple",
+  "complex",
+  "status_query",
+  "steering_command",
+];
 
-test("classifyGoal: case-insensitive keyword matching", () => {
-  assert.equal(classifyGoal("REFACTOR the session store"), "complex");
-  assert.equal(classifyGoal("Implement a new command"), "complex");
-});
-
-test("classifyGoal: simple-question pattern overrides length", () => {
-  const text = "explain the full lifecycle of an attempt from creation to completion in the system";
-  assert.ok(text.length >= 60);
-  assert.equal(classifyGoal(text), "simple");
-});
+for (const category of VALID_CATEGORIES) {
+  test(`classifyGoal: accepts '${category}' as a valid classification`, async () => {
+    const { session } = makeMockSession(category);
+    const result = await classifyGoal("some input", false, session);
+    assert.equal(result, category);
+  });
+}
