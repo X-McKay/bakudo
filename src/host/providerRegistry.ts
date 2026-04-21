@@ -147,3 +147,30 @@ providerRegistry.register({
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api"],
 });
+
+/**
+ * Wave 4: Critic — Reflection Agent that analyses why a Worker failed and
+ * produces a structured Post-Mortem starting with "LESSON LEARNED: ".
+ * Read-only: MUST NOT modify files or run git commands.
+ * Requires the `anthropic-api` abox proxy policy.
+ */
+providerRegistry.register({
+  id: "critic",
+  name: "Reflection Agent",
+  command: ["claude", "--print-responses"],
+  requiredPolicies: ["anthropic-api"],
+});
+
+/**
+ * Wave 4: Curator — Memory Consolidation Agent that consolidates Critic
+ * Post-Mortems into `.bakudo/memory/semantic/` Markdown rules.
+ * Requires both `anthropic-api` (LLM) and `git-write` (to commit memory
+ * files) abox proxy policies.
+ * MUST NEVER push, merge PRs, or modify code outside `.bakudo/memory/`.
+ */
+providerRegistry.register({
+  id: "curator",
+  name: "Memory Consolidation Agent",
+  command: ["claude", "--print-responses"],
+  requiredPolicies: ["anthropic-api", "git-write"],
+});

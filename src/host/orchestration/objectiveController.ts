@@ -1,11 +1,13 @@
 /**
- * Wave 3: Objective Controller
+ * Wave 3 + 4: Objective Controller
  *
  * The state machine that advances an Objective by:
  * 1. Using the Architect agent to decompose the Objective into Campaigns.
  * 2. Dispatching the Candidates of each Campaign in parallel via
  *    `headlessExecute` (the Wave 2 Worker → Chaos Monkey loop).
  * 3. Selecting the winning Candidate (first successful result).
+ * 4. (Wave 4) On failure: running the Critic to produce a Post-Mortem,
+ *    then triggering the Curator to consolidate it into Semantic Memory.
  *
  * The controller is intentionally stateful (it holds a mutable `Objective`)
  * because the Daemon Gateway owns the lifecycle of each Objective. The
@@ -18,6 +20,8 @@
  */
 import type { ABoxTaskRunner } from "../../aboxTaskRunner.js";
 import type { DispatchPlan } from "../../attemptProtocol.js";
+import { runCritic, extractPostMortem } from "../../worker/criticRunner.js";
+import { triggerCurator } from "../../daemon/curator.js";
 import { headlessExecute, type HeadlessExecuteResult } from "./headlessExecute.js";
 import { type Campaign, type Objective, createCampaign } from "./objectiveState.js";
 import { defaultBudget } from "./resourceBudget.js";
@@ -146,6 +150,70 @@ export class ObjectiveController {
       activeCampaign.winnerCandidateId = candidates[winnerIndex]?.candidateId;
     } else {
       activeCampaign.status = "failed";
+
+      // Wave 4: Cognitive reflection loop.
+      // 1. Collect the transcript from the first failed candidate.
+      const failedResult = results[0];
+      const failedTranscript =
+        failedResult?.status === "fulfilled"
+          ? failedResult.value.transcript
+          : "(no transcript available)";
+      const failedDiff =
+        failedResult?.status === "fulfilled" ? failedResult.value.diff : "";
+
+      // 2. Run the Critic to produce a Post-Mortem.
+      const criticCommand = runCritic(failedTranscript, failedDiff);
+      const criticSpec = {
+        schemaVersion: 3 as const,
+        sessionId: `critic-${activeCampaign.campaignId}`,
+        turnId: "reflect",
+        attemptId: `critic-attempt-${activeCampaign.campaignId}-${Date.now()}`,
+        taskId: `critic-task-${activeCampaign.campaignId}`,
+        intentId: `critic-intent-${activeCampaign.campaignId}`,
+        mode: "build" as const,
+        taskKind: "assistant_job" as const,
+        prompt: criticCommand.stdin ?? "",
+        instructions: [],
+        cwd: process.cwd(),
+        execution: { engine: "agent_cli" as const },
+        permissions: { rules: [], allowAllTools: false, noAskUser: true },
+        budget: { timeoutSeconds: 120, maxOutputBytes: 262144, heartbeatIntervalMs: 5000 },
+        acceptanceChecks: [],
+        artifactRequests: [],
+      };
+      const criticPlan: DispatchPlan = {
+        schemaVersion: 1,
+        candidateId: criticSpec.attemptId,
+        profile: {
+          providerId: "critic",
+          sandboxLifecycle: "ephemeral" as const,
+          candidatePolicy: "discard" as const,
+        },
+        spec: criticSpec,
+      };
+
+      try {
+        const criticRecord = await this.runner.runAttempt(
+          criticSpec,
+          { timeoutSeconds: 120 },
+          {},
+          criticPlan.profile,
+        );
+        const criticOutput = criticRecord.result.stdout + criticRecord.result.stderr;
+        const postMortem = extractPostMortem(criticOutput);
+
+        // 3. If the Critic produced a valid Post-Mortem, trigger the Curator.
+        if (postMortem !== null) {
+          // triggerCurator acquires gitWriteMutex internally.
+          await triggerCurator(postMortem, process.cwd(), this.runner);
+        }
+      } catch (error) {
+        // Critic/Curator failures are non-fatal — log and continue.
+        console.warn(
+          `[ObjectiveController] Critic/Curator failed for campaign ${activeCampaign.campaignId}:`,
+          error,
+        );
+      }
     }
   }
 
