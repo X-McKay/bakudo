@@ -24,22 +24,35 @@ Furthermore, there was no visibility into the orchestrator's state. Users had no
 
 ## Architecture
 
-The solution introduces three new components to the host architecture:
+The solution introduces four new components to the host architecture:
 
-1. `RoutingClassifier` (Heuristic Intent Routing)
-2. `OrchestratorDriver` (TUI-to-Headless Bridge)
-3. `Sidebar` (Ink Component)
+1. `MacroOrchestrationSession` (Persistent Reasoning Engine)
+2. `RoutingClassifier` (LLM-backed Intent Routing)
+3. `ConversationalNarrator` (Prose generation and pre-flight clarification)
+4. `OrchestratorDriver` (TUI-to-Headless Bridge)
+5. `Sidebar` (Ink Component)
 
-### 1. RoutingClassifier
+### 1. MacroOrchestrationSession
+
+`src/host/orchestration/macroOrchestrationSession.ts`
+
+A single, long-lived Claude Code / Codex process that serves as the macro-orchestration brain for the interactive shell. Started on boot and torn down on exit, this session handles all reasoning tasks (classification, clarification, decomposition, steering, narration) via a JSON-over-stdio protocol.
+
+**Why persistent?**
+A persistent session has full context of the conversation. It understands references to prior turns ("same reason as last time"), avoids repeating clarifying questions, and provides genuine narrative continuity.
+
+**Resilience:**
+If the underlying process dies (OOM, network drop), the session automatically restarts and replays a rolling summary of the last N turns as a system message to restore context.
+
+### 2. RoutingClassifier & ConversationalNarrator
 
 `src/host/orchestration/routingClassifier.ts`
+`src/host/orchestration/conversationalNarrator.ts`
 
-To avoid the latency and cost of an LLM call on every keystroke, the `RoutingClassifier` uses deterministic heuristic rules to classify the user's prompt as either `simple` or `complex`.
+These modules delegate entirely to the `MacroOrchestrationSession`.
 
-- **Simple:** Empty strings, slash commands (`/help`), short questions starting with "what/how/explain", or prefixes like "show me", "list", "find", "read".
-- **Complex:** Prompts containing keywords like "refactor", "implement", "migrate", "redesign", or any prompt longer than 60 characters that doesn't match a simple question pattern.
-
-**Integration:** In `interactive.ts`, `runTurn()` checks `classifyGoal(text)`. If simple, it routes to the existing `answerHeadPrompt` / `executePromptFromResolution` path. If complex, it routes to `runObjectiveInTUI()`.
+- **RoutingClassifier**: No regex or keyword lists. The session classifies goals into four categories: `simple`, `complex`, `status_query`, or `steering_command`.
+- **ConversationalNarrator**: Handles pre-flight clarification (asking the session if a complex goal is ambiguous before decomposing it) and generates conversational prose for status queries ("how are things going?") and orchestrator lifecycle events.
 
 ### 2. OrchestratorDriver
 
@@ -93,8 +106,8 @@ The sidebar is collapsible. Users can press `[Tab]` in an empty composer buffer 
 
 ## Testing Strategy
 
-- **Unit Tests:** `routingClassifier.test.ts` covers all heuristic branches (40+ assertions).
-- **Reducer Tests:** `orchestratorReducer.test.ts` verifies the state transitions for the 7 new orchestrator actions.
+- **Unit Tests:** `routingClassifier.test.ts` and `conversationalNarrator.test.ts` use a `MockMacroSession` stub to verify correct routing and state transitions without spawning real LLM processes.
+- **Reducer Tests:** `orchestratorReducer.test.ts` verifies the state transitions for all orchestrator actions, including the new session memory slices.
 - **Component Tests:** `sidebar.test.tsx` uses `ink-testing-library` to verify rendering states (hidden, empty, active campaigns, mutex locked).
 
 ## Future Work (P2)
