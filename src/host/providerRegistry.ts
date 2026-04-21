@@ -123,7 +123,7 @@ providerRegistry.register({
 
 /**
  * Wave 2: Chaos Monkey — adversarial evaluator that runs in the same
- * preserved sandbox as the Worker to find edge cases and write failing
+ * preserved sandbox as the Worker agent to find edge cases and write failing
  * tests. Uses the Claude Code CLI as its backbone but is invoked with
  * a strictly adversarial system prompt (see `chaosMonkeyRunner.ts`).
  * Requires the `anthropic-api` abox proxy policy.
@@ -131,6 +131,19 @@ providerRegistry.register({
 providerRegistry.register({
   id: "chaos-monkey",
   name: "Adversarial Evaluator",
+  command: ["claude", "--print-responses"],
+  requiredPolicies: ["anthropic-api"],
+});
+
+/**
+ * Wave 3: Architect — Decomposition Agent that breaks high-level Objectives
+ * into Campaigns. Uses the Claude Code CLI as its backbone with a structured
+ * decomposition prompt (see `objectiveController.ts`).
+ * Only needs LLM access — no network egress beyond the anthropic-api proxy.
+ */
+providerRegistry.register({
+  id: "architect",
+  name: "Decomposition Agent",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api"],
 });

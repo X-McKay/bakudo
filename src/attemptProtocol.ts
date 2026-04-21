@@ -125,7 +125,16 @@ export type BatchSpec = {
   candidates: DispatchPlan[];
 };
 
-export type CandidateSet = BatchSpec;
+/**
+ * Wave 3: CandidateSet extends BatchSpec with Objective/Campaign tracking
+ * fields so it survives serialisation through the Daemon Gateway.
+ */
+export type CandidateSet = BatchSpec & {
+  /** Wave 3: ID of the parent Objective this set belongs to. */
+  objectiveId?: string;
+  /** Wave 3: ID of the Campaign within the Objective. */
+  campaignId?: string;
+};
 
 export type CandidateSetResult = {
   batchId: string;
@@ -376,7 +385,14 @@ export const BatchSpecSchema = z
   })
   .strip();
 
-export const CandidateSetSchema = BatchSpecSchema;
+/**
+ * Wave 3: CandidateSet schema extends BatchSpec with optional Objective/Campaign
+ * tracking fields for the Daemon Gateway state model.
+ */
+export const CandidateSetSchema = BatchSpecSchema.extend({
+  objectiveId: z.string().optional(),
+  campaignId: z.string().optional(),
+});
 
 export const CandidateSetResultSchema = z
   .object({
