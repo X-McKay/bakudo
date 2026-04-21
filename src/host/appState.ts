@@ -1,4 +1,5 @@
 import type { TranscriptItem } from "./renderModel.js";
+import type { Objective } from "./orchestration/objectiveState.js";
 
 export type HostScreen = "transcript" | "sessions" | "inspect" | "help";
 
@@ -169,6 +170,26 @@ export type InspectState = {
   scrollHeight: number;
 };
 
+/**
+ * Live state for the Cognitive Meta-Orchestrator pipeline.
+ * Updated by `OrchestratorDriver` as campaigns advance.
+ *
+ * This slice is entirely owned by the `orchestrator_*` and `toggle_sidebar`
+ * reducer actions — no other code should mutate it directly.
+ */
+export type OrchestratorSlice = {
+  /** All objectives submitted in this session, newest first. */
+  objectives: Objective[];
+  /** Whether the collapsible sidebar is currently visible. */
+  sidebarVisible: boolean;
+  /** The objectiveId currently being driven by OrchestratorDriver (undefined when idle). */
+  activeCampaignId: string | undefined;
+  /** Whether the git write mutex is currently held by an agent. */
+  gitMutexLocked: boolean;
+  /** One-liner from the most recent Critic or Synthesizer verdict. */
+  lastVerdict: string | undefined;
+};
+
 export type HostAppState = {
   screen: HostScreen;
   composer: {
@@ -189,6 +210,8 @@ export type HostAppState = {
   pendingSubmit?: PendingSubmit;
   shouldExit?: ShouldExit;
   submitSeq: number;
+  /** Cognitive Meta-Orchestrator live state — owned by orchestrator_* actions. */
+  orchestrator: OrchestratorSlice;
   /**
    * Cursor index for the approval prompt's [1]/[2]/[3]/[4] option list.
    * Shift+Tab cycles through the options (see `reducer` actions
@@ -228,5 +251,12 @@ export const initialHostAppState = (): HostAppState => ({
   transcript: [],
   dispatch: { inFlight: false },
   submitSeq: 0,
+  orchestrator: {
+    objectives: [],
+    sidebarVisible: false,
+    activeCampaignId: undefined,
+    gitMutexLocked: false,
+    lastVerdict: undefined,
+  },
   approvalDialogCursor: 0,
 });

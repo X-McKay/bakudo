@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { Mutex } from "async-mutex";
+import { ABoxAdapter } from "../aboxAdapter.js";
+import { ABoxTaskRunner } from "../aboxTaskRunner.js";
+import { classifyGoal } from "./orchestration/routingClassifier.js";
+import { runObjectiveInTUI } from "./orchestration/orchestratorDriver.js";
 import { createInterface } from "node:readline/promises";
 import { basename } from "node:path";
 
@@ -298,6 +303,12 @@ export const runInteractiveShell = async (): Promise<number> => {
   const configSnapshot = await loadConfigCascade(repoRoot, {});
   const store = createHostStore(reduceHost, initialHostAppState());
 
+  // Shared ABoxTaskRunner and git write mutex for the OrchestratorDriver.
+  // Both are created once per session and passed to runObjectiveInTUI().
+  const aboxAdapter = new ABoxAdapter();
+  const aboxRunner = new ABoxTaskRunner(aboxAdapter);
+  const sessionGitMutex = new Mutex();
+
   // Wave 1: Seed the composer with the configured default provider so the
   // Footer displays it immediately, before the first planning pass resolves.
   const initialProviderId =
@@ -411,7 +422,14 @@ export const runInteractiveShell = async (): Promise<number> => {
     }
 
     if (dispatched.kind === "fallthrough") {
-      await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
+      // Classify the goal: complex goals go through the meta-orchestrator;
+      // simple goals go through the existing SessionController path.
+      const complexity = classifyGoal(line);
+      if (complexity === "complex") {
+        await runObjectiveInTUI(line, aboxRunner, store, sessionGitMutex);
+      } else {
+        await executePromptFromResolution(dispatched.resolution, line, deps, execDeps);
+      }
     }
 
     await persistHostState();

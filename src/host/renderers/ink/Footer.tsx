@@ -17,7 +17,7 @@ const hintsFor = (state: {
   if (state.screen === "inspect")
     return ["[Shift+Tab] tabs", "[↑/↓] scroll", "[?] help", "[Ctrl+C] exit"];
   if (state.inFlight) return ["[Esc] cancel", "[Ctrl+C] quit"];
-  return ["[/] commands", "[?] help", "[Ctrl+C] exit"];
+  return ["[/] commands", "[Tab] sidebar", "[?] help", "[Ctrl+C] exit"];
 };
 
 export const Footer = () => {

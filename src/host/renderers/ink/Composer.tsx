@@ -187,6 +187,12 @@ export const Composer = () => {
     // Disable text entry while a dispatch is in flight and no prompt is active.
     if (dispatch.inFlight) return;
 
+    // [Tab] (no modifier) toggles the sidebar when the buffer is empty and idle.
+    if (input === "\t" && !key.shift && bufferRef.current.length === 0) {
+      store.dispatch({ type: "toggle_sidebar" });
+      return;
+    }
+
     if (key.return) {
       const text = bufferRef.current.trim();
       if (text.length === 0) return;
