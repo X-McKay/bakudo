@@ -25,6 +25,7 @@
  */
 import type { DispatchPlan } from "../../attemptProtocol.js";
 import type { ABoxTaskRunner, TaskExecutionRecord } from "../../aboxTaskRunner.js";
+import { providerRegistry } from "../providerRegistry.js";
 import { isChaosMonkeyLgtm, runChaosMonkey } from "../../worker/chaosMonkeyRunner.js";
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ const runAdversarialEval = async (
   // The Chaos Monkey runs in the same preserved sandbox as the Worker.
   const monkeyProfile = {
     providerId: "chaos-monkey",
+    resolvedCommand: providerRegistry.get("chaos-monkey").command,
     sandboxLifecycle: "preserved" as const,
     candidatePolicy: "discard" as const,
   };

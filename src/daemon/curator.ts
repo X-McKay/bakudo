@@ -136,6 +136,7 @@ export const triggerCurator = async (
     candidateId: curatorSpec.attemptId,
     profile: {
       providerId: "curator",
+      resolvedCommand: providerRegistry.get("curator").command,
       sandboxLifecycle: "ephemeral",
       candidatePolicy: "discard",
     },

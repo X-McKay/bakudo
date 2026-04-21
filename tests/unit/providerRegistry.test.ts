@@ -2,7 +2,7 @@
  * Wave 1: Provider Registry unit tests.
  *
  * Tests the ProviderRegistry class, the default registrations, and the
- * integration with assistantJobRunner (providerId → command resolution).
+ * integration with assistantJobRunner (resolvedCommand from host-resolved profile).
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -122,13 +122,14 @@ test("providerRegistry: register() overwrites existing provider", () => {
 });
 
 // ---------------------------------------------------------------------------
-// assistantJobRunner: Wave 1 providerId path
+// assistantJobRunner: uses resolvedCommand from host-resolved profile
 // ---------------------------------------------------------------------------
 
-test("assistantJobRunner: uses providerId to resolve command from registry", () => {
+test("assistantJobRunner: uses resolvedCommand from profile (codex)", () => {
   const spec = baseSpec();
   const profile = {
     providerId: "codex",
+    resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
     sandboxLifecycle: "ephemeral" as const,
     candidatePolicy: "discard" as const,
   };
@@ -137,10 +138,11 @@ test("assistantJobRunner: uses providerId to resolve command from registry", () 
   assert.ok(result.stdin?.includes("implement the feature"), "prompt should be in stdin");
 });
 
-test("assistantJobRunner: uses claude-code provider command", () => {
+test("assistantJobRunner: uses resolvedCommand from profile (claude-code)", () => {
   const spec = baseSpec({ prompt: "write tests" });
   const profile = {
     providerId: "claude-code",
+    resolvedCommand: ["claude", "--dangerously-skip-permissions"],
     sandboxLifecycle: "ephemeral" as const,
     candidatePolicy: "discard" as const,
   };
@@ -149,68 +151,31 @@ test("assistantJobRunner: uses claude-code provider command", () => {
   assert.ok(result.stdin?.includes("write tests"), "prompt should be in stdin");
 });
 
-test("assistantJobRunner: throws for unknown providerId", () => {
+test("assistantJobRunner: throws when resolvedCommand is empty", () => {
   const spec = baseSpec();
   const profile = {
-    providerId: "unknown-provider-xyz",
+    providerId: "codex",
+    resolvedCommand: [] as string[],
     sandboxLifecycle: "ephemeral" as const,
     candidatePolicy: "discard" as const,
   };
   assert.throws(
     () => runAssistantJob(spec, profile),
     (err: Error) => {
-      assert.ok(err.message.includes("unknown-provider-xyz"), "error should mention the provider ID");
+      assert.ok(err.message.includes("resolvedCommand is empty"), "error should mention resolvedCommand");
       return true;
     },
   );
 });
 
-test("assistantJobRunner: legacy agentBackend path still works", () => {
-  const spec = baseSpec({ prompt: "legacy test" });
-  const profile = {
-    agentBackend: "my-custom-agent --flag",
-    sandboxLifecycle: "ephemeral" as const,
-    candidatePolicy: "discard" as const,
-  };
-  const result = runAssistantJob(spec, profile);
-  assert.equal(result.command[0], "my-custom-agent");
-  assert.equal(result.command[1], "--flag");
-  assert.ok(result.stdin?.includes("legacy test"), "prompt should be in stdin");
-});
-
-test("assistantJobRunner: throws when neither providerId nor agentBackend is set", () => {
-  const spec = baseSpec();
-  const profile = {
-    sandboxLifecycle: "ephemeral" as const,
-    candidatePolicy: "discard" as const,
-  };
-  assert.throws(
-    () => runAssistantJob(spec, profile as Parameters<typeof runAssistantJob>[1]),
-    /neither providerId nor agentBackend/,
-  );
-});
-
-test("assistantJobRunner: providerId takes precedence over agentBackend", () => {
-  const spec = baseSpec();
-  const profile = {
-    providerId: "codex",
-    agentBackend: "should-not-be-used --flag",
-    sandboxLifecycle: "ephemeral" as const,
-    candidatePolicy: "discard" as const,
-  };
-  const result = runAssistantJob(spec, profile);
-  // Should use the codex provider command, not the agentBackend string
-  assert.equal(result.command[0], "codex");
-  assert.notEqual(result.command[0], "should-not-be-used");
-});
-
-test("assistantJobRunner: joins prompt and instructions with double newlines (providerId path)", () => {
+test("assistantJobRunner: joins prompt and instructions with double newlines", () => {
   const spec = baseSpec({
     prompt: "do the thing",
     instructions: ["rule one", "rule two"],
   });
   const profile = {
     providerId: "codex",
+    resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
     sandboxLifecycle: "ephemeral" as const,
     candidatePolicy: "discard" as const,
   };
@@ -218,10 +183,11 @@ test("assistantJobRunner: joins prompt and instructions with double newlines (pr
   assert.equal(result.stdin, "do the thing\n\nrule one\n\nrule two");
 });
 
-test("assistantJobRunner: sets BAKUDO_GUEST_OUTPUT_DIR env (providerId path)", () => {
+test("assistantJobRunner: sets BAKUDO_GUEST_OUTPUT_DIR env", () => {
   const spec = baseSpec({ attemptId: "attempt-42" });
   const profile = {
     providerId: "codex",
+    resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
     sandboxLifecycle: "ephemeral" as const,
     candidatePolicy: "discard" as const,
   };
@@ -251,6 +217,7 @@ test("providerRegistry: local LLM mock provider resolves correctly", () => {
   const spec = baseSpec({ prompt: "local LLM test prompt" });
   const profile = {
     providerId: "local-llama-cpp",
+    resolvedCommand: localLlmSpec.command,
     sandboxLifecycle: "ephemeral" as const,
     candidatePolicy: "discard" as const,
   };

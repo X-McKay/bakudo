@@ -7,6 +7,7 @@ import type {
 import type { ComposerMode } from "./appState.js";
 import { compileAttemptSpec, type CompilerContext } from "./attemptCompiler.js";
 import { buildTurnIntent } from "./intentClassifier.js";
+import { providerRegistry } from "./providerRegistry.js";
 
 // ---------------------------------------------------------------------------
 // Unified planner entry point
@@ -29,9 +30,12 @@ export const planAttempt = (
     intent.kind === "run_check" ||
     intent.kind === "run_explicit_command";
   const isAuto = composerMode === "autopilot" || composerMode === "plan";
-  // Wave 1: Use registered provider ID instead of raw command string.
+  // Wave 1: Use registered provider ID. Resolve command on the host so the
+  // worker never needs to import the registry.
+  const providerId = "codex";
   const profile: ExecutionProfile = {
-    providerId: "codex",
+    providerId,
+    resolvedCommand: providerRegistry.get(providerId).command,
     sandboxLifecycle: usesEphemeralSandbox ? "ephemeral" : "preserved",
     candidatePolicy: usesEphemeralSandbox ? "discard" : isAuto ? "auto_apply" : "manual_apply",
   };

@@ -28,6 +28,16 @@ export const ProviderSpecSchema = z.object({
    * bakudo performs a pre-flight check before dispatch.
    */
   requiredPolicies: z.array(z.string()),
+  /**
+   * abox v0.3.0: Default memory allocation in MiB for this provider's sandbox
+   * VM. Passed as `--memory` to `abox run`. Omit to use the abox config default.
+   */
+  memoryMiB: z.number().int().positive().optional(),
+  /**
+   * abox v0.3.0: Default number of vCPUs for this provider's sandbox VM.
+   * Passed as `--cpus` to `abox run`. Omit to use the abox config default.
+   */
+  cpus: z.number().int().positive().optional(),
 });
 
 export type ProviderSpec = z.infer<typeof ProviderSpecSchema>;
@@ -95,19 +105,22 @@ providerRegistry.register({
   name: "Claude Code CLI",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api"],
+  memoryMiB: 2048,
+  cpus: 2,
 });
 
 /**
  * Codex CLI — legacy default used by the pre-Wave-1 hardcoded path.
- * Kept as a registered provider so existing serialised profiles that
- * reference `agentBackend: "codex exec ..."` can be resolved via the
- * `codex` provider ID after migration.
+ * Kept as a registered provider for compatibility with profiles that
+ * reference the `codex` provider ID.
  */
 providerRegistry.register({
   id: "codex",
   name: "Codex CLI",
   command: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
   requiredPolicies: ["openai-api"],
+  memoryMiB: 2048,
+  cpus: 2,
 });
 
 /**
@@ -119,6 +132,8 @@ providerRegistry.register({
   name: "OpenDevin",
   command: ["opendevin", "--headless"],
   requiredPolicies: ["openai-api", "github-api"],
+  memoryMiB: 2048,
+  cpus: 2,
 });
 
 /**
@@ -133,6 +148,8 @@ providerRegistry.register({
   name: "Adversarial Evaluator",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api"],
+  memoryMiB: 1024,
+  cpus: 1,
 });
 
 /**
@@ -146,6 +163,8 @@ providerRegistry.register({
   name: "Decomposition Agent",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api"],
+  memoryMiB: 1024,
+  cpus: 1,
 });
 
 /**
@@ -159,6 +178,8 @@ providerRegistry.register({
   name: "Reflection Agent",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api"],
+  memoryMiB: 1024,
+  cpus: 1,
 });
 
 /**
@@ -173,6 +194,8 @@ providerRegistry.register({
   name: "Memory Consolidation Agent",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api", "git-write"],
+  memoryMiB: 1024,
+  cpus: 1,
 });
 
 /**
@@ -186,6 +209,8 @@ providerRegistry.register({
   name: "Reconnaissance Agent",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api", "read-only-repo", "web-read"],
+  memoryMiB: 1536,
+  cpus: 2,
 });
 
 /**
@@ -200,6 +225,8 @@ providerRegistry.register({
   name: "Parallel Merge Agent",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api", "multi-worktree-read", "git-write"],
+  memoryMiB: 2048,
+  cpus: 2,
 });
 
 /**
@@ -214,4 +241,6 @@ providerRegistry.register({
   name: "Codebase Hygiene Agent",
   command: ["claude", "--print-responses"],
   requiredPolicies: ["anthropic-api", "git-write"],
+  memoryMiB: 512,
+  cpus: 1,
 });

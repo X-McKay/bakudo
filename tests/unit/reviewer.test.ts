@@ -188,7 +188,8 @@ test("reviewAttemptResult: policy denial via hints", () => {
 test("reviewAttemptResult: preserved manual-apply candidate blocks for user review", () => {
   const review = reviewAttemptResult(baseSpec, makeExecResult(), {
     profile: {
-      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      providerId: "codex",
+      resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
       sandboxLifecycle: "preserved",
       candidatePolicy: "manual_apply",
     },
@@ -217,7 +218,8 @@ test("reviewAttemptResult: preserved manual-apply candidate blocks for user revi
 test("reviewAttemptResult: preserved change without repo mutation is rejected", () => {
   const review = reviewAttemptResult(baseSpec, makeExecResult(), {
     profile: {
-      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      providerId: "codex",
+      resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
       sandboxLifecycle: "preserved",
       candidatePolicy: "auto_apply",
     },
@@ -253,7 +255,8 @@ test("reviewAttemptResult: explicit_command is accepted without repo mutation ev
     makeExecResult({ taskKind: "explicit_command", summary: "command completed successfully" }),
     {
       profile: {
-        agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+        providerId: "codex",
+        resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
         sandboxLifecycle: "preserved",
         candidatePolicy: "auto_apply",
       },
@@ -285,7 +288,8 @@ test("reviewAttemptResult: report-only attempt rejects repo mutation", () => {
     makeExecResult(),
     {
       profile: {
-        agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+        providerId: "codex",
+        resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
         sandboxLifecycle: "preserved",
         candidatePolicy: "discard",
       },

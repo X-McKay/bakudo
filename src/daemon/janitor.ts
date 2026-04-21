@@ -272,6 +272,7 @@ export const maybeRunJanitor = async (
     candidateId: janitorSpec.attemptId,
     profile: {
       providerId: "janitor",
+      resolvedCommand: providerRegistry.get("janitor").command,
       sandboxLifecycle: "ephemeral" as const,
       candidatePolicy: "discard" as const,
     },

@@ -18,6 +18,11 @@ export const buildAboxRunArgs = (
   "--task",
   taskId,
   ...(isEphemeralSandbox(profile) ? ["--ephemeral"] : []),
+  // abox v0.3.0: pass resource constraints when explicitly set in the profile.
+  // These override the abox config defaults and come from ResourceBudget role
+  // definitions (Wave 5). Omitting them lets abox use its own defaults.
+  ...(profile.memoryMiB !== undefined ? ["--memory", String(profile.memoryMiB)] : []),
+  ...(profile.cpus !== undefined ? ["--cpus", String(profile.cpus)] : []),
 ];
 
 export const sandboxBranchName = (taskId: string): string => `agent/${taskId}`;

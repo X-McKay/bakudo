@@ -198,7 +198,8 @@ test("DispatchPlanSchema accepts optional batchId/candidateId", () => {
   const parsed = DispatchPlanSchema.parse({
     schemaVersion: 1,
     profile: ExecutionProfileSchema.parse({
-      agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+      providerId: "codex",
+      resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
       sandboxLifecycle: "preserved",
       candidatePolicy: "manual_apply",
     }),
@@ -217,7 +218,8 @@ test("BatchSpecSchema accepts dispatch-plan candidates", () => {
         schemaVersion: 1,
         candidateId: "attempt-1",
         profile: ExecutionProfileSchema.parse({
-          agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+          providerId: "codex",
+          resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
           sandboxLifecycle: "preserved",
           candidatePolicy: "manual_apply",
         }),
@@ -237,7 +239,8 @@ test("CandidateSetSchema aliases the batch candidate shape", () => {
         schemaVersion: 1,
         candidateId: "candidate-1",
         profile: ExecutionProfileSchema.parse({
-          agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+          providerId: "codex",
+          resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
           sandboxLifecycle: "preserved",
           candidatePolicy: "manual_apply",
         }),

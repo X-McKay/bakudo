@@ -1,14 +1,17 @@
 import { ABoxAdapter } from "./aboxAdapter.js";
 import type { ExecutionProfile } from "./attemptProtocol.js";
+import { providerRegistry } from "./host/providerRegistry.js";
 import { buildAboxShellCommandArgs, generateSandboxTaskId } from "./host/sandboxLifecycle.js";
 import { RiskLevel, type ToolCall, type ToolResult, type ToolSpec } from "./models.js";
 
 type ToolFn = (call: ToolCall) => Promise<ToolResult>;
 
 export class ToolRuntime {
-  // Wave 1: Use registered provider ID instead of raw command string.
+  // Wave 1: Use registered provider ID. Resolve command on the host so the
+  // worker never needs to import the registry.
   private static readonly TOOL_PROFILE: ExecutionProfile = {
     providerId: "codex",
+    resolvedCommand: providerRegistry.get("codex").command,
     sandboxLifecycle: "ephemeral",
     candidatePolicy: "discard",
   };

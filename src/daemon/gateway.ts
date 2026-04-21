@@ -254,7 +254,11 @@ export const startDaemon = (port = 3000): void => {
 
   // Wave 5: Idle Janitor tick — runs every minute, only when Daemon is idle.
   setInterval(() => {
-    const activeSandboxCount = 0; // TODO: wire to real sandbox registry
+    // Sandbox count is derived from the active ObjectiveControllers: each
+    // active controller has at most one running sandbox at a time. This is a
+    // conservative approximation — the Janitor will see 0 sandboxes when no
+    // Objectives are running, which is the correct idle condition.
+    const activeSandboxCount = [...activeControllers.values()].filter((c) => c.isActive()).length;
     const schedState = {
         activeObjectives: () =>
           [...activeControllers.values()].filter((c) => c.isActive()).length,

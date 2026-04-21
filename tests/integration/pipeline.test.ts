@@ -236,7 +236,8 @@ test("executeAttempt auto-applies a reviewed candidate into the source repo", as
       candidateId: "candidate-1",
       batchId: "batch-1",
       profile: {
-        agentBackend: "mock",
+        providerId: "codex",
+        resolvedCommand: ["mock"],
         sandboxLifecycle: "preserved",
         candidatePolicy: "auto_apply",
       },
@@ -358,7 +359,8 @@ test("executeAttempt auto-resolves overlapping source edits through apply_resolv
       candidateId: "candidate-1",
       batchId: "batch-1",
       profile: {
-        agentBackend: "mock",
+        providerId: "codex",
+        resolvedCommand: ["mock"],
         sandboxLifecycle: "preserved",
         candidatePolicy: "auto_apply",
       },
@@ -438,7 +440,8 @@ test("executeAttempt non-interactive run preserves the candidate in needs_confir
       candidateId: "candidate-1",
       batchId: "batch-1",
       profile: {
-        agentBackend: "mock",
+        providerId: "codex",
+        resolvedCommand: ["mock"],
         sandboxLifecycle: "preserved",
         candidatePolicy: "auto_apply",
       },
@@ -621,7 +624,8 @@ test("executeAttempt non-interactive run marks the attempt apply_failed when ver
       candidateId: "candidate-1",
       batchId: "batch-1",
       profile: {
-        agentBackend: "mock",
+        providerId: "codex",
+        resolvedCommand: ["mock"],
         sandboxLifecycle: "preserved",
         candidatePolicy: "auto_apply",
       },

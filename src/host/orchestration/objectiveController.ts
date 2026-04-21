@@ -29,6 +29,7 @@ import { runSynthesizer, parseSynthesizerOutput } from "../../worker/synthesizer
 import { triggerCurator } from "../../daemon/curator.js";
 import { headlessExecute, type HeadlessExecuteResult } from "./headlessExecute.js";
 import { type Campaign, type Objective, createCampaign } from "./objectiveState.js";
+import { providerRegistry } from "../providerRegistry.js";
 import { defaultBudget } from "./resourceBudget.js";
 
 // ---------------------------------------------------------------------------
@@ -206,6 +207,7 @@ export class ObjectiveController {
         candidateId: criticSpec.attemptId,
         profile: {
           providerId: "critic",
+          resolvedCommand: providerRegistry.get("critic").command,
           sandboxLifecycle: "ephemeral" as const,
           candidatePolicy: "discard" as const,
         },
@@ -276,6 +278,7 @@ export class ObjectiveController {
         candidateId: synthSpec.attemptId,
         profile: {
           providerId: "synthesizer",
+          resolvedCommand: providerRegistry.get("synthesizer").command,
           sandboxLifecycle: "ephemeral" as const,
           candidatePolicy: "discard" as const,
         },
@@ -351,6 +354,7 @@ export class ObjectiveController {
       candidateId: explorerSpec.attemptId,
       profile: {
         providerId: "explorer",
+        resolvedCommand: providerRegistry.get("explorer").command,
         sandboxLifecycle: "ephemeral" as const,
         candidatePolicy: "discard" as const,
       },
@@ -418,6 +422,7 @@ export class ObjectiveController {
       candidateId: explorerSpec.attemptId,
       profile: {
         providerId: "explorer",
+        resolvedCommand: providerRegistry.get("explorer").command,
         sandboxLifecycle: "ephemeral" as const,
         candidatePolicy: "discard" as const,
       },
@@ -485,6 +490,7 @@ export class ObjectiveController {
       candidateId: architectSpec.attemptId,
       profile: {
         providerId: "architect",
+        resolvedCommand: providerRegistry.get("architect").command,
         sandboxLifecycle: "ephemeral",
         candidatePolicy: "discard",
       },

@@ -43,6 +43,7 @@ const basePlan = (): DispatchPlan => ({
   candidateId: "attempt-1",
   profile: {
     providerId: "codex",
+    resolvedCommand: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
     sandboxLifecycle: "preserved",
     candidatePolicy: "discard",
   },
