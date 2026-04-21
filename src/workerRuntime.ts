@@ -77,7 +77,8 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 5000;
 const DEFAULT_KILL_GRACE_MS = 2000;
 const ABOX_GUEST_WORKSPACE_CWD = "/workspace";
 const DEFAULT_EXECUTION_PROFILE: ExecutionProfile = {
-  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  // Wave 1: Use registered provider ID instead of raw command string.
+  providerId: "codex",
   sandboxLifecycle: "ephemeral",
   candidatePolicy: "discard",
 };
@@ -98,8 +99,13 @@ const isExecutionProfile = (value: unknown): value is ExecutionProfile => {
   if (!isObject(value)) {
     return false;
   }
+  // Wave 1: Accept either providerId (new) or agentBackend (legacy).
+  const hasProviderId = typeof value.providerId === "string";
+  const hasAgentBackend = typeof value.agentBackend === "string";
+  if (!hasProviderId && !hasAgentBackend) {
+    return false;
+  }
   return (
-    typeof value.agentBackend === "string" &&
     (value.sandboxLifecycle === "preserved" || value.sandboxLifecycle === "ephemeral") &&
     (value.candidatePolicy === "auto_apply" ||
       value.candidatePolicy === "manual_apply" ||
@@ -412,7 +418,7 @@ export const decodeExecutionProfile = (encoded: string): ExecutionProfile => {
   const parsed = decodeJson(encoded);
   if (!isExecutionProfile(parsed)) {
     throw new Error(
-      "invalid execution profile: expected agentBackend plus valid sandboxLifecycle and candidatePolicy",
+      "invalid execution profile: expected providerId (or legacy agentBackend) plus valid sandboxLifecycle and candidatePolicy",
     );
   }
   return parsed;

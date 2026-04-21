@@ -96,7 +96,17 @@ export type AttemptSpec = {
 };
 
 export type ExecutionProfile = {
-  agentBackend: string;
+  /**
+   * Wave 1: Registered provider ID (e.g. `"claude-code"`, `"codex"`).
+   * Takes precedence over the deprecated `agentBackend` string.
+   */
+  providerId?: string;
+  /**
+   * @deprecated Use `providerId` instead. Kept for backwards-compatibility
+   * with serialised profiles that pre-date Wave 1. When both are present,
+   * `providerId` wins.
+   */
+  agentBackend?: string;
   sandboxLifecycle: "preserved" | "ephemeral";
   candidatePolicy: "auto_apply" | "manual_apply" | "discard";
 };
@@ -314,7 +324,10 @@ export const AttemptSpecSchema = z
 
 export const ExecutionProfileSchema = z
   .object({
-    agentBackend: z.string(),
+    /** Wave 1: registered provider ID. Takes precedence over agentBackend. */
+    providerId: z.string().optional(),
+    /** @deprecated Use providerId. Kept for backwards-compat with pre-Wave-1 profiles. */
+    agentBackend: z.string().optional(),
     sandboxLifecycle: z.enum(["preserved", "ephemeral"]),
     candidatePolicy: z.enum(["auto_apply", "manual_apply", "discard"]),
   })

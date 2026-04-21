@@ -29,8 +29,9 @@ export const planAttempt = (
     intent.kind === "run_check" ||
     intent.kind === "run_explicit_command";
   const isAuto = composerMode === "autopilot" || composerMode === "plan";
+  // Wave 1: Use registered provider ID instead of raw command string.
   const profile: ExecutionProfile = {
-    agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+    providerId: "codex",
     sandboxLifecycle: usesEphemeralSandbox ? "ephemeral" : "preserved",
     candidatePolicy: usesEphemeralSandbox ? "discard" : isAuto ? "auto_apply" : "manual_apply",
   };

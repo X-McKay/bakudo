@@ -48,7 +48,8 @@ type WorkerModuleSources = {
 };
 
 const DEFAULT_WORKER_EXECUTION_PROFILE: ExecutionProfile = {
-  agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+  // Wave 1: Use registered provider ID instead of raw command string.
+  providerId: "codex",
   sandboxLifecycle: "ephemeral",
   candidatePolicy: "discard",
 };

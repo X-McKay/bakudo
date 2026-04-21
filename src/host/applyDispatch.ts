@@ -21,7 +21,10 @@ export type BuildApplyDispatchInput = {
   command?: string[];
   acceptanceChecks?: AcceptanceCheck[];
   permissionRules?: PermissionRule[];
+  /** @deprecated Use providerId instead. */
   agentBackend?: string;
+  /** Wave 1: registered provider ID. Defaults to "codex" if omitted. */
+  providerId?: string;
   timeoutSeconds?: number;
   maxOutputBytes?: number;
   heartbeatIntervalMs?: number;
@@ -64,7 +67,12 @@ export const buildApplyDispatchPlan = (input: BuildApplyDispatchInput): Dispatch
     schemaVersion: 1,
     candidateId: input.attemptId,
     profile: {
-      agentBackend: input.agentBackend ?? "codex exec --dangerously-bypass-approvals-and-sandbox",
+      // Wave 1: prefer providerId; fall back to legacy agentBackend if provided.
+      ...(input.providerId !== undefined
+        ? { providerId: input.providerId }
+        : input.agentBackend !== undefined
+          ? { agentBackend: input.agentBackend }
+          : { providerId: "codex" }),
       sandboxLifecycle: "ephemeral",
       candidatePolicy: "discard",
     },

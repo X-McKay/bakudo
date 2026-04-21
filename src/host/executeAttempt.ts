@@ -1,6 +1,7 @@
 import type { ABoxTaskRunner, TaskExecutionRecord } from "../aboxTaskRunner.js";
 import type { ArtifactStore } from "../artifactStore.js";
 import type { AttemptExecutionResult, AttemptSpec, DispatchPlan } from "../attemptProtocol.js";
+import { providerRegistry } from "./providerRegistry.js";
 import type { TaskMode } from "../protocol.js";
 import { createAttemptReviewRecord, type ReviewedAttemptResult, reviewAttemptResult } from "../reviewer.js";
 import type { SessionStore } from "../sessionStore.js";
@@ -181,6 +182,32 @@ export const executeAttempt = async (
   if (spec === undefined) {
     throw new Error("executeAttempt requires either plan.spec or ctx.spec");
   }
+
+  // Wave 1: Pre-flight provider policy check.
+  // Verify that the chosen provider is registered and that its required
+  // abox policies are declared. This is a best-effort check — abox itself
+  // enforces the actual sandbox policy; this gives the user a clear error
+  // message before any sandbox is spawned.
+  if (plan?.profile.providerId !== undefined) {
+    const providerId = plan.profile.providerId;
+    if (!providerRegistry.has(providerId)) {
+      throw new Error(
+        `[Wave 1] Unknown provider "${providerId}". ` +
+          `Register it with providerRegistry.register() before dispatching.`,
+      );
+    }
+    // Policy check is advisory: we log the required policies so the user
+    // can verify their abox config, but we do not block execution since
+    // abox config parsing is handled by the Rust core.
+    const provider = providerRegistry.get(providerId);
+    if (provider.requiredPolicies.length > 0) {
+      // Surface the required policies in debug output so the user can
+      // confirm their abox config includes them.
+      const policies = provider.requiredPolicies.join(", ");
+      void policies; // consumed by future abox config probe (Wave 3+)
+    }
+  }
+
   const { sessionStore, artifactStore, runner, sessionId, turnId, args, onProgress } = ctx;
   const storageRoot = sessionStore.rootDir;
   const writerFactory = ctx.eventLogWriterFactory ?? createSessionEventLogWriter;

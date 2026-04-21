@@ -6,8 +6,9 @@ import { RiskLevel, type ToolCall, type ToolResult, type ToolSpec } from "./mode
 type ToolFn = (call: ToolCall) => Promise<ToolResult>;
 
 export class ToolRuntime {
+  // Wave 1: Use registered provider ID instead of raw command string.
   private static readonly TOOL_PROFILE: ExecutionProfile = {
-    agentBackend: "codex exec --dangerously-bypass-approvals-and-sandbox",
+    providerId: "codex",
     sandboxLifecycle: "ephemeral",
     candidatePolicy: "discard",
   };
