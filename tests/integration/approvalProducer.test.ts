@@ -345,7 +345,6 @@ test("executeAttempt: approval proceed flows through dispatch → review pipelin
       sessionId,
       goal: "execute with approval",
       repoRoot: root,
-      assumeDangerousSkipPermissions: false,
       status: "running",
       turns: [
         {

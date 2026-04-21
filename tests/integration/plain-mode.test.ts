@@ -172,14 +172,12 @@ test("plain session list: no ANSI when captured via withCapturedStdout (non-TTY)
       sessionId: "session-plain-1",
       goal: "pipe-friendly sessions listing",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "completed",
     });
     await store.createSession({
       sessionId: "session-plain-2",
       goal: "another session",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "running",
     });
 
@@ -214,7 +212,6 @@ test("plain status (no session id): newline-separated, stripped cleanly to ASCII
       sessionId: "session-status-plain",
       goal: "status plain",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "completed",
     });
 
@@ -250,7 +247,6 @@ test("plain logs: text mode renders v2 envelope details without undefined", asyn
       sessionId: "session-plain-logs",
       goal: "logs plain",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "running",
     });
     await emitSessionEvent(

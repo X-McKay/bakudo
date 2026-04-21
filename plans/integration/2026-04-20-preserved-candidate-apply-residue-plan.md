@@ -175,13 +175,20 @@ disposable. Bakudo still carries legacy migration logic and tests for older sess
 ## External follow-up noted but not owned by this branch
 
 - Workspace-root `just integration-test` still only exercises the live E2E apply flow when
-  `BAKUDO_INTEGRATION_E2E=1` is set.
+  `BAKUDO_INTEGRATION_E2E=1` is set. (The workspace-root `justfile` lives outside the bakudo
+  git repo, so this change cannot ship in a bakudo-only PR and needs to be picked up in the
+  parent workspace separately.)
 - `abox` still needs its own CLI/E2E regression for the hardened non-`CONFLICT` merge failure path.
-- Submodule paths short-circuit in `createApplyWorkspace` via
-  `ApplyWorkspaceUnsupportedSurfaceError` before `stagePathResolution` runs, so
-  `apply-conflicts.json` is never emitted for submodule surfaces. The submodule
-  branch inside `stagePathResolution` is therefore unreachable from the main
-  apply path. Consider either (a) emitting a dedicated structured artifact on
-  the `createApplyWorkspace` throw path or (b) removing the unreachable
-  `stagePathResolution` submodule branch. Tracked as R3-followup; not in scope
-  for this residue branch.
+
+## Closed follow-ups
+
+- **F1 (submodule unreachable branch):** the submodule branch in `stagePathResolution`
+  has been removed in the `feat/apply-residue-followup` branch; the two existing submodule
+  surface tests in `tests/unit/candidateApplierSurfaces.test.ts` now pin the
+  `ApplyWorkspaceUnsupportedSurfaceError` wrapping as the canonical rejection string.
+- **F2 (CreateSessionInput shim):** the deprecated
+  `CreateSessionInput.assumeDangerousSkipPermissions` field and its single
+  `createAndRunFirstTurn` call site have been deleted, along with the now-dead
+  `resolveAssumeDangerous` helper. Other `assumeDangerousSkipPermissions` uses on
+  `RuntimeConfig`, `TaskRequest`, worker runtime, policy engine, and attempt-spec
+  surfaces remain untouched.

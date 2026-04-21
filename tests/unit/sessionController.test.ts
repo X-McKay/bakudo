@@ -113,7 +113,6 @@ test("resumeNamedSession: loads an existing session record", async () => {
       sessionId: "session-a",
       goal: "x",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: false,
       status: "planned",
       turns: [
         {
@@ -229,7 +228,6 @@ test("createAndRunFirstTurn: DI seam captures envelopes without a real runner", 
       sessionId,
       goal: "di-test",
       repoRoot: "/tmp",
-      assumeDangerousSkipPermissions: false,
       status: "running",
       turns: [
         {

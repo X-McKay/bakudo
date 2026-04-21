@@ -35,7 +35,6 @@ test("SessionStore computes a stable layout and persists session state", async (
       sessionId,
       goal: "ship the host-side persistence scaffold",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: true,
       status: "planned",
       createdAt: "2026-04-13T10:00:00.000Z",
       turns: [
@@ -139,7 +138,6 @@ test("SessionStore upserts the index entry on repeated saves of the same session
       sessionId,
       goal: "first",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: false,
       status: "planned",
       createdAt: "2026-04-14T10:00:00.000Z",
       updatedAt: "2026-04-14T10:00:00.000Z",
@@ -176,7 +174,6 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
       sessionId: "session/old",
       goal: "oldest session",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T09:00:00.000Z",
       updatedAt: "2026-04-13T10:00:00.000Z",
     });
@@ -184,7 +181,6 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
       sessionId: "session/tie-z",
       goal: "same timestamp, later id",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T11:00:00.000Z",
       updatedAt: "2026-04-13T11:00:00.000Z",
     });
@@ -192,7 +188,6 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
       sessionId: "session/tie-a",
       goal: "same timestamp, earlier id",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T11:00:00.000Z",
       updatedAt: "2026-04-13T11:00:00.000Z",
     });
@@ -200,7 +195,6 @@ test("SessionStore lists sessions newest updated first with stable tie-breaking"
       sessionId: "session/latest",
       goal: "most recent session",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: true,
       createdAt: "2026-04-13T12:00:00.000Z",
       updatedAt: "2026-04-13T12:30:00.000Z",
     });

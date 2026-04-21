@@ -261,14 +261,12 @@ test("printSessions --json: every line is JSONL with sessionId/status", async ()
       sessionId: "session-adj-1",
       goal: "adjacent sessions",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "completed",
     });
     await store.createSession({
       sessionId: "session-adj-2",
       goal: "adjacent sessions 2",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "running",
     });
 
@@ -297,7 +295,6 @@ test("printStatus --json (with sessionId): emits a single-line full record", asy
       sessionId: "session-adj-status",
       goal: "adjacent status",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "running",
     });
 
@@ -329,7 +326,6 @@ test("printLogs --json: emits JSONL envelopes with sessionId preserved on every 
       sessionId: "session-adj-logs",
       goal: "logs under json",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
     });
     for (let i = 0; i < 4; i += 1) {
       await emitSessionEvent(
@@ -385,7 +381,6 @@ test("printReview --json: exits non-zero sentinel when no reviewed result, surfa
       sessionId: "session-adj-review",
       goal: "no result",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
     });
     const cap = captureWriter();
     const args = {
@@ -413,7 +408,6 @@ test("printSandbox --json: throws cleanly when no turn exists, no ANSI partial o
       sessionId: "session-adj-sandbox",
       goal: "no turn",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
     });
     const cap = captureWriter();
     const args = {

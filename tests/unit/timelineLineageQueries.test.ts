@@ -45,7 +45,6 @@ const seedChainedSession = async (rootDir: string, sessionId: string): Promise<v
     sessionId,
     goal: "lineage test",
     repoRoot: "/tmp",
-    assumeDangerousSkipPermissions: false,
     status: "running",
     turns: [
       {

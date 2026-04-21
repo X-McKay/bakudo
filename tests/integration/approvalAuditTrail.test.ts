@@ -30,7 +30,6 @@ test("approvals tab surfaces two persisted records in chronological order with e
       sessionId: "session-audit-1",
       goal: "approvals audit",
       repoRoot: "/tmp",
-      assumeDangerousSkipPermissions: false,
       status: "running",
       turns: [
         {
