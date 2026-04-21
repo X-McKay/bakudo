@@ -47,14 +47,12 @@ test("printSessions --json emits valid JSONL of SessionIndexEntry records", asyn
       sessionId: "session-aaa",
       goal: "first goal",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "completed",
     });
     await store.createSession({
       sessionId: "session-bbb",
       goal: "second goal",
       repoRoot: "/tmp/repo",
-      assumeDangerousSkipPermissions: false,
       status: "running",
     });
 
@@ -84,7 +82,6 @@ test("printStatus --json without sessionId emits JSONL summaries", async () => {
       sessionId: "session-ccc",
       goal: "status goal",
       repoRoot: "/r",
-      assumeDangerousSkipPermissions: false,
     });
 
     const c = capture();
@@ -109,7 +106,6 @@ test("printStatus --json with sessionId emits full SessionRecord", async () => {
       sessionId: "session-ddd",
       goal: "full record",
       repoRoot: "/r",
-      assumeDangerousSkipPermissions: false,
       status: "running",
     });
 
@@ -136,7 +132,6 @@ test("printLogs --json emits SessionEventEnvelope JSONL", async () => {
       sessionId: "session-eee",
       goal: "log test",
       repoRoot: "/r",
-      assumeDangerousSkipPermissions: false,
     });
     // Write three event envelopes.
     for (let i = 0; i < 3; i++) {

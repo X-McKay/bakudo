@@ -215,7 +215,6 @@ test("executeAttempt round-trip writes the expected envelope sequence", async ()
       sessionId,
       goal: "exec-goal",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: false,
       status: "running",
       turns: [
         {

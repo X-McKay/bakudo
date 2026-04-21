@@ -42,8 +42,6 @@ export type CreateSessionInput = {
   /** Goal text — used to derive the session title via first turn prompt. */
   goal: string;
   repoRoot: string;
-  /** @deprecated kept for migration callers; not stored on SessionRecord. */
-  assumeDangerousSkipPermissions?: boolean;
   status?: SessionStatus;
   title?: string;
   turns?: SessionTurnRecord[];

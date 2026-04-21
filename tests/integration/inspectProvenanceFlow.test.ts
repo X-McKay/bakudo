@@ -126,7 +126,6 @@ const seedSession = async (store: SessionStore, sessionId: string, prompt: strin
     sessionId,
     goal: prompt,
     repoRoot: "/tmp",
-    assumeDangerousSkipPermissions: false,
     status: "running",
     turns: [
       {

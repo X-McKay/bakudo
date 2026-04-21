@@ -76,7 +76,6 @@ const seedSession = async (sessionStore: SessionStore, sessionId: string, repoRo
     sessionId,
     goal: "pipeline-goal",
     repoRoot,
-    assumeDangerousSkipPermissions: false,
     status: "running",
     turns: [
       {

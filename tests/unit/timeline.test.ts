@@ -32,7 +32,6 @@ const seedSession = async (rootDir: string, sessionId: string): Promise<void> =>
     sessionId,
     goal: "test timeline",
     repoRoot: "/tmp",
-    assumeDangerousSkipPermissions: false,
     status: "running",
     turns: [
       {
@@ -314,14 +313,12 @@ test("listSessionSummaries returns entries sorted newest-first", async () => {
       sessionId: "session-old",
       goal: "old",
       repoRoot: "/tmp",
-      assumeDangerousSkipPermissions: false,
       updatedAt: "2026-04-14T00:00:00.000Z",
     });
     await store.createSession({
       sessionId: "session-new",
       goal: "new",
       repoRoot: "/tmp",
-      assumeDangerousSkipPermissions: false,
       updatedAt: "2026-04-15T00:00:00.000Z",
     });
 

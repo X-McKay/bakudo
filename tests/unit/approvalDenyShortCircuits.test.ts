@@ -93,7 +93,6 @@ const seedSession = async (store: SessionStore, sessionId: string, repoRoot: str
     sessionId,
     goal: "deny-short-circuit",
     repoRoot,
-    assumeDangerousSkipPermissions: false,
     status: "running",
     turns: [
       {

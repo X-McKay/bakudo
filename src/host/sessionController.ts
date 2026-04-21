@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { ABoxAdapter } from "../aboxAdapter.js";
 import { ABoxTaskRunner } from "../aboxTaskRunner.js";
 import { ArtifactStore } from "../artifactStore.js";
-import { buildRuntimeConfig, loadConfig } from "../config.js";
 import { createSessionEvent } from "../protocol.js";
 import type { ReviewClassification } from "../resultClassifier.js";
 import { SessionStore } from "../sessionStore.js";
@@ -224,15 +223,6 @@ const nextAttemptId = (session: SessionRecord, turnId: string): string => {
   );
 };
 
-const resolveAssumeDangerous = async (args: HostCliArgs): Promise<boolean> => {
-  if (args.mode !== "build") {
-    return false;
-  }
-  const fileConfig = await loadConfig(args.config);
-  const runtimeConfig = buildRuntimeConfig(fileConfig);
-  return runtimeConfig.assumeDangerousSkipPermissions;
-};
-
 /** Map the worker-facing TaskMode back to a ComposerMode for the planner. */
 const taskModeToComposerMode = (mode: string, autoApprove: boolean): ComposerMode => {
   if (mode === "plan") return "plan";
@@ -276,7 +266,6 @@ export const createAndRunFirstTurn = async (
 ): Promise<SessionDispatchResult> => {
   const { sessionStore, artifactStore, runner } = await buildRunnerContext(args);
   const sessionId = args.sessionId ?? `session-${Date.now()}-${randomUUID().slice(0, 8)}`;
-  const assumeDangerousSkipPermissions = await resolveAssumeDangerous(args);
   const turnId = "turn-1";
 
   // Parse inline token budget (e.g. "+500k fix the bug").
@@ -299,7 +288,6 @@ export const createAndRunFirstTurn = async (
       sessionId,
       goal: effectivePrompt,
       repoRoot: repoRootFor(args.repo),
-      assumeDangerousSkipPermissions,
       status: "running",
       turns: [initialTurn],
     });

@@ -151,7 +151,6 @@ test("cross-sink: writer.append and coalescer.onProgress see matching raw event 
       sessionId,
       goal: "cross-sink",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: false,
       status: "running",
       turns: [
         {
@@ -238,7 +237,6 @@ test("cross-sink: zero-progress run still emits lifecycle envelopes", async () =
       sessionId,
       goal: "zero",
       repoRoot: ".",
-      assumeDangerousSkipPermissions: false,
       status: "running",
       turns: [
         {
