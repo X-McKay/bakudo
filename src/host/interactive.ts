@@ -298,6 +298,12 @@ export const runInteractiveShell = async (): Promise<number> => {
   const configSnapshot = await loadConfigCascade(repoRoot, {});
   const store = createHostStore(reduceHost, initialHostAppState());
 
+  // Wave 1: Seed the composer with the configured default provider so the
+  // Footer displays it immediately, before the first planning pass resolves.
+  const initialProviderId =
+    configSnapshot.merged.provider?.defaultProviderId ?? "codex";
+  store.dispatch({ type: "set_composer_metadata", provider: initialProviderId });
+
   const transcriptFacade = buildTranscriptFacade(store);
 
   const deps: TickDeps = {

@@ -1,6 +1,6 @@
 import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import type { CommandPaletteRequest, SessionPickerPayload } from "../../appState.js";
+import type { CommandPaletteRequest, RecoveryDialogPayload, SessionPickerPayload } from "../../appState.js";
 import { matchesFuzzy } from "../../fuzzyFilter.js";
 import { answerPrompt, cancelPrompt } from "../../promptResolvers.js";
 import { useAppState } from "./hooks/useAppState.js";
@@ -145,6 +145,26 @@ export const Composer = () => {
             input: payload.input + input,
           });
         }
+        return;
+      }
+
+      if (headPrompt.kind === "recovery_dialog") {
+        // [r] retry  [h] halt  [e] edit  — Esc is handled above by cancelPrompt
+        const _payload = headPrompt.payload as RecoveryDialogPayload;
+        void _payload;
+        if (input.toLowerCase() === "r") {
+          answerPrompt(headPrompt.id, "retry");
+          return;
+        }
+        if (input.toLowerCase() === "h") {
+          answerPrompt(headPrompt.id, "halt");
+          return;
+        }
+        if (input.toLowerCase() === "e") {
+          answerPrompt(headPrompt.id, "edit");
+          return;
+        }
+        // Swallow all other keys while the recovery dialog is active.
         return;
       }
 

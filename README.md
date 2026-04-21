@@ -43,7 +43,22 @@ user prompt → intent classification → attempt compilation → bounded sandbo
 
 **`/run-command` escape hatch**: bypasses intent classification, compiles directly to `explicit_command` with `engine: "shell"` and `command: ["bash", "-lc", "<raw>"]`.
 
-**Control-plane dispatch** (`planner.ts` / `executeAttempt.ts`): the planner produces a `DispatchPlan` with an `ExecutionProfile` (`agentBackend`, `sandboxLifecycle`). `executeAttempt` drives the abox sandbox via `WorkerDispatchInput`. The legacy `createTaskSpec` → `executeTask` path and `WorkerTaskSpec` type have been removed.
+**Control-plane dispatch** (`planner.ts` / `executeAttempt.ts`): the planner produces a `DispatchPlan` with an `ExecutionProfile` containing the resolved provider ID and its executable command. `executeAttempt` drives the abox sandbox via `WorkerDispatchInput`. The legacy `agentBackend` field and the `createTaskSpec` → `executeTask` path have been entirely removed.
+
+## Cognitive Meta-Orchestrator (Phase 7 / Revamp)
+
+Bakudo has evolved into a "Cognitive Meta-Orchestrator" running on top of the `abox` secure sandbox. The architecture is defined by five implementation waves:
+
+1. **Provider Registry**: A centralized, Zod-validated registry (`src/host/providerRegistry.ts`) defining all agent profiles (e.g., `codex`, `claude-code`, `explorer`, `synthesizer`) and their required `abox` policies.
+2. **Chaos Monkey Evaluator**: An adversarial loop (`headlessExecute.ts`) that runs the worker, evaluates the result via a Critic/Chaos Monkey agent, and forces up to 3 retries if the result is substandard.
+3. **Daemon Gateway & Git Mutex**: A background daemon (`src/daemon/gateway.ts`) that orchestrates asynchronous campaigns. A strict `gitWriteMutex` ensures only one agent modifies the repository at a time.
+4. **Cognitive Layer**: Background agents including the **Curator** (maintains the `AGENTS.md` index) and the **Janitor** (performs LLM-based codebase hygiene during idle cycles).
+5. **Extended Autonomy**: Multi-winner decomposition where the **Explorer** performs read-only reconnaissance, multiple workers execute in parallel, and the **Synthesizer** merges the results.
+
+**Critical Invariants:**
+- **Headless Execution Boundary**: All background daemon logic routes exclusively through `headlessExecute()`. The interactive `SessionController` is strictly isolated.
+- **No Auto-Merge**: Background agents (Curator, Janitor, Synthesizer) must never push to protected branches or auto-merge PRs. They operate on branches and require manual review.
+- **No Raw Credentials**: The orchestrator defines *which* policies an agent needs, but `abox` handles the actual TLS-proxy stub injection. Credentials are never injected via environment variables.
 
 ## Project Structure
 

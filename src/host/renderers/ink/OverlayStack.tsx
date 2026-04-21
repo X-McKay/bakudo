@@ -8,6 +8,7 @@ import { QuickHelpOverlay } from "./overlays/QuickHelpOverlay.js";
 import { SessionPickerOverlay } from "./overlays/SessionPickerOverlay.js";
 import { TimelinePickerOverlay } from "./overlays/TimelinePickerOverlay.js";
 import { ResumeConfirmOverlay } from "./overlays/ResumeConfirmOverlay.js";
+import { RecoveryDialogOverlay } from "./overlays/RecoveryDialogOverlay.js";
 
 export const OverlayStack = () => {
   const state = useAppState((s) => s);
@@ -35,6 +36,9 @@ export const OverlayStack = () => {
   }
   if (overlay.kind === "timeline_picker") {
     return <TimelinePickerOverlay />;
+  }
+  if (overlay.kind === "recovery_dialog") {
+    return <RecoveryDialogOverlay payload={overlay.payload} />;
   }
   return <ResumeConfirmOverlay message={overlay.message} />;
 };

@@ -30,9 +30,9 @@ export const planAttempt = (
     intent.kind === "run_check" ||
     intent.kind === "run_explicit_command";
   const isAuto = composerMode === "autopilot" || composerMode === "plan";
-  // Wave 1: Use registered provider ID. Resolve command on the host so the
-  // worker never needs to import the registry.
-  const providerId = "codex";
+  // Wave 1: Use registered provider ID from config (falls back to "codex").
+  // Resolve command on the host so the worker never needs to import the registry.
+  const providerId = context.config.provider?.defaultProviderId ?? "codex";
   const profile: ExecutionProfile = {
     providerId,
     resolvedCommand: providerRegistry.get(providerId).command,

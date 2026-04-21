@@ -40,6 +40,7 @@ export type InspectTab =
 export type PromptKind =
   | "approval"
   | "approval_prompt"
+  | "recovery_dialog"
   | "resume_confirm"
   | "command_palette"
   | "session_picker"
@@ -128,6 +129,16 @@ export type SessionPickerPayload = {
 };
 
 /**
+ * Payload for the `recovery_dialog` overlay — shown when an attempt fails
+ * and the host needs the user to choose between retry / halt / edit.
+ */
+export type RecoveryDialogPayload = {
+  sessionId: string;
+  turnId: string;
+  reason: string;
+};
+
+/**
  * Derived overlay view used by renderers. Always projected from `promptQueue[0]`.
  */
 export type HostOverlay =
@@ -135,6 +146,7 @@ export type HostOverlay =
   | { kind: "session_picker"; request: SessionPickerPayload }
   | { kind: "approval"; message: string }
   | { kind: "approval_prompt"; request: ApprovalPromptRequest; cursorIndex: number }
+  | { kind: "recovery_dialog"; payload: RecoveryDialogPayload }
   | { kind: "resume_confirm"; message: string }
   | { kind: "timeline_picker" }
   | { kind: "quick_help"; context: QuickHelpContext; dialogKind?: string };

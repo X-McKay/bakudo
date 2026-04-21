@@ -189,6 +189,16 @@ const renderOverlay = (frame: RenderFrame): string[] => {
       overlay.dialogKind,
     );
   }
+  if (overlay.kind === "recovery_dialog") {
+    return [
+      "-------- attempt failed --------",
+      `Turn: ${overlay.payload.turnId}`,
+      overlay.payload.reason,
+      "[r] retry  [h] halt  [e] edit",
+      "--------------------------------",
+    ];
+  }
+  // session_picker is the only remaining overlay kind.
   return renderSessionPickerOverlayLines(overlay.request);
 };
 
