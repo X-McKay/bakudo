@@ -296,6 +296,21 @@ impl App {
         self.shelf.iter().any(|entry| entry.task_id == task_id)
     }
 
+    /// Sanity-check before sending Dispatch. Currently catches a stale or
+    /// mistyped provider in config (the TUI would otherwise silently hand a
+    /// bogus provider to the daemon). Other validation hooks (credentials,
+    /// model name) belong here as the registry grows them.
+    fn preflight_dispatch(&self) -> Result<(), String> {
+        if self.registry.get(&self.provider_id).is_none() {
+            return Err(format!(
+                "Provider '{}' is not registered. Use /providers to list available providers, \
+                 then /provider <id> to switch.",
+                self.provider_id
+            ));
+        }
+        Ok(())
+    }
+
     // ── Tick ───────────────────────────────────────────────────────────────
 
     /// Advance the spinner tick counter.
@@ -780,9 +795,13 @@ impl App {
             }
             None => {
                 self.push_message(ChatMessage::user(input.clone()));
-                let _ = self
-                    .cmd_tx
-                    .try_send(SessionCommand::Dispatch { prompt: input });
+                if let Err(reason) = self.preflight_dispatch() {
+                    self.push_message(ChatMessage::error(reason));
+                } else {
+                    let _ = self
+                        .cmd_tx
+                        .try_send(SessionCommand::Dispatch { prompt: input });
+                }
             }
         }
     }
