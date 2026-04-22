@@ -104,41 +104,70 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("model: ", Style::default().fg(palette::header_fg())),
         Span::styled(model_str, Style::default().fg(palette::model_accent())),
     ]);
-    let line_2 = Line::from(vec![
-        Span::raw("  "),
-        Span::styled("base ", palette::dim_style()),
-        Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("policy ", palette::dim_style()),
-        Span::styled(
-            app.config.candidate_policy.to_string(),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("lifecycle ", palette::dim_style()),
-        Span::styled(
-            app.config.sandbox_lifecycle.to_string(),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("running ", palette::dim_style()),
-        Span::styled(
-            app.running_shelf_count().to_string(),
-            Style::default().fg(palette::shelf_running()).bold(),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("preserved ", palette::dim_style()),
-        Span::styled(
-            app.preserved_shelf_count().to_string(),
-            Style::default().fg(palette::shelf_preserved()).bold(),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("conflicts ", palette::dim_style()),
-        Span::styled(
-            app.conflict_shelf_count().to_string(),
-            Style::default().fg(palette::shelf_conflicts()).bold(),
-        ),
-    ]);
+    let line_2 = if area.width < SHELF_MIN_TERM_WIDTH {
+        // Narrow: short labels and a compact r/p/c triplet so nothing truncates.
+        let counts = format!(
+            "r{} p{} c{}",
+            app.running_shelf_count(),
+            app.preserved_shelf_count(),
+            app.conflict_shelf_count(),
+        );
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("base ", palette::dim_style()),
+            Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("policy ", palette::dim_style()),
+            Span::styled(
+                app.config.candidate_policy.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("lc ", palette::dim_style()),
+            Span::styled(
+                app.config.sandbox_lifecycle.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled(counts, Style::default().fg(Color::White).bold()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("base ", palette::dim_style()),
+            Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("policy ", palette::dim_style()),
+            Span::styled(
+                app.config.candidate_policy.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("lifecycle ", palette::dim_style()),
+            Span::styled(
+                app.config.sandbox_lifecycle.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("running ", palette::dim_style()),
+            Span::styled(
+                app.running_shelf_count().to_string(),
+                Style::default().fg(palette::shelf_running()).bold(),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("preserved ", palette::dim_style()),
+            Span::styled(
+                app.preserved_shelf_count().to_string(),
+                Style::default().fg(palette::shelf_preserved()).bold(),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("conflicts ", palette::dim_style()),
+            Span::styled(
+                app.conflict_shelf_count().to_string(),
+                Style::default().fg(palette::shelf_conflicts()).bold(),
+            ),
+        ])
+    };
 
     let header = Paragraph::new(Text::from(vec![line_1, line_2]))
         .style(Style::default().bg(palette::header_bg()));
