@@ -676,6 +676,12 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     if text.is_empty() || width == 0 {
         return vec![text.to_string()];
     }
+    // Fast path: a line that already fits is returned verbatim. This
+    // preserves internal multi-space alignment (e.g. /help column padding)
+    // that split_whitespace would otherwise collapse.
+    if text.width() <= width {
+        return vec![text.to_string()];
+    }
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut current_w = 0usize;
