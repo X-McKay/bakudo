@@ -355,13 +355,18 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
     }
 
     let popup_height = (app.completions.len() as u16).min(8) + 2; // +2 for borders
-    let popup_width = app
+    // Title text is " Tab: complete " — without bordering whitespace it's 13
+    // cells. Add 2 for borders + 2 for breathing room → 17 cells minimum so
+    // the title never gets truncated to "Tab: com┐".
+    const POPUP_TITLE_FLOOR: u16 = 17;
+    let entries_width = app
         .completions
         .iter()
         .map(|s| s.len() + 3) // "/ " prefix + padding
         .max()
         .unwrap_or(12) as u16
         + 4;
+    let popup_width = entries_width.max(POPUP_TITLE_FLOOR);
 
     // Position popup just above the composer.
     let popup_y = composer_area.y.saturating_sub(popup_height);
