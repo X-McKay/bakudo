@@ -25,7 +25,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, FocusedPanel, MessageRole, ShelfColor};
 use crate::palette::{
@@ -178,23 +178,32 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         let role_style = Style::default().fg(fg).bold();
         let body_style = Style::default().fg(fg);
 
-        for (i, content_line) in msg.content.lines().enumerate() {
-            if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
-                    Span::styled(format!("{ts} "), palette::dim_style()),
-                    Span::styled(icon, role_style),
-                    Span::raw(" "),
-                    Span::styled(role_label, role_style),
-                    Span::styled(content_line.to_string(), body_style),
-                ]));
-            } else {
-                // Continuation lines: indent to align with first-line body.
-                let indent = " ".repeat(gutter + ts.len() + 1 + 1 + 1 + role_label.len());
-                lines.push(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(content_line.to_string(), body_style),
-                ]));
+        // Width consumed by gutter + timestamp + space + icon + space + role label
+        // before the message body begins. Continuation lines pad to this column.
+        let prefix_width = gutter + ts.len() + 1 + 1 + 1 + role_label.len();
+        let body_width = (inner.width as usize).saturating_sub(prefix_width).max(1);
+        let cont_indent = " ".repeat(prefix_width);
+
+        let mut first_segment_of_msg = true;
+        for content_line in msg.content.lines() {
+            let wrapped = wrap_to_width(content_line, body_width);
+            for segment in wrapped {
+                if first_segment_of_msg {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
+                        Span::styled(format!("{ts} "), palette::dim_style()),
+                        Span::styled(icon, role_style),
+                        Span::raw(" "),
+                        Span::styled(role_label, role_style),
+                        Span::styled(segment, body_style),
+                    ]));
+                    first_segment_of_msg = false;
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(cont_indent.clone()),
+                        Span::styled(segment, body_style),
+                    ]));
+                }
             }
         }
     }
@@ -209,7 +218,8 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     };
     let visible_lines: Vec<Line> = lines.into_iter().skip(start).collect();
 
-    let para = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });
+    // Each line is already pre-wrapped to inner.width, so no Paragraph::wrap.
+    let para = Paragraph::new(Text::from(visible_lines));
     frame.render_widget(para, inner);
 
     // Scroll indicator in top-right corner of transcript.
@@ -605,6 +615,75 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
     ];
     let para = Paragraph::new(detail).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+/// Word-wrap `text` so each returned line's display width is at most `width`.
+///
+/// Splits on ASCII whitespace runs (collapsing them, matching the previous
+/// `Paragraph::wrap` behaviour). Words wider than `width` are hard-broken at
+/// character boundaries. Always returns at least one line — an empty input
+/// yields a single empty string so callers preserve blank-line spacing.
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() || width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_w = word.width();
+        if current.is_empty() {
+            // First word on the line.
+            if word_w > width {
+                push_hard_broken(&mut out, &mut current, &mut current_w, word, width);
+            } else {
+                current.push_str(word);
+                current_w = word_w;
+            }
+        } else if current_w + 1 + word_w <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_w += 1 + word_w;
+        } else {
+            out.push(std::mem::take(&mut current));
+            current_w = 0;
+            if word_w > width {
+                push_hard_broken(&mut out, &mut current, &mut current_w, word, width);
+            } else {
+                current.push_str(word);
+                current_w = word_w;
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Hard-break `word` (wider than `width`) into character-aligned chunks,
+/// flushing completed chunks into `out` and leaving any trailing partial
+/// chunk in `current` / `current_w`.
+fn push_hard_broken(
+    out: &mut Vec<String>,
+    current: &mut String,
+    current_w: &mut usize,
+    word: &str,
+    width: usize,
+) {
+    for ch in word.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if *current_w + cw > width && !current.is_empty() {
+            out.push(std::mem::take(current));
+            *current_w = 0;
+        }
+        current.push(ch);
+        *current_w += cw;
+    }
 }
 
 fn human_elapsed(started_at: chrono::DateTime<chrono::Local>) -> String {
