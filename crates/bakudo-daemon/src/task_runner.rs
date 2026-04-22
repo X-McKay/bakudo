@@ -108,14 +108,18 @@ async fn run_attempt_inner(
     // Build the abox run params.
     let command = cfg.worker_command.clone();
     // Pass the spec file path as an env var so the worker can find it.
-    let env_vars = vec![
+    let mut env_vars = vec![
         (
             "BAKUDO_SPEC_PATH".to_string(),
             spec_path.to_string_lossy().to_string(),
         ),
         ("BAKUDO_TASK_ID".to_string(), task_id.clone()),
         ("BAKUDO_PROMPT".to_string(), spec.prompt.clone()),
+        ("BAKUDO_PROVIDER".to_string(), spec.provider_id.clone()),
     ];
+    if let Some(m) = spec.model.as_ref() {
+        env_vars.push(("BAKUDO_MODEL".to_string(), m.clone()));
+    }
 
     let params = RunParams {
         task_id: task_id.clone(),

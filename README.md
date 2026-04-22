@@ -45,8 +45,10 @@ bakudo
 - `/discard <task-id>`: discard a preserved worktree.
 - `/diverge <task-id>`: show divergence for a preserved worktree.
 - `/sandboxes` (aliases: `/ls`, `/list`): list tracked sandboxes.
+- `/diff <task-id>`: fetch and colorise the diff for a preserved worktree.
 - `/status`: show provider/model/task counts.
 - `/config`: show the active runtime configuration.
+- `/doctor`: probe `abox` and provider binaries for health issues.
 - `/clear`: clear the transcript display.
 - `/new`: start a fresh transcript/session view.
 - `/help`: show the command catalog.
@@ -60,16 +62,29 @@ bakudo list
 bakudo apply <task-id>
 bakudo discard <task-id>
 bakudo divergence <task-id>
+bakudo doctor
+bakudo resume <session-id>
 ```
+
+### Configuration
+
+Bakudo loads configuration in layered order:
+
+1. `~/.config/bakudo/config.toml`  (user defaults)
+2. `<repo>/.bakudo/config.toml`     (repo overrides)
+3. `-c <path>`                      (CLI-explicit file; suppresses layering)
+
+Each layer may set any subset of fields; later layers override earlier ones.
 
 ## Architecture
 
 Bakudo is a Cargo workspace with three main crates plus a thin root binary:
 
 1. `bakudo-core`: Protocol types, config loading, provider registry, state models, and the `abox` adapter.
-2. `bakudo-daemon`: Session orchestration, task execution, divergence queries, and worktree lifecycle decisions.
+2. `bakudo-daemon`: Session orchestration, task execution, divergence queries, doctor probes, and worktree lifecycle decisions.
 3. `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
-4. `src/main.rs`: CLI entrypoint and TUI bootstrap.
+4. `bakudo-worker`: Small wrapper that runs inside an abox sandbox and emits structured `BAKUDO_EVENT`/`BAKUDO_RESULT` envelopes around provider output.
+5. `src/main.rs`: CLI entrypoint and TUI bootstrap.
 
 See [AGENTS.md](AGENTS.md) for development invariants and [docs/current-architecture.md](docs/current-architecture.md) for the current implementation walkthrough. Historical design drafts remain in `docs/` and are marked as archived.
 

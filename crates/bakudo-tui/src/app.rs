@@ -98,7 +98,7 @@ impl ChatMessage {
 pub struct ShelfEntry {
     pub task_id: String,
     pub provider: String,
-    pub model: String,
+    pub model: Option<String>,
     pub prompt_summary: String,
     pub last_note: String,
     pub state_label: String,
@@ -160,8 +160,8 @@ pub struct App {
 
     /// Current provider ID.
     pub provider_id: String,
-    /// Current model (empty = provider default).
-    pub model: String,
+    /// Current model (None = provider default).
+    pub model: Option<String>,
 
     /// Number of tasks currently in-flight (used to gate commands).
     pub active_task_count: usize,
@@ -235,14 +235,17 @@ impl App {
     // ── Transcript ─────────────────────────────────────────────────────────
 
     /// Push a message to the transcript, trimming if over limit.
+    ///
+    /// If the user is scrolled up, we keep their absolute position anchored
+    /// by incrementing `scroll_offset` by the number of newly-added lines.
     pub fn push_message(&mut self, msg: ChatMessage) {
+        let added_lines = msg.content.lines().count().max(1);
         self.transcript.push_back(msg);
         while self.transcript.len() > MAX_TRANSCRIPT_LINES {
             self.transcript.pop_front();
         }
-        // Auto-scroll to bottom when not scrolled up.
-        if self.scroll_offset == 0 {
-            self.scroll_offset = 0;
+        if self.scroll_offset > 0 {
+            self.scroll_offset = self.scroll_offset.saturating_add(added_lines);
         }
     }
 
@@ -269,6 +272,21 @@ impl App {
 
     pub fn selected_shelf_entry(&self) -> Option<&ShelfEntry> {
         self.shelf.get(self.shelf_selected)
+    }
+
+    /// Show a note in the transcript that we are resuming a named session.
+    pub fn note_resume(&mut self, session_id: String) {
+        self.push_message(ChatMessage::system(format!(
+            "Resuming session {session_id}. Prior sandboxes will be rehydrated from the on-disk ledger."
+        )));
+    }
+
+    /// Human label for the active model (or "default" when unset).
+    pub fn model_label(&self) -> String {
+        match self.model.as_deref() {
+            Some(m) if !m.is_empty() => m.to_string(),
+            _ => "default".to_string(),
+        }
     }
 
     // ── Tick ───────────────────────────────────────────────────────────────
@@ -602,13 +620,12 @@ impl App {
             SessionEvent::ProviderChanged { provider_id, model } => {
                 self.provider_id = provider_id.clone();
                 self.model = model.clone();
+                let model_label = match model.as_deref() {
+                    Some(m) if !m.is_empty() => m.to_string(),
+                    _ => "default".to_string(),
+                };
                 self.push_message(ChatMessage::info(format!(
-                    "Provider → {provider_id}  model → {}",
-                    if model.is_empty() {
-                        "default".to_string()
-                    } else {
-                        model
-                    }
+                    "Provider → {provider_id}  model → {model_label}"
                 )));
             }
             SessionEvent::Info(message) => {
@@ -711,7 +728,7 @@ impl App {
         let ParsedCommand { command, arg } = parsed;
 
         // Guard commands that should not run during an active task.
-        if self.active_task_count > 0 && !command.clone().available_during_task() {
+        if self.active_task_count > 0 && !command.available_during_task() {
             self.push_message(ChatMessage::error(format!(
                 "/{} cannot be used while a task is in progress.",
                 command.command()
@@ -720,121 +737,156 @@ impl App {
         }
 
         match command {
-            SlashCommand::Provider => {
-                if self.registry.get(&arg).is_none() {
-                    self.push_message(ChatMessage::error(format!(
-                        "Unknown provider '{arg}'. Use /providers to list available providers."
-                    )));
-                } else {
-                    let _ = self
-                        .cmd_tx
-                        .try_send(SessionCommand::SetProvider { provider_id: arg });
-                }
-            }
-            SlashCommand::Model => {
-                let _ = self
-                    .cmd_tx
-                    .try_send(SessionCommand::SetModel { model: arg });
-            }
-            SlashCommand::Providers => {
-                let ids = self.registry.list_ids();
-                let mut lines = vec!["Registered providers:".to_string()];
-                for id in ids {
-                    if let Some(spec) = self.registry.get(id) {
-                        let active = if *id == self.provider_id {
-                            "  ← active"
-                        } else {
-                            ""
-                        };
-                        lines.push(format!("  {:<12} {}{}", id, spec.display_name, active));
-                    }
-                }
-                self.push_message(ChatMessage::info(lines.join("\n")));
-            }
-            SlashCommand::Apply => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Apply {
-                    task_id: arg.clone(),
-                });
-                self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
-            }
-            SlashCommand::Discard => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Discard {
-                    task_id: arg.clone(),
-                });
-                self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
-            }
-            SlashCommand::Sandboxes => {
-                if self.shelf.is_empty() {
-                    self.push_message(ChatMessage::info("No sandboxes in this session."));
-                } else {
-                    let mut lines = vec![format!("Sandboxes ({}):", self.shelf.len())];
-                    for entry in &self.shelf {
-                        lines.push(format!(
-                            "  [{:<10}] {}  {}{}  {}",
-                            entry.state_label,
-                            entry.task_id,
-                            entry.provider,
-                            if entry.model.is_empty() {
-                                String::new()
-                            } else {
-                                format!("/{}", entry.model)
-                            },
-                            entry.last_note
-                        ));
-                    }
-                    self.push_message(ChatMessage::info(lines.join("\n")));
-                }
-            }
-            SlashCommand::Diverge => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
-                    task_id: arg.clone(),
-                });
-                self.push_message(ChatMessage::info(format!("Fetching divergence for {arg}…")));
-            }
-            SlashCommand::New => {
-                self.transcript.clear();
-                self.shelf.clear();
-                self.shelf_selected = 0;
-                self.push_message(ChatMessage::system("New session started."));
-            }
-            SlashCommand::Clear => {
-                self.transcript.clear();
-                self.push_message(ChatMessage::system("Transcript cleared."));
-            }
-            SlashCommand::Config => {
-                let cfg = &self.config;
-                let info = format!(
-                    "Configuration:\n  provider:          {}\n  model:             {}\n  base_branch:       {}\n  timeout:           {}s\n  candidate_policy:  {}\n  sandbox_lifecycle: {}",
-                    self.provider_id,
-                    if self.model.is_empty() { "default" } else { &self.model },
-                    cfg.base_branch,
-                    cfg.timeout_secs,
-                    cfg.candidate_policy,
-                    cfg.sandbox_lifecycle,
-                );
-                self.push_message(ChatMessage::info(info));
-            }
-            SlashCommand::Status => {
-                let info = format!(
-                    "Status:\n  workspace:      {}\n  provider:       {}\n  model:          {}\n  active tasks:   {}\n  preserved:      {}\n  conflicts:      {}\n  shelf entries:  {}",
-                    self.workspace_label,
-                    self.provider_id,
-                    if self.model.is_empty() { "default" } else { &self.model },
-                    self.active_task_count,
-                    self.preserved_shelf_count(),
-                    self.conflict_shelf_count(),
-                    self.shelf.len(),
-                );
-                self.push_message(ChatMessage::info(info));
-            }
+            SlashCommand::Provider => self.cmd_provider(arg),
+            SlashCommand::Model => self.cmd_model(arg),
+            SlashCommand::Providers => self.cmd_providers(),
+            SlashCommand::Apply => self.cmd_apply(arg),
+            SlashCommand::Discard => self.cmd_discard(arg),
+            SlashCommand::Sandboxes => self.cmd_sandboxes(),
+            SlashCommand::Diverge => self.cmd_diverge(arg),
+            SlashCommand::Diff => self.cmd_diff(arg),
+            SlashCommand::New => self.cmd_new(),
+            SlashCommand::Clear => self.cmd_clear(),
+            SlashCommand::Config => self.cmd_config(),
+            SlashCommand::Status => self.cmd_status(),
+            SlashCommand::Doctor => self.cmd_doctor(),
             SlashCommand::Help => {
                 self.push_message(ChatMessage::info(help_text()));
             }
-            SlashCommand::Quit => {
-                self.should_quit = true;
-                let _ = self.cmd_tx.try_send(SessionCommand::Shutdown);
+            SlashCommand::Quit => self.cmd_quit(),
+        }
+    }
+
+    fn cmd_provider(&mut self, arg: String) {
+        if self.registry.get(&arg).is_none() {
+            self.push_message(ChatMessage::error(format!(
+                "Unknown provider '{arg}'. Use /providers to list available providers."
+            )));
+        } else {
+            let _ = self
+                .cmd_tx
+                .try_send(SessionCommand::SetProvider { provider_id: arg });
+        }
+    }
+
+    fn cmd_model(&mut self, arg: String) {
+        let model = if arg.is_empty() { None } else { Some(arg) };
+        let _ = self.cmd_tx.try_send(SessionCommand::SetModel { model });
+    }
+
+    fn cmd_providers(&mut self) {
+        let ids = self.registry.list_ids();
+        let mut lines = vec!["Registered providers:".to_string()];
+        for id in ids {
+            if let Some(spec) = self.registry.get(id) {
+                let active = if *id == self.provider_id {
+                    "  ← active"
+                } else {
+                    ""
+                };
+                lines.push(format!("  {:<12} {}{}", id, spec.display_name, active));
             }
         }
+        self.push_message(ChatMessage::info(lines.join("\n")));
+    }
+
+    fn cmd_apply(&mut self, arg: String) {
+        let _ = self.cmd_tx.try_send(SessionCommand::Apply {
+            task_id: arg.clone(),
+        });
+        self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
+    }
+
+    fn cmd_discard(&mut self, arg: String) {
+        let _ = self.cmd_tx.try_send(SessionCommand::Discard {
+            task_id: arg.clone(),
+        });
+        self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
+    }
+
+    fn cmd_sandboxes(&mut self) {
+        if self.shelf.is_empty() {
+            self.push_message(ChatMessage::info("No sandboxes in this session."));
+            return;
+        }
+        let mut lines = vec![format!("Sandboxes ({}):", self.shelf.len())];
+        for entry in &self.shelf {
+            let model_suffix = entry
+                .model
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .map(|m| format!("/{m}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  [{:<10}] {}  {}{}  {}",
+                entry.state_label, entry.task_id, entry.provider, model_suffix, entry.last_note
+            ));
+        }
+        self.push_message(ChatMessage::info(lines.join("\n")));
+    }
+
+    fn cmd_diverge(&mut self, arg: String) {
+        let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
+            task_id: arg.clone(),
+        });
+        self.push_message(ChatMessage::info(format!("Fetching divergence for {arg}…")));
+    }
+
+    fn cmd_diff(&mut self, arg: String) {
+        let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
+            task_id: arg.clone(),
+        });
+        self.push_message(ChatMessage::info(format!("Fetching diff for {arg}…")));
+    }
+
+    fn cmd_new(&mut self) {
+        self.transcript.clear();
+        self.shelf.clear();
+        self.shelf_selected = 0;
+        self.push_message(ChatMessage::system("New session started."));
+    }
+
+    fn cmd_clear(&mut self) {
+        self.transcript.clear();
+        self.push_message(ChatMessage::system("Transcript cleared."));
+    }
+
+    fn cmd_config(&mut self) {
+        let cfg = &self.config;
+        let info = format!(
+            "Configuration:\n  provider:          {}\n  model:             {}\n  base_branch:       {}\n  timeout:           {}s\n  candidate_policy:  {}\n  sandbox_lifecycle: {}",
+            self.provider_id,
+            self.model_label(),
+            cfg.base_branch,
+            cfg.timeout_secs,
+            cfg.candidate_policy,
+            cfg.sandbox_lifecycle,
+        );
+        self.push_message(ChatMessage::info(info));
+    }
+
+    fn cmd_status(&mut self) {
+        let info = format!(
+            "Status:\n  workspace:      {}\n  provider:       {}\n  model:          {}\n  active tasks:   {}\n  preserved:      {}\n  conflicts:      {}\n  shelf entries:  {}",
+            self.workspace_label,
+            self.provider_id,
+            self.model_label(),
+            self.active_task_count,
+            self.preserved_shelf_count(),
+            self.conflict_shelf_count(),
+            self.shelf.len(),
+        );
+        self.push_message(ChatMessage::info(info));
+    }
+
+    fn cmd_doctor(&mut self) {
+        let _ = self.cmd_tx.try_send(SessionCommand::Doctor);
+        self.push_message(ChatMessage::info("Running health checks…"));
+    }
+
+    fn cmd_quit(&mut self) {
+        self.should_quit = true;
+        let _ = self.cmd_tx.try_send(SessionCommand::Shutdown);
     }
 
     // ── Tab completion ─────────────────────────────────────────────────────
@@ -978,7 +1030,7 @@ fn shelf_entry_from_record(record: SandboxRecord) -> ShelfEntry {
     ShelfEntry {
         task_id: record.task_id,
         provider: record.provider_id,
-        model: record.model,
+        model: record.model.filter(|m| !m.is_empty()),
         prompt_summary: truncate_line(record.prompt_summary, 100),
         last_note: truncate_line(shelf_state_note(&record.state), 120),
         state_label: state_label.to_string(),

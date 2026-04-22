@@ -83,11 +83,8 @@ pub fn render(frame: &mut Frame, app: &App) {
 // ─── Header ────────────────────────────────────────────────────────────────
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    let model_str = if app.model.is_empty() {
-        "default"
-    } else {
-        &app.model
-    };
+    let model_label = app.model_label();
+    let model_str = model_label.as_str();
     let line_1 = Line::from(vec![
         Span::raw("  "),
         Span::styled("bakudo", Style::default().fg(Color::White).bold()),
@@ -179,6 +176,7 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         let body_style = Style::default().fg(fg);
 
         for (i, content_line) in msg.content.lines().enumerate() {
+            let body_span = render_diff_aware_span(content_line, body_style);
             if i == 0 {
                 lines.push(Line::from(vec![
                     Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
@@ -186,15 +184,11 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
                     Span::styled(icon, role_style),
                     Span::raw(" "),
                     Span::styled(role_label, role_style),
-                    Span::styled(content_line.to_string(), body_style),
+                    body_span,
                 ]));
             } else {
-                // Continuation lines: indent to align with first-line body.
                 let indent = " ".repeat(gutter + ts.len() + 1 + 1 + 1 + role_label.len());
-                lines.push(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(content_line.to_string(), body_style),
-                ]));
+                lines.push(Line::from(vec![Span::raw(indent), body_span]));
             }
         }
     }
@@ -496,10 +490,9 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
             // Truncate summary.
             let summary: String = entry.prompt_summary.chars().take(max_summary_w).collect();
             let note: String = entry.last_note.chars().take(max_summary_w).collect();
-            let provider_model = if entry.model.is_empty() {
-                entry.provider.clone()
-            } else {
-                format!("{}/{}", entry.provider, entry.model)
+            let provider_model = match entry.model.as_deref().filter(|m| !m.is_empty()) {
+                Some(m) => format!("{}/{}", entry.provider, m),
+                None => entry.provider.clone(),
             };
 
             ListItem::new(vec![
@@ -564,10 +557,9 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let provider_model = if entry.model.is_empty() {
-        entry.provider.clone()
-    } else {
-        format!("{}/{}", entry.provider, entry.model)
+    let provider_model = match entry.model.as_deref().filter(|m| !m.is_empty()) {
+        Some(m) => format!("{}/{}", entry.provider, m),
+        None => entry.provider.clone(),
     };
     let detail = vec![
         Line::from(vec![
@@ -619,6 +611,27 @@ fn human_elapsed(started_at: chrono::DateTime<chrono::Local>) -> String {
     }
 }
 
+/// Colorise a single line from a unified-diff-ish payload.
+/// Lines starting with `+`/`-` (but not `+++`/`---` file headers) and `@@`
+/// hunk headers get diff-flavoured colors; everything else inherits
+/// `fallback`.
+fn render_diff_aware_span(line: &str, fallback: Style) -> Span<'static> {
+    if line.starts_with("@@") {
+        Span::styled(line.to_string(), Style::default().fg(palette::diff_hunk()))
+    } else if line.starts_with("+++") || line.starts_with("---") {
+        Span::styled(line.to_string(), fallback.fg(palette::diff_hunk()))
+    } else if line.starts_with('+') {
+        Span::styled(line.to_string(), Style::default().fg(palette::diff_added()))
+    } else if line.starts_with('-') && !line.starts_with("--") {
+        Span::styled(
+            line.to_string(),
+            Style::default().fg(palette::diff_removed()),
+        )
+    } else {
+        Span::styled(line.to_string(), fallback)
+    }
+}
+
 fn state_color(color: ShelfColor) -> Color {
     match color {
         ShelfColor::Running => palette::shelf_running(),
@@ -657,13 +670,13 @@ mod tests {
             event_rx,
         );
         app.provider_id = "codex".to_string();
-        app.model = "gpt-5".to_string();
+        app.model = Some("gpt-5".to_string());
         app.focus = FocusedPanel::Shelf;
         app.active_task_count = 1;
         app.shelf.push_back(ShelfEntry {
             task_id: "task-render".to_string(),
             provider: "codex".to_string(),
-            model: "gpt-5".to_string(),
+            model: Some("gpt-5".to_string()),
             prompt_summary: "Make the TUI feel native.".to_string(),
             last_note: "Summarizing diffs before applying the fix.".to_string(),
             state_label: "running".to_string(),

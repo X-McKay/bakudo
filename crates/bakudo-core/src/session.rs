@@ -11,17 +11,17 @@ pub struct SessionRecord {
     pub session_id: SessionId,
     pub started_at: DateTime<Utc>,
     pub provider_id: String,
-    pub model: String,
+    pub model: Option<String>,
     pub repo_root: Option<String>,
 }
 
 impl SessionRecord {
-    pub fn new(provider_id: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(provider_id: impl Into<String>, model: Option<String>) -> Self {
         Self {
             session_id: SessionId::new(),
             started_at: Utc::now(),
             provider_id: provider_id.into(),
-            model: model.into(),
+            model,
             repo_root: None,
         }
     }

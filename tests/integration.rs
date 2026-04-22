@@ -83,7 +83,7 @@ mod state_ledger_tests {
             session_id: SessionId("session-test".to_string()),
             task_id: task_id.to_string(),
             provider_id: "claude".to_string(),
-            model: String::new(),
+            model: None,
             prompt_summary: "integration test".to_string(),
             state,
             lifecycle: SandboxLifecycle::Preserved,

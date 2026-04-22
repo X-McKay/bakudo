@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSpec {
@@ -15,11 +15,13 @@ pub struct ProviderSpec {
 
 impl ProviderSpec {
     /// Build the full argument list for a non-interactive invocation.
-    pub fn build_args(&self, model: &str, allow_all: bool) -> Vec<String> {
+    pub fn build_args(&self, model: Option<&str>, allow_all: bool) -> Vec<String> {
         let mut args = self.non_interactive_args.clone();
-        if !model.is_empty() && !self.model_flag.is_empty() {
-            args.push(self.model_flag.clone());
-            args.push(model.to_string());
+        if let Some(m) = model.filter(|s| !s.is_empty()) {
+            if !self.model_flag.is_empty() {
+                args.push(self.model_flag.clone());
+                args.push(m.to_string());
+            }
         }
         if allow_all {
             if let Some(flag) = &self.allow_all_flag {
@@ -30,7 +32,7 @@ impl ProviderSpec {
     }
 
     /// Build a command that feeds the prompt from `BAKUDO_PROMPT` into stdin.
-    pub fn build_stdin_command(&self, model: &str, allow_all: bool) -> Vec<String> {
+    pub fn build_stdin_command(&self, model: Option<&str>, allow_all: bool) -> Vec<String> {
         let mut command = vec![
             "bash".to_string(),
             "-lc".to_string(),
@@ -44,13 +46,13 @@ impl ProviderSpec {
 
 #[derive(Debug, Clone)]
 pub struct ProviderRegistry {
-    providers: HashMap<String, ProviderSpec>,
+    providers: BTreeMap<String, ProviderSpec>,
     default_provider: String,
 }
 
 impl ProviderRegistry {
     pub fn with_defaults() -> Self {
-        let mut providers = HashMap::new();
+        let mut providers = BTreeMap::new();
 
         providers.insert(
             "claude".to_string(),
@@ -132,9 +134,8 @@ impl ProviderRegistry {
     }
 
     pub fn list_ids(&self) -> Vec<&str> {
-        let mut ids: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
-        ids.sort();
-        ids
+        // BTreeMap iteration is already sorted.
+        self.providers.keys().map(|s| s.as_str()).collect()
     }
 }
 
@@ -160,7 +161,7 @@ mod tests {
     #[test]
     fn claude_args_non_interactive() {
         let reg = ProviderRegistry::with_defaults();
-        let args = reg.get("claude").unwrap().build_args("", false);
+        let args = reg.get("claude").unwrap().build_args(None, false);
         assert_eq!(args, vec!["-p"]);
     }
 
@@ -170,7 +171,7 @@ mod tests {
         let args = reg
             .get("claude")
             .unwrap()
-            .build_args("claude-opus-4-5", true);
+            .build_args(Some("claude-opus-4-5"), true);
         assert_eq!(
             args,
             vec![
@@ -185,18 +186,28 @@ mod tests {
     #[test]
     fn codex_exec_subcommand() {
         let reg = ProviderRegistry::with_defaults();
-        let args = reg.get("codex").unwrap().build_args("", false);
+        let args = reg.get("codex").unwrap().build_args(None, false);
         assert_eq!(args, vec!["exec"]);
     }
 
     #[test]
     fn stdin_command_wraps_provider_and_preserves_args() {
         let reg = ProviderRegistry::with_defaults();
-        let cmd = reg.get("codex").unwrap().build_stdin_command("gpt-5", true);
+        let cmd = reg
+            .get("codex")
+            .unwrap()
+            .build_stdin_command(Some("gpt-5"), true);
         assert_eq!(cmd[0], "bash");
         assert_eq!(cmd[1], "-lc");
         assert_eq!(cmd[3], "codex");
         assert_eq!(&cmd[4..], &["exec", "--model", "gpt-5", "--full-auto"]);
+    }
+
+    #[test]
+    fn empty_model_string_is_treated_as_none() {
+        let reg = ProviderRegistry::with_defaults();
+        let args = reg.get("claude").unwrap().build_args(Some(""), false);
+        assert_eq!(args, vec!["-p"]);
     }
 
     #[test]

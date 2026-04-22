@@ -27,6 +27,7 @@ pub enum SlashCommand {
     #[strum(serialize = "sandboxes", serialize = "ls", serialize = "list")]
     Sandboxes,
     Diverge,
+    Diff,
 
     // ── Session management ────────────────────────────────────────────────
     New,
@@ -35,6 +36,7 @@ pub enum SlashCommand {
     // ── Observability ─────────────────────────────────────────────────────
     Config,
     Status,
+    Doctor,
 
     // ── Meta ──────────────────────────────────────────────────────────────
     Help,
@@ -57,10 +59,12 @@ impl SlashCommand {
                 "list all active and preserved sandboxes  (aliases: /ls /list)"
             }
             SlashCommand::Diverge => "show divergence summary for a preserved worktree",
+            SlashCommand::Diff => "show a colorised unified diff for a preserved worktree",
             SlashCommand::New => "start a fresh session (clears transcript)",
             SlashCommand::Clear => "clear the transcript display",
             SlashCommand::Config => "show current configuration",
             SlashCommand::Status => "show provider, model, and active sandbox count",
+            SlashCommand::Doctor => "probe abox and provider binaries for health issues",
             SlashCommand::Help => "show this help  (alias: /h /?)",
             SlashCommand::Quit => "exit bakudo  (aliases: /exit /q)",
         }
@@ -74,9 +78,11 @@ impl SlashCommand {
                 | SlashCommand::Sandboxes
                 | SlashCommand::Status
                 | SlashCommand::Config
+                | SlashCommand::Doctor
                 | SlashCommand::Help
                 | SlashCommand::Clear
                 | SlashCommand::Diverge
+                | SlashCommand::Diff
                 | SlashCommand::Quit
         )
     }
@@ -90,6 +96,7 @@ impl SlashCommand {
                 | SlashCommand::Apply
                 | SlashCommand::Discard
                 | SlashCommand::Diverge
+                | SlashCommand::Diff
         )
     }
 
@@ -141,14 +148,15 @@ pub fn parse_slash(input: &str) -> Option<Result<ParsedCommand, String>> {
         }
     };
 
-    // Validate required arguments.
-    if command.supports_inline_arg() && arg.is_empty() {
+    // Validate required arguments. `/model` with no arg is a valid "reset to
+    // provider default" so it is not required.
+    if command.supports_inline_arg() && arg.is_empty() && command != SlashCommand::Model {
         let usage = match command {
             SlashCommand::Provider => "Usage: /provider <id>  (e.g. /provider claude)",
-            SlashCommand::Model => "Usage: /model <name>  (e.g. /model claude-opus-4-5)",
             SlashCommand::Apply => "Usage: /apply <task_id>",
             SlashCommand::Discard => "Usage: /discard <task_id>",
             SlashCommand::Diverge => "Usage: /diverge <task_id>",
+            SlashCommand::Diff => "Usage: /diff <task_id>",
             _ => "Usage: /<command> <arg>",
         };
         return Some(Err(usage.to_string()));
@@ -269,9 +277,27 @@ mod tests {
     #[test]
     fn missing_arg_returns_usage() {
         err_contains("/provider", "Usage:");
-        err_contains("/model", "Usage:");
         err_contains("/apply", "Usage:");
         err_contains("/discard", "Usage:");
+    }
+
+    #[test]
+    fn model_without_arg_is_valid_reset() {
+        assert_eq!(parse_slash("/model"), ok(SlashCommand::Model, ""));
+    }
+
+    #[test]
+    fn doctor_has_no_inline_arg() {
+        assert_eq!(parse_slash("/doctor"), ok(SlashCommand::Doctor, ""));
+    }
+
+    #[test]
+    fn diff_requires_task_id() {
+        err_contains("/diff", "Usage:");
+        assert_eq!(
+            parse_slash("/diff bakudo-abc"),
+            ok(SlashCommand::Diff, "bakudo-abc")
+        );
     }
 
     #[test]

@@ -83,4 +83,4 @@ cargo build --release
 
 ## Historical Documents
 
-The two `bakudo-v2-architecture-*.md` files in `docs/` are historical design drafts. They are retained for context only and do not describe the current shipping implementation.
+Files under `docs/archive/` are historical design drafts. They are retained for context only and do not describe the current shipping implementation.

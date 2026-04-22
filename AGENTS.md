@@ -19,7 +19,7 @@ bakudo/
 │   └── runtime.rs
 ├── docs/
 │   ├── current-architecture.md
-│   └── bakudo-v2-architecture-*.md   # archived design drafts
+│   └── archive/                       # historical design drafts
 ├── .claude/skills/
 ├── AGENTS.md
 ├── justfile
@@ -111,7 +111,7 @@ Slash commands live in `bakudo-tui/src/commands.rs`. When adding one:
 ## Documentation Policy
 
 - `README.md` and `docs/current-architecture.md` describe the current implementation.
-- The `docs/bakudo-v2-architecture-*.md` files are archived historical drafts. Do not treat them as the source of truth for current behavior.
+- Files under `docs/archive/` are historical drafts. Do not treat them as the source of truth for current behavior.
 
 ## Commit Message Convention
 

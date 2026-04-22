@@ -57,6 +57,10 @@ impl TempRepo {
             &["config", "user.email", "test@example.com"],
         );
         run_host(&dir.path, "git", &["config", "user.name", "Bakudo Tests"]);
+        // Make the fixture repo self-contained: global git config may enforce
+        // commit signing in some CI/sandbox envs, which breaks temp-repo setup.
+        run_host(&dir.path, "git", &["config", "commit.gpgsign", "false"]);
+        run_host(&dir.path, "git", &["config", "tag.gpgsign", "false"]);
         fs::write(dir.path.join("README.md"), "base\n").unwrap();
         run_host(&dir.path, "git", &["add", "README.md"]);
         run_host(&dir.path, "git", &["commit", "-m", "base"]);
@@ -177,7 +181,7 @@ fn make_record(task_id: &str, state: SandboxState) -> SandboxRecord {
         session_id: SessionId("session-runtime".to_string()),
         task_id: task_id.to_string(),
         provider_id: "claude".to_string(),
-        model: String::new(),
+        model: None,
         prompt_summary: "runtime test".to_string(),
         state,
         lifecycle: Default::default(),
@@ -770,7 +774,7 @@ fn app_drain_session_events_updates_shelf_and_blocks_mutating_commands() {
         .try_send(SessionEvent::TaskStarted {
             task_id: "task-1".to_string(),
             provider_id: "claude".to_string(),
-            model: String::new(),
+            model: None,
             prompt_summary: "test prompt".to_string(),
         })
         .unwrap();

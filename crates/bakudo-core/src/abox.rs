@@ -242,6 +242,16 @@ impl AboxAdapter {
         Ok(vec![]) // empty = clean merge
     }
 
+    /// `abox --version` — returns the raw version output.
+    pub async fn version(&self) -> Result<String, AboxError> {
+        let out = Command::new(&self.bin)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(AboxError::Io)?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
     /// `abox [--repo <repo>] divergence [--base <base>]`
     pub async fn divergence(&self, repo: Option<&Path>, base: &str) -> Result<String, AboxError> {
         let mut cmd = self.base_cmd(repo);
@@ -305,29 +315,93 @@ pub fn sandbox_task_id(attempt_id: &str) -> String {
 
 /// Parse the tabular output of `abox list`.
 /// Header line format: ID  BRANCH  STATE  PID  AHEAD
+///
+/// Uses the header row to determine fixed column offsets, falling back to
+/// whitespace splitting only if the header can't be found. This tolerates
+/// state/branch strings that contain spaces (e.g. "merge conflicts").
 fn parse_list_output(output: &str) -> Result<Vec<SandboxEntry>, AboxError> {
+    let mut lines = output.lines();
+    let header = loop {
+        match lines.next() {
+            Some(line) if line.trim_start().starts_with("ID") => break Some(line),
+            Some(_) => continue,
+            None => break None,
+        }
+    };
+
+    let offsets = header.and_then(header_offsets);
+
     let mut entries = Vec::new();
-    for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("ID") || line.starts_with('-') {
+    for line in lines {
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
             continue;
         }
-        if line.starts_with("No active") || line.contains("sandbox(es)") {
+        if trimmed.starts_with('-') {
             continue;
         }
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 5 {
+        if trimmed.trim_start().starts_with("No active") || trimmed.contains("sandbox(es)") {
             continue;
         }
-        entries.push(SandboxEntry {
-            id: cols[0].to_string(),
-            branch: cols[1].to_string(),
-            vm_state: cols[2].to_string(),
-            vm_pid: cols[3].to_string(),
-            commits_ahead: cols[4].to_string(),
-        });
+        match &offsets {
+            Some(off) => {
+                if let Some(entry) = parse_by_offsets(trimmed, off) {
+                    entries.push(entry);
+                }
+            }
+            None => {
+                let cols: Vec<&str> = trimmed.split_whitespace().collect();
+                if cols.len() >= 5 {
+                    entries.push(SandboxEntry {
+                        id: cols[0].to_string(),
+                        branch: cols[1].to_string(),
+                        vm_state: cols[2].to_string(),
+                        vm_pid: cols[3].to_string(),
+                        commits_ahead: cols[4].to_string(),
+                    });
+                }
+            }
+        }
     }
     Ok(entries)
+}
+
+/// Determine the byte offsets of each column header in the `abox list` header row.
+fn header_offsets(header: &str) -> Option<[usize; 5]> {
+    let id = header.find("ID")?;
+    let branch = header[id..].find("BRANCH").map(|i| i + id)?;
+    let state = header[branch..].find("STATE").map(|i| i + branch)?;
+    let pid = header[state..].find("PID").map(|i| i + state)?;
+    let ahead = header[pid..].find("AHEAD").map(|i| i + pid)?;
+    Some([id, branch, state, pid, ahead])
+}
+
+fn parse_by_offsets(line: &str, offsets: &[usize; 5]) -> Option<SandboxEntry> {
+    fn slice(line: &str, start: usize, end: Option<usize>) -> Option<String> {
+        if start >= line.len() {
+            return None;
+        }
+        let end = end.unwrap_or(line.len()).min(line.len());
+        if end <= start {
+            return None;
+        }
+        Some(line[start..end].trim().to_string())
+    }
+    let id = slice(line, offsets[0], Some(offsets[1]))?;
+    let branch = slice(line, offsets[1], Some(offsets[2]))?;
+    let vm_state = slice(line, offsets[2], Some(offsets[3]))?;
+    let vm_pid = slice(line, offsets[3], Some(offsets[4]))?;
+    let commits_ahead = slice(line, offsets[4], None).unwrap_or_default();
+    if id.is_empty() {
+        return None;
+    }
+    Some(SandboxEntry {
+        id,
+        branch,
+        vm_state,
+        vm_pid,
+        commits_ahead,
+    })
 }
 
 #[cfg(test)]
@@ -345,6 +419,20 @@ mod tests {
         let out = "No active sandboxes.\n";
         let entries = parse_list_output(out).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_list_tolerates_multi_word_state() {
+        let out = "\
+ID               BRANCH                   STATE            PID      AHEAD
+------------------------------------------------------------------------------
+bakudo-abc       agent/bakudo-abc         merge conflicts  12345    3
+";
+        let entries = parse_list_output(out).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].vm_state, "merge conflicts");
+        assert_eq!(entries[0].vm_pid, "12345");
+        assert_eq!(entries[0].commits_ahead, "3");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_SCHEMA_VERSION: u32 = 3;
+pub const PROTOCOL_SCHEMA_VERSION: u32 = 1;
 
 /// Unique identifier for a single attempt (one VM run).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -177,9 +177,10 @@ pub struct AttemptSpec {
     /// Provider ID (e.g. "claude", "codex", "opencode"). Used to look up the
     /// command in the provider registry.
     pub provider_id: String,
-    /// Model override (e.g. "claude-opus-4-5"). Empty string means use the
+    /// Model override (e.g. "claude-opus-4-5"). `None` means use the
     /// provider default.
-    pub model: String,
+    #[serde(default, deserialize_with = "deserialize_optional_model")]
+    pub model: Option<String>,
     /// Optional path to the repo root on the host. Passed as `abox --repo`.
     pub repo_root: Option<String>,
 }
@@ -198,10 +199,20 @@ impl AttemptSpec {
             sandbox_lifecycle: SandboxLifecycle::Preserved,
             candidate_policy: CandidatePolicy::Review,
             provider_id: provider_id.into(),
-            model: String::new(),
+            model: None,
             repo_root: None,
         }
     }
+}
+
+/// Accept `""` as `None` for backward compatibility with earlier config files
+/// that used the empty-string sentinel.
+fn deserialize_optional_model<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.filter(|s| !s.is_empty()))
 }
 
 /// A progress event emitted by the worker to stdout during execution.

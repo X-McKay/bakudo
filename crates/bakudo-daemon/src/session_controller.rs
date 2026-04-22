@@ -32,14 +32,16 @@ pub enum SessionCommand {
     Dispatch { prompt: String },
     /// Change the active provider.
     SetProvider { provider_id: String },
-    /// Change the active model.
-    SetModel { model: String },
+    /// Change the active model. `None` resets to the provider default.
+    SetModel { model: Option<String> },
     /// Apply (merge) a preserved worktree.
     Apply { task_id: String },
     /// Discard a preserved worktree.
     Discard { task_id: String },
     /// Show divergence summary for a preserved worktree.
     Diverge { task_id: String },
+    /// Run provider/abox health probes and emit a single Info event.
+    Doctor,
     /// Shut down the session.
     Shutdown,
 }
@@ -53,7 +55,7 @@ pub enum SessionEvent {
     TaskStarted {
         task_id: String,
         provider_id: String,
-        model: String,
+        model: Option<String>,
         prompt_summary: String,
     },
     /// A progress event from a running task.
@@ -64,7 +66,10 @@ pub enum SessionEvent {
         state: SandboxState,
     },
     /// Provider changed.
-    ProviderChanged { provider_id: String, model: String },
+    ProviderChanged {
+        provider_id: String,
+        model: Option<String>,
+    },
     /// Informational message for the transcript.
     Info(String),
     /// An error occurred.
@@ -80,7 +85,7 @@ pub struct SessionController {
     pub ledger: Arc<SandboxLedger>,
     pub registry: Arc<ProviderRegistry>,
     current_provider: String,
-    current_model: String,
+    current_model: Option<String>,
     cmd_rx: mpsc::Receiver<SessionCommand>,
     event_tx: mpsc::Sender<SessionEvent>,
 }
@@ -96,7 +101,7 @@ impl SessionController {
     ) -> Self {
         let current_provider = config.default_provider.clone();
         let current_model = config.default_model.clone();
-        let session = SessionRecord::new(&current_provider, &current_model);
+        let session = SessionRecord::new(&current_provider, current_model.clone());
         Self {
             session,
             config,
@@ -142,12 +147,20 @@ impl SessionController {
                 SessionCommand::Diverge { task_id } => {
                     self.show_divergence(&task_id).await;
                 }
+                SessionCommand::Doctor => {
+                    self.run_doctor().await;
+                }
                 SessionCommand::Shutdown => {
                     let _ = self.event_tx.send(SessionEvent::Shutdown).await;
                     break;
                 }
             }
         }
+    }
+
+    async fn run_doctor(&self) {
+        let report = crate::doctor::run(&self.config, &self.abox, &self.registry).await;
+        let _ = self.event_tx.send(SessionEvent::Info(report)).await;
     }
 
     async fn reconcile_on_startup(&self) {
@@ -185,7 +198,7 @@ impl SessionController {
         let mut spec = self.config.build_attempt_spec(
             &prompt,
             &self.current_provider,
-            &self.current_model,
+            self.current_model.clone(),
             self.repo_path().map(|p| p.to_string_lossy().to_string()),
             self.config.candidate_policy,
             self.config.sandbox_lifecycle,
@@ -205,7 +218,7 @@ impl SessionController {
             })
             .await;
 
-        let worker_cmd = provider.build_stdin_command(&self.current_model, true);
+        let worker_cmd = provider.build_stdin_command(self.current_model.as_deref(), true);
 
         let cfg = Arc::new(TaskRunnerConfig {
             abox: self.abox.clone(),

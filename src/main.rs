@@ -6,6 +6,9 @@
 //!   bakudo list
 //!   bakudo apply <task_id>
 //!   bakudo discard <task_id>
+//!   bakudo divergence <task_id>
+//!   bakudo doctor
+//!   bakudo resume <session_id>
 //!
 //! With no subcommand, bakudo launches the interactive ratatui TUI.
 
@@ -17,6 +20,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
+    event::{DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -42,7 +46,8 @@ use bakudo_tui::{
     long_about = None
 )]
 struct Cli {
-    /// Path to the config file. Defaults to ~/.config/bakudo/config.toml.
+    /// Path to the config file. Defaults to layered lookup under
+    /// ~/.config/bakudo/config.toml and ./.bakudo/config.toml.
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
@@ -91,6 +96,13 @@ enum Commands {
         #[arg(short, long, default_value = "main")]
         base: String,
     },
+    /// Run health checks on abox and all registered provider binaries.
+    Doctor,
+    /// Resume a previous TUI session by loading its persisted ledger.
+    Resume {
+        /// The session ID to resume.
+        session_id: String,
+    },
 }
 
 #[tokio::main]
@@ -115,26 +127,20 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    // Load config.
-    let config_path = cli.config.unwrap_or_else(|| {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("bakudo")
-            .join("config.toml")
-    });
-    let config = Arc::new(BakudoConfig::load(&config_path)?);
+    let repo_root = std::env::current_dir().ok();
+    let config = Arc::new(
+        BakudoConfig::load_layered(cli.config.as_deref(), repo_root.as_deref())
+            .context("failed to load config")?,
+    );
 
     // Build shared components.
-    // Respect config.abox_bin so users can override the binary path.
     let abox = Arc::new(AboxAdapter::new(&config.abox_bin));
     let registry = Arc::new(ProviderRegistry::with_defaults());
-    let ledger = Arc::new(SandboxLedger::new());
+    let ledger_path = config.resolved_data_dir().join("ledger.jsonl");
+    let ledger = Arc::new(SandboxLedger::with_persistence(&ledger_path));
 
     match cli.command {
-        None => {
-            // Launch the interactive TUI.
-            run_tui(config, abox, registry, ledger).await
-        }
+        None => run_tui(config, abox, registry, ledger, None).await,
         Some(Commands::Run {
             prompt,
             provider,
@@ -157,63 +163,110 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Some(Commands::List) => {
-            let entries = abox.list(std::env::current_dir().ok().as_deref()).await?;
-            if entries.is_empty() {
-                println!("No active sandboxes.");
-            } else {
-                println!("{:<24} {:<12} {:<10} BRANCH", "TASK ID", "STATE", "AHEAD");
-                println!("{}", "-".repeat(70));
-                for e in entries {
-                    println!(
-                        "{:<24} {:<12} {:<10} {}",
-                        e.id, e.vm_state, e.commits_ahead, e.branch
-                    );
-                }
-            }
-            Ok(())
-        }
-        Some(Commands::Apply { task_id }) => {
-            let conflicts = abox
-                .merge(
-                    std::env::current_dir().ok().as_deref(),
-                    &task_id,
-                    &config.base_branch,
-                )
-                .await?;
-            if conflicts.is_empty() {
-                println!("Merged {} into {}", task_id, config.base_branch);
-            } else {
-                eprintln!("Merge conflicts:");
-                for c in conflicts {
-                    eprintln!("  {c}");
-                }
-                std::process::exit(1);
-            }
-            Ok(())
-        }
-        Some(Commands::Discard { task_id }) => {
-            abox.stop(std::env::current_dir().ok().as_deref(), &task_id, true)
-                .await?;
-            println!("Discarded {task_id}");
-            Ok(())
-        }
+        Some(Commands::List) => cmd_list(&abox, &config).await,
+        Some(Commands::Apply { task_id }) => cmd_apply(&abox, &config, &task_id).await,
+        Some(Commands::Discard { task_id }) => cmd_discard(&abox, &task_id).await,
         Some(Commands::Divergence { task_id, base }) => {
-            use bakudo_daemon::candidate::query_divergence;
-            let summary = query_divergence(
-                &task_id,
-                &base,
-                std::env::current_dir().ok().as_deref(),
-                &abox,
-            )
-            .await?;
-            if summary.has_changes {
-                print!("{}", summary.raw_output);
-            } else {
-                println!("{task_id} is up to date with '{base}'");
-            }
+            cmd_divergence(&abox, &task_id, &base).await
+        }
+        Some(Commands::Doctor) => {
+            let report = bakudo_daemon::doctor::run(&config, &abox, &registry).await;
+            println!("{report}");
             Ok(())
         }
+        Some(Commands::Resume { session_id }) => {
+            run_tui(config, abox, registry, ledger, Some(session_id)).await
+        }
+    }
+}
+
+async fn cmd_list(abox: &Arc<AboxAdapter>, _config: &Arc<BakudoConfig>) -> Result<()> {
+    let entries = abox.list(std::env::current_dir().ok().as_deref()).await?;
+    if entries.is_empty() {
+        println!("No active sandboxes.");
+    } else {
+        println!("{:<24} {:<12} {:<10} BRANCH", "TASK ID", "STATE", "AHEAD");
+        println!("{}", "-".repeat(70));
+        for e in entries {
+            println!(
+                "{:<24} {:<12} {:<10} {}",
+                e.id, e.vm_state, e.commits_ahead, e.branch
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_apply(
+    abox: &Arc<AboxAdapter>,
+    config: &Arc<BakudoConfig>,
+    task_id: &str,
+) -> Result<()> {
+    let conflicts = abox
+        .merge(
+            std::env::current_dir().ok().as_deref(),
+            task_id,
+            &config.base_branch,
+        )
+        .await?;
+    if conflicts.is_empty() {
+        println!("Merged {} into {}", task_id, config.base_branch);
+    } else {
+        eprintln!("Merge conflicts:");
+        for c in conflicts {
+            eprintln!("  {c}");
+        }
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn cmd_discard(abox: &Arc<AboxAdapter>, task_id: &str) -> Result<()> {
+    abox.stop(std::env::current_dir().ok().as_deref(), task_id, true)
+        .await?;
+    println!("Discarded {task_id}");
+    Ok(())
+}
+
+async fn cmd_divergence(abox: &Arc<AboxAdapter>, task_id: &str, base: &str) -> Result<()> {
+    use bakudo_daemon::candidate::query_divergence;
+    let summary =
+        query_divergence(task_id, base, std::env::current_dir().ok().as_deref(), abox).await?;
+    if summary.has_changes {
+        print!("{}", summary.raw_output);
+    } else {
+        println!("{task_id} is up to date with '{base}'");
+    }
+    Ok(())
+}
+
+/// RAII guard that restores the terminal on drop — even if the TUI panics.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableFocusChange
+        )?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let mut stdout = io::stdout();
+        let _ = execute!(
+            stdout,
+            DisableFocusChange,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
+        let _ = disable_raw_mode();
     }
 }
 
@@ -223,8 +276,8 @@ async fn run_tui(
     abox: Arc<AboxAdapter>,
     registry: Arc<ProviderRegistry>,
     ledger: Arc<SandboxLedger>,
+    resume_session_id: Option<String>,
 ) -> Result<()> {
-    // Set up channels.
     let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(256);
 
@@ -239,22 +292,35 @@ async fn run_tui(
     );
     tokio::spawn(ctrl.run());
 
-    // Set up the terminal.
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
+    // Watch for SIGINT/SIGTERM and forward as a shutdown command so the
+    // terminal is restored cleanly even on signal.
+    let shutdown_tx = cmd_tx.clone();
+    tokio::spawn(async move {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        let _ = shutdown_tx.send(SessionCommand::Shutdown).await;
+    });
+
+    let _guard = TerminalGuard::enter()?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(config, registry, ledger, cmd_tx, event_rx);
+    if let Some(session_id) = resume_session_id {
+        app.note_resume(session_id);
+    }
 
     let result = run_event_loop(&mut terminal, &mut app).await;
 
-    // Restore terminal.
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
+    // _guard Drops here — terminal restored regardless of panic/result.
+    let _ = terminal.show_cursor();
     result
 }
 
@@ -263,17 +329,12 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        // Drain session events first.
         app.drain_session_events();
-
-        // Draw.
         terminal.draw(|f| render(f, app))?;
-
         if app.should_quit {
             break;
         }
 
-        // Poll for input with a short timeout so we keep draining events.
         match poll_event(Duration::from_millis(50))? {
             Some(TermEvent::Key(key)) => {
                 if !app.handle_global_key(key) {
@@ -283,21 +344,11 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                     }
                 }
             }
-            Some(TermEvent::Paste(text)) => {
-                app.handle_paste(text);
-            }
-            Some(TermEvent::FocusGained) => {
-                app.on_focus_gained();
-            }
-            Some(TermEvent::FocusLost) => {
-                app.on_focus_lost();
-            }
-            Some(TermEvent::Resize(_, _)) => {
-                // Terminal will redraw on next iteration.
-            }
-            Some(TermEvent::Tick) | None => {
-                app.tick();
-            }
+            Some(TermEvent::Paste(text)) => app.handle_paste(text),
+            Some(TermEvent::FocusGained) => app.on_focus_gained(),
+            Some(TermEvent::FocusLost) => app.on_focus_lost(),
+            Some(TermEvent::Resize(_, _)) => {}
+            Some(TermEvent::Tick) | None => app.tick(),
         }
     }
     Ok(())
@@ -329,7 +380,7 @@ async fn run_headless(
         .unwrap_or_else(|| config.default_provider.clone());
     let model = request
         .model_override
-        .unwrap_or_else(|| config.default_model.clone());
+        .or_else(|| config.default_model.clone());
 
     let provider = registry
         .get(&provider_id)
@@ -346,7 +397,7 @@ async fn run_headless(
     let spec = config.build_attempt_spec(
         &request.prompt,
         &provider_id,
-        &model,
+        model.clone(),
         std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string()),
@@ -356,7 +407,7 @@ async fn run_headless(
 
     let task_id = sandbox_task_id(&spec.attempt_id.0);
 
-    let worker_cmd = provider.build_stdin_command(&model, true);
+    let worker_cmd = provider.build_stdin_command(model.as_deref(), true);
 
     let cfg = Arc::new(TaskRunnerConfig {
         abox: abox.clone(),
@@ -382,7 +433,6 @@ async fn run_headless(
         }
     }
 
-    // Apply candidate policy.
     match apply_candidate_policy(
         &task_id,
         &spec.candidate_policy,

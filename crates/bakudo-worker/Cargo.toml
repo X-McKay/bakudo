@@ -1,11 +1,15 @@
 [package]
-name = "bakudo-daemon"
+name = "bakudo-worker"
 version = "2.0.0"
 edition = "2021"
 
+[[bin]]
+name = "bakudo-worker"
+path = "src/main.rs"
+
 [dependencies]
 bakudo-core = { version = "2.0.0", path = "../bakudo-core" }
+anyhow.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+tokio = { workspace = true, features = ["full"] }
