@@ -40,6 +40,8 @@ pub enum SessionCommand {
     Discard { task_id: String },
     /// Show divergence summary for a preserved worktree.
     Diverge { task_id: String },
+    /// Show a unified diff for a preserved worktree.
+    Diff { task_id: String },
     /// Run provider/abox health probes and emit a single Info event.
     Doctor,
     /// Shut down the session.
@@ -86,8 +88,14 @@ pub struct SessionController {
     pub registry: Arc<ProviderRegistry>,
     current_provider: String,
     current_model: Option<String>,
+    resume_only: bool,
     cmd_rx: mpsc::Receiver<SessionCommand>,
     event_tx: mpsc::Sender<SessionEvent>,
+}
+
+pub struct SessionBootstrap {
+    pub session: SessionRecord,
+    pub resume_only: bool,
 }
 
 impl SessionController {
@@ -101,7 +109,42 @@ impl SessionController {
     ) -> Self {
         let current_provider = config.default_provider.clone();
         let current_model = config.default_model.clone();
-        let session = SessionRecord::new(&current_provider, current_model.clone());
+        let session = SessionRecord::new(
+            &current_provider,
+            current_model.clone(),
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string()),
+        );
+        Self::with_session(
+            config,
+            abox,
+            ledger,
+            registry,
+            SessionBootstrap {
+                session,
+                resume_only: false,
+            },
+            cmd_rx,
+            event_tx,
+        )
+    }
+
+    pub fn with_session(
+        config: Arc<BakudoConfig>,
+        abox: Arc<AboxAdapter>,
+        ledger: Arc<SandboxLedger>,
+        registry: Arc<ProviderRegistry>,
+        bootstrap: SessionBootstrap,
+        cmd_rx: mpsc::Receiver<SessionCommand>,
+        event_tx: mpsc::Sender<SessionEvent>,
+    ) -> Self {
+        let SessionBootstrap {
+            session,
+            resume_only,
+        } = bootstrap;
+        let current_provider = session.provider_id.clone();
+        let current_model = session.model.clone();
         Self {
             session,
             config,
@@ -110,6 +153,7 @@ impl SessionController {
             registry,
             current_provider,
             current_model,
+            resume_only,
             cmd_rx,
             event_tx,
         }
@@ -117,6 +161,12 @@ impl SessionController {
 
     /// Run the session event loop. This should be spawned as a tokio task.
     pub async fn run(mut self) {
+        if let Err(e) = self.persist_session() {
+            warn!(
+                "Could not persist session '{}': {e}",
+                self.session.session_id
+            );
+        }
         // Reconcile ledger on startup.
         self.reconcile_on_startup().await;
 
@@ -130,6 +180,16 @@ impl SessionController {
                 }
                 SessionCommand::SetModel { model } => {
                     self.current_model = model.clone();
+                    self.session.model = model.clone();
+                    if let Err(e) = self.persist_session() {
+                        let _ = self
+                            .event_tx
+                            .send(SessionEvent::Error(format!(
+                                "Failed to persist session {}: {e}",
+                                self.session.session_id
+                            )))
+                            .await;
+                    }
                     let _ = self
                         .event_tx
                         .send(SessionEvent::ProviderChanged {
@@ -146,6 +206,9 @@ impl SessionController {
                 }
                 SessionCommand::Diverge { task_id } => {
                     self.show_divergence(&task_id).await;
+                }
+                SessionCommand::Diff { task_id } => {
+                    self.show_diff(&task_id).await;
                 }
                 SessionCommand::Doctor => {
                     self.run_doctor().await;
@@ -167,7 +230,13 @@ impl SessionController {
         match self.abox.list(self.repo_path().as_deref()).await {
             Ok(entries) => {
                 self.ledger.reconcile(&entries).await;
-                let snapshot = self.ledger.all().await;
+                let snapshot = if self.resume_only {
+                    self.ledger
+                        .entries_for_session(&self.session.session_id)
+                        .await
+                } else {
+                    self.ledger.all().await
+                };
                 let _ = self
                     .event_tx
                     .send(SessionEvent::LedgerSnapshot { entries: snapshot })
@@ -218,7 +287,7 @@ impl SessionController {
             })
             .await;
 
-        let worker_cmd = provider.build_stdin_command(self.current_model.as_deref(), true);
+        let worker_cmd = provider.build_worker_command(self.current_model.as_deref(), true);
 
         let cfg = Arc::new(TaskRunnerConfig {
             abox: self.abox.clone(),
@@ -314,6 +383,16 @@ impl SessionController {
             return;
         }
         self.current_provider = provider_id.clone();
+        self.session.provider_id = provider_id.clone();
+        if let Err(e) = self.persist_session() {
+            let _ = self
+                .event_tx
+                .send(SessionEvent::Error(format!(
+                    "Failed to persist session {}: {e}",
+                    self.session.session_id
+                )))
+                .await;
+        }
         let _ = self
             .event_tx
             .send(SessionEvent::ProviderChanged {
@@ -377,7 +456,6 @@ impl SessionController {
             task_id,
             &self.config.base_branch,
             self.repo_path().as_deref(),
-            &self.abox,
         )
         .await
         {
@@ -400,9 +478,39 @@ impl SessionController {
         }
     }
 
+    async fn show_diff(&self, task_id: &str) {
+        match crate::candidate::query_diff(
+            task_id,
+            &self.config.base_branch,
+            self.repo_path().as_deref(),
+        )
+        .await
+        {
+            Ok(diff) => {
+                let msg = if diff.trim().is_empty() {
+                    format!("[{task_id}] No diff (worktree matches base branch).")
+                } else {
+                    format!("[{task_id}] Diff:\n{diff}")
+                };
+                let _ = self.event_tx.send(SessionEvent::Info(msg)).await;
+            }
+            Err(e) => {
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Error(format!(
+                        "Diff check failed for {task_id}: {e}"
+                    )))
+                    .await;
+            }
+        }
+    }
+
     fn repo_path(&self) -> Option<PathBuf> {
-        // Try to detect the repo root from the current directory.
-        std::env::current_dir().ok()
+        self.session.repo_root.as_ref().map(PathBuf::from)
+    }
+
+    fn persist_session(&self) -> Result<(), bakudo_core::error::SessionError> {
+        self.session.save(&self.config.resolved_data_dir())
     }
 }
 

@@ -8,10 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- `bakudo-worker` crate: a minimal in-sandbox wrapper that emits structured `BAKUDO_EVENT` / `BAKUDO_RESULT` envelopes around provider output so the host can render tool-call / assistant-message events instead of raw stdout.
+- Guest-side provider wrapper: `python3 -c` wrapper command now emits structured `BAKUDO_EVENT` / `BAKUDO_RESULT` envelopes around provider output so the host can render tool-call / assistant-message events instead of raw stdout without depending on an extra guest binary.
 - `/doctor` slash command and `bakudo doctor` subcommand: probe `abox --version` and every registered provider binary, surfacing missing tools in one shot.
 - `/diff <task-id>` slash command: fetches divergence output and renders it with diff-aware colors in the transcript (hunk headers / added / removed lines).
 - `bakudo resume <session-id>` subcommand: rehydrates a prior session from the on-disk ledger.
+- `bakudo sessions` subcommand: lists saved interactive sessions newest-first and prefers the current repo so resumable session IDs are discoverable.
 - Layered config loader: `~/.config/bakudo/config.toml` → `<repo>/.bakudo/config.toml` → explicit `-c` path.
 - Persistent `SandboxLedger` backed by JSONL at `<data-dir>/ledger.jsonl`; reconcile now ingests unknown `abox list` entries so recovery works across process restarts.
 - GitHub Actions CI (`fmt --check`, `clippy -D warnings`, `cargo test --workspace`).

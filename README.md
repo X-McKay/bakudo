@@ -6,7 +6,7 @@ Version 2 ships a `ratatui` interface, a headless CLI mode, and a host-owned pre
 
 ## Features
 
-- **Provider agnostic**: Run Claude Code, Codex, OpenCode, or Gemini CLI headlessly. Prompts are injected via `stdin` and structured specs are passed into the sandbox with `BAKUDO_*` env vars.
+- **Provider agnostic**: Run Claude Code, Codex, OpenCode, or Gemini CLI headlessly. Prompts are injected via `stdin`, structured specs are passed into the sandbox with `BAKUDO_*` env vars, and a guest-side wrapper emits structured progress/result events.
 - **Host-owned worktree lifecycle**: Bakudo decides whether to preserve, merge, or discard the sandbox worktree after the provider exits.
 - **Polished TUI**: A responsive `ratatui` interface with a chat transcript, observability shelf, slash commands, and keyboard-driven worktree actions.
 - **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
@@ -63,8 +63,11 @@ bakudo apply <task-id>
 bakudo discard <task-id>
 bakudo divergence <task-id>
 bakudo doctor
+bakudo sessions
 bakudo resume <session-id>
 ```
+
+`bakudo sessions` lists saved interactive sessions newest-first and filters to the current repo when possible, so you can discover the right ID before calling `bakudo resume`.
 
 ### Configuration
 
@@ -83,8 +86,7 @@ Bakudo is a Cargo workspace with three main crates plus a thin root binary:
 1. `bakudo-core`: Protocol types, config loading, provider registry, state models, and the `abox` adapter.
 2. `bakudo-daemon`: Session orchestration, task execution, divergence queries, doctor probes, and worktree lifecycle decisions.
 3. `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
-4. `bakudo-worker`: Small wrapper that runs inside an abox sandbox and emits structured `BAKUDO_EVENT`/`BAKUDO_RESULT` envelopes around provider output.
-5. `src/main.rs`: CLI entrypoint and TUI bootstrap.
+4. `src/main.rs`: CLI entrypoint and TUI bootstrap.
 
 See [AGENTS.md](AGENTS.md) for development invariants and [docs/current-architecture.md](docs/current-architecture.md) for the current implementation walkthrough. Historical design drafts remain in `docs/` and are marked as archived.
 

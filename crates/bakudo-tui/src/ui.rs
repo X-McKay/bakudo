@@ -25,7 +25,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, FocusedPanel, MessageRole, ShelfColor};
 use crate::palette::{
@@ -39,36 +40,44 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.size();
     let use_shelf = area.width >= SHELF_MIN_TERM_WIDTH;
 
-    // ── Horizontal split: main | shelf ─────────────────────────────────────
+    // ── Slice the header off the top so it spans the full terminal width and
+    //    the shelf naturally starts below it. ──────────────────────────────
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
+        .split(area);
+    let header_area = outer[0];
+    let body_area = outer[1];
+
+    // ── Horizontal split of the body: main | shelf ────────────────────────
     let h_chunks = if use_shelf {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(SHELF_WIDTH)])
-            .split(area)
+            .split(body_area)
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(100)])
-            .split(area)
+            .split(body_area)
     };
 
     let main_area = h_chunks[0];
 
-    // ── Vertical split: header | transcript | composer | footer ────────────
+    // ── Vertical split of main: transcript | composer | footer ────────────
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(HEADER_HEIGHT),
             Constraint::Min(5),
             Constraint::Length(COMPOSER_HEIGHT),
             Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(main_area);
 
-    render_header(frame, app, v_chunks[0]);
-    render_transcript(frame, app, v_chunks[1]);
-    render_composer(frame, app, v_chunks[2]);
-    render_footer(frame, app, v_chunks[3]);
+    render_header(frame, app, header_area);
+    render_transcript(frame, app, v_chunks[0]);
+    render_composer(frame, app, v_chunks[1]);
+    render_footer(frame, app, v_chunks[2]);
 
     if use_shelf {
         render_shelf(frame, app, h_chunks[1]);
@@ -76,7 +85,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // ── Completion popup ────────────────────────────────────────────────────
     if !app.completions.is_empty() && app.focus == FocusedPanel::Chat {
-        render_completion_popup(frame, app, v_chunks[2]);
+        render_completion_popup(frame, app, v_chunks[1]);
     }
 }
 
@@ -101,41 +110,69 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("model: ", Style::default().fg(palette::header_fg())),
         Span::styled(model_str, Style::default().fg(palette::model_accent())),
     ]);
-    let line_2 = Line::from(vec![
-        Span::raw("  "),
-        Span::styled("base ", palette::dim_style()),
-        Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("policy ", palette::dim_style()),
-        Span::styled(
-            app.config.candidate_policy.to_string(),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("lifecycle ", palette::dim_style()),
-        Span::styled(
-            app.config.sandbox_lifecycle.to_string(),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("running ", palette::dim_style()),
-        Span::styled(
-            app.running_shelf_count().to_string(),
-            Style::default().fg(palette::shelf_running()).bold(),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("preserved ", palette::dim_style()),
-        Span::styled(
-            app.preserved_shelf_count().to_string(),
-            Style::default().fg(palette::shelf_preserved()).bold(),
-        ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
-        Span::styled("conflicts ", palette::dim_style()),
-        Span::styled(
-            app.conflict_shelf_count().to_string(),
-            Style::default().fg(palette::shelf_conflicts()).bold(),
-        ),
-    ]);
+    let line_2 = if area.width < SHELF_MIN_TERM_WIDTH {
+        let counts = format!(
+            "r{} p{} c{}",
+            app.running_shelf_count(),
+            app.preserved_shelf_count(),
+            app.conflict_shelf_count(),
+        );
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("base ", palette::dim_style()),
+            Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("policy ", palette::dim_style()),
+            Span::styled(
+                app.config.candidate_policy.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("lc ", palette::dim_style()),
+            Span::styled(
+                app.config.sandbox_lifecycle.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled(counts, Style::default().fg(Color::White).bold()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("base ", palette::dim_style()),
+            Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("policy ", palette::dim_style()),
+            Span::styled(
+                app.config.candidate_policy.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("lifecycle ", palette::dim_style()),
+            Span::styled(
+                app.config.sandbox_lifecycle.to_string(),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("running ", palette::dim_style()),
+            Span::styled(
+                app.running_shelf_count().to_string(),
+                Style::default().fg(palette::shelf_running()).bold(),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("preserved ", palette::dim_style()),
+            Span::styled(
+                app.preserved_shelf_count().to_string(),
+                Style::default().fg(palette::shelf_preserved()).bold(),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("conflicts ", palette::dim_style()),
+            Span::styled(
+                app.conflict_shelf_count().to_string(),
+                Style::default().fg(palette::shelf_conflicts()).bold(),
+            ),
+        ])
+    };
 
     let header = Paragraph::new(Text::from(vec![line_1, line_2]))
         .style(Style::default().bg(palette::header_bg()));
@@ -145,7 +182,8 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 // ─── Transcript ────────────────────────────────────────────────────────────
 
 fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == FocusedPanel::Chat && app.terminal_focused {
+    let focused = app.focus == FocusedPanel::Chat && app.terminal_focused;
+    let border_style = if focused {
         palette::focused_border_style()
     } else {
         palette::unfocused_border_style()
@@ -154,7 +192,7 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Span::styled(" Chat ", Style::default().fg(Color::White)));
+        .title(Span::styled(" Chat ", panel_title_style(focused)));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -175,20 +213,28 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         let role_style = Style::default().fg(fg).bold();
         let body_style = Style::default().fg(fg);
 
-        for (i, content_line) in msg.content.lines().enumerate() {
-            let body_span = render_diff_aware_span(content_line, body_style);
-            if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
-                    Span::styled(format!("{ts} "), palette::dim_style()),
-                    Span::styled(icon, role_style),
-                    Span::raw(" "),
-                    Span::styled(role_label, role_style),
-                    body_span,
-                ]));
-            } else {
-                let indent = " ".repeat(gutter + ts.len() + 1 + 1 + 1 + role_label.len());
-                lines.push(Line::from(vec![Span::raw(indent), body_span]));
+        let prefix_width = gutter + ts.len() + 1 + 1 + 1 + role_label.len();
+        let body_width = (inner.width as usize).saturating_sub(prefix_width).max(1);
+        let cont_indent = " ".repeat(prefix_width);
+
+        let mut first_segment_of_msg = true;
+        for content_line in msg.content.lines() {
+            let wrapped = wrap_to_width(content_line, body_width);
+            for segment in wrapped {
+                let body_span = render_diff_aware_span(&segment, body_style);
+                if first_segment_of_msg {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
+                        Span::styled(format!("{ts} "), palette::dim_style()),
+                        Span::styled(icon, role_style),
+                        Span::raw(" "),
+                        Span::styled(role_label, role_style),
+                        body_span,
+                    ]));
+                    first_segment_of_msg = false;
+                } else {
+                    lines.push(Line::from(vec![Span::raw(cont_indent.clone()), body_span]));
+                }
             }
         }
     }
@@ -203,7 +249,7 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     };
     let visible_lines: Vec<Line> = lines.into_iter().skip(start).collect();
 
-    let para = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });
+    let para = Paragraph::new(Text::from(visible_lines));
     frame.render_widget(para, inner);
 
     // Scroll indicator in top-right corner of transcript.
@@ -230,7 +276,8 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
 // ─── Composer ──────────────────────────────────────────────────────────────
 
 fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == FocusedPanel::Chat && app.terminal_focused {
+    let focused = app.focus == FocusedPanel::Chat && app.terminal_focused;
+    let border_style = if focused {
         palette::focused_border_style()
     } else {
         palette::unfocused_border_style()
@@ -250,7 +297,7 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
             format!("[{provider_initial}]"),
             Style::default().fg(palette::provider_accent()).bold(),
         ),
-        Span::raw(" Input "),
+        Span::styled(" Input ", panel_title_style(focused)),
     ]);
 
     let block = Block::default()
@@ -261,45 +308,68 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Render input with a block cursor at the cursor position.
-    let before_cursor = &app.input[..app.cursor];
-    let at_cursor = if app.cursor < app.input.len() {
-        let end = app.input[app.cursor..]
-            .char_indices()
-            .nth(1)
-            .map(|(i, _)| app.cursor + i)
-            .unwrap_or(app.input.len());
-        &app.input[app.cursor..end]
-    } else {
-        " "
+    const PROMPT_WIDTH: u16 = 2;
+    let prompt_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: PROMPT_WIDTH.min(inner.width),
+        height: inner.height,
     };
-    let after_cursor = if app.cursor < app.input.len() {
-        let end = app.input[app.cursor..]
-            .char_indices()
-            .nth(1)
-            .map(|(i, _)| app.cursor + i)
-            .unwrap_or(app.input.len());
-        &app.input[end..]
-    } else {
-        ""
+    let text_area = Rect {
+        x: inner.x + PROMPT_WIDTH.min(inner.width),
+        y: inner.y,
+        width: inner.width.saturating_sub(PROMPT_WIDTH),
+        height: inner.height,
     };
 
-    let prompt_icon = Span::styled("> ", Style::default().fg(palette::dim_border()));
+    let prompt = Paragraph::new(Line::from(Span::styled(
+        "> ",
+        Style::default().fg(palette::dim_border()),
+    )));
+    frame.render_widget(prompt, prompt_area);
+
+    let before_cursor = &app.input[..app.cursor];
+    let (at_cursor, after_cursor) = if app.cursor < app.input.len() {
+        let tail = &app.input[app.cursor..];
+        let g_len = tail.graphemes(true).next().map(str::len).unwrap_or(0);
+        if g_len == 0 {
+            (" ", "")
+        } else {
+            (&tail[..g_len], &tail[g_len..])
+        }
+    } else {
+        (" ", "")
+    };
+
+    let cursor_col = before_cursor.width();
+    let cursor_cell_w = if app.cursor < app.input.len() {
+        at_cursor.width().max(1)
+    } else {
+        1
+    };
+    let visible_w = text_area.width as usize;
+    let scroll_x: u16 = if visible_w == 0 {
+        0
+    } else if cursor_col + cursor_cell_w > visible_w {
+        let target_col = visible_w.saturating_sub(4);
+        (cursor_col.saturating_sub(target_col)) as u16
+    } else {
+        0
+    };
+
     let line = Line::from(vec![
-        prompt_icon,
         Span::styled(before_cursor, Style::default().fg(Color::White)),
         Span::styled(
             at_cursor,
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
-                .add_modifier(Modifier::BOLD),
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ),
         Span::styled(after_cursor, Style::default().fg(Color::White)),
     ]);
 
-    let para = Paragraph::new(line);
-    frame.render_widget(para, inner);
+    let para = Paragraph::new(line).scroll((0, scroll_x));
+    frame.render_widget(para, text_area);
 }
 
 // ─── Completion popup ──────────────────────────────────────────────────────
@@ -310,13 +380,16 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
     }
 
     let popup_height = (app.completions.len() as u16).min(8) + 2; // +2 for borders
-    let popup_width = app
+
+    const POPUP_TITLE_FLOOR: u16 = 17;
+    let entries_width = app
         .completions
         .iter()
         .map(|s| s.len() + 3) // "/ " prefix + padding
         .max()
         .unwrap_or(12) as u16
         + 4;
+    let popup_width = entries_width.max(POPUP_TITLE_FLOOR);
 
     // Position popup just above the composer.
     let popup_y = composer_area.y.saturating_sub(popup_height);
@@ -361,23 +434,27 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let hints: Line = if app.focus == FocusedPanel::Chat {
-        let tab_hint = if app.input.starts_with('/') {
-            ": complete  "
-        } else {
-            ": inspect shelf  "
-        };
-        Line::from(vec![
+        let shelf_visible = area.width >= SHELF_MIN_TERM_WIDTH;
+        let mut spans = vec![
             hint_key("Enter"),
             Span::styled(": send  ", palette::footer_fg()),
-            hint_key("Tab"),
-            Span::styled(tab_hint, palette::footer_fg()),
+        ];
+        if app.input.starts_with('/') {
+            spans.push(hint_key("Tab"));
+            spans.push(Span::styled(": complete  ", palette::footer_fg()));
+        } else if shelf_visible {
+            spans.push(hint_key("Tab"));
+            spans.push(Span::styled(": inspect shelf  ", palette::footer_fg()));
+        }
+        spans.extend([
             hint_key("PgUp/Dn"),
             Span::styled(": scroll  ", palette::footer_fg()),
             hint_key("Ctrl+C"),
             Span::styled(": quit  ", palette::footer_fg()),
             hint_key("/help"),
             Span::styled(": commands", palette::footer_fg()),
-        ])
+        ]);
+        Line::from(spans)
     } else {
         Line::from(vec![
             hint_key("Tab/Esc"),
@@ -399,10 +476,21 @@ fn hint_key(label: &'static str) -> Span<'static> {
     Span::styled(label, Style::default().fg(palette::hint_key_fg()).bold())
 }
 
+fn panel_title_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(palette::focus_border())
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::White).bold()
+    }
+}
+
 // ─── Shelf ─────────────────────────────────────────────────────────────────
 
 fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == FocusedPanel::Shelf && app.terminal_focused {
+    let focused = app.focus == FocusedPanel::Shelf && app.terminal_focused;
+    let border_style = if focused {
         palette::focused_border_style()
     } else {
         palette::unfocused_border_style()
@@ -410,7 +498,7 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
 
     let title = Line::from(vec![
         Span::raw(" "),
-        Span::styled("Sandboxes", Style::default().fg(Color::White).bold()),
+        Span::styled("Sandboxes", panel_title_style(focused)),
         if !app.shelf.is_empty() {
             Span::styled(format!(" ({})", app.shelf.len()), palette::dim_style())
         } else {
@@ -483,9 +571,9 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                 ShelfColor::TimedOut => "⌛",
             };
 
-            // Truncate task_id to fit.
+            // Truncate task_id from the head so the distinguishing suffix stays visible.
             let id_max = (list_area.width as usize).saturating_sub(6);
-            let id_short: String = entry.task_id.chars().take(id_max).collect();
+            let id_short = tail_truncate(&entry.task_id, id_max);
 
             // Truncate summary.
             let summary: String = entry.prompt_summary.chars().take(max_summary_w).collect();
@@ -495,21 +583,35 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                 None => entry.provider.clone(),
             };
 
+            let mut status_spans: Vec<Span> = vec![
+                Span::raw(" "),
+                Span::styled(icon, Style::default().fg(state_color).bold()),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:<9}", entry.state_label),
+                    Style::default().fg(state_color),
+                ),
+                Span::styled(
+                    human_elapsed(entry.started_at),
+                    Style::default().fg(palette::dim_border()),
+                ),
+            ];
+            if let Some(action) = entry.pending_action {
+                status_spans.push(Span::styled("  → ", palette::dim_style()));
+                status_spans.push(Span::styled(
+                    palette::spinner_frame(app.tick),
+                    Style::default().fg(palette::focus_border()).bold(),
+                ));
+                status_spans.push(Span::raw(" "));
+                status_spans.push(Span::styled(
+                    action.label(),
+                    Style::default().fg(palette::focus_border()).bold(),
+                ));
+                status_spans.push(Span::styled("…", palette::dim_style()));
+            }
+
             ListItem::new(vec![
-                Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(icon, Style::default().fg(state_color).bold()),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<9}", entry.state_label),
-                        Style::default().fg(state_color),
-                    ),
-                    Span::styled(
-                        human_elapsed(entry.started_at),
-                        Style::default().fg(palette::dim_border()),
-                    ),
-                ])
-                .style(Style::default().bg(row_bg)),
+                Line::from(status_spans).style(Style::default().bg(row_bg)),
                 Line::from(vec![
                     Span::raw("   "),
                     Span::styled(id_short, Style::default().fg(Color::White).bold()),
@@ -549,7 +651,10 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(palette::unfocused_border_style())
-        .title(Span::styled(" Selection ", palette::dim_style()));
+        .title(Span::styled(
+            " Selection ",
+            Style::default().fg(Color::White).bold(),
+        ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -561,8 +666,10 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
         Some(m) => format!("{}/{}", entry.provider, m),
         None => entry.provider.clone(),
     };
+    let pad = || Span::raw(" ");
     let detail = vec![
         Line::from(vec![
+            pad(),
             Span::styled(
                 entry.state_label.clone(),
                 Style::default()
@@ -572,15 +679,22 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  ", palette::dim_style()),
             Span::styled(provider_model, palette::dim_style()),
         ]),
-        Line::from(Span::styled(
-            entry.task_id.clone(),
-            Style::default().fg(Color::White).bold(),
-        )),
-        Line::from(Span::styled(
-            entry.prompt_summary.clone(),
-            Style::default().fg(Color::White),
-        )),
         Line::from(vec![
+            pad(),
+            Span::styled(
+                entry.task_id.clone(),
+                Style::default().fg(Color::White).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            pad(),
+            Span::styled(
+                entry.prompt_summary.clone(),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            pad(),
             Span::styled("started ", palette::dim_style()),
             Span::styled(
                 entry.started_at.format("%H:%M:%S").to_string(),
@@ -593,10 +707,92 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::White),
             ),
         ]),
-        Line::from(Span::styled(entry.last_note.clone(), palette::dim_style())),
+        Line::from(vec![
+            pad(),
+            Span::styled(entry.last_note.clone(), palette::dim_style()),
+        ]),
     ];
     let para = Paragraph::new(detail).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+}
+
+/// Word-wrap `text` so each returned line's display width is at most `width`.
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() || width == 0 {
+        return vec![text.to_string()];
+    }
+    if text.width() <= width {
+        return vec![text.to_string()];
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_w = word.width();
+        if current.is_empty() {
+            if word_w > width {
+                push_hard_broken(&mut out, &mut current, &mut current_w, word, width);
+            } else {
+                current.push_str(word);
+                current_w = word_w;
+            }
+        } else if current_w + 1 + word_w <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_w += 1 + word_w;
+        } else {
+            out.push(std::mem::take(&mut current));
+            current_w = 0;
+            if word_w > width {
+                push_hard_broken(&mut out, &mut current, &mut current_w, word, width);
+            } else {
+                current.push_str(word);
+                current_w = word_w;
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn push_hard_broken(
+    out: &mut Vec<String>,
+    current: &mut String,
+    current_w: &mut usize,
+    word: &str,
+    width: usize,
+) {
+    for ch in word.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if *current_w + cw > width && !current.is_empty() {
+            out.push(std::mem::take(current));
+            *current_w = 0;
+        }
+        current.push(ch);
+        *current_w += cw;
+    }
+}
+
+fn tail_truncate(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let skip = count - (max_chars - 1);
+    let mut out = String::from("…");
+    out.extend(text.chars().skip(skip));
+    out
 }
 
 fn human_elapsed(started_at: chrono::DateTime<chrono::Local>) -> String {
@@ -683,6 +879,7 @@ mod tests {
             state_color: crate::app::ShelfColor::Running,
             started_at: Local::now(),
             updated_at: Local::now(),
+            pending_action: None,
         });
 
         let backend = TestBackend::new(120, 30);

@@ -14,12 +14,15 @@ use bakudo_core::protocol::{
     WorkerProgressKind, WorkerStatus, WORKER_EVENT_PREFIX,
 };
 use bakudo_core::provider::ProviderRegistry;
+use bakudo_core::session::SessionRecord;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
-use bakudo_daemon::session_controller::{SessionCommand, SessionController, SessionEvent};
+use bakudo_daemon::session_controller::{
+    SessionBootstrap, SessionCommand, SessionController, SessionEvent,
+};
 use bakudo_daemon::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use bakudo_daemon::worktree::{apply_candidate_policy, WorktreeAction};
 use bakudo_tui::app::{App, MessageRole, ShelfColor};
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -162,10 +165,15 @@ fn read_invocations(log_path: &Path) -> Vec<Vec<String>> {
 }
 
 fn write_config_file(dir: &TempDir, abox_bin: &Path) -> PathBuf {
+    write_config_file_with_data_dir(dir, abox_bin, &dir.path.join("data"))
+}
+
+fn write_config_file_with_data_dir(dir: &TempDir, abox_bin: &Path, data_dir: &Path) -> PathBuf {
     let config_path = dir.path.join("bakudo.toml");
     let config = format!(
-        "abox_bin = {:?}\nbase_branch = \"main\"\n",
-        abox_bin.display().to_string()
+        "abox_bin = {:?}\nbase_branch = \"main\"\ndata_dir = {:?}\n",
+        abox_bin.display().to_string(),
+        data_dir.display().to_string()
     );
     fs::write(&config_path, config).unwrap();
     config_path
@@ -521,13 +529,20 @@ EOF
 #[tokio::test]
 async fn session_controller_diverge_uses_configured_base_branch() {
     let dir = TempDir::new("bakudo-session-controller");
+    let repo = TempRepo::new();
+    fs::write(repo.path().join("diverge.txt"), "base\n").unwrap();
+    run_host(repo.path(), "git", &["add", "diverge.txt"]);
+    run_host(repo.path(), "git", &["commit", "-m", "add base file"]);
+    run_host(repo.path(), "git", &["checkout", "-b", "agent/task-123"]);
+    fs::write(repo.path().join("diverge.txt"), "base\nchanged\n").unwrap();
+    run_host(repo.path(), "git", &["add", "diverge.txt"]);
+    run_host(repo.path(), "git", &["commit", "-m", "branch change"]);
+    run_host(repo.path(), "git", &["checkout", "main"]);
+
     let (script, log) = write_fake_abox_script(
         &dir,
         r#"  list)
     echo "No active sandboxes."
-    ;;
-  divergence)
-    echo "M src/lib.rs"
     ;;
 "#,
     );
@@ -535,16 +550,26 @@ async fn session_controller_diverge_uses_configured_base_branch() {
     let config = BakudoConfig {
         abox_bin: script.display().to_string(),
         base_branch: "main".to_string(),
+        data_dir: Some(dir.path.join("data")),
         ..Default::default()
     };
 
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
     let (event_tx, mut event_rx) = mpsc::channel(8);
-    let controller = SessionController::new(
+    let controller = SessionController::with_session(
         Arc::new(config),
         Arc::new(AboxAdapter::new(&script)),
         Arc::new(SandboxLedger::new()),
         Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-diverge".to_string()),
+                "claude",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
         cmd_rx,
         event_tx,
     );
@@ -569,22 +594,155 @@ async fn session_controller_diverge_uses_configured_base_branch() {
     .await
     .unwrap();
     assert!(msg.contains("Divergence"));
-    assert!(msg.contains("M src/lib.rs"));
+    assert!(msg.contains("M\tdiverge.txt"));
 
     cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
 
     let invocations = read_invocations(&log);
-    assert!(
-        invocations.len() >= 2,
-        "expected list + divergence invocations"
+    assert_eq!(
+        invocations.len(),
+        1,
+        "expected only the startup list invocation"
     );
-    let divergence = invocations
-        .iter()
-        .find(|args| args.iter().any(|arg| arg == "divergence"))
-        .expect("divergence invocation");
-    assert!(divergence.iter().any(|arg| arg == "main"));
-    assert!(!divergence.iter().any(|arg| arg == "task-123"));
+    assert!(invocations[0].iter().any(|arg| arg == "list"));
+}
+
+#[tokio::test]
+async fn session_controller_diff_uses_task_branch() {
+    let dir = TempDir::new("bakudo-session-diff");
+    let repo = TempRepo::new();
+    run_host(repo.path(), "git", &["checkout", "-b", "agent/task-diff"]);
+    fs::write(repo.path().join("diff-target.txt"), "before\nafter\n").unwrap();
+    run_host(repo.path(), "git", &["add", "diff-target.txt"]);
+    run_host(repo.path(), "git", &["commit", "-m", "diff change"]);
+    run_host(repo.path(), "git", &["checkout", "main"]);
+
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+"#,
+    );
+
+    let config = BakudoConfig {
+        abox_bin: script.display().to_string(),
+        base_branch: "main".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let controller = SessionController::with_session(
+        Arc::new(config),
+        Arc::new(AboxAdapter::new(&script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-diff".to_string()),
+                "claude",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_rx,
+        event_tx,
+    );
+
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::Diff {
+            task_id: "task-diff".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let msg = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) if msg.contains("[task-diff]") => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(msg.contains("Diff"));
+    assert!(msg.contains("+++ b/diff-target.txt"));
+    assert!(msg.contains("+before"));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_controller_resume_only_filters_snapshot_to_requested_session() {
+    let dir = TempDir::new("bakudo-session-resume");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+"#,
+    );
+
+    let mut keep = make_record("task-keep", SandboxState::Preserved);
+    keep.session_id = SessionId("session-resume".to_string());
+    let mut drop = make_record("task-drop", SandboxState::Preserved);
+    drop.session_id = SessionId("session-other".to_string());
+    let ledger = Arc::new(SandboxLedger::new());
+    ledger.insert(keep).await;
+    ledger.insert(drop).await;
+
+    let config = BakudoConfig {
+        abox_bin: script.display().to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (event_tx, mut event_rx) = mpsc::channel(8);
+    let controller = SessionController::with_session(
+        Arc::new(config),
+        Arc::new(AboxAdapter::new(&script)),
+        ledger,
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-resume".to_string()),
+                "claude",
+                None,
+                None,
+            ),
+            resume_only: true,
+        },
+        cmd_rx,
+        event_tx,
+    );
+
+    let handle = tokio::spawn(controller.run());
+
+    let entries = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::LedgerSnapshot { entries }) => break entries,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].task_id, "task-keep");
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
 }
 
 #[tokio::test]
@@ -605,6 +763,7 @@ async fn session_controller_reports_failed_tasks_as_failed() {
 
     let config = BakudoConfig {
         abox_bin: script.display().to_string(),
+        data_dir: Some(dir.path.join("data")),
         ..Default::default()
     };
 
@@ -713,27 +872,89 @@ fn bakudo_run_cli_forwards_prompt_to_provider_and_discards() {
     assert!(run_invocation
         .iter()
         .any(|arg| arg == &format!("BAKUDO_TASK_ID={task_id}")));
+    assert!(run_invocation
+        .iter()
+        .any(|arg| arg == "BAKUDO_PROTOCOL_SCHEMA_VERSION=1"));
+    assert!(run_invocation
+        .iter()
+        .any(|arg| arg.starts_with("BAKUDO_ATTEMPT_ID=")));
+    assert!(run_invocation
+        .iter()
+        .any(|arg| arg.starts_with("BAKUDO_SESSION_ID=")));
 
     let command_start = run_invocation
         .iter()
         .position(|arg| arg == "--")
         .expect("run invocation has command delimiter");
-    assert_eq!(
-        &run_invocation[command_start + 1..command_start + 7],
-        &[
-            "bash".to_string(),
-            "-lc".to_string(),
-            "printf '%s' \"$BAKUDO_PROMPT\" | \"$0\" \"$@\"".to_string(),
-            "codex".to_string(),
-            "exec".to_string(),
-            "--full-auto".to_string(),
-        ]
-    );
+    assert_eq!(run_invocation[command_start + 1], "python3");
+    assert_eq!(run_invocation[command_start + 2], "-c");
+    assert!(run_invocation
+        .iter()
+        .any(|arg| arg.contains("BAKUDO_RESULT")));
+    assert!(run_invocation.iter().any(|arg| arg == "codex"));
+    assert!(run_invocation.iter().any(|arg| arg == "exec"));
+    assert!(run_invocation.iter().any(|arg| arg == "--full-auto"));
 
     let stop_invocation = &invocations[1];
     assert!(stop_invocation.iter().any(|arg| arg == "stop"));
     assert!(stop_invocation.iter().any(|arg| arg == &task_id));
     assert!(stop_invocation.iter().any(|arg| arg == "--clean"));
+}
+
+#[test]
+fn bakudo_sessions_lists_saved_sessions_for_current_repo() {
+    let dir = TempDir::new("bakudo-cli-sessions");
+    let script = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+"#,
+    )
+    .0;
+    let data_dir = dir.path.join("saved-sessions");
+    let config = write_config_file_with_data_dir(&dir, &script, &data_dir);
+    let repo = TempRepo::new();
+    let other_repo = TempRepo::new();
+    let nested_dir = repo.path().join("nested").join("workspace");
+    fs::create_dir_all(&nested_dir).unwrap();
+
+    let mut current = SessionRecord::with_id(
+        SessionId("session-current".to_string()),
+        "codex",
+        Some("gpt-5".to_string()),
+        Some(repo.path().display().to_string()),
+    );
+    current.started_at = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+    current.save(&data_dir).unwrap();
+
+    let mut other = SessionRecord::with_id(
+        SessionId("session-other".to_string()),
+        "claude",
+        None,
+        Some(other_repo.path().display().to_string()),
+    );
+    other.started_at = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+    other.save(&data_dir).unwrap();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args(["-c", config.to_str().unwrap(), "sessions"])
+        .current_dir(&nested_dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "bakudo sessions failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("SESSION ID"));
+    assert!(stdout.contains("session-current"));
+    assert!(!stdout.contains("session-other"));
+    assert!(stdout.contains(&repo.path().display().to_string()));
 }
 
 #[test]

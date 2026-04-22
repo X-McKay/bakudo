@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::warn;
 
 use crate::abox::SandboxEntry;
@@ -74,6 +74,7 @@ impl SandboxRecord {
 pub struct SandboxLedger {
     inner: Arc<RwLock<HashMap<String, SandboxRecord>>>,
     persist_path: Option<PathBuf>,
+    persist_lock: Arc<Mutex<()>>,
 }
 
 impl SandboxLedger {
@@ -81,6 +82,7 @@ impl SandboxLedger {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
             persist_path: None,
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -97,6 +99,7 @@ impl SandboxLedger {
         Self {
             inner: Arc::new(RwLock::new(map)),
             persist_path: Some(path),
+            persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -155,6 +158,15 @@ impl SandboxLedger {
     pub async fn all(&self) -> Vec<SandboxRecord> {
         let map = self.inner.read().await;
         map.values().cloned().collect()
+    }
+
+    /// Get all records belonging to one session.
+    pub async fn entries_for_session(&self, session_id: &SessionId) -> Vec<SandboxRecord> {
+        let map = self.inner.read().await;
+        map.values()
+            .filter(|r| &r.session_id == session_id)
+            .cloned()
+            .collect()
     }
 
     /// Get all active (running or starting) sandboxes.
@@ -230,18 +242,21 @@ impl SandboxLedger {
         let Some(path) = self.persist_path.clone() else {
             return;
         };
+        let _persist_guard = self.persist_lock.lock().await;
         let records: Vec<SandboxRecord> = {
             let map = self.inner.read().await;
             map.values().cloned().collect()
         };
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = write_records(&path, &records) {
-                warn!(
-                    "failed to persist sandbox ledger to {}: {e}",
-                    path.display()
-                );
+        let path_display = path.display().to_string();
+        match tokio::task::spawn_blocking(move || write_records(&path, &records)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!("failed to persist sandbox ledger to {path_display}: {e}");
             }
-        });
+            Err(e) => {
+                warn!("failed to join sandbox ledger persistence for {path_display}: {e}");
+            }
+        }
     }
 }
 
@@ -385,13 +400,29 @@ mod tests {
             ledger
                 .insert(make_record("task-persist", SandboxState::Preserved))
                 .await;
-            // Give the spawn_blocking flush a moment to land.
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let reopened = SandboxLedger::with_persistence(&path);
         let all = reopened.all().await;
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].task_id, "task-persist");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn entries_for_session_only_returns_matching_records() {
+        let ledger = SandboxLedger::new();
+        let mut keep = make_record("task-keep", SandboxState::Preserved);
+        keep.session_id = SessionId("session-a".to_string());
+        let mut drop = make_record("task-drop", SandboxState::Preserved);
+        drop.session_id = SessionId("session-b".to_string());
+
+        ledger.insert(keep).await;
+        ledger.insert(drop).await;
+
+        let records = ledger
+            .entries_for_session(&SessionId("session-a".to_string()))
+            .await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].task_id, "task-keep");
     }
 }

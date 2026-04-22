@@ -147,18 +147,8 @@ dependencies = [
  "ratatui",
  "strum",
  "tokio",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
-]
-
-[[package]]
-name = "bakudo-worker"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "bakudo-core",
- "chrono",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

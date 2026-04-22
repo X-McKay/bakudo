@@ -11,5 +11,6 @@ chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+unicode-segmentation = "1"
 unicode-width = "0.2.2"
 strum = { version = "0.26", features = ["derive"] }

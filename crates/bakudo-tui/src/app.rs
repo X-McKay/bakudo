@@ -105,6 +105,25 @@ pub struct ShelfEntry {
     pub state_color: ShelfColor,
     pub started_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
+    /// If Some, a worktree action was just dispatched and we're waiting for
+    /// the daemon's TaskFinished/Error response.
+    pub pending_action: Option<PendingAction>,
+}
+
+/// A worktree action that was dispatched and is awaiting daemon completion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PendingAction {
+    Applying,
+    Discarding,
+}
+
+impl PendingAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PendingAction::Applying => "applying",
+            PendingAction::Discarding => "discarding",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +154,7 @@ pub struct App {
     pub registry: Arc<ProviderRegistry>,
     pub ledger: Arc<SandboxLedger>,
     pub workspace_label: String,
+    pub session_id: String,
 
     /// Chat transcript (newest at the end).
     pub transcript: VecDeque<ChatMessage>,
@@ -206,6 +226,7 @@ impl App {
             registry,
             ledger,
             workspace_label,
+            session_id: String::new(),
             transcript: VecDeque::new(),
             input: String::new(),
             cursor: 0,
@@ -227,7 +248,7 @@ impl App {
         app.push_message(ChatMessage::system(
             "Welcome to Bakudo v2.\n\
              Type a prompt and press Enter to dispatch a task to a sandbox.\n\
-             Type /help for available commands.",
+             Type /help for available commands, or /status to see the current session id.",
         ));
         app
     }
@@ -274,6 +295,11 @@ impl App {
         self.shelf.get(self.shelf_selected)
     }
 
+    /// Whether the shelf currently contains an entry with the given task id.
+    pub fn shelf_has_task(&self, task_id: &str) -> bool {
+        self.shelf.iter().any(|entry| entry.task_id == task_id)
+    }
+
     /// Show a note in the transcript that we are resuming a named session.
     pub fn note_resume(&mut self, session_id: String) {
         self.push_message(ChatMessage::system(format!(
@@ -287,6 +313,19 @@ impl App {
             Some(m) if !m.is_empty() => m.to_string(),
             _ => "default".to_string(),
         }
+    }
+
+    /// Sanity-check before sending Dispatch. Currently catches a stale or
+    /// mistyped provider in config before it reaches the daemon.
+    fn preflight_dispatch(&self) -> Result<(), String> {
+        if self.registry.get(&self.provider_id).is_none() {
+            return Err(format!(
+                "Provider '{}' is not registered. Use /providers to list available providers, \
+                 then /provider <id> to switch.",
+                self.provider_id
+            ));
+        }
+        Ok(())
     }
 
     // ── Tick ───────────────────────────────────────────────────────────────
@@ -485,6 +524,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Apply {
                         task_id: task_id.clone(),
                     });
+                    self.set_pending(&task_id, PendingAction::Applying);
                     self.push_message(ChatMessage::info(format!(
                         "Applying worktree for {task_id}…"
                     )));
@@ -496,6 +536,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Discard {
                         task_id: task_id.clone(),
                     });
+                    self.set_pending(&task_id, PendingAction::Discarding);
                     self.push_message(ChatMessage::info(format!(
                         "Discarding worktree for {task_id}…"
                     )));
@@ -532,8 +573,9 @@ impl App {
                 prompt_summary,
             } => {
                 self.active_task_count += 1;
+                let short = short_task_id(&task_id);
                 self.push_message(ChatMessage::info(format!(
-                    "⟳  [{task_id}] {provider_id} dispatched: {prompt_summary}"
+                    "⟳  [{short}] {provider_id} dispatched: {prompt_summary}"
                 )));
                 self.upsert_shelf_entry(ShelfEntry {
                     task_id,
@@ -545,16 +587,18 @@ impl App {
                     state_color: ShelfColor::Running,
                     started_at: Local::now(),
                     updated_at: Local::now(),
+                    pending_action: None,
                 });
             }
             SessionEvent::TaskProgress { task_id, event } => {
                 use bakudo_daemon::task_runner::RunnerEvent;
+                let short = short_task_id(&task_id);
                 match event {
                     RunnerEvent::RawLine(line) => {
                         let line = line.trim();
-                        if !line.is_empty() {
+                        if !line.is_empty() && !is_abox_lifecycle_noise(line) {
                             self.record_shelf_activity(&task_id, line);
-                            self.push_message(ChatMessage::agent(format!("[{task_id}] {line}")));
+                            self.push_message(ChatMessage::agent(format!("[{short}] {line}")));
                         }
                     }
                     RunnerEvent::Progress(p) => {
@@ -562,25 +606,25 @@ impl App {
                         match p.kind {
                             WorkerProgressKind::AssistantMessage => {
                                 self.push_message(ChatMessage::agent(format!(
-                                    "[{task_id}] {}",
+                                    "[{short}] {}",
                                     p.message
                                 )));
                             }
                             WorkerProgressKind::ToolCall => {
                                 self.push_message(ChatMessage::info(format!(
-                                    "[{task_id}] tool → {}",
+                                    "[{short}] tool → {}",
                                     p.message
                                 )));
                             }
                             WorkerProgressKind::ToolResult => {
                                 self.push_message(ChatMessage::info(format!(
-                                    "[{task_id}] tool ✓ {}",
+                                    "[{short}] tool ✓ {}",
                                     p.message
                                 )));
                             }
                             WorkerProgressKind::StatusUpdate => {
                                 self.push_message(ChatMessage::info(format!(
-                                    "[{task_id}] {}",
+                                    "[{short}] {}",
                                     p.message
                                 )));
                             }
@@ -591,17 +635,26 @@ impl App {
                         self.update_shelf_state(&task_id, "failed", ShelfColor::Failed);
                         self.record_shelf_activity(&task_id, format!("Infrastructure error: {e}"));
                         self.push_message(ChatMessage::error(format!(
-                            "[{task_id}] Infrastructure error: {e}"
+                            "[{short}] Infrastructure error: {e}"
                         )));
                     }
                     RunnerEvent::Finished(result) => {
                         self.record_shelf_activity(&task_id, &result.summary);
-                        self.push_message(ChatMessage::info(format!(
-                            "✓  [{task_id}] {} ({}, {}ms)",
+                        let body = format!(
+                            "[{short}] {} ({}, {}ms)",
                             result.summary,
                             render_worker_status(&result.status),
-                            result.duration_ms
-                        )));
+                            result.duration_ms,
+                        );
+                        let msg = match result.status {
+                            WorkerStatus::Succeeded => ChatMessage::info(format!("✓  {body}")),
+                            WorkerStatus::Failed
+                            | WorkerStatus::TimedOut
+                            | WorkerStatus::Cancelled => {
+                                ChatMessage::error(failure_chat_body(body, &result))
+                            }
+                        };
+                        self.push_message(msg);
                     }
                 }
             }
@@ -611,9 +664,11 @@ impl App {
                 }
                 let (label, color) = shelf_state_view(&state);
                 self.update_shelf_state(&task_id, label, color);
+                self.clear_pending(&task_id);
                 self.record_shelf_activity(&task_id, shelf_state_note(&state));
+                let short = short_task_id(&task_id);
                 self.push_message(ChatMessage::info(format!(
-                    "[{task_id}] {}",
+                    "[{short}] {}",
                     shelf_state_note(&state)
                 )));
             }
@@ -632,6 +687,7 @@ impl App {
                 self.push_message(ChatMessage::info(message));
             }
             SessionEvent::Error(e) => {
+                self.clear_all_pending();
                 self.push_message(ChatMessage::error(e));
             }
             SessionEvent::Shutdown => {
@@ -648,6 +704,34 @@ impl App {
                 entry.updated_at = Local::now();
                 break;
             }
+        }
+    }
+
+    /// Mark a shelf entry as having a worktree action in flight.
+    fn set_pending(&mut self, task_id: &str, action: PendingAction) {
+        for entry in &mut self.shelf {
+            if entry.task_id == task_id {
+                entry.pending_action = Some(action);
+                entry.updated_at = Local::now();
+                break;
+            }
+        }
+    }
+
+    /// Clear pending_action on a single entry.
+    fn clear_pending(&mut self, task_id: &str) {
+        for entry in &mut self.shelf {
+            if entry.task_id == task_id {
+                entry.pending_action = None;
+                break;
+            }
+        }
+    }
+
+    /// Clear pending_action on every entry when the daemon reports an error.
+    fn clear_all_pending(&mut self) {
+        for entry in &mut self.shelf {
+            entry.pending_action = None;
         }
     }
 
@@ -717,9 +801,13 @@ impl App {
             }
             None => {
                 self.push_message(ChatMessage::user(input.clone()));
-                let _ = self
-                    .cmd_tx
-                    .try_send(SessionCommand::Dispatch { prompt: input });
+                if let Err(reason) = self.preflight_dispatch() {
+                    self.push_message(ChatMessage::error(reason));
+                } else {
+                    let _ = self
+                        .cmd_tx
+                        .try_send(SessionCommand::Dispatch { prompt: input });
+                }
             }
         }
     }
@@ -791,17 +879,31 @@ impl App {
     }
 
     fn cmd_apply(&mut self, arg: String) {
-        let _ = self.cmd_tx.try_send(SessionCommand::Apply {
-            task_id: arg.clone(),
-        });
-        self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
+        if !self.shelf_has_task(&arg) {
+            self.push_message(ChatMessage::error(format!(
+                "No sandbox with task id '{arg}' in this session."
+            )));
+        } else {
+            let _ = self.cmd_tx.try_send(SessionCommand::Apply {
+                task_id: arg.clone(),
+            });
+            self.set_pending(&arg, PendingAction::Applying);
+            self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
+        }
     }
 
     fn cmd_discard(&mut self, arg: String) {
-        let _ = self.cmd_tx.try_send(SessionCommand::Discard {
-            task_id: arg.clone(),
-        });
-        self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
+        if !self.shelf_has_task(&arg) {
+            self.push_message(ChatMessage::error(format!(
+                "No sandbox with task id '{arg}' in this session."
+            )));
+        } else {
+            let _ = self.cmd_tx.try_send(SessionCommand::Discard {
+                task_id: arg.clone(),
+            });
+            self.set_pending(&arg, PendingAction::Discarding);
+            self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
+        }
     }
 
     fn cmd_sandboxes(&mut self) {
@@ -826,24 +928,39 @@ impl App {
     }
 
     fn cmd_diverge(&mut self, arg: String) {
-        let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
-            task_id: arg.clone(),
-        });
-        self.push_message(ChatMessage::info(format!("Fetching divergence for {arg}…")));
+        if !self.shelf_has_task(&arg) {
+            self.push_message(ChatMessage::error(format!(
+                "No sandbox with task id '{arg}' in this session."
+            )));
+        } else {
+            let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
+                task_id: arg.clone(),
+            });
+            self.push_message(ChatMessage::info(format!("Fetching divergence for {arg}…")));
+        }
     }
 
     fn cmd_diff(&mut self, arg: String) {
-        let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
-            task_id: arg.clone(),
-        });
-        self.push_message(ChatMessage::info(format!("Fetching diff for {arg}…")));
+        if !self.shelf_has_task(&arg) {
+            self.push_message(ChatMessage::error(format!(
+                "No sandbox with task id '{arg}' in this session."
+            )));
+        } else {
+            let _ = self.cmd_tx.try_send(SessionCommand::Diff {
+                task_id: arg.clone(),
+            });
+            self.push_message(ChatMessage::info(format!("Fetching diff for {arg}…")));
+        }
     }
 
     fn cmd_new(&mut self) {
         self.transcript.clear();
         self.shelf.clear();
         self.shelf_selected = 0;
-        self.push_message(ChatMessage::system("New session started."));
+        self.push_message(ChatMessage::system(
+            "Transcript and shelf view cleared. Running tasks continue in the background and will \
+             reappear on the next event.",
+        ));
     }
 
     fn cmd_clear(&mut self) {
@@ -867,7 +984,12 @@ impl App {
 
     fn cmd_status(&mut self) {
         let info = format!(
-            "Status:\n  workspace:      {}\n  provider:       {}\n  model:          {}\n  active tasks:   {}\n  preserved:      {}\n  conflicts:      {}\n  shelf entries:  {}",
+            "Status:\n  session:        {}\n  workspace:      {}\n  provider:       {}\n  model:          {}\n  active tasks:   {}\n  preserved:      {}\n  conflicts:      {}\n  shelf entries:  {}",
+            if self.session_id.is_empty() {
+                "<uninitialised>"
+            } else {
+                &self.session_id
+            },
             self.workspace_label,
             self.provider_id,
             self.model_label(),
@@ -971,6 +1093,44 @@ impl App {
     }
 }
 
+/// Lines emitted by the abox runtime itself that duplicate lifecycle info we
+/// already surface via structured events.
+fn is_abox_lifecycle_noise(line: &str) -> bool {
+    line.starts_with("Sandbox '")
+        && (line.ends_with("' starting...") || line.ends_with("' exited cleanly."))
+}
+
+/// Build the multi-line chat body for a failed Finished event.
+fn failure_chat_body(headline: String, result: &bakudo_core::protocol::WorkerResult) -> String {
+    let mut out = headline;
+    let stderr_tail = result
+        .stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_string);
+    if let Some(line) = stderr_tail {
+        out.push('\n');
+        out.push_str("→ stderr: ");
+        out.push_str(&truncate_line(line.trim(), 200));
+    }
+    out.push('\n');
+    out.push_str("→ full logs at ~/.local/share/bakudo/bakudo.log");
+    out
+}
+
+/// Compact a `bakudo-attempt-<uuid>` id down to the first 8 chars of the UUID
+/// for inline chat display.
+fn short_task_id(task_id: &str) -> &str {
+    let tail = task_id.strip_prefix("bakudo-attempt-").unwrap_or(task_id);
+    let end = tail
+        .char_indices()
+        .nth(8)
+        .map(|(i, _)| i)
+        .unwrap_or(tail.len());
+    &tail[..end]
+}
+
 fn truncate_line(text: impl Into<String>, max_chars: usize) -> String {
     let text = text.into();
     let mut truncated: String = text.chars().take(max_chars).collect();
@@ -1037,5 +1197,6 @@ fn shelf_entry_from_record(record: SandboxRecord) -> ShelfEntry {
         state_color,
         started_at: record.started_at.with_timezone(&Local),
         updated_at,
+        pending_action: None,
     }
 }

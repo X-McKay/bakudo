@@ -60,10 +60,12 @@ impl SlashCommand {
             }
             SlashCommand::Diverge => "show divergence summary for a preserved worktree",
             SlashCommand::Diff => "show a colorised unified diff for a preserved worktree",
-            SlashCommand::New => "start a fresh session (clears transcript)",
+            SlashCommand::New => {
+                "clear transcript and local shelf view (does not abort running tasks)"
+            }
             SlashCommand::Clear => "clear the transcript display",
             SlashCommand::Config => "show current configuration",
-            SlashCommand::Status => "show provider, model, and active sandbox count",
+            SlashCommand::Status => "show session, provider, model, and active sandbox count",
             SlashCommand::Doctor => "probe abox and provider binaries for health issues",
             SlashCommand::Help => "show this help  (alias: /h /?)",
             SlashCommand::Quit => "exit bakudo  (aliases: /exit /q)",

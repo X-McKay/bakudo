@@ -42,6 +42,26 @@ pub struct BakudoConfig {
     pub data_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct BakudoConfigLayer {
+    #[serde(default)]
+    abox_bin: Option<String>,
+    #[serde(default)]
+    default_provider: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_model_layer")]
+    default_model: Option<Option<String>>,
+    #[serde(default)]
+    base_branch: Option<String>,
+    #[serde(default)]
+    candidate_policy: Option<CandidatePolicy>,
+    #[serde(default)]
+    sandbox_lifecycle: Option<SandboxLifecycle>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    data_dir: Option<PathBuf>,
+}
+
 fn default_abox_bin() -> String {
     "abox".to_string()
 }
@@ -63,6 +83,16 @@ where
     Ok(opt.filter(|s| !s.is_empty()))
 }
 
+fn deserialize_optional_model_layer<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(Some(opt.filter(|s| !s.is_empty())))
+}
+
 impl Default for BakudoConfig {
     fn default() -> Self {
         Self {
@@ -81,13 +111,9 @@ impl Default for BakudoConfig {
 impl BakudoConfig {
     /// Load config from the given path. Returns `Default` if the file does not exist.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let text = std::fs::read_to_string(path)?;
-        let cfg: Self = toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("config parse error in '{}': {e}", path.display()))?;
-        Ok(cfg)
+        Ok(Self::load_layer(path)?
+            .map(|layer| layer.apply_to(Self::default()))
+            .unwrap_or_default())
     }
 
     /// Load a layered config: user-level defaults merged with a repo-local
@@ -102,60 +128,25 @@ impl BakudoConfig {
         if let Some(path) = explicit {
             return Self::load(path);
         }
-        let user_cfg = dirs::config_dir()
+        let mut cfg = Self::default();
+        if let Some(user_layer) = dirs::config_dir()
             .map(|d| d.join("bakudo").join("config.toml"))
-            .map(|p| Self::load(&p))
+            .map(|p| Self::load_layer(&p))
             .transpose()?
-            .unwrap_or_default();
-        let repo_cfg = repo_root
+            .flatten()
+        {
+            cfg = user_layer.apply_to(cfg);
+        }
+        if let Some(repo_layer) = repo_root
             .map(|r| r.join(".bakudo").join("config.toml"))
             .filter(|p| p.exists())
-            .map(|p| Self::load(&p))
-            .transpose()?;
-        Ok(match repo_cfg {
-            Some(repo) => user_cfg.merged_with(repo),
-            None => user_cfg,
-        })
-    }
-
-    /// Merge a higher-priority layer over `self`. Non-default fields in
-    /// `other` overwrite `self`.
-    fn merged_with(self, other: Self) -> Self {
-        let defaults = Self::default();
-        Self {
-            abox_bin: if other.abox_bin != defaults.abox_bin {
-                other.abox_bin
-            } else {
-                self.abox_bin
-            },
-            default_provider: if other.default_provider != defaults.default_provider {
-                other.default_provider
-            } else {
-                self.default_provider
-            },
-            default_model: other.default_model.or(self.default_model),
-            base_branch: if other.base_branch != defaults.base_branch {
-                other.base_branch
-            } else {
-                self.base_branch
-            },
-            candidate_policy: if other.candidate_policy != defaults.candidate_policy {
-                other.candidate_policy
-            } else {
-                self.candidate_policy
-            },
-            sandbox_lifecycle: if other.sandbox_lifecycle != defaults.sandbox_lifecycle {
-                other.sandbox_lifecycle
-            } else {
-                self.sandbox_lifecycle
-            },
-            timeout_secs: if other.timeout_secs != defaults.timeout_secs {
-                other.timeout_secs
-            } else {
-                self.timeout_secs
-            },
-            data_dir: other.data_dir.or(self.data_dir),
+            .map(|p| Self::load_layer(&p))
+            .transpose()?
+            .flatten()
+        {
+            cfg = repo_layer.apply_to(cfg);
         }
+        Ok(cfg)
     }
 
     /// Resolve the data directory: explicit config value, or `~/.local/share/bakudo`.
@@ -189,6 +180,31 @@ impl BakudoConfig {
         spec.candidate_policy = candidate_policy;
         spec.sandbox_lifecycle = sandbox_lifecycle;
         spec
+    }
+
+    fn load_layer(path: &Path) -> anyhow::Result<Option<BakudoConfigLayer>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(path)?;
+        let layer = toml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("config parse error in '{}': {e}", path.display()))?;
+        Ok(Some(layer))
+    }
+}
+
+impl BakudoConfigLayer {
+    fn apply_to(self, base: BakudoConfig) -> BakudoConfig {
+        BakudoConfig {
+            abox_bin: self.abox_bin.unwrap_or(base.abox_bin),
+            default_provider: self.default_provider.unwrap_or(base.default_provider),
+            default_model: self.default_model.unwrap_or(base.default_model),
+            base_branch: self.base_branch.unwrap_or(base.base_branch),
+            candidate_policy: self.candidate_policy.unwrap_or(base.candidate_policy),
+            sandbox_lifecycle: self.sandbox_lifecycle.unwrap_or(base.sandbox_lifecycle),
+            timeout_secs: self.timeout_secs.unwrap_or(base.timeout_secs),
+            data_dir: self.data_dir.or(base.data_dir),
+        }
     }
 }
 
@@ -248,6 +264,23 @@ mod tests {
         let cfg = BakudoConfig::load(&path).unwrap();
         assert_eq!(cfg.default_model, None);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn layered_merge_honors_explicit_default_values() {
+        let user: BakudoConfigLayer = toml::from_str(
+            "timeout_secs = 42\nbase_branch = \"develop\"\ncandidate_policy = \"discard\"\n",
+        )
+        .unwrap();
+        let repo: BakudoConfigLayer = toml::from_str(
+            "timeout_secs = 300\nbase_branch = \"main\"\ncandidate_policy = \"review\"\n",
+        )
+        .unwrap();
+
+        let merged = repo.apply_to(user.apply_to(BakudoConfig::default()));
+        assert_eq!(merged.timeout_secs, 300);
+        assert_eq!(merged.base_branch, "main");
+        assert_eq!(merged.candidate_policy, CandidatePolicy::Review);
     }
 
     #[test]

@@ -2,8 +2,7 @@
 members = [
     "crates/bakudo-core",
     "crates/bakudo-tui",
-    "crates/bakudo-daemon",
-    "crates/bakudo-worker"
+    "crates/bakudo-daemon"
 ]
 resolver = "2"
 

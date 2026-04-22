@@ -8,6 +8,7 @@
 //!   bakudo discard <task_id>
 //!   bakudo divergence <task_id>
 //!   bakudo doctor
+//!   bakudo sessions
 //!   bakudo resume <session_id>
 //!
 //! With no subcommand, bakudo launches the interactive ratatui TUI.
@@ -29,9 +30,12 @@ use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use bakudo_core::{
-    abox::AboxAdapter, config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger,
+    abox::AboxAdapter, config::BakudoConfig, provider::ProviderRegistry, session::SessionRecord,
+    state::SandboxLedger,
 };
-use bakudo_daemon::session_controller::{SessionCommand, SessionController, SessionEvent};
+use bakudo_daemon::session_controller::{
+    SessionBootstrap, SessionCommand, SessionController, SessionEvent,
+};
 use bakudo_tui::{
     app::App,
     events::{poll_event, TermEvent},
@@ -98,6 +102,8 @@ enum Commands {
     },
     /// Run health checks on abox and all registered provider binaries.
     Doctor,
+    /// List saved interactive sessions, newest first.
+    Sessions,
     /// Resume a previous TUI session by loading its persisted ledger.
     Resume {
         /// The session ID to resume.
@@ -140,7 +146,10 @@ async fn main() -> Result<()> {
     let ledger = Arc::new(SandboxLedger::with_persistence(&ledger_path));
 
     match cli.command {
-        None => run_tui(config, abox, registry, ledger, None).await,
+        None => {
+            let session = create_session(&config)?;
+            run_tui(config, abox, registry, ledger, session, false).await
+        }
         Some(Commands::Run {
             prompt,
             provider,
@@ -166,16 +175,16 @@ async fn main() -> Result<()> {
         Some(Commands::List) => cmd_list(&abox, &config).await,
         Some(Commands::Apply { task_id }) => cmd_apply(&abox, &config, &task_id).await,
         Some(Commands::Discard { task_id }) => cmd_discard(&abox, &task_id).await,
-        Some(Commands::Divergence { task_id, base }) => {
-            cmd_divergence(&abox, &task_id, &base).await
-        }
+        Some(Commands::Divergence { task_id, base }) => cmd_divergence(&task_id, &base).await,
         Some(Commands::Doctor) => {
             let report = bakudo_daemon::doctor::run(&config, &abox, &registry).await;
             println!("{report}");
             Ok(())
         }
+        Some(Commands::Sessions) => cmd_sessions(&config),
         Some(Commands::Resume { session_id }) => {
-            run_tui(config, abox, registry, ledger, Some(session_id)).await
+            let session = load_session(&config, &session_id)?;
+            run_tui(config, abox, registry, ledger, session, true).await
         }
     }
 }
@@ -228,16 +237,104 @@ async fn cmd_discard(abox: &Arc<AboxAdapter>, task_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_divergence(abox: &Arc<AboxAdapter>, task_id: &str, base: &str) -> Result<()> {
+async fn cmd_divergence(task_id: &str, base: &str) -> Result<()> {
     use bakudo_daemon::candidate::query_divergence;
-    let summary =
-        query_divergence(task_id, base, std::env::current_dir().ok().as_deref(), abox).await?;
+    let summary = query_divergence(task_id, base, std::env::current_dir().ok().as_deref()).await?;
     if summary.has_changes {
         print!("{}", summary.raw_output);
     } else {
         println!("{task_id} is up to date with '{base}'");
     }
     Ok(())
+}
+
+fn cmd_sessions(config: &Arc<BakudoConfig>) -> Result<()> {
+    let all_sessions = SessionRecord::list(&config.resolved_data_dir())?;
+    if all_sessions.is_empty() {
+        println!("No saved sessions.");
+        return Ok(());
+    }
+
+    let current_repo = current_repo_root();
+    let mut visible: Vec<_> = all_sessions
+        .iter()
+        .filter(|session| match current_repo.as_deref() {
+            Some(repo) => session.repo_root.as_deref() == Some(repo),
+            None => true,
+        })
+        .collect();
+
+    if visible.is_empty() {
+        if let Some(repo) = current_repo.as_deref() {
+            println!("No saved sessions for current repo '{repo}'.");
+            println!("Showing all saved sessions instead.\n");
+        }
+        visible = all_sessions.iter().collect();
+    }
+
+    println!(
+        "{:<44} {:<20} {:<10} {:<16} REPO",
+        "SESSION ID", "STARTED", "PROVIDER", "MODEL"
+    );
+    println!("{}", "-".repeat(118));
+    for session in visible {
+        println!(
+            "{:<44} {:<20} {:<10} {:<16} {}",
+            session.session_id.0,
+            session.started_at.format("%Y-%m-%d %H:%M:%S"),
+            session.provider_id,
+            session.model.as_deref().unwrap_or("-"),
+            session.repo_root.as_deref().unwrap_or("-"),
+        );
+    }
+
+    Ok(())
+}
+
+fn current_repo_root() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let repo_root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                (!root.is_empty()).then_some(root)
+            } else {
+                None
+            }
+        });
+
+    repo_root.or_else(|| Some(cwd.to_string_lossy().to_string()))
+}
+
+fn create_session(config: &Arc<BakudoConfig>) -> Result<SessionRecord> {
+    let session = SessionRecord::new(
+        config.default_provider.clone(),
+        config.default_model.clone(),
+        current_repo_root(),
+    );
+    session.save(&config.resolved_data_dir())?;
+    Ok(session)
+}
+
+fn load_session(config: &Arc<BakudoConfig>, session_id: &str) -> Result<SessionRecord> {
+    let session = SessionRecord::load(&config.resolved_data_dir(), session_id)?;
+    if let (Some(saved_repo), Some(current_repo)) =
+        (session.repo_root.as_deref(), current_repo_root())
+    {
+        if saved_repo != current_repo {
+            anyhow::bail!(
+                "session '{}' belongs to repo '{}', current repo is '{}'",
+                session_id,
+                saved_repo,
+                current_repo
+            );
+        }
+    }
+    Ok(session)
 }
 
 /// RAII guard that restores the terminal on drop — even if the TUI panics.
@@ -276,17 +373,22 @@ async fn run_tui(
     abox: Arc<AboxAdapter>,
     registry: Arc<ProviderRegistry>,
     ledger: Arc<SandboxLedger>,
-    resume_session_id: Option<String>,
+    session: SessionRecord,
+    resumed: bool,
 ) -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(256);
 
     // Spawn the session controller.
-    let ctrl = SessionController::new(
+    let ctrl = SessionController::with_session(
         config.clone(),
         abox.clone(),
         ledger.clone(),
         registry.clone(),
+        SessionBootstrap {
+            session: session.clone(),
+            resume_only: resumed,
+        },
         cmd_rx,
         event_tx,
     );
@@ -313,8 +415,11 @@ async fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(config, registry, ledger, cmd_tx, event_rx);
-    if let Some(session_id) = resume_session_id {
-        app.note_resume(session_id);
+    app.session_id = session.session_id.0.clone();
+    app.provider_id = session.provider_id.clone();
+    app.model = session.model.clone();
+    if resumed {
+        app.note_resume(session.session_id.0.clone());
     }
 
     let result = run_event_loop(&mut terminal, &mut app).await;
@@ -407,7 +512,7 @@ async fn run_headless(
 
     let task_id = sandbox_task_id(&spec.attempt_id.0);
 
-    let worker_cmd = provider.build_stdin_command(model.as_deref(), true);
+    let worker_cmd = provider.build_worker_command(model.as_deref(), true);
 
     let cfg = Arc::new(TaskRunnerConfig {
         abox: abox.clone(),

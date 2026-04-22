@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::{Arc as StdArc, Mutex};
 use std::time::Instant;
 
 use chrono::Utc;
@@ -20,7 +21,7 @@ use tracing::{info, warn};
 use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
 use bakudo_core::error::BakudoError;
 use bakudo_core::protocol::{
-    AttemptSpec, SandboxLifecycle, WorkerProgressEvent, WorkerResult, WorkerStatus,
+    AttemptSpec, SandboxLifecycle, TaskId, WorkerProgressEvent, WorkerResult, WorkerStatus,
     WORKER_ERROR_PREFIX, WORKER_EVENT_PREFIX, WORKER_RESULT_PREFIX,
 };
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
@@ -44,7 +45,7 @@ pub struct TaskRunnerConfig {
     pub ledger: Arc<SandboxLedger>,
     pub data_dir: PathBuf,
     /// The bootstrap command to run inside the VM.
-    /// Typically: ["bakudo-worker"] or a shell script path.
+    /// Typically: ["python3", "-c", <wrapper>, <provider-binary>, ...].
     pub worker_command: Vec<String>,
     /// Optional provider-specific sandbox sizing overrides.
     pub memory_mib: Option<u32>,
@@ -113,9 +114,15 @@ async fn run_attempt_inner(
             "BAKUDO_SPEC_PATH".to_string(),
             spec_path.to_string_lossy().to_string(),
         ),
+        ("BAKUDO_ATTEMPT_ID".to_string(), spec.attempt_id.0.clone()),
+        ("BAKUDO_SESSION_ID".to_string(), spec.session_id.0.clone()),
         ("BAKUDO_TASK_ID".to_string(), task_id.clone()),
         ("BAKUDO_PROMPT".to_string(), spec.prompt.clone()),
         ("BAKUDO_PROVIDER".to_string(), spec.provider_id.clone()),
+        (
+            "BAKUDO_PROTOCOL_SCHEMA_VERSION".to_string(),
+            bakudo_core::protocol::PROTOCOL_SCHEMA_VERSION.to_string(),
+        ),
     ];
     if let Some(m) = spec.model.as_ref() {
         env_vars.push(("BAKUDO_MODEL".to_string(), m.clone()));
@@ -133,12 +140,22 @@ async fn run_attempt_inner(
     };
 
     let tx_clone = tx.clone();
+    let structured_result: StdArc<Mutex<Option<WorkerResult>>> = StdArc::new(Mutex::new(None));
+    let structured_result_cb = structured_result.clone();
     let run_result = cfg
         .abox
         .run(&params, move |line| {
             let line = line.to_string();
-            let event = parse_worker_line(&line);
-            let _ = tx_clone.try_send(event);
+            match parse_worker_line(&line) {
+                RunnerEvent::Finished(result) => {
+                    *structured_result_cb
+                        .lock()
+                        .expect("worker result mutex poisoned") = Some(result);
+                }
+                event => {
+                    let _ = tx_clone.try_send(event);
+                }
+            }
         })
         .await;
 
@@ -149,6 +166,7 @@ async fn run_attempt_inner(
 
     match run_result {
         Ok(run) => {
+            let clean_stdout = strip_structured_worker_output(&run.stdout);
             let status = if run.timed_out {
                 WorkerStatus::TimedOut
             } else if run.exit_code == 0 {
@@ -166,22 +184,43 @@ async fn run_attempt_inner(
             };
             cfg.ledger.update_state(&task_id, new_state).await;
 
-            let result = WorkerResult {
-                schema_version: bakudo_core::protocol::PROTOCOL_SCHEMA_VERSION,
-                attempt_id: spec.attempt_id,
-                session_id: spec.session_id,
-                task_id: spec.task_id,
-                status,
-                summary: extract_summary(&run.stdout, &run.stderr),
-                finished_at: Utc::now(),
-                exit_code: run.exit_code,
-                duration_ms,
-                timed_out: run.timed_out,
-                stdout: run.stdout.clone(),
-                stderr: run.stderr.clone(),
-                stdout_truncated: run.stdout.len() >= spec.budget.max_output_bytes,
-                stderr_truncated: false,
-            };
+            let mut result = structured_result
+                .lock()
+                .expect("worker result mutex poisoned")
+                .clone()
+                .unwrap_or_else(|| WorkerResult {
+                    schema_version: bakudo_core::protocol::PROTOCOL_SCHEMA_VERSION,
+                    attempt_id: spec.attempt_id.clone(),
+                    session_id: spec.session_id.clone(),
+                    task_id: TaskId(task_id.clone()),
+                    status: status.clone(),
+                    summary: extract_summary(&clean_stdout, &run.stderr),
+                    finished_at: Utc::now(),
+                    exit_code: run.exit_code,
+                    duration_ms,
+                    timed_out: run.timed_out,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                });
+
+            result.schema_version = bakudo_core::protocol::PROTOCOL_SCHEMA_VERSION;
+            result.attempt_id = spec.attempt_id;
+            result.session_id = spec.session_id;
+            result.task_id = TaskId(task_id.clone());
+            result.status = status;
+            if result.summary.trim().is_empty() {
+                result.summary = extract_summary(&clean_stdout, &run.stderr);
+            }
+            result.finished_at = Utc::now();
+            result.exit_code = run.exit_code;
+            result.duration_ms = duration_ms;
+            result.timed_out = run.timed_out;
+            result.stdout = clean_stdout;
+            result.stderr = run.stderr.clone();
+            result.stdout_truncated = run.stdout.len() >= spec.budget.max_output_bytes;
+            result.stderr_truncated = false;
 
             let _ = tx.send(RunnerEvent::Finished(result.clone())).await;
             Ok(result)
@@ -215,6 +254,22 @@ fn parse_worker_line(line: &str) -> RunnerEvent {
         return RunnerEvent::InfraError(msg.to_string());
     }
     RunnerEvent::RawLine(line.to_string())
+}
+
+fn strip_structured_worker_output(stdout: &str) -> String {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|line| {
+            !line.starts_with(WORKER_EVENT_PREFIX)
+                && !line.starts_with(WORKER_RESULT_PREFIX)
+                && !line.starts_with(WORKER_ERROR_PREFIX)
+        })
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
 }
 
 /// Extract a one-line summary from the worker's stdout.

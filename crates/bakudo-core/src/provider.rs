@@ -1,6 +1,92 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+const WORKER_WRAPPER_PY: &str = concat!(
+    "import json, os, subprocess, sys, threading, time\n",
+    "from datetime import datetime, timezone\n",
+    "\n",
+    "EVENT_PREFIX = 'BAKUDO_EVENT'\n",
+    "RESULT_PREFIX = 'BAKUDO_RESULT'\n",
+    "ERROR_PREFIX = 'BAKUDO_ERROR'\n",
+    "SCHEMA_VERSION = int(os.environ.get('BAKUDO_PROTOCOL_SCHEMA_VERSION', '1'))\n",
+    "ATTEMPT_ID = os.environ.get('BAKUDO_ATTEMPT_ID', 'unknown')\n",
+    "SESSION_ID = os.environ.get('BAKUDO_SESSION_ID', 'unknown')\n",
+    "TASK_ID = os.environ.get('BAKUDO_TASK_ID', 'unknown')\n",
+    "PROMPT = os.environ.get('BAKUDO_PROMPT', '')\n",
+    "\n",
+    "def timestamp():\n",
+    "    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')\n",
+    "\n",
+    "def emit(prefix, payload):\n",
+    "    print(f'{prefix} {json.dumps(payload, ensure_ascii=False)}', flush=True)\n",
+    "\n",
+    "binary = sys.argv[1]\n",
+    "args = sys.argv[2:]\n",
+    "start = time.monotonic()\n",
+    "last_line = {'value': ''}\n",
+    "\n",
+    "try:\n",
+    "    proc = subprocess.Popen(\n",
+    "        [binary, *args],\n",
+    "        stdin=subprocess.PIPE,\n",
+    "        stdout=subprocess.PIPE,\n",
+    "        stderr=subprocess.PIPE,\n",
+    "        text=True,\n",
+    "        bufsize=1,\n",
+    "    )\n",
+    "except Exception as exc:\n",
+    "    print(f'{ERROR_PREFIX} failed to spawn provider: {exc}', flush=True)\n",
+    "    sys.exit(127)\n",
+    "\n",
+    "if proc.stdin is not None:\n",
+    "    try:\n",
+    "        proc.stdin.write(PROMPT)\n",
+    "    finally:\n",
+    "        proc.stdin.close()\n",
+    "\n",
+    "def pump(stream, kind, prefix=''):\n",
+    "    if stream is None:\n",
+    "        return\n",
+    "    for raw in stream:\n",
+    "        line = raw.rstrip('\\n')\n",
+    "        trimmed = line.strip()\n",
+    "        if not trimmed:\n",
+    "            continue\n",
+    "        if kind == 'assistant_message':\n",
+    "            last_line['value'] = trimmed\n",
+    "        emit(EVENT_PREFIX, {\n",
+    "            'attempt_id': ATTEMPT_ID,\n",
+    "            'kind': kind,\n",
+    "            'message': f'{prefix}{trimmed}',\n",
+    "            'timestamp': timestamp(),\n",
+    "        })\n",
+    "\n",
+    "stderr_thread = threading.Thread(target=pump, args=(proc.stderr, 'status_update', '(stderr) '))\n",
+    "stderr_thread.daemon = True\n",
+    "stderr_thread.start()\n",
+    "pump(proc.stdout, 'assistant_message')\n",
+    "exit_code = proc.wait()\n",
+    "stderr_thread.join()\n",
+    "status = 'succeeded' if exit_code == 0 else 'failed'\n",
+    "summary = last_line['value'] or f'provider exited with code {exit_code}'\n",
+    "emit(RESULT_PREFIX, {\n",
+    "    'schema_version': SCHEMA_VERSION,\n",
+    "    'attempt_id': ATTEMPT_ID,\n",
+    "    'session_id': SESSION_ID,\n",
+    "    'task_id': TASK_ID,\n",
+    "    'status': status,\n",
+    "    'summary': summary[:200],\n",
+    "    'finished_at': timestamp(),\n",
+    "    'exit_code': exit_code,\n",
+    "    'duration_ms': int((time.monotonic() - start) * 1000),\n",
+    "    'timed_out': False,\n",
+    "    'stdout': '',\n",
+    "    'stderr': '',\n",
+    "    'stdout_truncated': False,\n",
+    "    'stderr_truncated': False,\n",
+    "})\n",
+);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSpec {
     pub id: String,
@@ -31,12 +117,13 @@ impl ProviderSpec {
         args
     }
 
-    /// Build a command that feeds the prompt from `BAKUDO_PROMPT` into stdin.
-    pub fn build_stdin_command(&self, model: Option<&str>, allow_all: bool) -> Vec<String> {
+    /// Build a guest-safe wrapper command that emits structured progress and
+    /// result envelopes around provider output.
+    pub fn build_worker_command(&self, model: Option<&str>, allow_all: bool) -> Vec<String> {
         let mut command = vec![
-            "bash".to_string(),
-            "-lc".to_string(),
-            "printf '%s' \"$BAKUDO_PROMPT\" | \"$0\" \"$@\"".to_string(),
+            "python3".to_string(),
+            "-c".to_string(),
+            WORKER_WRAPPER_PY.to_string(),
             self.binary.clone(),
         ];
         command.extend(self.build_args(model, allow_all));
@@ -191,14 +278,15 @@ mod tests {
     }
 
     #[test]
-    fn stdin_command_wraps_provider_and_preserves_args() {
+    fn worker_command_wraps_provider_and_preserves_args() {
         let reg = ProviderRegistry::with_defaults();
         let cmd = reg
             .get("codex")
             .unwrap()
-            .build_stdin_command(Some("gpt-5"), true);
-        assert_eq!(cmd[0], "bash");
-        assert_eq!(cmd[1], "-lc");
+            .build_worker_command(Some("gpt-5"), true);
+        assert_eq!(cmd[0], "python3");
+        assert_eq!(cmd[1], "-c");
+        assert!(cmd[2].contains("BAKUDO_RESULT"));
         assert_eq!(cmd[3], "codex");
         assert_eq!(&cmd[4..], &["exec", "--model", "gpt-5", "--full-auto"]);
     }
