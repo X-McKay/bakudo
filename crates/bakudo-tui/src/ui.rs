@@ -579,21 +579,37 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                 format!("{}/{}", entry.provider, entry.model)
             };
 
+            // Status row. When a worktree action is in flight, append a
+            // spinning '→ applying…' / '→ discarding…' badge so the user
+            // knows the row is doing something.
+            let mut status_spans: Vec<Span> = vec![
+                Span::raw(" "),
+                Span::styled(icon, Style::default().fg(state_color).bold()),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:<9}", entry.state_label),
+                    Style::default().fg(state_color),
+                ),
+                Span::styled(
+                    human_elapsed(entry.started_at),
+                    Style::default().fg(palette::dim_border()),
+                ),
+            ];
+            if let Some(action) = entry.pending_action {
+                status_spans.push(Span::styled("  → ", palette::dim_style()));
+                status_spans.push(Span::styled(
+                    palette::spinner_frame(app.tick),
+                    Style::default().fg(palette::focus_border()).bold(),
+                ));
+                status_spans.push(Span::raw(" "));
+                status_spans.push(Span::styled(
+                    action.label(),
+                    Style::default().fg(palette::focus_border()).bold(),
+                ));
+                status_spans.push(Span::styled("…", palette::dim_style()));
+            }
             ListItem::new(vec![
-                Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(icon, Style::default().fg(state_color).bold()),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("{:<9}", entry.state_label),
-                        Style::default().fg(state_color),
-                    ),
-                    Span::styled(
-                        human_elapsed(entry.started_at),
-                        Style::default().fg(palette::dim_border()),
-                    ),
-                ])
-                .style(Style::default().bg(row_bg)),
+                Line::from(status_spans).style(Style::default().bg(row_bg)),
                 Line::from(vec![
                     Span::raw("   "),
                     Span::styled(id_short, Style::default().fg(Color::White).bold()),
@@ -673,7 +689,10 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             pad(),
-            Span::styled(entry.prompt_summary.clone(), Style::default().fg(Color::White)),
+            Span::styled(
+                entry.prompt_summary.clone(),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(vec![
             pad(),
@@ -852,6 +871,7 @@ mod tests {
             state_color: crate::app::ShelfColor::Running,
             started_at: Local::now(),
             updated_at: Local::now(),
+            pending_action: None,
         });
 
         let backend = TestBackend::new(120, 30);

@@ -105,6 +105,26 @@ pub struct ShelfEntry {
     pub state_color: ShelfColor,
     pub started_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
+    /// If Some, a worktree action was just dispatched and we're waiting for
+    /// the daemon's TaskFinished/Error response. Renders as a transient
+    /// 'applying…' / 'discarding…' badge so the row doesn't look dead.
+    pub pending_action: Option<PendingAction>,
+}
+
+/// A worktree action that was dispatched and is awaiting daemon completion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PendingAction {
+    Applying,
+    Discarding,
+}
+
+impl PendingAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            PendingAction::Applying => "applying",
+            PendingAction::Discarding => "discarding",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -472,6 +492,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Apply {
                         task_id: task_id.clone(),
                     });
+                    self.set_pending(&task_id, PendingAction::Applying);
                     self.push_message(ChatMessage::info(format!(
                         "Applying worktree for {task_id}…"
                     )));
@@ -483,6 +504,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Discard {
                         task_id: task_id.clone(),
                     });
+                    self.set_pending(&task_id, PendingAction::Discarding);
                     self.push_message(ChatMessage::info(format!(
                         "Discarding worktree for {task_id}…"
                     )));
@@ -533,6 +555,7 @@ impl App {
                     state_color: ShelfColor::Running,
                     started_at: Local::now(),
                     updated_at: Local::now(),
+                    pending_action: None,
                 });
             }
             SessionEvent::TaskProgress { task_id, event } => {
@@ -607,6 +630,7 @@ impl App {
                 }
                 let (label, color) = shelf_state_view(&state);
                 self.update_shelf_state(&task_id, label, color);
+                self.clear_pending(&task_id);
                 self.record_shelf_activity(&task_id, shelf_state_note(&state));
                 let short = short_task_id(&task_id);
                 self.push_message(ChatMessage::info(format!(
@@ -630,6 +654,12 @@ impl App {
                 self.push_message(ChatMessage::info(message));
             }
             SessionEvent::Error(e) => {
+                // Daemon Errors don't carry a task_id, so we can't be precise
+                // about which pending action they correspond to. Apply/discard
+                // failures are uncommon enough that clearing all pending
+                // badges is the lesser evil vs. a stale 'applying…' that
+                // never resolves.
+                self.clear_all_pending();
                 self.push_message(ChatMessage::error(e));
             }
             SessionEvent::Shutdown => {
@@ -646,6 +676,39 @@ impl App {
                 entry.updated_at = Local::now();
                 break;
             }
+        }
+    }
+
+    /// Mark a shelf entry as having a worktree action in flight. Cleared on
+    /// the next TaskFinished or Error from the daemon.
+    fn set_pending(&mut self, task_id: &str, action: PendingAction) {
+        for entry in &mut self.shelf {
+            if entry.task_id == task_id {
+                entry.pending_action = Some(action);
+                entry.updated_at = Local::now();
+                break;
+            }
+        }
+    }
+
+    /// Clear pending_action on a single entry. Used when a specific
+    /// TaskFinished comes back.
+    fn clear_pending(&mut self, task_id: &str) {
+        for entry in &mut self.shelf {
+            if entry.task_id == task_id {
+                entry.pending_action = None;
+                break;
+            }
+        }
+    }
+
+    /// Clear pending_action on every entry. Used when an Error event arrives —
+    /// the daemon's Error variant doesn't carry a task_id so we can't be
+    /// surgical, but apply/discard failures are rare and a stale badge is
+    /// worse than briefly clearing an unrelated one.
+    fn clear_all_pending(&mut self) {
+        for entry in &mut self.shelf {
+            entry.pending_action = None;
         }
     }
 
@@ -775,6 +838,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Apply {
                         task_id: arg.clone(),
                     });
+                    self.set_pending(&arg, PendingAction::Applying);
                     self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
                 }
             }
@@ -787,6 +851,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Discard {
                         task_id: arg.clone(),
                     });
+                    self.set_pending(&arg, PendingAction::Discarding);
                     self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
                 }
             }
@@ -1043,5 +1108,6 @@ fn shelf_entry_from_record(record: SandboxRecord) -> ShelfEntry {
         state_color,
         started_at: record.started_at.with_timezone(&Local),
         updated_at,
+        pending_action: None,
     }
 }
