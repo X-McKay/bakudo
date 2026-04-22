@@ -548,9 +548,11 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                 ShelfColor::TimedOut => "⌛",
             };
 
-            // Truncate task_id to fit.
+            // Truncate task_id from the head: every attempt id starts with the
+            // shared "bakudo-attempt-" prefix, so head-truncation would drop the
+            // distinguishing suffix. Show "…<tail>" instead.
             let id_max = (list_area.width as usize).saturating_sub(6);
-            let id_short: String = entry.task_id.chars().take(id_max).collect();
+            let id_short = tail_truncate(&entry.task_id, id_max);
 
             // Truncate summary.
             let summary: String = entry.prompt_summary.chars().take(max_summary_w).collect();
@@ -739,6 +741,22 @@ fn push_hard_broken(
         current.push(ch);
         *current_w += cw;
     }
+}
+
+/// Truncate `text` to at most `max_chars` chars, keeping the tail and
+/// prepending '…' when truncation happens.
+fn tail_truncate(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let skip = count - (max_chars - 1);
+    let mut out = String::from("…");
+    out.extend(text.chars().skip(skip));
+    out
 }
 
 fn human_elapsed(started_at: chrono::DateTime<chrono::Local>) -> String {
