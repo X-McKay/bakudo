@@ -75,6 +75,7 @@ pub enum ShelfColor {
     Merged,
     Discarded,
     Failed,
+    Conflicts,
 }
 
 /// Which panel has keyboard focus.
@@ -168,8 +169,23 @@ Type /help for available commands."
     /// Handle a key press in the composer input.
     pub fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Enter => self.submit_input(),
+            // Ctrl+A / Home — move to start of line.
+            KeyCode::Home | KeyCode::Char('a') if ctrl => {
+                self.cursor = 0;
+            }
+            // Ctrl+E / End — move to end of line.
+            KeyCode::End | KeyCode::Char('e') if ctrl => {
+                self.cursor = self.input.len();
+            }
+            // Ctrl+U — clear from cursor to start.
+            KeyCode::Char('u') if ctrl => {
+                self.input.drain(..self.cursor);
+                self.cursor = 0;
+            }
+            // Regular character insertion (must come AFTER all Ctrl+Char guards).
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
@@ -196,16 +212,6 @@ Type /help for available commands."
                 if self.cursor < self.input.len() {
                     self.cursor = self.next_char_boundary();
                 }
-            }
-            KeyCode::Home | KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.cursor = 0;
-            }
-            KeyCode::End | KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.cursor = self.input.len();
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.drain(..self.cursor);
-                self.cursor = 0;
             }
             KeyCode::Tab => {
                 // Switch focus to shelf.
@@ -333,10 +339,14 @@ Type /help for available commands."
                 }
             }
             SessionEvent::TaskFinished { task_id, action } => {
-                let color = match action.as_str() {
-                    "merged" => ShelfColor::Merged,
-                    "discarded" => ShelfColor::Discarded,
-                    _ => ShelfColor::Preserved,
+                let color = if action == "merged" {
+                    ShelfColor::Merged
+                } else if action == "discarded" {
+                    ShelfColor::Discarded
+                } else if action.starts_with("conflicts:") {
+                    ShelfColor::Conflicts
+                } else {
+                    ShelfColor::Preserved
                 };
                 self.update_shelf_state(&task_id, &action, color);
                 self.push_message(ChatMessage::info(format!(

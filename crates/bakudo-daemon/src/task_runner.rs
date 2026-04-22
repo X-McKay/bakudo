@@ -13,10 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Context;
 use chrono::Utc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
 use bakudo_core::error::BakudoError;
@@ -99,7 +98,7 @@ async fn run_attempt_inner(
     info!("Starting task {task_id} with provider '{}'", spec.provider_id);
 
     // Build the abox run params.
-    let mut command = cfg.worker_command.clone();
+    let command = cfg.worker_command.clone();
     // Pass the spec file path as an env var so the worker can find it.
     let env_vars = vec![
         ("BAKUDO_SPEC_PATH".to_string(), spec_path.to_string_lossy().to_string()),

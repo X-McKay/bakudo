@@ -22,8 +22,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
-use tracing::info;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::EnvFilter;
 
 use bakudo_core::{
     abox::AboxAdapter,
@@ -126,7 +125,8 @@ async fn main() -> Result<()> {
     let config = Arc::new(BakudoConfig::load(&config_path)?);
 
     // Build shared components.
-    let abox = Arc::new(AboxAdapter::from_env());
+    // Respect config.abox_bin so users can override the binary path.
+    let abox = Arc::new(AboxAdapter::new(&config.abox_bin));
     let registry = Arc::new(ProviderRegistry::with_defaults());
     let ledger = Arc::new(SandboxLedger::new());
 
@@ -167,9 +167,19 @@ async fn main() -> Result<()> {
             println!("Discarded {task_id}");
             Ok(())
         }
-        Some(Commands::Divergence { task_id: _, base }) => {
-            let output = abox.divergence(std::env::current_dir().ok().as_deref(), &base).await?;
-            print!("{output}");
+        Some(Commands::Divergence { task_id, base }) => {
+            use bakudo_daemon::candidate::query_divergence;
+            let summary = query_divergence(
+                &task_id,
+                &base,
+                std::env::current_dir().ok().as_deref(),
+                &abox,
+            ).await?;
+            if summary.has_changes {
+                print!("{}", summary.raw_output);
+            } else {
+                println!("{task_id} is up to date with '{base}'");
+            }
             Ok(())
         }
     }
@@ -190,6 +200,7 @@ async fn run_tui(
     let ctrl = SessionController::new(
         config.clone(),
         abox.clone(),
+        ledger.clone(),
         registry.clone(),
         cmd_rx,
         event_tx,
@@ -303,7 +314,7 @@ async fn run_headless(
 
     println!("Dispatching task {task_id} to provider '{provider_id}'...");
 
-    let (mut rx, handle) = run_attempt(spec.clone(), cfg).await;
+    let (mut rx, _handle) = run_attempt(spec.clone(), cfg).await;
 
     while let Some(event) = rx.recv().await {
         match &event {

@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::abox::{AboxAdapter, SandboxEntry};
+use crate::abox::SandboxEntry;
 use crate::protocol::{AttemptId, CandidatePolicy, SandboxLifecycle, SessionId};
 
 /// The lifecycle state of a single sandbox.
@@ -36,6 +36,8 @@ pub enum SandboxState {
     Failed { exit_code: i32 },
     /// The run timed out.
     TimedOut,
+    /// The merge had conflicts; the worktree is preserved for manual resolution.
+    MergeConflicts,
 }
 
 /// A single entry in the sandbox ledger.
@@ -70,6 +72,7 @@ impl SandboxRecord {
                 | SandboxState::Discarded
                 | SandboxState::Failed { .. }
                 | SandboxState::TimedOut
+                | SandboxState::MergeConflicts
         )
     }
 }

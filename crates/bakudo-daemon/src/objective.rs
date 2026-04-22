@@ -19,10 +19,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use bakudo_core::abox::AboxAdapter;
-use bakudo_core::config::BakudoConfig;
 use bakudo_core::protocol::{AttemptSpec, WorkerStatus};
-use bakudo_core::state::SandboxLedger;
 
 use crate::session_controller::SessionEvent;
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
@@ -58,6 +55,7 @@ pub async fn run_objective(
     retry_policy: RetryPolicy,
     cfg: Arc<TaskRunnerConfig>,
     event_tx: mpsc::Sender<SessionEvent>,
+    base_branch: String,
 ) {
     let base_spec = spec;
     let mut attempt_num = 0u32;
@@ -68,13 +66,13 @@ pub async fn run_objective(
         // Give each retry a fresh attempt ID so abox creates a new worktree.
         attempt_spec.attempt_id = bakudo_core::protocol::AttemptId::new();
 
+        let task_id = bakudo_core::abox::sandbox_task_id(&attempt_spec.attempt_id.0);
         info!(
             "Objective attempt {}/{}: task_id={}",
-            attempt_num, retry_policy.max_attempts, attempt_spec.task_id
+            attempt_num, retry_policy.max_attempts, task_id
         );
 
         let (mut rx, handle) = run_attempt(attempt_spec.clone(), cfg.clone()).await;
-        let task_id = bakudo_core::abox::sandbox_task_id(&attempt_spec.attempt_id.0);
 
         // Forward progress events.
         let mut final_result = None;
@@ -111,11 +109,13 @@ pub async fn run_objective(
             WorkerStatus::Cancelled => false,
         };
 
+        // Ensure the spawned task is cleaned up regardless of outcome.
+        let _ = handle.await;
+
         if !should_retry || attempt_num >= retry_policy.max_attempts {
             // Apply candidate policy.
             let abox = cfg.abox.clone();
             let ledger = cfg.ledger.clone();
-            let base_branch = "main".to_string(); // TODO: from config
             match apply_candidate_policy(
                 &task_id,
                 &attempt_spec.candidate_policy,

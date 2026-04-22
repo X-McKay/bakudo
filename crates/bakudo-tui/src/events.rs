@@ -1,6 +1,6 @@
 //! Terminal input event handling.
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyEvent};
 use std::time::Duration;
 
 /// Polled terminal events, abstracted over crossterm.

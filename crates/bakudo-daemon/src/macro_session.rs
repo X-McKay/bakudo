@@ -101,9 +101,10 @@ impl MacroSession {
         let event_tx = self.event_tx.clone();
         let spec = req.spec;
         let retry_policy = req.retry_policy;
+        let base_branch = self.config.base_branch.clone();
 
         tokio::spawn(async move {
-            run_objective(spec, retry_policy, cfg, event_tx).await;
+            run_objective(spec, retry_policy, cfg, event_tx, base_branch).await;
             // Release the concurrency slot when the objective completes.
             drop(permit);
         });

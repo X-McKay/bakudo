@@ -54,7 +54,8 @@ pub async fn apply_candidate_policy(
                     "Merge conflicts for task {task_id}: {:?}",
                     conflicts
                 );
-                // Leave preserved so the user can resolve manually.
+                // Mark the ledger so the shelf shows the conflict state.
+                ledger.update_state(task_id, SandboxState::MergeConflicts).await;
                 Ok(WorktreeAction::MergeConflicts(conflicts))
             }
         }

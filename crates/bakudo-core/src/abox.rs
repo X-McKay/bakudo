@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -123,7 +122,8 @@ impl AboxAdapter {
 
         let deadline = params.timeout_secs.map(|s| Duration::from_secs(s + 30));
 
-        let run_fut = async {
+        // Drive stdout/stderr concurrently and collect into buffers.
+        let read_fut = async {
             loop {
                 tokio::select! {
                     line = out_reader.next_line() => {
@@ -142,20 +142,26 @@ impl AboxAdapter {
                     }
                 }
             }
-            child.wait().await
         };
 
         let (status, timed_out) = if let Some(d) = deadline {
-            match timeout(d, run_fut).await {
-                Ok(Ok(s)) => (s, false),
-                Ok(Err(e)) => return Err(AboxError::Io(e)),
-                Err(_) => {
+            match timeout(d, read_fut).await {
+                Ok(()) => {
+                    match child.wait().await {
+                        Ok(s) => (s, false),
+                        Err(e) => return Err(AboxError::Io(e)),
+                    }
+                }
+                Err(_elapsed) => {
+                    // Kill the child and return a timeout error.
                     let _ = child.kill().await;
+                    let _ = child.wait().await; // reap zombie
                     return Err(AboxError::Timeout { timeout_secs: d.as_secs() });
                 }
             }
         } else {
-            match run_fut.await {
+            read_fut.await;
+            match child.wait().await {
                 Ok(s) => (s, false),
                 Err(e) => return Err(AboxError::Io(e)),
             }

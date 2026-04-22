@@ -12,7 +12,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::Utc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -20,11 +19,10 @@ use bakudo_core::abox::AboxAdapter;
 use bakudo_core::config::BakudoConfig;
 use bakudo_core::protocol::{
     AttemptBudget, AttemptPermissions, AttemptSpec, CandidatePolicy, SandboxLifecycle,
-    SessionId,
 };
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::session::SessionRecord;
-use bakudo_core::state::{SandboxLedger, SandboxRecord};
+use bakudo_core::state::SandboxLedger;
 
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use crate::worktree::{apply_candidate_policy, WorktreeAction};
@@ -79,6 +77,7 @@ impl SessionController {
     pub fn new(
         config: Arc<BakudoConfig>,
         abox: Arc<AboxAdapter>,
+        ledger: Arc<SandboxLedger>,
         registry: Arc<ProviderRegistry>,
         cmd_rx: mpsc::Receiver<SessionCommand>,
         event_tx: mpsc::Sender<SessionEvent>,
@@ -90,7 +89,7 @@ impl SessionController {
             session,
             config,
             abox,
-            ledger: Arc::new(SandboxLedger::new()),
+            ledger,
             registry,
             current_provider,
             current_model,

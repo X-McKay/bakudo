@@ -15,7 +15,6 @@
 //!  Footer: key hints
 
 use ratatui::{
-    backend::Backend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -237,6 +236,7 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                 ShelfColor::Merged => Color::Blue,
                 ShelfColor::Discarded => Color::DarkGray,
                 ShelfColor::Failed => Color::Red,
+                ShelfColor::Conflicts => Color::Magenta,
             };
             let selected = i == app.shelf_selected && app.focus == FocusedPanel::Shelf;
             let style = if selected {
