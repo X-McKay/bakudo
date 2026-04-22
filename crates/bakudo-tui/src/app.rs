@@ -578,12 +578,19 @@ impl App {
                     }
                     RunnerEvent::Finished(result) => {
                         self.record_shelf_activity(&task_id, &result.summary);
-                        self.push_message(ChatMessage::info(format!(
-                            "✓  [{task_id}] {} ({}, {}ms)",
+                        let body = format!(
+                            "[{task_id}] {} ({}, {}ms)",
                             result.summary,
                             render_worker_status(&result.status),
-                            result.duration_ms
-                        )));
+                            result.duration_ms,
+                        );
+                        let msg = match result.status {
+                            WorkerStatus::Succeeded => ChatMessage::info(format!("✓  {body}")),
+                            WorkerStatus::Failed
+                            | WorkerStatus::TimedOut
+                            | WorkerStatus::Cancelled => ChatMessage::error(body),
+                        };
+                        self.push_message(msg);
                     }
                 }
             }
