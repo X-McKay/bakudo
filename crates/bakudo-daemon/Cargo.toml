@@ -1,0 +1,16 @@
+[package]
+name = "bakudo-daemon"
+version = "2.0.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+bakudo-core = { version = "2.0.0", path = "../bakudo-core" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2.0.18"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "bakudo-tui"
+version = "2.0.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+bakudo-core = { version = "2.0.0", path = "../bakudo-core" }
+bakudo-daemon = { version = "2.0.0", path = "../bakudo-daemon" }
+chrono.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+unicode-width = "0.2.2"
