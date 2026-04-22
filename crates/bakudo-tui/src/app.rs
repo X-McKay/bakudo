@@ -618,7 +618,9 @@ impl App {
                             WorkerStatus::Succeeded => ChatMessage::info(format!("✓  {body}")),
                             WorkerStatus::Failed
                             | WorkerStatus::TimedOut
-                            | WorkerStatus::Cancelled => ChatMessage::error(body),
+                            | WorkerStatus::Cancelled => {
+                                ChatMessage::error(failure_chat_body(body, &result))
+                            }
                         };
                         self.push_message(msg);
                     }
@@ -1026,6 +1028,29 @@ impl App {
 fn is_abox_lifecycle_noise(line: &str) -> bool {
     line.starts_with("Sandbox '")
         && (line.ends_with("' starting...") || line.ends_with("' exited cleanly."))
+}
+
+/// Build the multi-line chat body for a failed Finished event. Appends a
+/// pointer to the bakudo log and, when stderr is non-empty, the last
+/// meaningful stderr line so the user has somewhere to start without
+/// scrolling through the transcript or opening a separate file.
+fn failure_chat_body(headline: String, result: &bakudo_core::protocol::WorkerResult) -> String {
+    let mut out = headline;
+    let stderr_tail = result
+        .stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_string);
+    if let Some(line) = stderr_tail {
+        out.push('\n');
+        out.push_str("→ stderr: ");
+        // Cap to 200 chars so a verbose stack doesn't dominate the chat.
+        out.push_str(&truncate_line(line.trim(), 200));
+    }
+    out.push('\n');
+    out.push_str("→ full logs at ~/.local/share/bakudo/bakudo.log");
+    out
 }
 
 /// Compact a 51-char `bakudo-attempt-<uuid>` id down to the first 8 chars of
