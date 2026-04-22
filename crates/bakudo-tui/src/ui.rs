@@ -617,7 +617,10 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(palette::unfocused_border_style())
-        .title(Span::styled(" Selection ", palette::dim_style()));
+        .title(Span::styled(
+            " Selection ",
+            Style::default().fg(Color::White).bold(),
+        ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -630,8 +633,12 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{}/{}", entry.provider, entry.model)
     };
+    // Match the list rows above: a single-space left pad on every detail line
+    // so the content doesn't crowd the shelf's left border.
+    let pad = || Span::raw(" ");
     let detail = vec![
         Line::from(vec![
+            pad(),
             Span::styled(
                 entry.state_label.clone(),
                 Style::default()
@@ -641,15 +648,19 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("  ", palette::dim_style()),
             Span::styled(provider_model, palette::dim_style()),
         ]),
-        Line::from(Span::styled(
-            entry.task_id.clone(),
-            Style::default().fg(Color::White).bold(),
-        )),
-        Line::from(Span::styled(
-            entry.prompt_summary.clone(),
-            Style::default().fg(Color::White),
-        )),
         Line::from(vec![
+            pad(),
+            Span::styled(
+                entry.task_id.clone(),
+                Style::default().fg(Color::White).bold(),
+            ),
+        ]),
+        Line::from(vec![
+            pad(),
+            Span::styled(entry.prompt_summary.clone(), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            pad(),
             Span::styled("started ", palette::dim_style()),
             Span::styled(
                 entry.started_at.format("%H:%M:%S").to_string(),
@@ -662,7 +673,10 @@ fn render_shelf_detail(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::White),
             ),
         ]),
-        Line::from(Span::styled(entry.last_note.clone(), palette::dim_style())),
+        Line::from(vec![
+            pad(),
+            Span::styled(entry.last_note.clone(), palette::dim_style()),
+        ]),
     ];
     let para = Paragraph::new(detail).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
