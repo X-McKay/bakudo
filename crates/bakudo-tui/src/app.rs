@@ -539,7 +539,7 @@ impl App {
                 match event {
                     RunnerEvent::RawLine(line) => {
                         let line = line.trim();
-                        if !line.is_empty() {
+                        if !line.is_empty() && !is_abox_lifecycle_noise(line) {
                             self.record_shelf_activity(&task_id, line);
                             self.push_message(ChatMessage::agent(format!("[{task_id}] {line}")));
                         }
@@ -950,6 +950,14 @@ impl App {
         }
         i
     }
+}
+
+/// Lines emitted by the abox runtime itself that duplicate content already
+/// surfaced via structured TaskStarted / Finished events. Skipping them in
+/// the chat keeps the transcript focused on the agent's actual output.
+fn is_abox_lifecycle_noise(line: &str) -> bool {
+    line.starts_with("Sandbox '")
+        && (line.ends_with("' starting...") || line.ends_with("' exited cleanly."))
 }
 
 fn truncate_line(text: impl Into<String>, max_chars: usize) -> String {
