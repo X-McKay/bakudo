@@ -146,32 +146,36 @@ mod state_ledger_tests {
 
 #[cfg(test)]
 mod slash_command_tests {
-    use bakudo_tui::commands::{parse_slash, SlashCommand};
+    use bakudo_tui::commands::{parse_slash, ParsedCommand, SlashCommand};
+
+    fn ok(cmd: SlashCommand, arg: &str) -> Option<Result<ParsedCommand, String>> {
+        Some(Ok(ParsedCommand { command: cmd, arg: arg.to_string() }))
+    }
 
     #[test]
     fn all_providers_parseable() {
         for id in &["claude", "codex", "opencode", "gemini"] {
-            let cmd = parse_slash(&format!("/provider {id}")).unwrap();
-            assert_eq!(cmd, SlashCommand::SetProvider(id.to_string()));
+            let result = parse_slash(&format!("/provider {id}"));
+            assert_eq!(result, ok(SlashCommand::Provider, id));
         }
     }
 
     #[test]
     fn model_with_spaces_in_name() {
-        let cmd = parse_slash("/model claude opus 4").unwrap();
         // The full remainder after /model is the model name (spaces allowed).
-        assert_eq!(cmd, SlashCommand::SetModel("claude opus 4".to_string()));
+        let result = parse_slash("/model claude opus 4");
+        assert_eq!(result, ok(SlashCommand::Model, "claude opus 4"));
     }
 
     #[test]
     fn apply_and_discard() {
         assert_eq!(
             parse_slash("/apply bakudo-attempt-abc"),
-            Some(SlashCommand::Apply("bakudo-attempt-abc".to_string()))
+            ok(SlashCommand::Apply, "bakudo-attempt-abc")
         );
         assert_eq!(
             parse_slash("/discard bakudo-attempt-xyz"),
-            Some(SlashCommand::Discard("bakudo-attempt-xyz".to_string()))
+            ok(SlashCommand::Discard, "bakudo-attempt-xyz")
         );
     }
 }

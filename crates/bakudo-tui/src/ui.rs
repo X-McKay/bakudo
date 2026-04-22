@@ -1,47 +1,49 @@
-//! Ratatui UI rendering.
+//! Ratatui UI rendering — Codex-level polish.
 //!
-//! Layout (terminal width >= 100):
+//! Layout (terminal width ≥ SHELF_MIN_TERM_WIDTH):
 //!
-//!  ┌─────────────────────────────────────────────────┬──────────────────────┐
-//!  │  Header: bakudo v2 | provider: claude | model   │                      │
-//!  ├─────────────────────────────────────────────────┤   Sandbox Shelf      │
-//!  │                                                 │                      │
-//!  │   Chat Transcript                               │  [running] task-abc  │
-//!  │                                                 │  [preserved] task-xy │
-//!  │                                                 │                      │
-//!  ├─────────────────────────────────────────────────┤                      │
-//!  │  > composer input                               │                      │
-//!  └─────────────────────────────────────────────────┴──────────────────────┘
-//!  Footer: key hints
+//!  ┌──────────────────────────────────────────────────────┬──────────────────────────┐
+//!  │  bakudo v2  ·  provider: claude  ·  model: opus-4-5  │                          │
+//!  ├──────────────────────────────────────────────────────┤   ╔═ Sandboxes (2) ════╗  │
+//!  │                                                      │   ║ ⠙ running          ║  │
+//!  │   HH:MM:SS  you   hello world                        │   ║   task-abc         ║  │
+//!  │             ─────────────────────────────────────    │   ║   "fix the bug"    ║  │
+//!  │   HH:MM:SS        agent output line 1               │   ║                    ║  │
+//!  │                   agent output line 2               │   ║ ✓ preserved        ║  │
+//!  │                                                      │   ║   task-xyz         ║  │
+//!  ├──────────────────────────────────────────────────────┤   ╚════════════════════╝  │
+//!  │  [C] > input with cursor█                            │                          │
+//!  └──────────────────────────────────────────────────────┴──────────────────────────┘
+//!   Enter: send  Tab: complete/shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands
+//!
+//! When the terminal is narrower than SHELF_MIN_TERM_WIDTH the shelf is hidden.
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, FocusedPanel, MessageRole, ShelfColor};
+use crate::palette::{
+    self, COMPOSER_HEIGHT, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH,
+};
 
-const SHELF_WIDTH: u16 = 32;
-const HEADER_HEIGHT: u16 = 1;
-const COMPOSER_HEIGHT: u16 = 3;
-const FOOTER_HEIGHT: u16 = 1;
+// ─── Top-level render ──────────────────────────────────────────────────────
 
-/// Render the full TUI.
+/// Render the full TUI into `frame`.
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.size();
+    let use_shelf = area.width >= SHELF_MIN_TERM_WIDTH;
 
-    // Outer horizontal split: main area | shelf
-    let use_shelf = area.width >= 80;
+    // ── Horizontal split: main | shelf ─────────────────────────────────────
     let h_chunks = if use_shelf {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(40),
-                Constraint::Length(SHELF_WIDTH),
-            ])
+            .constraints([Constraint::Min(40), Constraint::Length(SHELF_WIDTH)])
             .split(area)
     } else {
         Layout::default()
@@ -52,7 +54,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let main_area = h_chunks[0];
 
-    // Vertical split for main area: header | transcript | composer | footer
+    // ── Vertical split: header | transcript | composer | footer ────────────
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -71,71 +73,94 @@ pub fn render(frame: &mut Frame, app: &App) {
     if use_shelf {
         render_shelf(frame, app, h_chunks[1]);
     }
+
+    // ── Completion popup ────────────────────────────────────────────────────
+    if !app.completions.is_empty() && app.focus == FocusedPanel::Chat {
+        render_completion_popup(frame, app, v_chunks[2]);
+    }
 }
 
+// ─── Header ────────────────────────────────────────────────────────────────
+
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    let model_str = if app.model.is_empty() {
-        "default".to_string()
-    } else {
-        app.model.clone()
-    };
-    let header = Paragraph::new(format!(
-        " bakudo v2  │  provider: {}  │  model: {}",
-        app.provider_id, model_str
-    ))
-    .style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    let model_str = if app.model.is_empty() { "default" } else { &app.model };
+
+    // Build a styled header line with coloured badges.
+    let line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("bakudo", Style::default().fg(Color::White).bold()),
+        Span::styled(" v2", Style::default().fg(palette::dim_border())),
+        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+        Span::styled("provider: ", Style::default().fg(palette::header_fg())),
+        Span::styled(&app.provider_id, Style::default().fg(palette::provider_accent()).bold()),
+        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+        Span::styled("model: ", Style::default().fg(palette::header_fg())),
+        Span::styled(model_str, Style::default().fg(palette::model_accent())),
+        // Right-align active task count if any.
+        if app.active_task_count > 0 {
+            Span::styled(
+                format!("  {} task(s) running  ", app.active_task_count),
+                Style::default().fg(palette::shelf_running()).bold(),
+            )
+        } else {
+            Span::raw("")
+        },
+    ]);
+
+    let header = Paragraph::new(line)
+        .style(Style::default().bg(palette::header_bg()));
     frame.render_widget(header, area);
 }
 
+// ─── Transcript ────────────────────────────────────────────────────────────
+
 fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let focus_style = if app.focus == FocusedPanel::Chat {
-        Style::default().fg(Color::Cyan)
+    let border_style = if app.focus == FocusedPanel::Chat && app.terminal_focused {
+        palette::focused_border_style()
     } else {
-        Style::default().fg(Color::DarkGray)
+        palette::unfocused_border_style()
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focus_style)
-        .title(" Chat ");
+        .border_style(border_style)
+        .title(Span::styled(" Chat ", Style::default().fg(Color::White)));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Build lines from transcript.
+    let gutter = GUTTER as usize;
     let mut lines: Vec<Line> = Vec::new();
+
     for msg in &app.transcript {
-        let (prefix, style) = match msg.role {
-            MessageRole::User => (
-                "you  ",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ),
-            MessageRole::System => (
-                "sys  ", Style::default().fg(Color::Yellow)
-            ),
-            MessageRole::AgentOutput => (
-                "     ", Style::default().fg(Color::White)
-            ),
-            MessageRole::Error => (
-                "err  ", Style::default().fg(Color::Red)
-            ),
-            MessageRole::Info => (
-                "info ", Style::default().fg(Color::Cyan)
-            ),
+        let (icon, role_label, fg) = match msg.role {
+            MessageRole::User => ("▶", "you  ", palette::role_user_fg()),
+            MessageRole::System => ("·", "sys  ", palette::role_system_fg()),
+            MessageRole::AgentOutput => (" ", "     ", palette::role_agent_fg()),
+            MessageRole::Error => ("✗", "err  ", palette::role_error_fg()),
+            MessageRole::Info => ("·", "info ", palette::role_info_fg()),
         };
+
         let ts = msg.timestamp.format("%H:%M:%S").to_string();
-        // Split multi-line content.
+        let role_style = Style::default().fg(fg).bold();
+        let body_style = Style::default().fg(fg);
+
         for (i, content_line) in msg.content.lines().enumerate() {
             if i == 0 {
                 lines.push(Line::from(vec![
-                    Span::styled(format!("{} ", ts), Style::default().fg(Color::DarkGray)),
-                    Span::styled(prefix, style),
-                    Span::styled(content_line.to_string(), style),
+                    Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
+                    Span::styled(format!("{ts} "), palette::dim_style()),
+                    Span::styled(icon, role_style),
+                    Span::raw(" "),
+                    Span::styled(role_label, role_style),
+                    Span::styled(content_line.to_string(), body_style),
                 ]));
             } else {
+                // Continuation lines: indent to align with first-line body.
+                let indent = " ".repeat(gutter + ts.len() + 1 + 1 + 1 + role_label.len());
                 lines.push(Line::from(vec![
-                    Span::raw("         "),
-                    Span::styled(content_line.to_string(), style),
+                    Span::raw(indent),
+                    Span::styled(content_line.to_string(), body_style),
                 ]));
             }
         }
@@ -151,39 +176,90 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     };
     let visible_lines: Vec<Line> = lines.into_iter().skip(start).collect();
 
-    let para = Paragraph::new(Text::from(visible_lines)).wrap(Wrap { trim: false });
+    let para = Paragraph::new(Text::from(visible_lines))
+        .wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
+
+    // Scroll indicator in top-right corner of transcript.
+    if app.scroll_offset > 0 {
+        let indicator = format!(" ↑ {} ", app.scroll_offset);
+        let ind_width = indicator.width() as u16;
+        if inner.width > ind_width + 2 {
+            let ind_rect = Rect {
+                x: inner.x + inner.width - ind_width - 1,
+                y: inner.y,
+                width: ind_width,
+                height: 1,
+            };
+            let ind_para = Paragraph::new(indicator)
+                .style(Style::default().fg(palette::role_info_fg()).bg(palette::header_bg()));
+            frame.render_widget(ind_para, ind_rect);
+        }
+    }
 }
 
+// ─── Composer ──────────────────────────────────────────────────────────────
+
 fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let focus_style = if app.focus == FocusedPanel::Chat {
-        Style::default().fg(Color::Cyan)
+    let border_style = if app.focus == FocusedPanel::Chat && app.terminal_focused {
+        palette::focused_border_style()
     } else {
-        Style::default().fg(Color::DarkGray)
+        palette::unfocused_border_style()
     };
 
-    let provider = app.provider_id.chars().next().unwrap_or('?').to_uppercase().to_string();
-    let title = format!(" [{}] Input ", provider);
+    // Title badge: first letter of provider in brackets.
+    let provider_initial = app.provider_id.chars().next().unwrap_or('?').to_uppercase().to_string();
+    let title = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            format!("[{provider_initial}]"),
+            Style::default().fg(palette::provider_accent()).bold(),
+        ),
+        Span::raw(" Input "),
+    ]);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focus_style)
+        .border_style(border_style)
         .title(title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Show input with cursor.
+    // Render input with a block cursor at the cursor position.
     let before_cursor = &app.input[..app.cursor];
-    let after_cursor = &app.input[app.cursor..];
-    let cursor_char = if app.input.len() == app.cursor { " " } else {
-        &app.input[app.cursor..app.cursor + app.input[app.cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)]
+    let at_cursor = if app.cursor < app.input.len() {
+        let end = app.input[app.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| app.cursor + i)
+            .unwrap_or(app.input.len());
+        &app.input[app.cursor..end]
+    } else {
+        " "
+    };
+    let after_cursor = if app.cursor < app.input.len() {
+        let end = app.input[app.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| app.cursor + i)
+            .unwrap_or(app.input.len());
+        &app.input[end..]
+    } else {
+        ""
     };
 
+    let prompt_icon = Span::styled("> ", Style::default().fg(palette::dim_border()));
     let line = Line::from(vec![
-        Span::raw("> "),
+        prompt_icon,
         Span::styled(before_cursor, Style::default().fg(Color::White)),
-        Span::styled(cursor_char, Style::default().bg(Color::White).fg(Color::Black)),
+        Span::styled(
+            at_cursor,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(after_cursor, Style::default().fg(Color::White)),
     ]);
 
@@ -191,39 +267,136 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, inner);
 }
 
-fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let hints = if app.focus == FocusedPanel::Chat {
-        " Enter: send  Tab: shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands "
-    } else {
-        " Tab/Esc: back to chat  j/k: navigate  a: apply  d: discard "
+// ─── Completion popup ──────────────────────────────────────────────────────
+
+fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
+    if app.completions.is_empty() {
+        return;
+    }
+
+    let popup_height = (app.completions.len() as u16).min(8) + 2; // +2 for borders
+    let popup_width = app
+        .completions
+        .iter()
+        .map(|s| s.len() + 3) // "/ " prefix + padding
+        .max()
+        .unwrap_or(12) as u16 + 4;
+
+    // Position popup just above the composer.
+    let popup_y = composer_area.y.saturating_sub(popup_height);
+    let popup_x = composer_area.x + 2; // align with "> " prompt
+    let popup_rect = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width.min(frame.size().width.saturating_sub(popup_x)),
+        height: popup_height,
     };
+
+    let items: Vec<ListItem> = app
+        .completions
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let selected = i == app.completion_idx.saturating_sub(1) % app.completions.len();
+            let style = if selected {
+                Style::default().fg(Color::Black).bg(palette::focus_border())
+            } else {
+                Style::default().fg(Color::White)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled("/", palette::dim_style()),
+                Span::styled(*cmd, style),
+            ]))
+        })
+        .collect();
+
+    let popup_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette::focus_border()))
+        .title(Span::styled(" Tab: complete ", palette::dim_style()));
+
+    let list = List::new(items).block(popup_block);
+    frame.render_widget(list, popup_rect);
+}
+
+// ─── Footer ────────────────────────────────────────────────────────────────
+
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let hints: Line = if app.focus == FocusedPanel::Chat {
+        Line::from(vec![
+            hint_key("Enter"),
+            Span::styled(": send  ", palette::footer_fg()),
+            hint_key("Tab"),
+            Span::styled(": complete/shelf  ", palette::footer_fg()),
+            hint_key("PgUp/Dn"),
+            Span::styled(": scroll  ", palette::footer_fg()),
+            hint_key("Ctrl+C"),
+            Span::styled(": quit  ", palette::footer_fg()),
+            hint_key("/help"),
+            Span::styled(": commands", palette::footer_fg()),
+        ])
+    } else {
+        Line::from(vec![
+            hint_key("Tab/Esc"),
+            Span::styled(": back to chat  ", palette::footer_fg()),
+            hint_key("j/k"),
+            Span::styled(": navigate  ", palette::footer_fg()),
+            hint_key("a"),
+            Span::styled(": apply  ", palette::footer_fg()),
+            hint_key("d"),
+            Span::styled(": discard", palette::footer_fg()),
+        ])
+    };
+
     let footer = Paragraph::new(hints)
-        .style(Style::default().fg(Color::DarkGray).bg(Color::Black));
+        .style(Style::default().bg(Color::Black));
     frame.render_widget(footer, area);
 }
 
+fn hint_key(label: &'static str) -> Span<'static> {
+    Span::styled(label, Style::default().fg(palette::hint_key_fg()).bold())
+}
+
+// ─── Shelf ─────────────────────────────────────────────────────────────────
+
 fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
-    let focus_style = if app.focus == FocusedPanel::Shelf {
-        Style::default().fg(Color::Cyan)
+    let border_style = if app.focus == FocusedPanel::Shelf && app.terminal_focused {
+        palette::focused_border_style()
     } else {
-        Style::default().fg(Color::DarkGray)
+        palette::unfocused_border_style()
     };
+
+    let title = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("Sandboxes", Style::default().fg(Color::White).bold()),
+        if !app.shelf.is_empty() {
+            Span::styled(
+                format!(" ({})", app.shelf.len()),
+                palette::dim_style(),
+            )
+        } else {
+            Span::raw("")
+        },
+        Span::raw(" "),
+    ]);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focus_style)
-        .title(" Sandboxes ");
+        .border_style(border_style)
+        .title(title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if app.shelf.is_empty() {
-        let empty = Paragraph::new("No sandboxes")
-            .style(Style::default().fg(Color::DarkGray))
+        let empty = Paragraph::new("No sandboxes yet")
+            .style(palette::dim_style())
             .alignment(Alignment::Center);
         frame.render_widget(empty, inner);
         return;
     }
+
+    let max_summary_w = (inner.width as usize).saturating_sub(4);
 
     let items: Vec<ListItem> = app
         .shelf
@@ -231,37 +404,58 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(i, entry)| {
             let state_color = match entry.state_color {
-                ShelfColor::Running => Color::Green,
-                ShelfColor::Preserved => Color::Yellow,
-                ShelfColor::Merged => Color::Blue,
-                ShelfColor::Discarded => Color::DarkGray,
-                ShelfColor::Failed => Color::Red,
-                ShelfColor::Conflicts => Color::Magenta,
+                ShelfColor::Running   => palette::shelf_running(),
+                ShelfColor::Preserved => palette::shelf_preserved(),
+                ShelfColor::Merged    => palette::shelf_merged(),
+                ShelfColor::Discarded => palette::shelf_discarded(),
+                ShelfColor::Failed    => palette::shelf_failed(),
+                ShelfColor::Conflicts => palette::shelf_conflicts(),
             };
+
             let selected = i == app.shelf_selected && app.focus == FocusedPanel::Shelf;
-            let style = if selected {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                Style::default()
+            let row_bg = if selected { palette::shelf_selected_bg() } else { Color::Reset };
+
+            // State icon.
+            let icon = match entry.state_color {
+                ShelfColor::Running   => palette::spinner_frame(app.tick),
+                ShelfColor::Preserved => "◎",
+                ShelfColor::Merged    => "✓",
+                ShelfColor::Discarded => "✗",
+                ShelfColor::Failed    => "✗",
+                ShelfColor::Conflicts => "⚡",
             };
-            // Truncate task_id and summary to fit shelf width.
-            let max_w = (inner.width as usize).saturating_sub(2);
-            let id_short: String = entry.task_id.chars().take(16).collect();
-            let summary: String = entry.prompt_summary.chars().take(max_w.saturating_sub(4)).collect();
+
+            // Truncate task_id to fit.
+            let id_max = (inner.width as usize).saturating_sub(6);
+            let id_short: String = entry.task_id.chars().take(id_max).collect();
+
+            // Truncate summary.
+            let summary: String = entry.prompt_summary.chars().take(max_summary_w).collect();
+
             ListItem::new(vec![
                 Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(icon, Style::default().fg(state_color).bold()),
+                    Span::raw(" "),
                     Span::styled(
-                        format!("[{}] ", entry.state_label),
+                        format!("{:<9}", entry.state_label),
                         Style::default().fg(state_color),
                     ),
-                    Span::styled(id_short, Style::default().fg(Color::White)),
-                ]),
-                Line::from(Span::styled(
-                    format!("  {}", summary),
-                    Style::default().fg(Color::DarkGray),
-                )),
+                ])
+                .style(Style::default().bg(row_bg)),
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(id_short, Style::default().fg(Color::White).bold()),
+                ])
+                .style(Style::default().bg(row_bg)),
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(summary, palette::dim_style()),
+                ])
+                .style(Style::default().bg(row_bg)),
+                // Blank separator line.
+                Line::raw(""),
             ])
-            .style(style)
         })
         .collect();
 

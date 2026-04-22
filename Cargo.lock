@@ -151,8 +151,11 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "strum",
+ "strum_macros",
  "tokio",
  "tracing",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
 ]
 

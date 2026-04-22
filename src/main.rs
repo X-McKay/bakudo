@@ -251,10 +251,21 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                     }
                 }
             }
+            Some(TermEvent::Paste(text)) => {
+                app.handle_paste(text);
+            }
+            Some(TermEvent::FocusGained) => {
+                app.on_focus_gained();
+            }
+            Some(TermEvent::FocusLost) => {
+                app.on_focus_lost();
+            }
             Some(TermEvent::Resize(_, _)) => {
                 // Terminal will redraw on next iteration.
             }
-            Some(TermEvent::Tick) | None => {}
+            Some(TermEvent::Tick) | None => {
+                app.tick();
+            }
         }
     }
     Ok(())

@@ -40,6 +40,8 @@ pub enum SessionCommand {
     Apply { task_id: String },
     /// Discard a preserved worktree.
     Discard { task_id: String },
+    /// Show divergence summary for a preserved worktree.
+    Diverge { task_id: String },
     /// Shut down the session.
     Shutdown,
 }
@@ -123,6 +125,9 @@ impl SessionController {
                 }
                 SessionCommand::Discard { task_id } => {
                     self.discard_worktree(&task_id).await;
+                }
+                SessionCommand::Diverge { task_id } => {
+                    self.show_divergence(&task_id).await;
                 }
                 SessionCommand::Shutdown => {
                     let _ = self.event_tx.send(SessionEvent::Shutdown).await;
@@ -297,6 +302,24 @@ impl SessionController {
             }
             Err(e) => {
                 let _ = self.event_tx.send(SessionEvent::Error(e.to_string())).await;
+            }
+        }
+    }
+
+    async fn show_divergence(&self, task_id: &str) {
+        match self.abox.divergence(self.repo_path().as_deref(), task_id).await {
+            Ok(summary) => {
+                let msg = if summary.is_empty() {
+                    format!("[{task_id}] No divergence (worktree matches base branch).")
+                } else {
+                    format!("[{task_id}] Divergence:\n{summary}")
+                };
+                let _ = self.event_tx.send(SessionEvent::Error(msg)).await;
+            }
+            Err(e) => {
+                let _ = self.event_tx.send(SessionEvent::Error(format!(
+                    "Divergence check failed for {task_id}: {e}"
+                ))).await;
             }
         }
     }
