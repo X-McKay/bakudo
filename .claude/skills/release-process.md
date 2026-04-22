@@ -1,51 +1,65 @@
-# Skill: AI-Based Release Process in Bakudo
+# Skill: Release Process for Bakudo
 
 ## Trigger
 
-When a feature branch is ready to be merged into `main` or when a new version of `bakudo` needs to be released.
+When asked to prepare or cut a release of `bakudo`.
 
-## Branch Naming Conventions
+## Process
 
-- **Feature Branches**: `feat/<short-description>`
-- **Bug Fixes**: `fix/<short-description>`
-- **Refactoring**: `refactor/<short-description>`
-- **Documentation**: `docs/<short-description>`
+1. **Ensure the branch is clean and all tests pass:**
+   ```bash
+   git checkout main && git pull
+   just check
+   ```
 
-## Process for Feature Branch to Main
+2. **Determine the next version** using Semantic Versioning:
+   - `BREAKING CHANGE:` in any commit footer -> major bump.
+   - Any `feat:` commit -> minor bump.
+   - Only `fix:`, `docs:`, `chore:` commits -> patch bump.
 
-1.  **Preparation**:
-    - Ensure all code changes are committed on the feature branch.
-    - Run `just check` (or `pnpm lint && pnpm test && pnpm build`) to verify code quality.
-2.  **Version Bumping**:
-    - Determine the version bump type:
-      - **Major**: Breaking changes.
-      - **Minor**: New features (backwards compatible).
-      - **Patch**: Bug fixes (backwards compatible).
-    - Update `package.json` with the new version.
-3.  **Merge into Main**:
-    - Checkout `main` branch.
-    - Pull latest changes from `origin/main`.
-    - Merge the feature branch: `git merge <branch-name>`.
-    - If conflicts occur, resolve them and run `just check` again.
-4.  **Final Quality Gate**:
-    - On `main` branch, run all tests: `pnpm test`.
-    - Verify linting: `pnpm lint`.
-    - Ensure build is successful: `pnpm build`.
-5.  **Tagging and Pushing**:
-    - Create a git tag for the new version: `git tag v<version>`.
-    - Push to `origin/main` with tags: `git push origin main --tags`.
+3. **Update `CHANGELOG.md`** with a new section for the version:
+   ```markdown
+   ## [X.Y.Z] — YYYY-MM-DD
+   ### Added
+   - ...
+   ### Fixed
+   - ...
+   ### Changed
+   - ...
+   ```
 
-## AI-Driven Release Automation
+4. **Bump the version** in all `Cargo.toml` files. Install `cargo-edit`
+   if not present (`cargo install cargo-edit`), then:
+   ```bash
+   cargo set-version X.Y.Z
+   ```
+   This updates the workspace root and all member crates.
 
-AI agents should automate the following:
+5. **Commit the version bump:**
+   ```bash
+   git add Cargo.toml Cargo.lock crates/*/Cargo.toml CHANGELOG.md
+   git commit -m "chore: bump version to vX.Y.Z"
+   ```
 
-- **Automatic Version Bumping**: Use tools to parse commit messages and determine the next version.
-- **Testing Requirement Enforcement**: Never merge if `pnpm test` fails.
-- **Documentation Update**: Automatically update `CHANGELOG.md` based on commit history.
+6. **Tag the release:**
+   ```bash
+   git tag vX.Y.Z
+   ```
+
+7. **Push branch and tag:**
+   ```bash
+   git push origin main --tags
+   ```
+
+8. **Build the release binary:**
+   ```bash
+   cargo build --release
+   ```
+   The binary is at `target/release/bakudo`.
+
+9. **Create the GitHub release** and attach the binary.
 
 ## Quality Gate
 
-- Zero linting errors.
-- All tests (unit, integration, regression) pass.
-- Version in `package.json` is updated.
-- Branch naming convention is followed.
+`just check` must pass on `main` before tagging. Never tag a commit that
+has failing tests or clippy warnings.

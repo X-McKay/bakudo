@@ -2,37 +2,49 @@
 
 ## Trigger
 
-When asked to verify the correctness of the `bakudo` repository or after making any code changes.
+When asked to verify the correctness of the `bakudo` repository or after
+making any code changes.
 
 ## Context
 
-`bakudo` uses the Node.js native test runner and TypeScript. Tests are categorized into unit, integration, and regression tests.
+Bakudo v2 uses Rust's built-in test framework. Tests live in two places:
+- **Crate-level unit tests**: `#[cfg(test)]` modules inside each crate's
+  source files (e.g., `crates/bakudo-core/src/provider.rs`).
+- **Workspace integration tests**: `tests/integration.rs` at the repo root.
 
 ## Process
 
-1.  **Run All Tests**:
+1. **Run all tests:**
+   ```bash
+   cargo test --workspace
+   ```
 
-    ```bash
-    pnpm test
-    ```
+2. **Run tests for a specific crate:**
+   ```bash
+   cargo test -p bakudo-core
+   cargo test -p bakudo-daemon
+   cargo test -p bakudo-tui
+   ```
 
-    This command builds the project and runs all tests in the `tests/` directory.
+3. **Run a specific test by name:**
+   ```bash
+   cargo test -p bakudo-core abox::tests::parse_list_with_entries
+   ```
 
-2.  **Run Specific Test Categories**:
-    - **Unit Tests**: `pnpm test:unit`
-    - **Integration Tests**: `pnpm test:integration`
-    - **Regression Tests**: `pnpm test:regression`
+4. **Run integration tests only:**
+   ```bash
+   cargo test --test integration
+   ```
 
-3.  **Interpret Results**:
-    - All tests must pass (indicated by a green checkmark or "pass" count).
-    - If a test fails, analyze the `AssertionError` and the input/expected values.
-    - Common issues include type mismatches or incorrect property access on `MemoryStore`.
+5. **Interpret results.** All tests must pass. If a test fails, read the
+   assertion error carefully — it will show the expected vs. actual value.
+   Common issues: incorrect argument order in abox adapter calls, wrong
+   provider flag strings, or stale ledger state in async tests.
 
-4.  **Add New Tests**:
-    - **Unit Tests**: Place in `tests/unit/`. Focus on individual classes like `PolicyEngine`.
-    - **Integration Tests**: Place in `tests/integration/`. Focus on end-to-end workflows.
-    - **Regression Tests**: Place in `tests/regression/`. Always add a test for every bug fix, naming it `bug-<number>-<description>.test.ts`.
+6. **Add new tests.** Unit tests go in the relevant source file under
+   `#[cfg(test)]`. Integration tests go in `tests/integration.rs` in a
+   clearly named module (e.g., `mod provider_registry_tests`).
 
 ## Quality Gate
 
-Ensure `pnpm build` passes before running tests. All tests must pass with zero failures.
+`cargo test --workspace` must pass with zero failures before every commit.

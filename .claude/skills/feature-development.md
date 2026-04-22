@@ -1,39 +1,42 @@
-# Skill: Implement a New Feature in Bakudo
+# Skill: Feature Development in Bakudo
 
 ## Trigger
 
-When asked to add new functionality to the `bakudo` agent harness.
+When asked to add a new feature to the `bakudo` repository.
 
 ## Context
 
-`bakudo` is a lightweight, robust custom agent harness designed for high-autonomy operation using `abox` sandboxing. It is written in TypeScript and follows a functional programming style to ensure testability.
+Bakudo v2 is a pure Rust project structured as a Cargo workspace with three
+crates: `bakudo-core`, `bakudo-daemon`, and `bakudo-tui`. The CLI entry point
+lives in `src/main.rs`. There is no TypeScript, Node.js, or `pnpm` in this
+repository.
 
 ## Process
 
-1.  **Analyze the Requirement**: Understand the goal and identify which component of the harness needs modification (`orchestrator`, `tools`, `adapter`, `policy`, etc.).
-2.  **Design the Change**:
-    - Follow the **Planner → Executor contract** for any new step-based functionality.
-    - If you are implementing background agents, orchestration logic, or interacting with the `abox` sandbox, you MUST strictly follow the invariants defined in `.claude/skills/meta-orchestrator.md`.
-    - Maintain **Mode-aware policy** by updating the tool allowlists if necessary.
-    - Ensure any new external interaction is handled via an adapter or a tool.
-3.  **Implement the Feature**:
-    - Use TypeScript best practices.
-    - Keep the core lightweight (minimize runtime dependencies).
-    - Follow the existing coding style (ESLint and Prettier).
-4.  **Write Tests**:
-    - Add unit tests in `tests/` for the new functionality.
-    - Ensure the feature is independently testable in isolation.
-5.  **Run Quality Checks**:
-    - Run `just check` to ensure linting, tests, and build all pass.
-6.  **Commit**:
-    - Use conventional commit messages (e.g., `feat: add support for MCP tool providers`).
+1. **Understand the crate boundary.** Decide which crate owns the new feature:
+   - Domain types, provider specs, abox adapter changes -> `bakudo-core`
+   - Task execution, worktree lifecycle, session state -> `bakudo-daemon`
+   - TUI rendering, slash commands, keyboard handling -> `bakudo-tui`
+   - CLI flags and top-level wiring -> `src/main.rs`
+
+2. **Write the implementation.** Follow the architecture invariants in
+   `AGENTS.md`. Key rules:
+   - All state mutations go through `SandboxLedger::update`.
+   - Provider invocations use `ProviderRegistry`; never hard-code CLI flags.
+   - TUI and daemon communicate only via the typed channel pair.
+
+3. **Write tests.** Every new public function needs a unit test in its crate.
+   Cross-crate integration scenarios go in `tests/integration.rs`.
+
+4. **Run the quality gate:**
+   ```bash
+   just check
+   ```
+   This runs `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`,
+   and `cargo test --workspace`. All must pass with zero warnings.
+
+5. **Commit** using Conventional Commits (see `AGENTS.md`).
 
 ## Quality Gate
 
-Before every commit, run:
-
-```bash
-just check
-```
-
-This command runs `lint`, `test`, and `build`. All must pass with zero errors.
+`just check` must pass with zero errors and zero warnings before every commit.

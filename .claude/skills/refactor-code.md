@@ -2,28 +2,44 @@
 
 ## Trigger
 
-When asked to simplify, restructure, or improve code quality in the `bakudo` repository.
+When asked to refactor, simplify, or restructure code in the `bakudo`
+repository without changing external behaviour.
 
 ## Process
 
-1.  **Establish a Baseline**: Run `pnpm test` to ensure the current codebase is in a stable state.
-2.  **Make the Refactoring Changes**:
-    - Identify areas for improvement in `src/`.
-    - Maintain the existing TypeScript architecture (functional programming style).
-    - Simplify logic where possible.
-3.  **Verify the Changes**:
-    - Run `pnpm test` again to ensure no regressions were introduced.
-4.  **Run Quality Checks**:
-    - Run `just check` to verify linting, tests, and build.
-5.  **Commit**:
-    - Use conventional commit messages (e.g., `refactor: simplify tool registration logic`).
+1. **Ensure tests pass before starting:**
+   ```bash
+   cargo test --workspace
+   ```
+   Capture the passing test count as the baseline.
+
+2. **Apply the refactor.** Common patterns in this codebase:
+   - Extract repeated abox argument construction into a helper in
+     `bakudo-core/src/abox.rs`.
+   - Move shared types between daemon and TUI into `bakudo-core`.
+   - Replace `unwrap()` with proper error propagation using `?` and
+     `BakudoError`.
+   - Replace `Arc<Mutex<T>>` with `Arc<tokio::sync::Mutex<T>>` for
+     async-safe shared state.
+
+3. **Run the quality gate after every logical change:**
+   ```bash
+   just check
+   ```
+   Fix any new clippy warnings immediately — do not accumulate them.
+
+4. **Verify behaviour is unchanged:**
+   ```bash
+   cargo test --workspace
+   ```
+   The same tests that passed before must still pass, with the same count.
+
+5. **Commit** using Conventional Commits:
+   ```
+   refactor(<scope>): <description>
+   ```
 
 ## Quality Gate
 
-Before every commit, run:
-
-```bash
-just check
-```
-
-All checks must pass with zero errors.
+`just check` must pass with zero errors and zero warnings, and the test
+count must not decrease.

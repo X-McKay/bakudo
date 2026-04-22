@@ -1,31 +1,42 @@
-# Skill: Update the Policy Engine in Bakudo
+# Skill: Update Provider or Policy Configuration in Bakudo
 
 ## Trigger
 
-When changing how the agent's autonomy budgets or tool allowlists are evaluated in the `bakudo` repository.
+When asked to add a new provider, change provider invocation flags, or
+update the default configuration schema in `bakudo`.
 
 ## Process
 
-1.  **Analyze the Requirement**: Understand the policy change (e.g., adding a new tool to an allowlist, updating a budget threshold).
-2.  **Design the Change**:
-    - Read `src/policy.ts` and `src/models.ts` to understand the current policy model.
-    - Update the `Policy` or `Budget` types in `src/models.ts` if the schema changed.
-    - Make changes to the `PolicyEngine` in `src/policy.ts`.
-3.  **Update Configuration**:
-    - Update `config/default.json` if the policy schema changed.
-4.  **Write Tests**:
-    - Add or update tests in `tests/harness.test.ts` to verify the new policy evaluation logic.
-5.  **Run Quality Checks**:
-    - Run `just check` to ensure everything passes.
-6.  **Commit**:
-    - Use conventional commit messages (e.g., `feat: update policy to allow file tool in build mode`).
+### Adding or updating a provider
+
+1. Open `crates/bakudo-core/src/provider.rs`.
+2. Add or update the `ProviderSpec` entry in `ProviderRegistry::default()`.
+3. Implement `build_args()` to return the correct **non-interactive** CLI
+   flags. Refer to the provider's official documentation:
+   - Claude Code: `claude -p <prompt>` (non-interactive print mode)
+   - Codex: `codex exec --full-auto -q <prompt>`
+   - OpenCode: `opencode run -q <prompt>`
+   - Gemini CLI: `gemini -p <prompt>`
+4. Add a unit test asserting the non-interactive flag is present:
+   ```rust
+   #[test]
+   fn my_provider_non_interactive_flag() {
+       let reg = ProviderRegistry::default();
+       let spec = reg.get("myprovider").unwrap();
+       let args = spec.build_args(&None, true);
+       assert!(args.iter().any(|a| a == "-p" || a == "--non-interactive"));
+   }
+   ```
+5. Run `just check`.
+
+### Updating the default config schema
+
+1. Open `crates/bakudo-core/src/config.rs`.
+2. Update the `BakudoConfig` struct and its `Default` implementation.
+3. Update `docs/bakudo-v2-architecture-revised-plan.md` to reflect the
+   new config key.
+4. Run `just check`.
 
 ## Quality Gate
 
-Before every commit, run:
-
-```bash
-just check
-```
-
-All checks must pass with zero errors.
+`just check` must pass with zero errors and zero warnings.

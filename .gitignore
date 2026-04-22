@@ -1,14 +1,7 @@
-dist/
-node_modules/
-.DS_Store
-*.log
-.mise.local.toml
-package-lock.json
-.bakudo/
-.bakudo-ux-briefs/
-.codex
-
-
-# Added by cargo
-
 /target
+Cargo.lock.bak
+.DS_Store
+*.swp
+*.swo
+.env
+.env.local

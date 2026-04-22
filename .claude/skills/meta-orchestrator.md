@@ -1,43 +1,50 @@
-# Cognitive Meta-Orchestrator Rules
+# Skill: Meta-Orchestration in Bakudo
 
-This skill defines the critical architectural invariants for the Bakudo Cognitive Meta-Orchestrator. You MUST follow these rules when implementing new background agents, modifying the orchestration loop, or interacting with the `abox` sandbox.
+## Trigger
 
-## 1. Headless Execution Boundary
+When asked to implement or modify the macro-orchestration session, objective
+controller, or multi-mission task management in `bakudo`.
 
-The `headlessExecute.ts` module is the **only** permitted entry point for background, daemon, or autonomous agent execution.
-- **NEVER** import or invoke `SessionController` or any interactive TUI components from daemon code.
-- Background execution is strictly non-interactive. All prompts, approvals, and user inputs are forbidden in this path.
+## Context
 
-## 2. Daemon-Level Git Mutex
+The macro-orchestration layer (`bakudo-daemon/src/macro_session.rs` and
+`bakudo-daemon/src/objective.rs`) manages long-running multi-mission sessions
+where a provider (Claude Code, Codex, etc.) acts as a planner that decomposes
+a high-level goal into discrete `TaskRequest` items and dispatches them
+sequentially via bakudo.
 
-All background agents that perform write operations (e.g., `Curator`, `Janitor`, `Synthesizer`) MUST acquire the `gitWriteMutex` before modifying the repository.
-- The mutex prevents concurrent agents from corrupting the Git tree.
-- Read-only agents (e.g., `Explorer`, `Critic`) do not require the mutex.
+## Key Invariants
 
-## 3. Strict No-Auto-Merge Policy
+1. **The macro provider is separate from the worker provider.** The macro
+   session uses a provider to generate `TaskRequest` JSON. The worker
+   (inside the abox sandbox) uses a potentially different provider to
+   execute each task. Never conflate these two roles.
 
-Background agents are forbidden from pushing directly to protected branches (e.g., `main`, `master`) or auto-merging Pull Requests.
-- Agents MUST create a new branch, commit their changes, and open a Pull Request.
-- The PR MUST wait for human review and approval.
-- You must enforce this by providing explicit instructions in the agent's system prompt (e.g., `JANITOR_HYGIENE_PROMPT`, `CURATOR_PROMPT`).
+2. **Task JSON is written to a spec file, not passed on stdin.** The macro
+   session writes a `TaskSpec` JSON file to the worktree before launching
+   the sandbox. The worker reads it from a well-known path
+   (`/run/bakudo/task.json`). This is the only IPC mechanism between the
+   macro session and the worker.
 
-## 4. No Raw Credentials
+3. **The `MacroSession` semaphore controls concurrency.** The
+   `MacroSession::max_parallel` semaphore must be acquired before
+   dispatching any objective. Never bypass it.
 
-The orchestrator and its agents MUST NEVER inject raw credentials (e.g., API keys, tokens) via environment variables.
-- The `ProviderRegistry` (`src/host/providerRegistry.ts`) defines the required policies for each agent profile.
-- The `abox` sandbox runtime is exclusively responsible for injecting TLS-proxy stubs based on these policies.
+4. **Objectives are immutable once dispatched.** Once a `TaskRequest` is
+   handed to `run_objective`, it must not be modified. If a retry is
+   needed, create a new `TaskRequest` with an incremented attempt counter.
 
-## 5. The Chaos Monkey Loop
+5. **The `SandboxLedger` is the source of truth for objective status.**
+   Never infer objective status from the `MacroSession`'s internal state
+   alone. Always cross-reference with `ledger.get(task_id)`.
 
-All worker executions in the headless path are subject to the Chaos Monkey adversarial loop.
-- The `Critic` agent evaluates the worker's output.
-- If the output is substandard, the orchestrator forces a retry (up to 3 times).
-- When implementing new agents, assume their output will be criticized and ensure they can handle iterative refinement.
+## Process
 
-## 6. Interactive TUI Routing
+When modifying this layer:
 
-The interactive shell (`interactive.ts`) routes user input through a `RoutingClassifier` before dispatching work.
-- **Simple goals** (short questions, slash commands, file lookups) are routed to the standard `SessionController` path.
-- **Complex goals** (refactors, implementations, multi-step changes) are routed to `runObjectiveInTUI()` in `orchestratorDriver.ts`, which drives `ObjectiveController` and streams state updates back to the Ink store.
-- The `OrchestratorDriver` is the **only** permitted bridge between the interactive shell and the headless orchestration layer. It MUST NOT call `SessionController` or `executePromptFromResolution` directly for complex goals.
-- The `Sidebar` component (`src/host/renderers/ink/Sidebar.tsx`) reads from the `orchestrator` slice of `HostAppState` and is the sole visual surface for orchestrator state in the TUI. It is collapsible via `[Tab]`.
+1. Read `bakudo-daemon/src/macro_session.rs` and
+   `bakudo-daemon/src/objective.rs` in full before making any changes.
+2. Ensure the `base_branch` is threaded through from `MacroSession` to
+   `run_objective` — it must never be hard-coded.
+3. After any change, run `cargo test --workspace` and verify the
+   integration tests in `tests/integration.rs` still pass.

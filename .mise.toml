@@ -1,21 +1,10 @@
 [tools]
-node = "22"
-pnpm = "latest"
-
-[env]
-NODE_ENV = "development"
-
-[tasks.lint]
-run = "pnpm lint"
-description = "Run ESLint"
-
-[tasks.test]
-run = "pnpm build && node --test dist/tests/unit/*.test.js dist/tests/unit/keybindings/*.test.js dist/tests/unit/themes/*.test.js dist/tests/unit/host/*.test.js dist/tests/unit/host/renderers/ink/*.test.js dist/tests/integration/*.test.js dist/tests/regression/*.test.js dist/tests/golden/*.test.js"
-description = "Build and run all tests (explicit paths so bash globstar isn't required)"
+rust = "stable"
+just = "latest"
 
 [tasks.check]
-depends = ["lint", "test"]
-description = "Run lint and tests (used by pre-commit hook)"
+run = "cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo test --workspace"
+description = "Full CI check: format, lint, and tests (used by pre-commit hook)"
 
 [tasks."hooks:install"]
 run = """

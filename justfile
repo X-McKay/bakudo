@@ -1,31 +1,43 @@
 set shell := ["bash", "-c"]
 
-# Install dependencies
-install:
-    pnpm install
-
-# Build the project
+# Build the project (debug)
 build:
-    pnpm build
+    cargo build
 
-release-bundle:
-    pnpm build:release-bundle
+# Build the project (release)
+release:
+    cargo build --release
 
-# Run tests
+# Run all tests across the workspace
 test:
-    pnpm test
+    cargo test --workspace
 
-# Lint the codebase
+# Run clippy linter with warnings as errors
 lint:
-    pnpm exec eslint .
+    cargo clippy --workspace -- -D warnings
 
-# Format the codebase
-format:
-    pnpm exec prettier --write .
+# Check formatting without modifying files
+fmt-check:
+    cargo fmt --all -- --check
 
-# Clean build artifacts
+# Format all source files
+fmt:
+    cargo fmt --all
+
+# Full CI-like check: format, lint, test
+check: fmt-check lint test
+
+# Remove build artifacts
 clean:
-    rm -rf dist
+    cargo clean
 
-# Full CI-like check
-check: lint test build
+# Install the git pre-commit hook (runs `just check` before every commit)
+hooks-install:
+    mise run hooks:install
+
+# Show the current workspace version
+version:
+    cargo metadata --no-deps --format-version 1 | python3 -c \
+        "import json,sys; pkgs=json.load(sys.stdin)['packages']; \
+         root=[p for p in pkgs if p['name']=='bakudo'][0]; \
+         print(root['version'])"
