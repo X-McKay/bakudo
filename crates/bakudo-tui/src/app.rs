@@ -519,8 +519,9 @@ impl App {
                 prompt_summary,
             } => {
                 self.active_task_count += 1;
+                let short = short_task_id(&task_id);
                 self.push_message(ChatMessage::info(format!(
-                    "⟳  [{task_id}] {provider_id} dispatched: {prompt_summary}"
+                    "⟳  [{short}] {provider_id} dispatched: {prompt_summary}"
                 )));
                 self.upsert_shelf_entry(ShelfEntry {
                     task_id,
@@ -536,12 +537,13 @@ impl App {
             }
             SessionEvent::TaskProgress { task_id, event } => {
                 use bakudo_daemon::task_runner::RunnerEvent;
+                let short = short_task_id(&task_id);
                 match event {
                     RunnerEvent::RawLine(line) => {
                         let line = line.trim();
                         if !line.is_empty() && !is_abox_lifecycle_noise(line) {
                             self.record_shelf_activity(&task_id, line);
-                            self.push_message(ChatMessage::agent(format!("[{task_id}] {line}")));
+                            self.push_message(ChatMessage::agent(format!("[{short}] {line}")));
                         }
                     }
                     RunnerEvent::Progress(p) => {
@@ -549,25 +551,25 @@ impl App {
                         match p.kind {
                             WorkerProgressKind::AssistantMessage => {
                                 self.push_message(ChatMessage::agent(format!(
-                                    "[{task_id}] {}",
+                                    "[{short}] {}",
                                     p.message
                                 )));
                             }
                             WorkerProgressKind::ToolCall => {
                                 self.push_message(ChatMessage::info(format!(
-                                    "[{task_id}] tool → {}",
+                                    "[{short}] tool → {}",
                                     p.message
                                 )));
                             }
                             WorkerProgressKind::ToolResult => {
                                 self.push_message(ChatMessage::info(format!(
-                                    "[{task_id}] tool ✓ {}",
+                                    "[{short}] tool ✓ {}",
                                     p.message
                                 )));
                             }
                             WorkerProgressKind::StatusUpdate => {
                                 self.push_message(ChatMessage::info(format!(
-                                    "[{task_id}] {}",
+                                    "[{short}] {}",
                                     p.message
                                 )));
                             }
@@ -578,13 +580,13 @@ impl App {
                         self.update_shelf_state(&task_id, "failed", ShelfColor::Failed);
                         self.record_shelf_activity(&task_id, format!("Infrastructure error: {e}"));
                         self.push_message(ChatMessage::error(format!(
-                            "[{task_id}] Infrastructure error: {e}"
+                            "[{short}] Infrastructure error: {e}"
                         )));
                     }
                     RunnerEvent::Finished(result) => {
                         self.record_shelf_activity(&task_id, &result.summary);
                         let body = format!(
-                            "[{task_id}] {} ({}, {}ms)",
+                            "[{short}] {} ({}, {}ms)",
                             result.summary,
                             render_worker_status(&result.status),
                             result.duration_ms,
@@ -606,8 +608,9 @@ impl App {
                 let (label, color) = shelf_state_view(&state);
                 self.update_shelf_state(&task_id, label, color);
                 self.record_shelf_activity(&task_id, shelf_state_note(&state));
+                let short = short_task_id(&task_id);
                 self.push_message(ChatMessage::info(format!(
-                    "[{task_id}] {}",
+                    "[{short}] {}",
                     shelf_state_note(&state)
                 )));
             }
@@ -958,6 +961,20 @@ impl App {
 fn is_abox_lifecycle_noise(line: &str) -> bool {
     line.starts_with("Sandbox '")
         && (line.ends_with("' starting...") || line.ends_with("' exited cleanly."))
+}
+
+/// Compact a 51-char `bakudo-attempt-<uuid>` id down to the first 8 chars of
+/// the UUID for inline chat display. The shelf still shows the full id for
+/// disambiguation; chat uses the short form so 36-char UUIDs don't eat ~40%
+/// of the body column on every line.
+fn short_task_id(task_id: &str) -> &str {
+    let tail = task_id.strip_prefix("bakudo-attempt-").unwrap_or(task_id);
+    let end = tail
+        .char_indices()
+        .nth(8)
+        .map(|(i, _)| i)
+        .unwrap_or(tail.len());
+    &tail[..end]
 }
 
 fn truncate_line(text: impl Into<String>, max_chars: usize) -> String {
