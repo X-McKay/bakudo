@@ -185,7 +185,8 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 // ─── Transcript ────────────────────────────────────────────────────────────
 
 fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == FocusedPanel::Chat && app.terminal_focused {
+    let focused = app.focus == FocusedPanel::Chat && app.terminal_focused;
+    let border_style = if focused {
         palette::focused_border_style()
     } else {
         palette::unfocused_border_style()
@@ -194,7 +195,7 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Span::styled(" Chat ", Style::default().fg(Color::White)));
+        .title(Span::styled(" Chat ", panel_title_style(focused)));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -283,7 +284,8 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
 // ─── Composer ──────────────────────────────────────────────────────────────
 
 fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == FocusedPanel::Chat && app.terminal_focused {
+    let focused = app.focus == FocusedPanel::Chat && app.terminal_focused;
+    let border_style = if focused {
         palette::focused_border_style()
     } else {
         palette::unfocused_border_style()
@@ -303,7 +305,7 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
             format!("[{provider_initial}]"),
             Style::default().fg(palette::provider_accent()).bold(),
         ),
-        Span::raw(" Input "),
+        Span::styled(" Input ", panel_title_style(focused)),
     ]);
 
     let block = Block::default()
@@ -464,10 +466,24 @@ fn hint_key(label: &'static str) -> Span<'static> {
     Span::styled(label, Style::default().fg(palette::hint_key_fg()).bold())
 }
 
+/// Style for a panel title. Focused panels invert (reversed) for high
+/// contrast; unfocused panels render in bold white. The reversed form is
+/// dramatically more visible than just border-colour change.
+fn panel_title_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(palette::focus_border())
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::White).bold()
+    }
+}
+
 // ─── Shelf ─────────────────────────────────────────────────────────────────
 
 fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
-    let border_style = if app.focus == FocusedPanel::Shelf && app.terminal_focused {
+    let focused = app.focus == FocusedPanel::Shelf && app.terminal_focused;
+    let border_style = if focused {
         palette::focused_border_style()
     } else {
         palette::unfocused_border_style()
@@ -475,7 +491,7 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
 
     let title = Line::from(vec![
         Span::raw(" "),
-        Span::styled("Sandboxes", Style::default().fg(Color::White).bold()),
+        Span::styled("Sandboxes", panel_title_style(focused)),
         if !app.shelf.is_empty() {
             Span::styled(format!(" ({})", app.shelf.len()), palette::dim_style())
         } else {
