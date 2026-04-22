@@ -50,14 +50,6 @@ impl AboxAdapter {
         Self { bin: bin.into() }
     }
 
-    /// Resolve the default binary path: `$ABOX_BIN` env var, then `abox` on PATH.
-    pub fn from_env() -> Self {
-        let bin = std::env::var("ABOX_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("abox"));
-        Self { bin }
-    }
-
     /// Build the base command with the optional `--repo` global flag.
     fn base_cmd(&self, repo: Option<&Path>) -> Command {
         let mut cmd = Command::new(&self.bin);
@@ -72,18 +64,12 @@ impl AboxAdapter {
     ///
     /// Runs the sandbox and streams stdout/stderr to the provided callbacks.
     /// Returns when the VM exits or the timeout fires.
-    pub async fn run<F>(
-        &self,
-        params: &RunParams,
-        on_line: F,
-    ) -> Result<RunResult, AboxError>
+    pub async fn run<F>(&self, params: &RunParams, on_line: F) -> Result<RunResult, AboxError>
     where
         F: Fn(&str) + Send + 'static,
     {
         let mut cmd = self.base_cmd(params.repo.as_deref());
-        cmd.arg("run")
-            .arg("--task")
-            .arg(&params.task_id);
+        cmd.arg("run").arg("--task").arg(&params.task_id);
 
         if params.ephemeral {
             cmd.arg("--ephemeral");
@@ -124,20 +110,39 @@ impl AboxAdapter {
 
         // Drive stdout/stderr concurrently and collect into buffers.
         let read_fut = async {
-            loop {
+            let mut stdout_open = true;
+            let mut stderr_open = true;
+            while stdout_open || stderr_open {
                 tokio::select! {
-                    line = out_reader.next_line() => {
+                    line = out_reader.next_line(), if stdout_open => {
                         match line {
-                            Ok(Some(l)) => { on_line(&l); out_buf.push_str(&l); out_buf.push('\n'); }
-                            Ok(None) => break,
-                            Err(e) => { warn!("stdout read error: {e}"); break; }
+                            Ok(Some(l)) => {
+                                on_line(&l);
+                                out_buf.push_str(&l);
+                                out_buf.push('\n');
+                            }
+                            Ok(None) => {
+                                stdout_open = false;
+                            }
+                            Err(e) => {
+                                warn!("stdout read error: {e}");
+                                stdout_open = false;
+                            }
                         }
                     }
-                    line = err_reader.next_line() => {
+                    line = err_reader.next_line(), if stderr_open => {
                         match line {
-                            Ok(Some(l)) => { err_buf.push_str(&l); err_buf.push('\n'); }
-                            Ok(None) => {}
-                            Err(e) => { warn!("stderr read error: {e}"); }
+                            Ok(Some(l)) => {
+                                err_buf.push_str(&l);
+                                err_buf.push('\n');
+                            }
+                            Ok(None) => {
+                                stderr_open = false;
+                            }
+                            Err(e) => {
+                                warn!("stderr read error: {e}");
+                                stderr_open = false;
+                            }
                         }
                     }
                 }
@@ -146,17 +151,20 @@ impl AboxAdapter {
 
         let (status, timed_out) = if let Some(d) = deadline {
             match timeout(d, read_fut).await {
-                Ok(()) => {
-                    match child.wait().await {
-                        Ok(s) => (s, false),
-                        Err(e) => return Err(AboxError::Io(e)),
-                    }
-                }
+                Ok(()) => match child.wait().await {
+                    Ok(s) => (s, false),
+                    Err(e) => return Err(AboxError::Io(e)),
+                },
                 Err(_elapsed) => {
                     // Kill the child and return a timeout error.
                     let _ = child.kill().await;
                     let _ = child.wait().await; // reap zombie
-                    return Err(AboxError::Timeout { timeout_secs: d.as_secs() });
+                    return Ok(RunResult {
+                        exit_code: -1,
+                        stdout: out_buf,
+                        stderr: err_buf,
+                        timed_out: true,
+                    });
                 }
             }
         } else {
@@ -220,7 +228,7 @@ impl AboxAdapter {
             // abox merge prints conflict paths on failure
             let conflicts: Vec<String> = stdout
                 .lines()
-                .filter(|l| l.trim_start().starts_with("  "))
+                .filter(|l| l.starts_with("  "))
                 .map(|l| l.trim().to_string())
                 .collect();
             if !conflicts.is_empty() {
@@ -235,11 +243,7 @@ impl AboxAdapter {
     }
 
     /// `abox [--repo <repo>] divergence [--base <base>]`
-    pub async fn divergence(
-        &self,
-        repo: Option<&Path>,
-        base: &str,
-    ) -> Result<String, AboxError> {
+    pub async fn divergence(&self, repo: Option<&Path>, base: &str) -> Result<String, AboxError> {
         let mut cmd = self.base_cmd(repo);
         cmd.arg("divergence").args(["--base", base]);
         let out = cmd.output().await.map_err(AboxError::Io)?;
@@ -280,10 +284,23 @@ impl RunParams {
 pub fn sandbox_task_id(attempt_id: &str) -> String {
     let sanitised: String = attempt_id
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = sanitised.trim_matches('-');
-    format!("bakudo-{}", if trimmed.is_empty() { "attempt" } else { trimmed })
+    format!(
+        "bakudo-{}",
+        if trimmed.is_empty() {
+            "attempt"
+        } else {
+            trimmed
+        }
+    )
 }
 
 /// Parse the tabular output of `abox list`.

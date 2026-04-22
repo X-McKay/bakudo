@@ -20,7 +20,7 @@ use tracing::{info, warn};
 use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
 use bakudo_core::error::BakudoError;
 use bakudo_core::protocol::{
-    AttemptSpec, WorkerProgressEvent, WorkerResult, WorkerStatus,
+    AttemptSpec, SandboxLifecycle, WorkerProgressEvent, WorkerResult, WorkerStatus,
     WORKER_ERROR_PREFIX, WORKER_EVENT_PREFIX, WORKER_RESULT_PREFIX,
 };
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
@@ -46,6 +46,9 @@ pub struct TaskRunnerConfig {
     /// The bootstrap command to run inside the VM.
     /// Typically: ["bakudo-worker"] or a shell script path.
     pub worker_command: Vec<String>,
+    /// Optional provider-specific sandbox sizing overrides.
+    pub memory_mib: Option<u32>,
+    pub cpus: Option<u8>,
 }
 
 /// Run a single attempt. Returns a channel receiver for streaming events.
@@ -85,33 +88,42 @@ async fn run_attempt_inner(
         model: spec.model.clone(),
         prompt_summary: spec.prompt.chars().take(120).collect(),
         state: SandboxState::Starting,
-        lifecycle: spec.sandbox_lifecycle.clone(),
-        candidate_policy: spec.candidate_policy.clone(),
+        lifecycle: spec.sandbox_lifecycle,
+        candidate_policy: spec.candidate_policy,
         started_at: Utc::now(),
         finished_at: None,
         worktree_path: None,
         branch: None,
     };
     cfg.ledger.insert(record).await;
-    cfg.ledger.update_state(&task_id, SandboxState::Running).await;
+    cfg.ledger
+        .update_state(&task_id, SandboxState::Running)
+        .await;
 
-    info!("Starting task {task_id} with provider '{}'", spec.provider_id);
+    info!(
+        "Starting task {task_id} with provider '{}'",
+        spec.provider_id
+    );
 
     // Build the abox run params.
     let command = cfg.worker_command.clone();
     // Pass the spec file path as an env var so the worker can find it.
     let env_vars = vec![
-        ("BAKUDO_SPEC_PATH".to_string(), spec_path.to_string_lossy().to_string()),
+        (
+            "BAKUDO_SPEC_PATH".to_string(),
+            spec_path.to_string_lossy().to_string(),
+        ),
         ("BAKUDO_TASK_ID".to_string(), task_id.clone()),
+        ("BAKUDO_PROMPT".to_string(), spec.prompt.clone()),
     ];
 
     let params = RunParams {
         task_id: task_id.clone(),
         command,
         repo: spec.repo_root.as_deref().map(PathBuf::from),
-        ephemeral: spec.sandbox_lifecycle == bakudo_core::protocol::SandboxLifecycle::Ephemeral,
-        memory_mib: None, // will be overridden by provider spec if set
-        cpus: None,
+        ephemeral: spec.sandbox_lifecycle == SandboxLifecycle::Ephemeral,
+        memory_mib: cfg.memory_mib,
+        cpus: cfg.cpus,
         timeout_secs: Some(spec.budget.timeout_secs),
         env_vars,
     };
@@ -144,7 +156,9 @@ async fn run_attempt_inner(
             let new_state = match &status {
                 WorkerStatus::Succeeded => SandboxState::Preserved,
                 WorkerStatus::TimedOut => SandboxState::TimedOut,
-                _ => SandboxState::Failed { exit_code: run.exit_code },
+                _ => SandboxState::Failed {
+                    exit_code: run.exit_code,
+                },
             };
             cfg.ledger.update_state(&task_id, new_state).await;
 
@@ -154,7 +168,7 @@ async fn run_attempt_inner(
                 session_id: spec.session_id,
                 task_id: spec.task_id,
                 status,
-                summary: extract_summary(&run.stdout),
+                summary: extract_summary(&run.stdout, &run.stderr),
                 finished_at: Utc::now(),
                 exit_code: run.exit_code,
                 duration_ms,
@@ -200,14 +214,102 @@ fn parse_worker_line(line: &str) -> RunnerEvent {
 }
 
 /// Extract a one-line summary from the worker's stdout.
-fn extract_summary(stdout: &str) -> String {
-    // Look for the last non-empty line as the summary.
-    stdout
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
+fn extract_summary(stdout: &str, stderr: &str) -> String {
+    // Prefer the last meaningful stdout line, but fall back to stderr so
+    // provider failures still produce a useful summary.
+    [stdout, stderr]
+        .into_iter()
+        .flat_map(|stream| stream.lines().rev())
+        .find(|line| !line.trim().is_empty())
         .unwrap_or("(no output)")
         .chars()
         .take(200)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bakudo_core::protocol::{
+        AttemptId, SessionId, TaskId, WorkerProgressKind, PROTOCOL_SCHEMA_VERSION,
+    };
+
+    #[test]
+    fn parse_worker_line_parses_structured_progress_events() {
+        let event = WorkerProgressEvent {
+            attempt_id: AttemptId("attempt-parse-progress".to_string()),
+            kind: WorkerProgressKind::StatusUpdate,
+            message: "working".to_string(),
+            timestamp: Utc::now(),
+        };
+        let line = format!(
+            "{} {}",
+            WORKER_EVENT_PREFIX,
+            serde_json::to_string(&event).unwrap()
+        );
+
+        match parse_worker_line(&line) {
+            RunnerEvent::Progress(parsed) => {
+                assert_eq!(parsed.message, "working");
+            }
+            other => panic!("expected Progress event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_worker_line_invalid_payload_falls_back_to_raw_line() {
+        let line = format!("{WORKER_EVENT_PREFIX} {{not valid json}}");
+        match parse_worker_line(&line) {
+            RunnerEvent::RawLine(raw) => assert_eq!(raw, line),
+            other => panic!("expected RawLine fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_worker_line_parses_result_payloads() {
+        let result = WorkerResult {
+            schema_version: PROTOCOL_SCHEMA_VERSION,
+            attempt_id: AttemptId("attempt-parse-result".to_string()),
+            session_id: SessionId("session-parse-result".to_string()),
+            task_id: TaskId("task-parse-result".to_string()),
+            status: WorkerStatus::Succeeded,
+            summary: "done".to_string(),
+            finished_at: Utc::now(),
+            exit_code: 0,
+            duration_ms: 42,
+            timed_out: false,
+            stdout: "done".to_string(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        let line = format!(
+            "{} {}",
+            WORKER_RESULT_PREFIX,
+            serde_json::to_string(&result).unwrap()
+        );
+
+        match parse_worker_line(&line) {
+            RunnerEvent::Finished(parsed) => {
+                assert_eq!(parsed.summary, "done");
+                assert_eq!(parsed.status, WorkerStatus::Succeeded);
+            }
+            other => panic!("expected Finished event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_summary_uses_last_non_empty_line_and_truncates() {
+        let long_line = "x".repeat(250);
+        let stdout = format!("first line\n\n{long_line}\n");
+        let summary = extract_summary(&stdout, "");
+        assert_eq!(summary.len(), 200);
+        assert!(summary.chars().all(|ch| ch == 'x'));
+    }
+
+    #[test]
+    fn extract_summary_falls_back_to_stderr() {
+        let summary = extract_summary("", "first\n\nfatal: provider exploded\n");
+        assert_eq!(summary, "fatal: provider exploded");
+    }
 }

@@ -22,11 +22,12 @@ pub enum BakudoError {
 #[derive(Debug, Error)]
 pub enum AboxError {
     #[error("abox binary not found at '{path}': {source}")]
-    BinaryNotFound { path: String, source: std::io::Error },
+    BinaryNotFound {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("abox run failed (exit {exit_code}): {stderr}")]
     RunFailed { exit_code: i32, stderr: String },
-    #[error("abox run timed out after {timeout_secs}s")]
-    Timeout { timeout_secs: u64 },
     #[error("abox sandbox '{task_id}' not found")]
     SandboxNotFound { task_id: String },
     #[error("abox merge failed for '{task_id}': {detail}")]

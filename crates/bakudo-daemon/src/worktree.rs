@@ -50,12 +50,11 @@ pub async fn apply_candidate_policy(
                 ledger.update_state(task_id, SandboxState::Merged).await;
                 Ok(WorktreeAction::Merged)
             } else {
-                warn!(
-                    "Merge conflicts for task {task_id}: {:?}",
-                    conflicts
-                );
+                warn!("Merge conflicts for task {task_id}: {:?}", conflicts);
                 // Mark the ledger so the shelf shows the conflict state.
-                ledger.update_state(task_id, SandboxState::MergeConflicts).await;
+                ledger
+                    .update_state(task_id, SandboxState::MergeConflicts)
+                    .await;
                 Ok(WorktreeAction::MergeConflicts(conflicts))
             }
         }
@@ -98,13 +97,5 @@ pub async fn manual_discard(
     abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
 ) -> Result<WorktreeAction, BakudoError> {
-    apply_candidate_policy(
-        task_id,
-        &CandidatePolicy::Discard,
-        "",
-        repo,
-        abox,
-        ledger,
-    )
-    .await
+    apply_candidate_policy(task_id, &CandidatePolicy::Discard, "", repo, abox, ledger).await
 }

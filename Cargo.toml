@@ -37,3 +37,7 @@ ratatui.workspace = true
 crossterm.workspace = true
 dirs = "6.0.0"
 chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+uuid.workspace = true

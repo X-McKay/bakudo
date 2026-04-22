@@ -1,4 +1,8 @@
-# Bakudo v2 — Architecture & Implementation Plan
+# Bakudo v2 — Architecture & Implementation Plan (Archived)
+
+> Archived historical draft. This document captures an earlier design direction and does not describe the current shipping implementation.
+>
+> For the current runtime, read [`docs/current-architecture.md`](current-architecture.md).
 
 > **Purpose of this document.** This is the hand-off specification for a complete rewrite of Bakudo. A fresh contributor (human or agent) should be able to read this document cold, with zero prior context on Bakudo v1, and execute the implementation. It defines the architecture, every public type, every MCP tool, the wake protocol, the storage schema, the TUI shape, the migration plan, and a phased build order with explicit acceptance criteria.
 >

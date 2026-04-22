@@ -1,16 +1,16 @@
 # Bakudo
 
-Bakudo is a lightweight, high-autonomy agent harness designed for executing complex tasks inside isolated `abox` sandboxes. 
+Bakudo is a Rust agent harness for running provider CLIs inside isolated `abox` sandboxes and managing the resulting worktrees from the host.
 
-Version 2 is a complete rewrite in Rust, featuring a polished `ratatui` terminal interface, provider-agnostic headless execution, and a robust concurrency model.
+Version 2 ships a `ratatui` interface, a headless CLI mode, and a host-owned preserved-worktree lifecycle.
 
 ## Features
 
-- **Provider Agnostic**: Run Claude Code, Codex, OpenCode, or Gemini CLI headlessly. Prompts are injected via `stdin` and structured specs are mounted into the sandbox.
-- **Preserved Worktrees**: The host (bakudo) owns the worktree lifecycle. When a task finishes, Bakudo evaluates the divergence and decides whether to automatically `abox merge` or preserve the worktree for manual review.
-- **Polished TUI**: A responsive, non-blocking `ratatui` interface featuring a main chat pane, an observability shelf for tracking running sandboxes, and slash commands (`/provider`, `/model`, `/apply`, `/discard`, `/ls`).
-- **Multi-Mission Multiplexing**: A robust `SandboxLedger` and `MacroSession` handle concurrent objective dispatches and wallet/budget reservations safely.
-- **Crash Recovery**: Uses `abox list` to reconcile running sandboxes and recover state if the host crashes.
+- **Provider agnostic**: Run Claude Code, Codex, OpenCode, or Gemini CLI headlessly. Prompts are injected via `stdin` and structured specs are passed into the sandbox with `BAKUDO_*` env vars.
+- **Host-owned worktree lifecycle**: Bakudo decides whether to preserve, merge, or discard the sandbox worktree after the provider exits.
+- **Polished TUI**: A responsive `ratatui` interface with a chat transcript, observability shelf, slash commands, and keyboard-driven worktree actions.
+- **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
+- **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.1`.
 
 ## Prerequisites
 
@@ -19,8 +19,6 @@ Version 2 is a complete rewrite in Rust, featuring a polished `ratatui` terminal
 - **just**: Command runner (install via `cargo install just` or `mise`).
 
 ## Installation
-
-Clone the repository and build from source:
 
 ```bash
 git clone https://github.com/X-McKay/bakudo.git
@@ -38,46 +36,51 @@ Start the interactive TUI:
 bakudo
 ```
 
-### Slash Commands
+### TUI Slash Commands
 
-Inside the TUI, you can use the following slash commands:
+- `/provider <name>`: set the active provider.
+- `/model <name>`: set the active model override.
+- `/providers`: list registered providers.
+- `/apply <task-id>`: merge a preserved worktree.
+- `/discard <task-id>`: discard a preserved worktree.
+- `/diverge <task-id>`: show divergence for a preserved worktree.
+- `/sandboxes` (aliases: `/ls`, `/list`): list tracked sandboxes.
+- `/status`: show provider/model/task counts.
+- `/config`: show the active runtime configuration.
+- `/clear`: clear the transcript display.
+- `/new`: start a fresh transcript/session view.
+- `/help`: show the command catalog.
+- `/quit`: exit the application.
 
-- `/provider <name>` — Set the active provider (e.g., `claude`, `codex`, `opencode`).
-- `/model <name>` — Set the active model (e.g., `claude-3-opus-20240229`).
-- `/apply <task-id>` — Manually merge a preserved worktree that requires review or has conflicts.
-- `/discard <task-id>` — Discard a preserved worktree and destroy the sandbox.
-- `/diverge <task-id>` — Show the git divergence (diff) of a preserved worktree.
-- `/ls` — List all running and preserved sandboxes.
-- `/quit` (or `Ctrl+C`) — Exit the application.
+### Headless CLI
+
+```bash
+bakudo run "Fix the failing tests"
+bakudo list
+bakudo apply <task-id>
+bakudo discard <task-id>
+bakudo divergence <task-id>
+```
 
 ## Architecture
 
-Bakudo is structured as a Cargo workspace with three primary crates:
+Bakudo is a Cargo workspace with three main crates plus a thin root binary:
 
-1. **`bakudo-core`**: Pure domain logic. Defines the protocol types, provider registry, configuration schema, state models, and the `abox` adapter.
-2. **`bakudo-daemon`**: The async execution engine. Owns the `SessionController`, `TaskRunner`, worktree lifecycle evaluation, and the `MacroSession` for multi-mission orchestration.
-3. **`bakudo-tui`**: The terminal interface. Owns the `ratatui` rendering loop, keyboard event handling, and slash command parsing.
+1. `bakudo-core`: Protocol types, config loading, provider registry, state models, and the `abox` adapter.
+2. `bakudo-daemon`: Session orchestration, task execution, divergence queries, and worktree lifecycle decisions.
+3. `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
+4. `src/main.rs`: CLI entrypoint and TUI bootstrap.
 
-See `AGENTS.md` for detailed architecture invariants and development guidelines.
+See [AGENTS.md](AGENTS.md) for development invariants and [docs/current-architecture.md](docs/current-architecture.md) for the current implementation walkthrough. Historical design drafts remain in `docs/` and are marked as archived.
 
 ## Development
 
-Bakudo uses `just` as its task runner.
-
 ```bash
-# Run the full quality gate (format, lint, test)
 just check
-
-# Build the project
-just build
-
-# Run tests
-just test
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release
 ```
-
-### Agent Workflows
-
-This repository includes `.claude/skills` that define the exact conventions and workflows for AI agents working on the codebase. See `AGENTS.md` for the strict rules governing state mutation, crate boundaries, and provider invocations.
 
 ## License
 

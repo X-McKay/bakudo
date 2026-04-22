@@ -21,8 +21,8 @@ pub const SHELF_WIDTH: u16 = 34;
 /// Minimum terminal width before the shelf is hidden.
 pub const SHELF_MIN_TERM_WIDTH: u16 = 90;
 
-/// Height of the header bar (1 row).
-pub const HEADER_HEIGHT: u16 = 1;
+/// Height of the header bar (2 rows).
+pub const HEADER_HEIGHT: u16 = 2;
 
 /// Height of the composer block (border + 1 input line + border = 3).
 pub const COMPOSER_HEIGHT: u16 = 3;
@@ -148,6 +148,10 @@ pub fn shelf_failed() -> Color {
 
 pub fn shelf_conflicts() -> Color {
     Color::Rgb(217, 70, 239) // fuchsia-500
+}
+
+pub fn shelf_timed_out() -> Color {
+    Color::Rgb(249, 115, 22) // orange-500
 }
 
 pub fn shelf_selected_bg() -> Color {

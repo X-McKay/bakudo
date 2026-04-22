@@ -13,6 +13,7 @@
 //!   - `available_during_task` guard so config-changing commands are blocked
 //!     while a task is in flight.
 
+use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -20,8 +21,9 @@ use chrono::{DateTime, Local};
 use tokio::sync::mpsc;
 
 use bakudo_core::config::BakudoConfig;
+use bakudo_core::protocol::{WorkerProgressKind, WorkerStatus};
 use bakudo_core::provider::ProviderRegistry;
-use bakudo_core::state::SandboxLedger;
+use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 use bakudo_daemon::session_controller::{SessionCommand, SessionEvent};
 
 use crate::commands::{completions_for, help_text, parse_slash, ParsedCommand, SlashCommand};
@@ -53,19 +55,39 @@ pub enum MessageRole {
 
 impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::User, content: content.into(), timestamp: Local::now() }
+        Self {
+            role: MessageRole::User,
+            content: content.into(),
+            timestamp: Local::now(),
+        }
     }
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::System, content: content.into(), timestamp: Local::now() }
+        Self {
+            role: MessageRole::System,
+            content: content.into(),
+            timestamp: Local::now(),
+        }
     }
     pub fn agent(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::AgentOutput, content: content.into(), timestamp: Local::now() }
+        Self {
+            role: MessageRole::AgentOutput,
+            content: content.into(),
+            timestamp: Local::now(),
+        }
     }
     pub fn error(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::Error, content: content.into(), timestamp: Local::now() }
+        Self {
+            role: MessageRole::Error,
+            content: content.into(),
+            timestamp: Local::now(),
+        }
     }
     pub fn info(content: impl Into<String>) -> Self {
-        Self { role: MessageRole::Info, content: content.into(), timestamp: Local::now() }
+        Self {
+            role: MessageRole::Info,
+            content: content.into(),
+            timestamp: Local::now(),
+        }
     }
 }
 
@@ -76,10 +98,13 @@ impl ChatMessage {
 pub struct ShelfEntry {
     pub task_id: String,
     pub provider: String,
+    pub model: String,
     pub prompt_summary: String,
+    pub last_note: String,
     pub state_label: String,
     pub state_color: ShelfColor,
     pub started_at: DateTime<Local>,
+    pub updated_at: DateTime<Local>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +115,7 @@ pub enum ShelfColor {
     Discarded,
     Failed,
     Conflicts,
+    TimedOut,
 }
 
 // ─── Focus ─────────────────────────────────────────────────────────────────
@@ -108,6 +134,7 @@ pub struct App {
     pub config: Arc<BakudoConfig>,
     pub registry: Arc<ProviderRegistry>,
     pub ledger: Arc<SandboxLedger>,
+    pub workspace_label: String,
 
     /// Chat transcript (newest at the end).
     pub transcript: VecDeque<ChatMessage>,
@@ -166,10 +193,19 @@ impl App {
     ) -> Self {
         let provider_id = config.default_provider.clone();
         let model = config.default_model.clone();
+        let workspace_label = std::env::current_dir()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "workspace".to_string());
         let mut app = Self {
             config,
             registry,
             ledger,
+            workspace_label,
             transcript: VecDeque::new(),
             input: String::new(),
             cursor: 0,
@@ -208,6 +244,31 @@ impl App {
         if self.scroll_offset == 0 {
             self.scroll_offset = 0;
         }
+    }
+
+    pub fn running_shelf_count(&self) -> usize {
+        self.shelf
+            .iter()
+            .filter(|entry| entry.state_color == ShelfColor::Running)
+            .count()
+    }
+
+    pub fn preserved_shelf_count(&self) -> usize {
+        self.shelf
+            .iter()
+            .filter(|entry| entry.state_color == ShelfColor::Preserved)
+            .count()
+    }
+
+    pub fn conflict_shelf_count(&self) -> usize {
+        self.shelf
+            .iter()
+            .filter(|entry| entry.state_color == ShelfColor::Conflicts)
+            .count()
+    }
+
+    pub fn selected_shelf_entry(&self) -> Option<&ShelfEntry> {
+        self.shelf.get(self.shelf_selected)
     }
 
     // ── Tick ───────────────────────────────────────────────────────────────
@@ -346,33 +407,25 @@ impl App {
                 self.update_completions();
             }
 
-            KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    let prev = self.prev_char_boundary();
-                    self.input.drain(prev..self.cursor);
-                    self.cursor = prev;
-                    self.update_completions();
-                }
+            KeyCode::Backspace if self.cursor > 0 => {
+                let prev = self.prev_char_boundary();
+                self.input.drain(prev..self.cursor);
+                self.cursor = prev;
+                self.update_completions();
             }
 
-            KeyCode::Delete => {
-                if self.cursor < self.input.len() {
-                    let next = self.next_char_boundary();
-                    self.input.drain(self.cursor..next);
-                    self.update_completions();
-                }
+            KeyCode::Delete if self.cursor < self.input.len() => {
+                let next = self.next_char_boundary();
+                self.input.drain(self.cursor..next);
+                self.update_completions();
             }
 
-            KeyCode::Left => {
-                if self.cursor > 0 {
-                    self.cursor = self.prev_char_boundary();
-                }
+            KeyCode::Left if self.cursor > 0 => {
+                self.cursor = self.prev_char_boundary();
             }
 
-            KeyCode::Right => {
-                if self.cursor < self.input.len() {
-                    self.cursor = self.next_char_boundary();
-                }
+            KeyCode::Right if self.cursor < self.input.len() => {
+                self.cursor = self.next_char_boundary();
             }
 
             _ => {}
@@ -402,28 +455,32 @@ impl App {
             KeyCode::Tab | KeyCode::Esc => {
                 self.focus = FocusedPanel::Chat;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.shelf_selected > 0 {
-                    self.shelf_selected -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.shelf_selected > 0 => {
+                self.shelf_selected -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.shelf_selected + 1 < self.shelf.len() {
-                    self.shelf_selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.shelf_selected + 1 < self.shelf.len() => {
+                self.shelf_selected += 1;
             }
             KeyCode::Char('a') => {
                 if let Some(entry) = self.shelf.get(self.shelf_selected) {
                     let task_id = entry.task_id.clone();
-                    let _ = self.cmd_tx.try_send(SessionCommand::Apply { task_id: task_id.clone() });
-                    self.push_message(ChatMessage::info(format!("Applying worktree for {task_id}…")));
+                    let _ = self.cmd_tx.try_send(SessionCommand::Apply {
+                        task_id: task_id.clone(),
+                    });
+                    self.push_message(ChatMessage::info(format!(
+                        "Applying worktree for {task_id}…"
+                    )));
                 }
             }
             KeyCode::Char('d') => {
                 if let Some(entry) = self.shelf.get(self.shelf_selected) {
                     let task_id = entry.task_id.clone();
-                    let _ = self.cmd_tx.try_send(SessionCommand::Discard { task_id: task_id.clone() });
-                    self.push_message(ChatMessage::info(format!("Discarding worktree for {task_id}…")));
+                    let _ = self.cmd_tx.try_send(SessionCommand::Discard {
+                        task_id: task_id.clone(),
+                    });
+                    self.push_message(ChatMessage::info(format!(
+                        "Discarding worktree for {task_id}…"
+                    )));
                 }
             }
             _ => {}
@@ -441,68 +498,105 @@ impl App {
 
     fn handle_session_event(&mut self, event: SessionEvent) {
         match event {
-            SessionEvent::TaskStarted { task_id, prompt_summary } => {
+            SessionEvent::LedgerSnapshot { entries } => {
+                self.rebuild_shelf(entries);
+                if !self.shelf.is_empty() {
+                    self.push_message(ChatMessage::info(format!(
+                        "Recovered {} sandbox(es) from the previous session state.",
+                        self.shelf.len()
+                    )));
+                }
+            }
+            SessionEvent::TaskStarted {
+                task_id,
+                provider_id,
+                model,
+                prompt_summary,
+            } => {
                 self.active_task_count += 1;
                 self.push_message(ChatMessage::info(format!(
-                    "⟳  [{task_id}] Task started: {prompt_summary}"
+                    "⟳  [{task_id}] {provider_id} dispatched: {prompt_summary}"
                 )));
-                self.shelf.push_front(ShelfEntry {
+                self.upsert_shelf_entry(ShelfEntry {
                     task_id,
-                    provider: self.provider_id.clone(),
+                    provider: provider_id,
+                    model,
                     prompt_summary,
+                    last_note: "Booting sandbox".to_string(),
                     state_label: "running".to_string(),
                     state_color: ShelfColor::Running,
                     started_at: Local::now(),
+                    updated_at: Local::now(),
                 });
-                while self.shelf.len() > MAX_SHELF_ENTRIES {
-                    self.shelf.pop_back();
-                }
             }
             SessionEvent::TaskProgress { task_id, event } => {
                 use bakudo_daemon::task_runner::RunnerEvent;
                 match event {
                     RunnerEvent::RawLine(line) => {
-                        if !line.trim().is_empty() {
-                            self.push_message(ChatMessage::agent(line));
+                        let line = line.trim();
+                        if !line.is_empty() {
+                            self.record_shelf_activity(&task_id, line);
+                            self.push_message(ChatMessage::agent(format!("[{task_id}] {line}")));
                         }
                     }
                     RunnerEvent::Progress(p) => {
-                        self.push_message(ChatMessage::agent(format!(
-                            "  [{task_id}] {}", p.message
-                        )));
+                        self.record_shelf_activity(&task_id, &p.message);
+                        match p.kind {
+                            WorkerProgressKind::AssistantMessage => {
+                                self.push_message(ChatMessage::agent(format!(
+                                    "[{task_id}] {}",
+                                    p.message
+                                )));
+                            }
+                            WorkerProgressKind::ToolCall => {
+                                self.push_message(ChatMessage::info(format!(
+                                    "[{task_id}] tool → {}",
+                                    p.message
+                                )));
+                            }
+                            WorkerProgressKind::ToolResult => {
+                                self.push_message(ChatMessage::info(format!(
+                                    "[{task_id}] tool ✓ {}",
+                                    p.message
+                                )));
+                            }
+                            WorkerProgressKind::StatusUpdate => {
+                                self.push_message(ChatMessage::info(format!(
+                                    "[{task_id}] {}",
+                                    p.message
+                                )));
+                            }
+                            WorkerProgressKind::Heartbeat => {}
+                        }
                     }
                     RunnerEvent::InfraError(e) => {
+                        self.update_shelf_state(&task_id, "failed", ShelfColor::Failed);
+                        self.record_shelf_activity(&task_id, format!("Infrastructure error: {e}"));
                         self.push_message(ChatMessage::error(format!(
-                            "  [{task_id}] Infrastructure error: {e}"
+                            "[{task_id}] Infrastructure error: {e}"
                         )));
                     }
                     RunnerEvent::Finished(result) => {
-                        self.push_message(ChatMessage::agent(format!(
-                            "✓  [{task_id}] Finished ({:?}) in {}ms",
-                            result.status, result.duration_ms
+                        self.record_shelf_activity(&task_id, &result.summary);
+                        self.push_message(ChatMessage::info(format!(
+                            "✓  [{task_id}] {} ({}, {}ms)",
+                            result.summary,
+                            render_worker_status(&result.status),
+                            result.duration_ms
                         )));
-                        self.update_shelf_state(&task_id, "preserved", ShelfColor::Preserved);
                     }
                 }
             }
-            SessionEvent::TaskFinished { task_id, action } => {
+            SessionEvent::TaskFinished { task_id, state } => {
                 if self.active_task_count > 0 {
                     self.active_task_count -= 1;
                 }
-                let (label, color) = if action == "merged" {
-                    ("merged", ShelfColor::Merged)
-                } else if action == "discarded" {
-                    ("discarded", ShelfColor::Discarded)
-                } else if action.starts_with("conflicts:") {
-                    ("conflicts", ShelfColor::Conflicts)
-                } else if action == "failed" {
-                    ("failed", ShelfColor::Failed)
-                } else {
-                    (action.as_str(), ShelfColor::Preserved)
-                };
+                let (label, color) = shelf_state_view(&state);
                 self.update_shelf_state(&task_id, label, color);
+                self.record_shelf_activity(&task_id, shelf_state_note(&state));
                 self.push_message(ChatMessage::info(format!(
-                    "  [{task_id}] Worktree → {action}"
+                    "[{task_id}] {}",
+                    shelf_state_note(&state)
                 )));
             }
             SessionEvent::ProviderChanged { provider_id, model } => {
@@ -510,8 +604,15 @@ impl App {
                 self.model = model.clone();
                 self.push_message(ChatMessage::info(format!(
                     "Provider → {provider_id}  model → {}",
-                    if model.is_empty() { "default".to_string() } else { model }
+                    if model.is_empty() {
+                        "default".to_string()
+                    } else {
+                        model
+                    }
                 )));
+            }
+            SessionEvent::Info(message) => {
+                self.push_message(ChatMessage::info(message));
             }
             SessionEvent::Error(e) => {
                 self.push_message(ChatMessage::error(e));
@@ -527,9 +628,55 @@ impl App {
             if entry.task_id == task_id {
                 entry.state_label = label.to_string();
                 entry.state_color = color.clone();
+                entry.updated_at = Local::now();
                 break;
             }
         }
+    }
+
+    fn record_shelf_activity(&mut self, task_id: &str, note: impl Into<String>) {
+        let note = truncate_line(note.into(), 120);
+        for entry in &mut self.shelf {
+            if entry.task_id == task_id {
+                entry.last_note = note.clone();
+                entry.updated_at = Local::now();
+                break;
+            }
+        }
+    }
+
+    fn rebuild_shelf(&mut self, entries: Vec<SandboxRecord>) {
+        let mut shelf_entries: Vec<ShelfEntry> =
+            entries.into_iter().map(shelf_entry_from_record).collect();
+        shelf_entries.sort_by_key(|entry| Reverse(entry.started_at));
+        self.active_task_count = shelf_entries
+            .iter()
+            .filter(|entry| entry.state_color == ShelfColor::Running)
+            .count();
+        self.shelf = shelf_entries.into_iter().take(MAX_SHELF_ENTRIES).collect();
+        if self.shelf.is_empty() {
+            self.shelf_selected = 0;
+            self.focus = FocusedPanel::Chat;
+        } else {
+            self.shelf_selected = self.shelf_selected.min(self.shelf.len() - 1);
+        }
+    }
+
+    fn upsert_shelf_entry(&mut self, entry: ShelfEntry) {
+        if let Some(existing) = self
+            .shelf
+            .iter_mut()
+            .find(|item| item.task_id == entry.task_id)
+        {
+            *existing = entry;
+            return;
+        }
+
+        self.shelf.push_front(entry);
+        while self.shelf.len() > MAX_SHELF_ENTRIES {
+            self.shelf.pop_back();
+        }
+        self.shelf_selected = self.shelf_selected.min(self.shelf.len().saturating_sub(1));
     }
 
     // ── Input submission ───────────────────────────────────────────────────
@@ -553,7 +700,9 @@ impl App {
             }
             None => {
                 self.push_message(ChatMessage::user(input.clone()));
-                let _ = self.cmd_tx.try_send(SessionCommand::Dispatch { prompt: input });
+                let _ = self
+                    .cmd_tx
+                    .try_send(SessionCommand::Dispatch { prompt: input });
             }
         }
     }
@@ -577,29 +726,41 @@ impl App {
                         "Unknown provider '{arg}'. Use /providers to list available providers."
                     )));
                 } else {
-                    let _ = self.cmd_tx.try_send(SessionCommand::SetProvider { provider_id: arg });
+                    let _ = self
+                        .cmd_tx
+                        .try_send(SessionCommand::SetProvider { provider_id: arg });
                 }
             }
             SlashCommand::Model => {
-                let _ = self.cmd_tx.try_send(SessionCommand::SetModel { model: arg });
+                let _ = self
+                    .cmd_tx
+                    .try_send(SessionCommand::SetModel { model: arg });
             }
             SlashCommand::Providers => {
                 let ids = self.registry.list_ids();
                 let mut lines = vec!["Registered providers:".to_string()];
                 for id in ids {
                     if let Some(spec) = self.registry.get(id) {
-                        let active = if *id == self.provider_id { "  ← active" } else { "" };
+                        let active = if *id == self.provider_id {
+                            "  ← active"
+                        } else {
+                            ""
+                        };
                         lines.push(format!("  {:<12} {}{}", id, spec.display_name, active));
                     }
                 }
                 self.push_message(ChatMessage::info(lines.join("\n")));
             }
             SlashCommand::Apply => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Apply { task_id: arg.clone() });
+                let _ = self.cmd_tx.try_send(SessionCommand::Apply {
+                    task_id: arg.clone(),
+                });
                 self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
             }
             SlashCommand::Discard => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Discard { task_id: arg.clone() });
+                let _ = self.cmd_tx.try_send(SessionCommand::Discard {
+                    task_id: arg.clone(),
+                });
                 self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
             }
             SlashCommand::Sandboxes => {
@@ -609,15 +770,25 @@ impl App {
                     let mut lines = vec![format!("Sandboxes ({}):", self.shelf.len())];
                     for entry in &self.shelf {
                         lines.push(format!(
-                            "  [{:<10}] {}  {}  {}",
-                            entry.state_label, entry.task_id, entry.provider, entry.prompt_summary
+                            "  [{:<10}] {}  {}{}  {}",
+                            entry.state_label,
+                            entry.task_id,
+                            entry.provider,
+                            if entry.model.is_empty() {
+                                String::new()
+                            } else {
+                                format!("/{}", entry.model)
+                            },
+                            entry.last_note
                         ));
                     }
                     self.push_message(ChatMessage::info(lines.join("\n")));
                 }
             }
             SlashCommand::Diverge => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Diverge { task_id: arg.clone() });
+                let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
+                    task_id: arg.clone(),
+                });
                 self.push_message(ChatMessage::info(format!("Fetching divergence for {arg}…")));
             }
             SlashCommand::New => {
@@ -645,10 +816,13 @@ impl App {
             }
             SlashCommand::Status => {
                 let info = format!(
-                    "Status:\n  provider:       {}\n  model:          {}\n  active tasks:   {}\n  shelf entries:  {}",
+                    "Status:\n  workspace:      {}\n  provider:       {}\n  model:          {}\n  active tasks:   {}\n  preserved:      {}\n  conflicts:      {}\n  shelf entries:  {}",
+                    self.workspace_label,
                     self.provider_id,
                     if self.model.is_empty() { "default" } else { &self.model },
                     self.active_task_count,
+                    self.preserved_shelf_count(),
+                    self.conflict_shelf_count(),
                     self.shelf.len(),
                 );
                 self.push_message(ChatMessage::info(info));
@@ -720,9 +894,13 @@ impl App {
         let bytes = self.input.as_bytes();
         let mut i = self.cursor;
         // Skip spaces.
-        while i > 0 && bytes[i - 1] == b' ' { i -= 1; }
+        while i > 0 && bytes[i - 1] == b' ' {
+            i -= 1;
+        }
         // Skip word chars.
-        while i > 0 && bytes[i - 1] != b' ' { i -= 1; }
+        while i > 0 && bytes[i - 1] != b' ' {
+            i -= 1;
+        }
         i
     }
 
@@ -730,9 +908,82 @@ impl App {
         let bytes = self.input.as_bytes();
         let mut i = self.cursor;
         // Skip word chars.
-        while i < bytes.len() && bytes[i] != b' ' { i += 1; }
+        while i < bytes.len() && bytes[i] != b' ' {
+            i += 1;
+        }
         // Skip spaces.
-        while i < bytes.len() && bytes[i] == b' ' { i += 1; }
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
         i
+    }
+}
+
+fn truncate_line(text: impl Into<String>, max_chars: usize) -> String {
+    let text = text.into();
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    if text.chars().count() > max_chars && max_chars > 1 {
+        truncated.pop();
+        truncated.push('…');
+    }
+    truncated
+}
+
+fn render_worker_status(status: &WorkerStatus) -> &'static str {
+    match status {
+        WorkerStatus::Succeeded => "succeeded",
+        WorkerStatus::Failed => "failed",
+        WorkerStatus::TimedOut => "timed out",
+        WorkerStatus::Cancelled => "cancelled",
+    }
+}
+
+fn shelf_state_view(state: &SandboxState) -> (&'static str, ShelfColor) {
+    match state {
+        SandboxState::Starting | SandboxState::Running => ("running", ShelfColor::Running),
+        SandboxState::Preserved => ("preserved", ShelfColor::Preserved),
+        SandboxState::Merged => ("merged", ShelfColor::Merged),
+        SandboxState::Discarded => ("discarded", ShelfColor::Discarded),
+        SandboxState::Failed { .. } => ("failed", ShelfColor::Failed),
+        SandboxState::TimedOut => ("timed out", ShelfColor::TimedOut),
+        SandboxState::MergeConflicts => ("conflicts", ShelfColor::Conflicts),
+    }
+}
+
+fn shelf_state_note(state: &SandboxState) -> String {
+    match state {
+        SandboxState::Starting | SandboxState::Running => {
+            "Task is still running in the sandbox.".to_string()
+        }
+        SandboxState::Preserved => "Worktree preserved for review.".to_string(),
+        SandboxState::Merged => "Worktree merged into the base branch.".to_string(),
+        SandboxState::Discarded => "Sandbox discarded and cleaned up.".to_string(),
+        SandboxState::Failed { exit_code } => {
+            format!("Task failed before producing a clean candidate (exit code {exit_code}).")
+        }
+        SandboxState::TimedOut => "Task timed out before completion.".to_string(),
+        SandboxState::MergeConflicts => {
+            "Merge conflicts detected; manual resolution is required.".to_string()
+        }
+    }
+}
+
+fn shelf_entry_from_record(record: SandboxRecord) -> ShelfEntry {
+    let (state_label, state_color) = shelf_state_view(&record.state);
+    let updated_at = record
+        .finished_at
+        .unwrap_or(record.started_at)
+        .with_timezone(&Local);
+
+    ShelfEntry {
+        task_id: record.task_id,
+        provider: record.provider_id,
+        model: record.model,
+        prompt_summary: truncate_line(record.prompt_summary, 100),
+        last_note: truncate_line(shelf_state_note(&record.state), 120),
+        state_label: state_label.to_string(),
+        state_color,
+        started_at: record.started_at.with_timezone(&Local),
+        updated_at,
     }
 }

@@ -25,13 +25,14 @@ use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use bakudo_core::{
-    abox::AboxAdapter,
-    config::BakudoConfig,
-    provider::ProviderRegistry,
-    state::SandboxLedger,
+    abox::AboxAdapter, config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger,
 };
 use bakudo_daemon::session_controller::{SessionCommand, SessionController, SessionEvent};
-use bakudo_tui::{app::App, events::{poll_event, TermEvent}, ui::render};
+use bakudo_tui::{
+    app::App,
+    events::{poll_event, TermEvent},
+    ui::render,
+};
 
 #[derive(Parser)]
 #[command(
@@ -108,8 +109,7 @@ async fn main() -> Result<()> {
         .open(&log_file)?;
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
         )
         .with_writer(file)
         .with_ansi(false)
@@ -135,35 +135,66 @@ async fn main() -> Result<()> {
             // Launch the interactive TUI.
             run_tui(config, abox, registry, ledger).await
         }
-        Some(Commands::Run { prompt, provider, model, discard, apply }) => {
-            run_headless(config, abox, registry, ledger, prompt, provider, model, discard, apply).await
+        Some(Commands::Run {
+            prompt,
+            provider,
+            model,
+            discard,
+            apply,
+        }) => {
+            run_headless(
+                config,
+                abox,
+                registry,
+                ledger,
+                HeadlessRunRequest {
+                    prompt,
+                    provider_override: provider,
+                    model_override: model,
+                    discard,
+                    apply,
+                },
+            )
+            .await
         }
         Some(Commands::List) => {
             let entries = abox.list(std::env::current_dir().ok().as_deref()).await?;
             if entries.is_empty() {
                 println!("No active sandboxes.");
             } else {
-                println!("{:<24} {:<12} {:<10} {}", "TASK ID", "STATE", "AHEAD", "BRANCH");
+                println!("{:<24} {:<12} {:<10} BRANCH", "TASK ID", "STATE", "AHEAD");
                 println!("{}", "-".repeat(70));
                 for e in entries {
-                    println!("{:<24} {:<12} {:<10} {}", e.id, e.vm_state, e.commits_ahead, e.branch);
+                    println!(
+                        "{:<24} {:<12} {:<10} {}",
+                        e.id, e.vm_state, e.commits_ahead, e.branch
+                    );
                 }
             }
             Ok(())
         }
         Some(Commands::Apply { task_id }) => {
-            let conflicts = abox.merge(std::env::current_dir().ok().as_deref(), &task_id, &config.base_branch).await?;
+            let conflicts = abox
+                .merge(
+                    std::env::current_dir().ok().as_deref(),
+                    &task_id,
+                    &config.base_branch,
+                )
+                .await?;
             if conflicts.is_empty() {
                 println!("Merged {} into {}", task_id, config.base_branch);
             } else {
                 eprintln!("Merge conflicts:");
-                for c in conflicts { eprintln!("  {c}"); }
+                for c in conflicts {
+                    eprintln!("  {c}");
+                }
                 std::process::exit(1);
             }
             Ok(())
         }
         Some(Commands::Discard { task_id }) => {
-            abox.stop(std::env::current_dir().ok().as_deref(), &task_id, true).await?;
+            abox.stop(std::env::current_dir().ok().as_deref(), &task_id, true)
+                .await?;
             println!("Discarded {task_id}");
             Ok(())
         }
@@ -174,7 +205,8 @@ async fn main() -> Result<()> {
                 &base,
                 std::env::current_dir().ok().as_deref(),
                 &abox,
-            ).await?;
+            )
+            .await?;
             if summary.has_changes {
                 print!("{}", summary.raw_output);
             } else {
@@ -272,55 +304,67 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
 }
 
 /// Run a single task headlessly (no TUI).
-async fn run_headless(
-    config: Arc<BakudoConfig>,
-    abox: Arc<AboxAdapter>,
-    registry: Arc<ProviderRegistry>,
-    ledger: Arc<SandboxLedger>,
+struct HeadlessRunRequest {
     prompt: String,
     provider_override: Option<String>,
     model_override: Option<String>,
     discard: bool,
     apply: bool,
+}
+
+async fn run_headless(
+    config: Arc<BakudoConfig>,
+    abox: Arc<AboxAdapter>,
+    registry: Arc<ProviderRegistry>,
+    ledger: Arc<SandboxLedger>,
+    request: HeadlessRunRequest,
 ) -> Result<()> {
-    use bakudo_core::protocol::{AttemptSpec, CandidatePolicy, SandboxLifecycle, AttemptBudget, AttemptPermissions};
     use bakudo_core::abox::sandbox_task_id;
+    use bakudo_core::protocol::{CandidatePolicy, SandboxLifecycle};
     use bakudo_daemon::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
     use bakudo_daemon::worktree::apply_candidate_policy;
 
-    let provider_id = provider_override.unwrap_or_else(|| config.default_provider.clone());
-    let model = model_override.unwrap_or_else(|| config.default_model.clone());
+    let provider_id = request
+        .provider_override
+        .unwrap_or_else(|| config.default_provider.clone());
+    let model = request
+        .model_override
+        .unwrap_or_else(|| config.default_model.clone());
 
-    let provider = registry.get(&provider_id)
+    let provider = registry
+        .get(&provider_id)
         .with_context(|| format!("Unknown provider '{provider_id}'"))?;
 
-    let candidate_policy = if discard {
+    let candidate_policy = if request.discard {
         CandidatePolicy::Discard
-    } else if apply {
+    } else if request.apply {
         CandidatePolicy::AutoApply
     } else {
         CandidatePolicy::Review
     };
 
-    let mut spec = AttemptSpec::new(&prompt, &provider_id);
-    spec.model = model.clone();
-    spec.budget = AttemptBudget { timeout_secs: config.timeout_secs, ..Default::default() };
-    spec.permissions = AttemptPermissions { allow_all_tools: true };
-    spec.sandbox_lifecycle = SandboxLifecycle::Preserved;
-    spec.candidate_policy = candidate_policy.clone();
-    spec.repo_root = std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string());
+    let spec = config.build_attempt_spec(
+        &request.prompt,
+        &provider_id,
+        &model,
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string()),
+        candidate_policy,
+        SandboxLifecycle::Preserved,
+    );
 
     let task_id = sandbox_task_id(&spec.attempt_id.0);
 
-    let worker_cmd: Vec<String> = std::iter::once(provider.binary.clone())
-        .chain(provider.build_args(&model, true))
-        .collect();
+    let worker_cmd = provider.build_stdin_command(&model, true);
 
     let cfg = Arc::new(TaskRunnerConfig {
         abox: abox.clone(),
         ledger: ledger.clone(),
         data_dir: config.resolved_data_dir().join("runs"),
         worker_command: worker_cmd,
+        memory_mib: provider.memory_mib,
+        cpus: provider.cpus,
     });
 
     println!("Dispatching task {task_id} to provider '{provider_id}'...");
@@ -341,19 +385,25 @@ async fn run_headless(
     // Apply candidate policy.
     match apply_candidate_policy(
         &task_id,
-        &candidate_policy,
+        &spec.candidate_policy,
         &config.base_branch,
         std::env::current_dir().ok().as_deref(),
         &abox,
         &ledger,
-    ).await? {
+    )
+    .await?
+    {
         bakudo_daemon::worktree::WorktreeAction::Merged => println!("Worktree merged."),
         bakudo_daemon::worktree::WorktreeAction::MergeConflicts(c) => {
             eprintln!("Merge conflicts:");
-            for conflict in c { eprintln!("  {conflict}"); }
+            for conflict in c {
+                eprintln!("  {conflict}");
+            }
         }
         bakudo_daemon::worktree::WorktreeAction::Discarded => println!("Worktree discarded."),
-        bakudo_daemon::worktree::WorktreeAction::Preserved => println!("Worktree preserved at task_id: {task_id}"),
+        bakudo_daemon::worktree::WorktreeAction::Preserved => {
+            println!("Worktree preserved at task_id: {task_id}")
+        }
     }
 
     Ok(())

@@ -98,9 +98,15 @@ mod state_ledger_tests {
     #[tokio::test]
     async fn active_returns_only_running() {
         let ledger = SandboxLedger::new();
-        ledger.insert(make_record("t1", SandboxState::Running)).await;
-        ledger.insert(make_record("t2", SandboxState::Preserved)).await;
-        ledger.insert(make_record("t3", SandboxState::Starting)).await;
+        ledger
+            .insert(make_record("t1", SandboxState::Running))
+            .await;
+        ledger
+            .insert(make_record("t2", SandboxState::Preserved))
+            .await;
+        ledger
+            .insert(make_record("t3", SandboxState::Starting))
+            .await;
 
         let active = ledger.active().await;
         assert_eq!(active.len(), 2);
@@ -112,7 +118,9 @@ mod state_ledger_tests {
     #[tokio::test]
     async fn update_state_sets_finished_at() {
         let ledger = SandboxLedger::new();
-        ledger.insert(make_record("t1", SandboxState::Running)).await;
+        ledger
+            .insert(make_record("t1", SandboxState::Running))
+            .await;
         ledger.update_state("t1", SandboxState::Preserved).await;
 
         let record = ledger.get("t1").await.unwrap();
@@ -123,9 +131,15 @@ mod state_ledger_tests {
     #[tokio::test]
     async fn reconcile_only_affects_running() {
         let ledger = SandboxLedger::new();
-        ledger.insert(make_record("running-ok", SandboxState::Running)).await;
-        ledger.insert(make_record("ghost", SandboxState::Running)).await;
-        ledger.insert(make_record("preserved", SandboxState::Preserved)).await;
+        ledger
+            .insert(make_record("running-ok", SandboxState::Running))
+            .await;
+        ledger
+            .insert(make_record("ghost", SandboxState::Running))
+            .await;
+        ledger
+            .insert(make_record("preserved", SandboxState::Preserved))
+            .await;
 
         let entries = vec![SandboxEntry {
             id: "running-ok".to_string(),
@@ -137,10 +151,19 @@ mod state_ledger_tests {
 
         ledger.reconcile(&entries).await;
 
-        assert_eq!(ledger.get("running-ok").await.unwrap().state, SandboxState::Running);
-        assert!(matches!(ledger.get("ghost").await.unwrap().state, SandboxState::Failed { .. }));
+        assert_eq!(
+            ledger.get("running-ok").await.unwrap().state,
+            SandboxState::Running
+        );
+        assert!(matches!(
+            ledger.get("ghost").await.unwrap().state,
+            SandboxState::Failed { .. }
+        ));
         // Preserved should NOT be changed.
-        assert_eq!(ledger.get("preserved").await.unwrap().state, SandboxState::Preserved);
+        assert_eq!(
+            ledger.get("preserved").await.unwrap().state,
+            SandboxState::Preserved
+        );
     }
 }
 
@@ -149,7 +172,10 @@ mod slash_command_tests {
     use bakudo_tui::commands::{parse_slash, ParsedCommand, SlashCommand};
 
     fn ok(cmd: SlashCommand, arg: &str) -> Option<Result<ParsedCommand, String>> {
-        Some(Ok(ParsedCommand { command: cmd, arg: arg.to_string() }))
+        Some(Ok(ParsedCommand {
+            command: cmd,
+            arg: arg.to_string(),
+        }))
     }
 
     #[test]

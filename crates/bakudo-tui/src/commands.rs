@@ -11,7 +11,9 @@ use strum::{AsRefStr, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 /// All supported slash commands.
 ///
 /// DO NOT ALPHA-SORT — enum order is the presentation order in `/help`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, EnumIter, AsRefStr, IntoStaticStr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, EnumIter, AsRefStr, IntoStaticStr,
+)]
 #[strum(serialize_all = "kebab-case")]
 pub enum SlashCommand {
     // ── Provider / model ─────────────────────────────────────────────────
@@ -44,19 +46,23 @@ impl SlashCommand {
     /// Short user-visible description shown in `/help`.
     pub fn description(&self) -> &'static str {
         match self {
-            SlashCommand::Provider  => "switch the active AI provider  e.g. /provider claude",
-            SlashCommand::Model     => "set the model for the current provider  e.g. /model claude-opus-4-5",
+            SlashCommand::Provider => "switch the active AI provider  e.g. /provider claude",
+            SlashCommand::Model => {
+                "set the model for the current provider  e.g. /model claude-opus-4-5"
+            }
             SlashCommand::Providers => "list all registered providers",
-            SlashCommand::Apply     => "merge a preserved worktree into the base branch",
-            SlashCommand::Discard   => "discard a preserved worktree (abox stop --clean)",
-            SlashCommand::Sandboxes => "list all active and preserved sandboxes  (aliases: /ls /list)",
-            SlashCommand::Diverge   => "show divergence summary for a preserved worktree",
-            SlashCommand::New       => "start a fresh session (clears transcript)",
-            SlashCommand::Clear     => "clear the transcript display",
-            SlashCommand::Config    => "show current configuration",
-            SlashCommand::Status    => "show provider, model, and active sandbox count",
-            SlashCommand::Help      => "show this help  (alias: /h /?)",
-            SlashCommand::Quit      => "exit bakudo  (aliases: /exit /q)",
+            SlashCommand::Apply => "merge a preserved worktree into the base branch",
+            SlashCommand::Discard => "discard a preserved worktree (abox stop --clean)",
+            SlashCommand::Sandboxes => {
+                "list all active and preserved sandboxes  (aliases: /ls /list)"
+            }
+            SlashCommand::Diverge => "show divergence summary for a preserved worktree",
+            SlashCommand::New => "start a fresh session (clears transcript)",
+            SlashCommand::Clear => "clear the transcript display",
+            SlashCommand::Config => "show current configuration",
+            SlashCommand::Status => "show provider, model, and active sandbox count",
+            SlashCommand::Help => "show this help  (alias: /h /?)",
+            SlashCommand::Quit => "exit bakudo  (aliases: /exit /q)",
         }
     }
 
@@ -139,11 +145,11 @@ pub fn parse_slash(input: &str) -> Option<Result<ParsedCommand, String>> {
     if command.supports_inline_arg() && arg.is_empty() {
         let usage = match command {
             SlashCommand::Provider => "Usage: /provider <id>  (e.g. /provider claude)",
-            SlashCommand::Model    => "Usage: /model <name>  (e.g. /model claude-opus-4-5)",
-            SlashCommand::Apply    => "Usage: /apply <task_id>",
-            SlashCommand::Discard  => "Usage: /discard <task_id>",
-            SlashCommand::Diverge  => "Usage: /diverge <task_id>",
-            _                      => "Usage: /<command> <arg>",
+            SlashCommand::Model => "Usage: /model <name>  (e.g. /model claude-opus-4-5)",
+            SlashCommand::Apply => "Usage: /apply <task_id>",
+            SlashCommand::Discard => "Usage: /discard <task_id>",
+            SlashCommand::Diverge => "Usage: /diverge <task_id>",
+            _ => "Usage: /<command> <arg>",
         };
         return Some(Err(usage.to_string()));
     }
@@ -187,7 +193,10 @@ mod tests {
     use super::*;
 
     fn ok(cmd: SlashCommand, arg: &str) -> Option<Result<ParsedCommand, String>> {
-        Some(Ok(ParsedCommand { command: cmd, arg: arg.to_string() }))
+        Some(Ok(ParsedCommand {
+            command: cmd,
+            arg: arg.to_string(),
+        }))
     }
 
     fn err_contains(input: &str, needle: &str) {
@@ -199,7 +208,10 @@ mod tests {
 
     #[test]
     fn parse_provider() {
-        assert_eq!(parse_slash("/provider claude"), ok(SlashCommand::Provider, "claude"));
+        assert_eq!(
+            parse_slash("/provider claude"),
+            ok(SlashCommand::Provider, "claude")
+        );
     }
 
     #[test]
@@ -223,21 +235,21 @@ mod tests {
     fn parse_quit_aliases() {
         assert_eq!(parse_slash("/quit"), ok(SlashCommand::Quit, ""));
         assert_eq!(parse_slash("/exit"), ok(SlashCommand::Quit, ""));
-        assert_eq!(parse_slash("/q"),    ok(SlashCommand::Quit, ""));
+        assert_eq!(parse_slash("/q"), ok(SlashCommand::Quit, ""));
     }
 
     #[test]
     fn parse_help_aliases() {
         assert_eq!(parse_slash("/help"), ok(SlashCommand::Help, ""));
-        assert_eq!(parse_slash("/h"),    ok(SlashCommand::Help, ""));
-        assert_eq!(parse_slash("/?"),    ok(SlashCommand::Help, ""));
+        assert_eq!(parse_slash("/h"), ok(SlashCommand::Help, ""));
+        assert_eq!(parse_slash("/?"), ok(SlashCommand::Help, ""));
     }
 
     #[test]
     fn parse_sandboxes_aliases() {
         assert_eq!(parse_slash("/sandboxes"), ok(SlashCommand::Sandboxes, ""));
-        assert_eq!(parse_slash("/ls"),        ok(SlashCommand::Sandboxes, ""));
-        assert_eq!(parse_slash("/list"),      ok(SlashCommand::Sandboxes, ""));
+        assert_eq!(parse_slash("/ls"), ok(SlashCommand::Sandboxes, ""));
+        assert_eq!(parse_slash("/list"), ok(SlashCommand::Sandboxes, ""));
     }
 
     #[test]
@@ -257,9 +269,9 @@ mod tests {
     #[test]
     fn missing_arg_returns_usage() {
         err_contains("/provider", "Usage:");
-        err_contains("/model",    "Usage:");
-        err_contains("/apply",    "Usage:");
-        err_contains("/discard",  "Usage:");
+        err_contains("/model", "Usage:");
+        err_contains("/apply", "Usage:");
+        err_contains("/discard", "Usage:");
     }
 
     #[test]

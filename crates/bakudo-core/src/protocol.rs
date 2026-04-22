@@ -104,23 +104,33 @@ pub struct AttemptPermissions {
 }
 
 /// Sandbox lifecycle policy for an attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxLifecycle {
     /// The worktree is removed after the VM exits (abox `--ephemeral`).
     Ephemeral,
     /// The worktree is preserved after the VM exits for host-side review.
+    #[default]
     Preserved,
 }
 
-impl Default for SandboxLifecycle {
-    fn default() -> Self {
-        Self::Preserved
+impl SandboxLifecycle {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ephemeral => "ephemeral",
+            Self::Preserved => "preserved",
+        }
+    }
+}
+
+impl std::fmt::Display for SandboxLifecycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).as_str())
     }
 }
 
 /// What the host should do with a preserved worktree after the agent finishes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CandidatePolicy {
     /// Automatically merge the worktree into the base branch if the agent succeeded.
@@ -128,12 +138,23 @@ pub enum CandidatePolicy {
     /// Discard the worktree (abox stop --clean) regardless of outcome.
     Discard,
     /// Leave the worktree preserved and wait for the user to decide.
+    #[default]
     Review,
 }
 
-impl Default for CandidatePolicy {
-    fn default() -> Self {
-        Self::Review
+impl CandidatePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoApply => "auto_apply",
+            Self::Discard => "discard",
+            Self::Review => "review",
+        }
+    }
+}
+
+impl std::fmt::Display for CandidatePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str((*self).as_str())
     }
 }
 

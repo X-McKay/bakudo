@@ -64,17 +64,6 @@ impl SandboxRecord {
     pub fn is_active(&self) -> bool {
         matches!(self.state, SandboxState::Starting | SandboxState::Running)
     }
-
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.state,
-            SandboxState::Merged
-                | SandboxState::Discarded
-                | SandboxState::Failed { .. }
-                | SandboxState::TimedOut
-                | SandboxState::MergeConflicts
-        )
-    }
 }
 
 /// The concurrency-safe sandbox ledger.
@@ -109,6 +98,7 @@ impl SandboxLedger {
                         | SandboxState::Discarded
                         | SandboxState::Failed { .. }
                         | SandboxState::TimedOut
+                        | SandboxState::MergeConflicts
                 )
             {
                 record.finished_at = Some(Utc::now());
@@ -155,7 +145,9 @@ impl SandboxLedger {
 
         let mut map = self.inner.write().await;
         for record in map.values_mut() {
-            if record.state == SandboxState::Running && !running_ids.contains(record.task_id.as_str()) {
+            if record.state == SandboxState::Running
+                && !running_ids.contains(record.task_id.as_str())
+            {
                 record.state = SandboxState::Failed { exit_code: -1 };
                 record.finished_at = Some(Utc::now());
             }
@@ -195,7 +187,9 @@ mod tests {
     #[tokio::test]
     async fn insert_and_get() {
         let ledger = SandboxLedger::new();
-        ledger.insert(make_record("task-1", SandboxState::Running)).await;
+        ledger
+            .insert(make_record("task-1", SandboxState::Running))
+            .await;
         let r = ledger.get("task-1").await.unwrap();
         assert_eq!(r.task_id, "task-1");
         assert_eq!(r.state, SandboxState::Running);
@@ -204,8 +198,12 @@ mod tests {
     #[tokio::test]
     async fn reconcile_marks_missing_as_failed() {
         let ledger = SandboxLedger::new();
-        ledger.insert(make_record("task-running", SandboxState::Running)).await;
-        ledger.insert(make_record("task-ghost", SandboxState::Running)).await;
+        ledger
+            .insert(make_record("task-running", SandboxState::Running))
+            .await;
+        ledger
+            .insert(make_record("task-ghost", SandboxState::Running))
+            .await;
 
         let abox_entries = vec![SandboxEntry {
             id: "task-running".to_string(),

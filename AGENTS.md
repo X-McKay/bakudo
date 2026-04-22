@@ -1,193 +1,132 @@
 # Bakudo v2 — Agent Conventions
 
-This document describes the conventions, architecture invariants, and
-workflow rules that AI agents (Claude Code, Codex, OpenCode, etc.) must
-follow when working in this repository.
-
----
+This document describes the conventions, architecture invariants, and workflow rules that AI agents should follow in this repository.
 
 ## Repository Layout
 
-```
+```text
 bakudo/
-├── Cargo.toml              # Workspace root
+├── Cargo.toml
 ├── Cargo.lock
 ├── src/
-│   └── main.rs             # CLI entry point (clap)
+│   └── main.rs
 ├── crates/
-│   ├── bakudo-core/        # Domain types, abox adapter, provider registry, config
-│   ├── bakudo-daemon/      # Session controller, task runner, worktree lifecycle
-│   └── bakudo-tui/         # ratatui TUI: app state, UI rendering, slash commands
+│   ├── bakudo-core/
+│   ├── bakudo-daemon/
+│   └── bakudo-tui/
 ├── tests/
-│   └── integration.rs      # Workspace-level integration tests
-├── docs/                   # Architecture plans and design documents
-├── .claude/skills/         # Claude Code skill definitions for this repo
-├── AGENTS.md               # This file
-├── justfile                # Task runner
-└── .mise.toml              # Tool version management
+│   ├── integration.rs
+│   └── runtime.rs
+├── docs/
+│   ├── current-architecture.md
+│   └── bakudo-v2-architecture-*.md   # archived design drafts
+├── .claude/skills/
+├── AGENTS.md
+├── justfile
+└── .mise.toml
 ```
-
----
 
 ## Build and Test Commands
 
-All development tasks are run via `just` (or `cargo` directly):
+All development tasks are run via `just` or `cargo`:
 
 | Task | Command |
 |------|---------|
 | Build (debug) | `cargo build` |
 | Build (release) | `cargo build --release` |
 | Run all tests | `cargo test --workspace` |
-| Run a specific crate's tests | `cargo test -p bakudo-core` |
-| Check (no codegen) | `cargo check --workspace` |
-| Lint (clippy) | `cargo clippy --workspace -- -D warnings` |
+| Run one crate's tests | `cargo test -p bakudo-core` |
+| Check | `cargo check --workspace` |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Format | `cargo fmt --all` |
-| Full CI check | `just check` |
-| Install pre-commit hook | `mise run hooks:install` |
+| Full quality gate | `just check` |
 
-**Quality gate**: before every commit, `just check` must pass with zero
-errors and zero warnings. This runs `cargo fmt --check`, `cargo clippy`,
-and `cargo test --workspace`.
-
----
+Before every commit, `just check` should pass with zero warnings.
 
 ## Architecture Invariants
 
 ### 1. Crate boundaries
 
-- **`bakudo-core`** — pure domain logic only. No I/O, no tokio runtime,
-  no TUI. All types here must be `Send + Sync`. Tests in this crate must
-  be synchronous or use `tokio::test`.
-- **`bakudo-daemon`** — owns async task execution and abox lifecycle.
-  Depends on `bakudo-core`. Must not import from `bakudo-tui`.
-- **`bakudo-tui`** — owns all terminal rendering and user input. Depends
-  on `bakudo-core` and `bakudo-daemon`. Must not spawn tokio tasks
-  directly; all async work is delegated to the daemon via channels.
-- **`src/main.rs`** — wires everything together. Thin layer only: parse
-  CLI args, build config, construct the channel pair, spawn the daemon
-  task, and hand off to the TUI event loop.
+- `bakudo-core` contains shared domain logic only.
+- `bakudo-daemon` owns async execution and sandbox lifecycle management.
+- `bakudo-tui` owns rendering and input handling.
+- `src/main.rs` is a thin composition layer for TUI and headless execution.
 
 ### 2. Provider agnosticism
 
-Providers (Claude Code, Codex, OpenCode, Gemini CLI) are invoked
-**headlessly via stdin**. The correct invocation form for each provider
-is defined in `bakudo-core/src/provider.rs`. Never hard-code a provider
-binary path or flag anywhere else.
+Providers are invoked headlessly through the registry in `bakudo-core/src/provider.rs`.
 
 ```rust
-// Correct — use the registry
 let spec = registry.get("claude").unwrap();
-let args = spec.build_args(&model, /*non_interactive=*/true);
-
-// Wrong — never do this
-let cmd = Command::new("claude").arg("-p").arg(prompt);
+let command = spec.build_stdin_command(&model, true);
 ```
 
-### 3. Worktree lifecycle — host owns merge/discard
+Do not hard-code provider binaries or flags anywhere else.
 
-The host (bakudo) **always** decides whether to merge or discard a
-preserved worktree. The agent running inside the abox sandbox **never**
-calls `abox merge` or `git merge`. The lifecycle is:
+### 3. Worktree lifecycle is host-owned
 
-1. `abox run --detach` — bakudo starts the sandbox.
-2. Agent runs, writes output to the worktree.
-3. `abox run` exits (VM halts).
-4. `bakudo-daemon/src/worktree.rs` evaluates `candidate_policy`.
-5. If `AutoApply`: bakudo calls `abox merge` then `abox stop --clean`.
-6. If `Review`: worktree is preserved; user calls `/apply` or `/discard`.
-7. If `Discard`: bakudo calls `abox stop --clean`.
+The agent inside the sandbox never merges its own work.
 
-### 4. State mutations go through `SandboxLedger`
+1. Bakudo starts a sandbox with `abox run --task <id> -- <provider-command...>`.
+2. The provider runs inside the sandbox and exits.
+3. `bakudo-daemon/src/worktree.rs` applies the host-side candidate policy.
+4. `AutoApply` calls `abox merge`.
+5. `Review` preserves the worktree for `/apply`, `/discard`, `bakudo apply`, or `bakudo discard`.
+6. `Discard` calls `abox stop --clean`.
 
-All sandbox state transitions must go through `SandboxLedger::update`.
-Never mutate sandbox state directly. The ledger is `Arc<SandboxLedger>`
-and is shared between the daemon and TUI.
+### 4. State changes go through `SandboxLedger`
+
+All sandbox state transitions must go through `SandboxLedger::update_state`.
 
 ```rust
-// Correct
-ledger.update("task-id", SandboxState::Preserved).await;
-
-// Wrong — never do this
-let mut guard = ledger.inner.lock().await;
-guard.get_mut("task-id").unwrap().state = SandboxState::Preserved;
+ledger.update_state("task-id", SandboxState::Preserved).await;
 ```
 
-### 5. TUI and Daemon communication
+Never mutate the ledger internals directly.
 
-The TUI and daemon communicate **only** through the typed channel pair:
+### 5. TUI and daemon communicate only through typed channels
 
-- `mpsc::Sender<SessionCommand>` — TUI sends commands to daemon.
-- `mpsc::Sender<SessionEvent>` — daemon sends events to TUI.
+- `mpsc::Sender<SessionCommand>`: TUI to daemon.
+- `mpsc::Sender<SessionEvent>`: daemon to TUI.
 
-Never share mutable state between the TUI and daemon directly. The
-`SandboxLedger` is the only `Arc`-shared state, and it is read-only from
-the TUI's perspective (the TUI reads it for display; the daemon writes it).
-
----
+The TUI does not spawn sandbox work directly.
 
 ## Slash Command Conventions
 
-Slash commands are defined in `bakudo-tui/src/commands.rs` as a
-`strum`-derived enum. When adding a new command:
+Slash commands live in `bakudo-tui/src/commands.rs`. When adding one:
 
-1. Add the variant to `SlashCommand` (maintain presentation order).
-2. Implement `description()`, `available_during_task()`, and
-   `supports_inline_arg()` for the new variant.
-3. Handle the command in `App::handle_parsed_command()` in `app.rs`.
-4. If the command requires daemon interaction, add a `SessionCommand`
-   variant and handle it in `SessionController::run()`.
-5. Add a unit test in `commands.rs` and an integration test in
-   `tests/integration.rs`.
-
----
+1. Add the enum variant in presentation order.
+2. Implement `description()`, `available_during_task()`, and `supports_inline_arg()`.
+3. Handle it in `App::handle_parsed_command()`.
+4. If needed, add a `SessionCommand` and handle it in `SessionController`.
+5. Add unit coverage in `commands.rs` and integration coverage in `tests/integration.rs` or `tests/runtime.rs`.
 
 ## Adding a New Provider
 
-1. Add a `ProviderSpec` entry in `ProviderRegistry::default()` in
-   `bakudo-core/src/provider.rs`.
-2. Implement `build_args()` to return the correct non-interactive CLI
-   flags for that provider.
-3. Add a unit test in `provider.rs` asserting the non-interactive flag
-   is present.
-4. Update `docs/bakudo-v2-architecture-revised-plan.md` with the new
-   provider's invocation details.
+1. Add a `ProviderSpec` entry in `ProviderRegistry::with_defaults()`.
+2. Implement the correct non-interactive/stdin invocation.
+3. Add unit tests in `provider.rs`.
+4. Update `docs/current-architecture.md` if the runtime behavior changes.
 
----
+## Documentation Policy
+
+- `README.md` and `docs/current-architecture.md` describe the current implementation.
+- The `docs/bakudo-v2-architecture-*.md` files are archived historical drafts. Do not treat them as the source of truth for current behavior.
 
 ## Commit Message Convention
 
-Use [Conventional Commits](https://www.conventionalcommits.org/):
+Use Conventional Commits:
 
-```
+```text
 <type>(<scope>): <description>
-
-[optional body]
 ```
 
 Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`.
-Scopes: `core`, `daemon`, `tui`, `cli`, `abox`, `provider`.
-
-Examples:
-
-```
-feat(tui): add /diverge slash command
-fix(daemon): correct argument order in abox.divergence() call
-docs: update provider registry section in AGENTS.md
-```
-
-Breaking changes must include `BREAKING CHANGE:` in the commit footer.
-
----
 
 ## Release Process
 
 1. Ensure `just check` passes on `main`.
-2. Update `CHANGELOG.md` with the new version section.
-3. Bump the version in the workspace `Cargo.toml` and all crate
-   `Cargo.toml` files using `cargo set-version <version>` (requires
-   `cargo-edit`).
-4. Commit: `chore: bump version to vX.Y.Z`.
-5. Tag: `git tag vX.Y.Z`.
-6. Push: `git push origin main --tags`.
-7. Build the release binary: `cargo build --release`.
-8. Create the GitHub release and attach the binary.
+2. Update `CHANGELOG.md`.
+3. Bump versions in the workspace manifests.
+4. Commit and tag the release.
+5. Build the release binary with `cargo build --release`.

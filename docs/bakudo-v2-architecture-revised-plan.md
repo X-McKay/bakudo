@@ -1,4 +1,8 @@
-# Bakudo v2 Architecture & Implementation Plan (Revised)
+# Bakudo v2 Architecture & Implementation Plan (Revised, Archived)
+
+> Archived historical draft. This document explains a transition-stage design and is kept only for context.
+>
+> For the current runtime, read [`docs/current-architecture.md`](current-architecture.md).
 
 This revised plan updates the original `v2-architecture-plan` to align with the actual capabilities of `abox v0.3.1`, the preserved worktree lifecycle introduced in the `control-plane-spec`, and the requirement for a provider-agnostic, TUI-driven architecture.
 

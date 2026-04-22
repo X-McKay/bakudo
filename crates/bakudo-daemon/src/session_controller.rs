@@ -17,12 +17,10 @@ use tracing::{info, warn};
 
 use bakudo_core::abox::AboxAdapter;
 use bakudo_core::config::BakudoConfig;
-use bakudo_core::protocol::{
-    AttemptBudget, AttemptPermissions, AttemptSpec, CandidatePolicy, SandboxLifecycle,
-};
+use bakudo_core::protocol::WorkerStatus;
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::session::SessionRecord;
-use bakudo_core::state::SandboxLedger;
+use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use crate::worktree::{apply_candidate_policy, WorktreeAction};
@@ -49,14 +47,26 @@ pub enum SessionCommand {
 /// Events emitted by the session controller to the TUI.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
+    /// Snapshot of the current sandbox ledger, used for startup recovery.
+    LedgerSnapshot { entries: Vec<SandboxRecord> },
     /// A new task was dispatched.
-    TaskStarted { task_id: String, prompt_summary: String },
+    TaskStarted {
+        task_id: String,
+        provider_id: String,
+        model: String,
+        prompt_summary: String,
+    },
     /// A progress event from a running task.
     TaskProgress { task_id: String, event: RunnerEvent },
     /// A task finished.
-    TaskFinished { task_id: String, action: String },
+    TaskFinished {
+        task_id: String,
+        state: SandboxState,
+    },
     /// Provider changed.
     ProviderChanged { provider_id: String, model: String },
+    /// Informational message for the transcript.
+    Info(String),
     /// An error occurred.
     Error(String),
     /// The session is shutting down.
@@ -115,10 +125,13 @@ impl SessionController {
                 }
                 SessionCommand::SetModel { model } => {
                     self.current_model = model.clone();
-                    let _ = self.event_tx.send(SessionEvent::ProviderChanged {
-                        provider_id: self.current_provider.clone(),
-                        model,
-                    }).await;
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::ProviderChanged {
+                            provider_id: self.current_provider.clone(),
+                            model,
+                        })
+                        .await;
                 }
                 SessionCommand::Apply { task_id } => {
                     self.apply_worktree(&task_id).await;
@@ -141,6 +154,11 @@ impl SessionController {
         match self.abox.list(self.repo_path().as_deref()).await {
             Ok(entries) => {
                 self.ledger.reconcile(&entries).await;
+                let snapshot = self.ledger.all().await;
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::LedgerSnapshot { entries: snapshot })
+                    .await;
                 info!("Reconciled ledger: {} abox entries", entries.len());
             }
             Err(e) => {
@@ -153,52 +171,49 @@ impl SessionController {
         let provider = match self.registry.get(&self.current_provider) {
             Some(p) => p,
             None => {
-                let _ = self.event_tx.send(SessionEvent::Error(format!(
-                    "Unknown provider '{}'", self.current_provider
-                ))).await;
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Error(format!(
+                        "Unknown provider '{}'",
+                        self.current_provider
+                    )))
+                    .await;
                 return;
             }
         };
 
-        let mut spec = AttemptSpec::new(&prompt, &self.current_provider);
+        let mut spec = self.config.build_attempt_spec(
+            &prompt,
+            &self.current_provider,
+            &self.current_model,
+            self.repo_path().map(|p| p.to_string_lossy().to_string()),
+            self.config.candidate_policy,
+            self.config.sandbox_lifecycle,
+        );
         spec.session_id = self.session.session_id.clone();
-        spec.model = self.current_model.clone();
-        spec.repo_root = self.repo_path().map(|p| p.to_string_lossy().to_string());
-        spec.budget = AttemptBudget {
-            timeout_secs: self.config.timeout_secs,
-            ..Default::default()
-        };
-        spec.permissions = AttemptPermissions { allow_all_tools: true };
-        spec.sandbox_lifecycle = match self.config.sandbox_lifecycle.as_str() {
-            "ephemeral" => SandboxLifecycle::Ephemeral,
-            _ => SandboxLifecycle::Preserved,
-        };
-        spec.candidate_policy = match self.config.candidate_policy.as_str() {
-            "auto_apply" => CandidatePolicy::AutoApply,
-            "discard" => CandidatePolicy::Discard,
-            _ => CandidatePolicy::Review,
-        };
 
         let task_id = bakudo_core::abox::sandbox_task_id(&spec.attempt_id.0);
         let prompt_summary: String = prompt.chars().take(80).collect();
 
-        let _ = self.event_tx.send(SessionEvent::TaskStarted {
-            task_id: task_id.clone(),
-            prompt_summary: prompt_summary.clone(),
-        }).await;
+        let _ = self
+            .event_tx
+            .send(SessionEvent::TaskStarted {
+                task_id: task_id.clone(),
+                provider_id: self.current_provider.clone(),
+                model: self.current_model.clone(),
+                prompt_summary: prompt_summary.clone(),
+            })
+            .await;
 
-        let worker_cmd = vec![
-            provider.binary.clone(),
-        ]
-        .into_iter()
-        .chain(provider.build_args(&self.current_model, true))
-        .collect::<Vec<_>>();
+        let worker_cmd = provider.build_stdin_command(&self.current_model, true);
 
         let cfg = Arc::new(TaskRunnerConfig {
             abox: self.abox.clone(),
             ledger: self.ledger.clone(),
             data_dir: self.config.resolved_data_dir().join("runs"),
             worker_command: worker_cmd,
+            memory_mib: provider.memory_mib,
+            cpus: provider.cpus,
         });
 
         let event_tx = self.event_tx.clone();
@@ -206,65 +221,93 @@ impl SessionController {
         let abox = self.abox.clone();
         let base_branch = self.config.base_branch.clone();
         let repo = self.repo_path();
-        let candidate_policy = spec.candidate_policy.clone();
+        let candidate_policy = spec.candidate_policy;
         let tid = task_id.clone();
 
-        let (mut rx, _handle) = run_attempt(spec, cfg).await;
+        let (mut rx, handle) = run_attempt(spec, cfg).await;
 
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                let is_finished = matches!(&event, RunnerEvent::Finished(_));
-                let _ = event_tx.send(SessionEvent::TaskProgress {
-                    task_id: tid.clone(),
-                    event: event.clone(),
-                }).await;
-
-                if is_finished {
-                    // Apply the candidate policy.
-                    match apply_candidate_policy(
-                        &tid,
-                        &candidate_policy,
-                        &base_branch,
-                        repo.as_deref(),
-                        &abox,
-                        &ledger,
-                    ).await {
-                        Ok(action) => {
-                            let action_str = match &action {
-                                WorktreeAction::Merged => "merged".to_string(),
-                                WorktreeAction::MergeConflicts(c) => format!("conflicts: {}", c.len()),
-                                WorktreeAction::Discarded => "discarded".to_string(),
-                                WorktreeAction::Preserved => "preserved".to_string(),
-                            };
-                            let _ = event_tx.send(SessionEvent::TaskFinished {
-                                task_id: tid.clone(),
-                                action: action_str,
-                            }).await;
-                        }
-                        Err(e) => {
-                            let _ = event_tx.send(SessionEvent::Error(format!(
-                                "Candidate policy error for {tid}: {e}"
-                            ))).await;
-                        }
-                    }
-                    break;
-                }
+                let _ = event_tx
+                    .send(SessionEvent::TaskProgress {
+                        task_id: tid.clone(),
+                        event: event.clone(),
+                    })
+                    .await;
             }
+
+            let final_state = match handle.await {
+                Ok(Ok(result)) => {
+                    if result.status == WorkerStatus::Succeeded {
+                        match apply_candidate_policy(
+                            &tid,
+                            &candidate_policy,
+                            &base_branch,
+                            repo.as_deref(),
+                            &abox,
+                            &ledger,
+                        )
+                        .await
+                        {
+                            Ok(action) => state_from_worktree_action(action),
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(SessionEvent::Error(format!(
+                                        "Candidate policy error for {tid}: {e}"
+                                    )))
+                                    .await;
+                                ledger
+                                    .get(&tid)
+                                    .await
+                                    .map(|record| record.state)
+                                    .unwrap_or(SandboxState::Preserved)
+                            }
+                        }
+                    } else {
+                        state_from_worker_status(&result.status, result.exit_code)
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!("Task {tid} failed before producing a final result: {e}");
+                    SandboxState::Failed { exit_code: -1 }
+                }
+                Err(e) => {
+                    let _ = event_tx
+                        .send(SessionEvent::Error(format!(
+                            "Task join error for {tid}: {e}"
+                        )))
+                        .await;
+                    SandboxState::Failed { exit_code: -1 }
+                }
+            };
+
+            let _ = event_tx
+                .send(SessionEvent::TaskFinished {
+                    task_id: tid.clone(),
+                    state: final_state,
+                })
+                .await;
         });
     }
 
     async fn set_provider(&mut self, provider_id: String) {
         if self.registry.get(&provider_id).is_none() {
-            let _ = self.event_tx.send(SessionEvent::Error(format!(
-                "Unknown provider '{provider_id}'"
-            ))).await;
+            let _ = self
+                .event_tx
+                .send(SessionEvent::Error(format!(
+                    "Unknown provider '{provider_id}'"
+                )))
+                .await;
             return;
         }
         self.current_provider = provider_id.clone();
-        let _ = self.event_tx.send(SessionEvent::ProviderChanged {
-            provider_id,
-            model: self.current_model.clone(),
-        }).await;
+        let _ = self
+            .event_tx
+            .send(SessionEvent::ProviderChanged {
+                provider_id,
+                model: self.current_model.clone(),
+            })
+            .await;
     }
 
     async fn apply_worktree(&self, task_id: &str) {
@@ -274,12 +317,17 @@ impl SessionController {
             self.repo_path().as_deref(),
             &self.abox,
             &self.ledger,
-        ).await {
+        )
+        .await
+        {
             Ok(_) => {
-                let _ = self.event_tx.send(SessionEvent::TaskFinished {
-                    task_id: task_id.to_string(),
-                    action: "merged".to_string(),
-                }).await;
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::TaskFinished {
+                        task_id: task_id.to_string(),
+                        state: SandboxState::Merged,
+                    })
+                    .await;
             }
             Err(e) => {
                 let _ = self.event_tx.send(SessionEvent::Error(e.to_string())).await;
@@ -293,12 +341,17 @@ impl SessionController {
             self.repo_path().as_deref(),
             &self.abox,
             &self.ledger,
-        ).await {
+        )
+        .await
+        {
             Ok(_) => {
-                let _ = self.event_tx.send(SessionEvent::TaskFinished {
-                    task_id: task_id.to_string(),
-                    action: "discarded".to_string(),
-                }).await;
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::TaskFinished {
+                        task_id: task_id.to_string(),
+                        state: SandboxState::Discarded,
+                    })
+                    .await;
             }
             Err(e) => {
                 let _ = self.event_tx.send(SessionEvent::Error(e.to_string())).await;
@@ -307,19 +360,29 @@ impl SessionController {
     }
 
     async fn show_divergence(&self, task_id: &str) {
-        match self.abox.divergence(self.repo_path().as_deref(), task_id).await {
+        match crate::candidate::query_divergence(
+            task_id,
+            &self.config.base_branch,
+            self.repo_path().as_deref(),
+            &self.abox,
+        )
+        .await
+        {
             Ok(summary) => {
-                let msg = if summary.is_empty() {
+                let msg = if !summary.has_changes {
                     format!("[{task_id}] No divergence (worktree matches base branch).")
                 } else {
-                    format!("[{task_id}] Divergence:\n{summary}")
+                    format!("[{task_id}] Divergence:\n{}", summary.raw_output)
                 };
-                let _ = self.event_tx.send(SessionEvent::Error(msg)).await;
+                let _ = self.event_tx.send(SessionEvent::Info(msg)).await;
             }
             Err(e) => {
-                let _ = self.event_tx.send(SessionEvent::Error(format!(
-                    "Divergence check failed for {task_id}: {e}"
-                ))).await;
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Error(format!(
+                        "Divergence check failed for {task_id}: {e}"
+                    )))
+                    .await;
             }
         }
     }
@@ -327,5 +390,22 @@ impl SessionController {
     fn repo_path(&self) -> Option<PathBuf> {
         // Try to detect the repo root from the current directory.
         std::env::current_dir().ok()
+    }
+}
+
+fn state_from_worker_status(status: &WorkerStatus, exit_code: i32) -> SandboxState {
+    match status {
+        WorkerStatus::Succeeded => SandboxState::Preserved,
+        WorkerStatus::TimedOut => SandboxState::TimedOut,
+        WorkerStatus::Failed | WorkerStatus::Cancelled => SandboxState::Failed { exit_code },
+    }
+}
+
+fn state_from_worktree_action(action: WorktreeAction) -> SandboxState {
+    match action {
+        WorktreeAction::Merged => SandboxState::Merged,
+        WorktreeAction::MergeConflicts(_) => SandboxState::MergeConflicts,
+        WorktreeAction::Discarded => SandboxState::Discarded,
+        WorktreeAction::Preserved => SandboxState::Preserved,
     }
 }
