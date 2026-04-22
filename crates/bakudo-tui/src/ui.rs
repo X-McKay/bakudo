@@ -39,36 +39,44 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.size();
     let use_shelf = area.width >= SHELF_MIN_TERM_WIDTH;
 
-    // ── Horizontal split: main | shelf ─────────────────────────────────────
+    // ── Slice the header off the top so it spans the full terminal width and
+    //    the shelf naturally starts below it. ──────────────────────────────
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
+        .split(area);
+    let header_area = outer[0];
+    let body_area = outer[1];
+
+    // ── Horizontal split of the body: main | shelf ─────────────────────────
     let h_chunks = if use_shelf {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(SHELF_WIDTH)])
-            .split(area)
+            .split(body_area)
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(100)])
-            .split(area)
+            .split(body_area)
     };
 
     let main_area = h_chunks[0];
 
-    // ── Vertical split: header | transcript | composer | footer ────────────
+    // ── Vertical split of main: transcript | composer | footer ─────────────
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(HEADER_HEIGHT),
             Constraint::Min(5),
             Constraint::Length(COMPOSER_HEIGHT),
             Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(main_area);
 
-    render_header(frame, app, v_chunks[0]);
-    render_transcript(frame, app, v_chunks[1]);
-    render_composer(frame, app, v_chunks[2]);
-    render_footer(frame, app, v_chunks[3]);
+    render_header(frame, app, header_area);
+    render_transcript(frame, app, v_chunks[0]);
+    render_composer(frame, app, v_chunks[1]);
+    render_footer(frame, app, v_chunks[2]);
 
     if use_shelf {
         render_shelf(frame, app, h_chunks[1]);
@@ -76,7 +84,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // ── Completion popup ────────────────────────────────────────────────────
     if !app.completions.is_empty() && app.focus == FocusedPanel::Chat {
-        render_completion_popup(frame, app, v_chunks[2]);
+        render_completion_popup(frame, app, v_chunks[1]);
     }
 }
 
