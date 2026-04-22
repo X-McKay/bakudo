@@ -162,17 +162,60 @@ pub fn parse_slash(input: &str) -> Option<Result<ParsedCommand, String>> {
 // ─── Help text ─────────────────────────────────────────────────────────────
 
 /// Return a formatted help string listing all commands in catalog order.
+///
+/// Targets a body width of 60 cells (the chat body at an 80-col terminal),
+/// wrapping descriptions onto continuation lines indented to the description
+/// column so the leading-`/`-name column always lines up. At wider terminals
+/// the surrounding chat just shows extra trailing whitespace; nothing breaks.
 pub fn help_text() -> String {
+    const NAME_COL: usize = 12;
+    const TARGET_BODY_WIDTH: usize = 60;
+    const DESC_WIDTH: usize = TARGET_BODY_WIDTH - NAME_COL - 2;
+    let cont_indent = " ".repeat(NAME_COL + 4);
+
     let mut out = String::from(
         "Bakudo Slash Commands\n\
          ─────────────────────────────────────────────────────────────\n",
     );
     for cmd in SlashCommand::iter() {
         let name = format!("/{}", cmd.command());
-        out.push_str(&format!("  {:<22}  {}\n", name, cmd.description()));
+        let lines = wrap_words(cmd.description(), DESC_WIDTH);
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 {
+                out.push_str(&format!("  {name:<NAME_COL$}  {line}\n"));
+            } else {
+                out.push_str(&format!("{cont_indent}{line}\n"));
+            }
+        }
     }
     out.push_str("─────────────────────────────────────────────────────────────\n");
     out.push_str("Type a message and press Enter to dispatch a task to a sandbox.");
+    out
+}
+
+/// Word-wrap on whitespace into lines no wider than `width`. Words longer
+/// than `width` are emitted on their own line. Local to commands.rs so the
+/// help formatter doesn't drag a UI dependency into the parser module.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.len() + 1 + word.len() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
     out
 }
 
