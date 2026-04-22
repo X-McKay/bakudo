@@ -825,7 +825,10 @@ impl App {
                 self.transcript.clear();
                 self.shelf.clear();
                 self.shelf_selected = 0;
-                self.push_message(ChatMessage::system("New session started."));
+                self.push_message(ChatMessage::system(
+                    "Transcript and shelf view cleared. Running tasks continue in the background \
+                     and will reappear on the next event.",
+                ));
             }
             SlashCommand::Clear => {
                 self.transcript.clear();

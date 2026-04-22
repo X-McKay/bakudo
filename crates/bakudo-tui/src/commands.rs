@@ -57,7 +57,9 @@ impl SlashCommand {
                 "list all active and preserved sandboxes  (aliases: /ls /list)"
             }
             SlashCommand::Diverge => "show divergence summary for a preserved worktree",
-            SlashCommand::New => "start a fresh session (clears transcript)",
+            SlashCommand::New => {
+                "clear transcript and local shelf view (does not abort running tasks)"
+            }
             SlashCommand::Clear => "clear the transcript display",
             SlashCommand::Config => "show current configuration",
             SlashCommand::Status => "show provider, model, and active sandbox count",
