@@ -419,23 +419,29 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let hints: Line = if app.focus == FocusedPanel::Chat {
-        let tab_hint = if app.input.starts_with('/') {
-            ": complete  "
-        } else {
-            ": inspect shelf  "
-        };
-        Line::from(vec![
+        // The shelf is hidden below SHELF_MIN_TERM_WIDTH, so don't tell users
+        // Tab can take them there.
+        let shelf_visible = area.width >= SHELF_MIN_TERM_WIDTH;
+        let mut spans = vec![
             hint_key("Enter"),
             Span::styled(": send  ", palette::footer_fg()),
-            hint_key("Tab"),
-            Span::styled(tab_hint, palette::footer_fg()),
+        ];
+        if app.input.starts_with('/') {
+            spans.push(hint_key("Tab"));
+            spans.push(Span::styled(": complete  ", palette::footer_fg()));
+        } else if shelf_visible {
+            spans.push(hint_key("Tab"));
+            spans.push(Span::styled(": inspect shelf  ", palette::footer_fg()));
+        }
+        spans.extend([
             hint_key("PgUp/Dn"),
             Span::styled(": scroll  ", palette::footer_fg()),
             hint_key("Ctrl+C"),
             Span::styled(": quit  ", palette::footer_fg()),
             hint_key("/help"),
             Span::styled(": commands", palette::footer_fg()),
-        ])
+        ]);
+        Line::from(spans)
     } else {
         Line::from(vec![
             hint_key("Tab/Esc"),
