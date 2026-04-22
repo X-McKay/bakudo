@@ -784,9 +784,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Discard {
                         task_id: arg.clone(),
                     });
-                    self.push_message(ChatMessage::info(format!(
-                        "Discarding worktree for {arg}…"
-                    )));
+                    self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
                 }
             }
             SlashCommand::Sandboxes => {
@@ -820,9 +818,7 @@ impl App {
                     let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
                         task_id: arg.clone(),
                     });
-                    self.push_message(ChatMessage::info(format!(
-                        "Fetching divergence for {arg}…"
-                    )));
+                    self.push_message(ChatMessage::info(format!("Fetching divergence for {arg}…")));
                 }
             }
             SlashCommand::New => {
