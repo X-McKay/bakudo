@@ -271,6 +271,11 @@ impl App {
         self.shelf.get(self.shelf_selected)
     }
 
+    /// Whether the shelf currently contains an entry with the given task id.
+    pub fn shelf_has_task(&self, task_id: &str) -> bool {
+        self.shelf.iter().any(|entry| entry.task_id == task_id)
+    }
+
     // ── Tick ───────────────────────────────────────────────────────────────
 
     /// Advance the spinner tick counter.
@@ -759,16 +764,30 @@ impl App {
                 self.push_message(ChatMessage::info(lines.join("\n")));
             }
             SlashCommand::Apply => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Apply {
-                    task_id: arg.clone(),
-                });
-                self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
+                if !self.shelf_has_task(&arg) {
+                    self.push_message(ChatMessage::error(format!(
+                        "No sandbox with task id '{arg}' in this session."
+                    )));
+                } else {
+                    let _ = self.cmd_tx.try_send(SessionCommand::Apply {
+                        task_id: arg.clone(),
+                    });
+                    self.push_message(ChatMessage::info(format!("Applying worktree for {arg}…")));
+                }
             }
             SlashCommand::Discard => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Discard {
-                    task_id: arg.clone(),
-                });
-                self.push_message(ChatMessage::info(format!("Discarding worktree for {arg}…")));
+                if !self.shelf_has_task(&arg) {
+                    self.push_message(ChatMessage::error(format!(
+                        "No sandbox with task id '{arg}' in this session."
+                    )));
+                } else {
+                    let _ = self.cmd_tx.try_send(SessionCommand::Discard {
+                        task_id: arg.clone(),
+                    });
+                    self.push_message(ChatMessage::info(format!(
+                        "Discarding worktree for {arg}…"
+                    )));
+                }
             }
             SlashCommand::Sandboxes => {
                 if self.shelf.is_empty() {
@@ -793,10 +812,18 @@ impl App {
                 }
             }
             SlashCommand::Diverge => {
-                let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
-                    task_id: arg.clone(),
-                });
-                self.push_message(ChatMessage::info(format!("Fetching divergence for {arg}…")));
+                if !self.shelf_has_task(&arg) {
+                    self.push_message(ChatMessage::error(format!(
+                        "No sandbox with task id '{arg}' in this session."
+                    )));
+                } else {
+                    let _ = self.cmd_tx.try_send(SessionCommand::Diverge {
+                        task_id: arg.clone(),
+                    });
+                    self.push_message(ChatMessage::info(format!(
+                        "Fetching divergence for {arg}…"
+                    )));
+                }
             }
             SlashCommand::New => {
                 self.transcript.clear();
