@@ -316,6 +316,28 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Split inner into [prompt | text-area] so the "> " prompt stays pinned
+    // when the text area scrolls horizontally.
+    const PROMPT_WIDTH: u16 = 2;
+    let prompt_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: PROMPT_WIDTH.min(inner.width),
+        height: inner.height,
+    };
+    let text_area = Rect {
+        x: inner.x + PROMPT_WIDTH.min(inner.width),
+        y: inner.y,
+        width: inner.width.saturating_sub(PROMPT_WIDTH),
+        height: inner.height,
+    };
+
+    let prompt = Paragraph::new(Line::from(Span::styled(
+        "> ",
+        Style::default().fg(palette::dim_border()),
+    )));
+    frame.render_widget(prompt, prompt_area);
+
     // Render input with a block cursor at the cursor position.
     let before_cursor = &app.input[..app.cursor];
     let at_cursor = if app.cursor < app.input.len() {
@@ -339,9 +361,27 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         ""
     };
 
-    let prompt_icon = Span::styled("> ", Style::default().fg(palette::dim_border()));
+    // Horizontal scroll: keep the cursor visible. When the cursor would land
+    // past the text area's right edge, shift left so the cursor sits a few
+    // cells from the edge.
+    let cursor_col = before_cursor.width();
+    let cursor_cell_w = if app.cursor < app.input.len() {
+        at_cursor.width().max(1)
+    } else {
+        1
+    };
+    let visible_w = text_area.width as usize;
+    let scroll_x: u16 = if visible_w == 0 {
+        0
+    } else if cursor_col + cursor_cell_w > visible_w {
+        // Pull the cursor 4 cells in from the right edge for breathing room.
+        let target_col = visible_w.saturating_sub(4);
+        (cursor_col.saturating_sub(target_col)) as u16
+    } else {
+        0
+    };
+
     let line = Line::from(vec![
-        prompt_icon,
         Span::styled(before_cursor, Style::default().fg(Color::White)),
         Span::styled(
             at_cursor,
@@ -353,8 +393,8 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(after_cursor, Style::default().fg(Color::White)),
     ]);
 
-    let para = Paragraph::new(line);
-    frame.render_widget(para, inner);
+    let para = Paragraph::new(line).scroll((0, scroll_x));
+    frame.render_widget(para, text_area);
 }
 
 // ─── Completion popup ──────────────────────────────────────────────────────
