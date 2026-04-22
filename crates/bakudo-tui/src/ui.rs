@@ -25,6 +25,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, FocusedPanel, MessageRole, ShelfColor};
@@ -339,26 +340,23 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(prompt, prompt_area);
 
     // Render input with a block cursor at the cursor position.
+    //
+    // Slice on grapheme boundaries (not char boundaries) so the cursor cell
+    // covers a full grapheme cluster — emoji with variation selectors, CJK,
+    // and combining-mark sequences (é, naïve in NFD) all stay intact instead
+    // of leaking a partial grapheme into after_cursor and rendering with a
+    // ghost extra cell.
     let before_cursor = &app.input[..app.cursor];
-    let at_cursor = if app.cursor < app.input.len() {
-        let end = app.input[app.cursor..]
-            .char_indices()
-            .nth(1)
-            .map(|(i, _)| app.cursor + i)
-            .unwrap_or(app.input.len());
-        &app.input[app.cursor..end]
+    let (at_cursor, after_cursor) = if app.cursor < app.input.len() {
+        let tail = &app.input[app.cursor..];
+        let g_len = tail.graphemes(true).next().map(str::len).unwrap_or(0);
+        if g_len == 0 {
+            (" ", "")
+        } else {
+            (&tail[..g_len], &tail[g_len..])
+        }
     } else {
-        " "
-    };
-    let after_cursor = if app.cursor < app.input.len() {
-        let end = app.input[app.cursor..]
-            .char_indices()
-            .nth(1)
-            .map(|(i, _)| app.cursor + i)
-            .unwrap_or(app.input.len());
-        &app.input[end..]
-    } else {
-        ""
+        (" ", "")
     };
 
     // Horizontal scroll: keep the cursor visible. When the cursor would land
@@ -381,14 +379,16 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
 
+    // REVERSED on the cursor span swaps fg/bg in-place, which terminals lay
+    // out as a single grapheme-aligned inversion — fewer wide-glyph artifacts
+    // than an explicit fg=Black bg=White pair in adjacent spans.
     let line = Line::from(vec![
         Span::styled(before_cursor, Style::default().fg(Color::White)),
         Span::styled(
             at_cursor,
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
-                .add_modifier(Modifier::BOLD),
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ),
         Span::styled(after_cursor, Style::default().fg(Color::White)),
     ]);
