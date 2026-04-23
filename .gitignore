@@ -5,3 +5,5 @@ Cargo.lock.bak
 *.swo
 .env
 .env.local
+.bakudo/
+.claude/settings.local.json

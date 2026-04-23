@@ -68,7 +68,7 @@ Bakudo v2 has exactly two cooperating processes per repository:
 1.  **Supervisor** — a single static Rust binary, persistent, ~5 MB resident. Owns the TUI, the abox fleet, the SQLite state store, the wallet, the wake scheduler, and the MCP server. **Never** makes LLM calls itself.
 2.  **Deliberator** — the LLM harness process (e.g., `claude`, `codex`). Spawned by the Supervisor only when reasoning is required. Connects to the Supervisor over MCP stdio. Exits when it calls the `suspend` tool or when its per-wake budget is exhausted.
 
-The Deliberator is **stateless across wakes**. State that must persist (Blackboard, Ledger, Wallet, fleet status) lives in the Supervisor. Each wake re-injects whatever state the Deliberator needs via the `WakeEvent` payload and the MCP meta-info block.
+The Deliberator is **stateless across wakes**. State that must persist (MissionState, Ledger, Wallet, fleet status) lives in the Supervisor. Each wake re-injects whatever state the Deliberator needs via the `WakeEvent` payload and the MCP meta-info block.
 
 This split is the single most important architectural decision in this document. Every other choice flows from it.
 
@@ -158,7 +158,7 @@ bakudo/
 
 | Crate | Responsibility | May depend on |
 |---|---|---|
-| `bakudo-core` | Domain types: `Mission`, `Experiment`, `Wallet`, `WakeEvent`, `Blackboard`, `Posture`. Pure data + small pure functions. No `tokio`, no `reqwest`, no SQLite. | `serde`, `chrono`, `thiserror`, `uuid` |
+| `bakudo-core` | Domain types: `Mission`, `Experiment`, `Wallet`, `WakeEvent`, `MissionState`, `Posture`. Pure data + small pure functions. No `tokio`, no `reqwest`, no SQLite. | `serde`, `chrono`, `thiserror`, `uuid` |
 | `bakudo-mcp` | MCP tool schemas, request/response types, stdio transport, the middleware that gates `host_exec`. | `bakudo-core`, `serde_json`, `tokio`, `tracing` |
 | `bakudo-providers` | Parses provider TOML, spawns Deliberator subprocesses, owns the per-provider system-prompt assembly. | `bakudo-core`, `bakudo-mcp`, `tokio`, `toml` |
 | `bakudo-supervisor` | Fleet manager (abox jobs), wake scheduler, debouncer, wallet enforcement, SQLite store, MCP server hosting, event bus. | `bakudo-core`, `bakudo-mcp`, `bakudo-providers`, `abox-core`, `rusqlite`, `tokio`, `tracing` |
@@ -317,7 +317,7 @@ pub struct WakeEvent {
     pub reason: WakeReason,
     pub created_at: DateTime<Utc>,
     pub payload: serde_json::Value, // shape depends on reason
-    pub blackboard: Blackboard,
+    pub mission_state: MissionState,
     pub wallet: Wallet,
     pub user_inbox: Vec<UserMessage>,
     pub recent_ledger: Vec<LedgerEntry>,
@@ -343,14 +343,14 @@ pub struct UserMessage {
     pub urgent: bool,
 }
 
-// ─── Blackboard and Ledger ───────────────────────────────────────────────────
+// ─── MissionState and Ledger ───────────────────────────────────────────────────
 
 /// The Deliberator's externalised working memory. Stored as JSON in SQLite.
 /// The Supervisor never interprets the inner shape; it only round-trips it.
 /// Convention: the schema is whatever the system prompt says it is, but a
-/// minimal recommended layout is captured in default-blackboard.json.
+/// minimal recommended layout is captured in default-mission-state.json.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Blackboard(pub serde_json::Value);
+pub struct MissionState(pub serde_json::Value);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEntry {
@@ -372,9 +372,9 @@ pub enum LedgerKind {
 }
 ```
 
-### 5.1 Default Blackboard layout
+### 5.1 Default MissionState layout
 
-The Supervisor never imposes a Blackboard schema, but the **default system prompt** instructs the Deliberator to maintain at least these keys. Implementers should ship a `crates/bakudo-core/data/default-blackboard.json`:
+The Supervisor never imposes a MissionState schema, but the **default system prompt** instructs the Deliberator to maintain at least these keys. Implementers should ship a `crates/bakudo-core/data/default-mission-state.json`:
 
 ```json
 {
@@ -497,9 +497,9 @@ Run a command on the host. **Always prompts the user via the TUI.** Reserved for
 
 If the user denies, the call returns `{ "approved": false }` and the Deliberator must not retry the same command without a new justification.
 
-### 6.5 `update_blackboard`
+### 6.5 `update_mission_state`
 
-JSON-merge-patch update of the Blackboard. The Deliberator should call this before suspending so that the next wake sees its current thinking.
+JSON-merge-patch update of the MissionState. The Deliberator should call this before suspending so that the next wake sees its current thinking.
 
 ```json
 // request
@@ -720,7 +720,7 @@ CREATE TABLE wake_events (
   processed_at    TEXT
 );
 
-CREATE TABLE blackboards (
+CREATE TABLE mission_states (
   mission_id      TEXT PRIMARY KEY REFERENCES missions(id),
   state_json      TEXT NOT NULL,
   updated_at      TEXT NOT NULL
@@ -755,7 +755,7 @@ A Wake is an atomic unit of LLM activity. The full lifecycle:
 
 1. **Trigger.** Any `WakeReason` is produced by an actor. Pushed to `WakeScheduler`.
 2. **Debounce.** Scheduler waits up to the debounce window for additional triggers for the same Mission and coalesces them.
-3. **Materialise.** Scheduler builds a complete `WakeEvent`: pulls the current Blackboard, Wallet, last K=5 LedgerEntries, and any undelivered UserMessages. Persists the event to `wake_events`.
+3. **Materialise.** Scheduler builds a complete `WakeEvent`: pulls the current MissionState, Wallet, last K=5 LedgerEntries, and any undelivered UserMessages. Persists the event to `wake_events`.
 4. **Dispatch.** Scheduler signals `DeliberatorRunner` for that Mission.
 5. **Spawn.** `DeliberatorRunner` reads the provider config, spawns the harness with the resume flag and stdin set to the JSON-encoded `WakeEvent`. Marks the Mission `Deliberating`.
 6. **Tool calls.** Harness reads stdin, calls Bakudo MCP tools. Each call passes through the `MetaInjector` middleware, which appends the `meta` sidecar.
@@ -769,7 +769,7 @@ A wake never recurses. A tool call cannot trigger another wake within the same w
 
 ## 11. Mission and Explore Postures
 
-The two postures share all infrastructure; they differ only in the system prompt and the implicit gate on `dispatch_swarm` results. The Deliberator declares which posture it is operating in via a Blackboard field; the Supervisor uses this to pick the right system prompt at the next wake.
+The two postures share all infrastructure; they differ only in the system prompt and the implicit gate on `dispatch_swarm` results. The Deliberator declares which posture it is operating in via a MissionState field; the Supervisor uses this to pick the right system prompt at the next wake.
 
 ### 11.1 Mission
 
@@ -778,16 +778,16 @@ Trigger: a specific bounded ask. The Deliberator's system prompt instructs it to
 1. Optionally ask up to 2 clarifying questions via `ask_user`.
 2. Write the change locally or via `abox_apply_patch`.
 3. Fan out a verification swarm via `dispatch_swarm` containing at minimum: tests, lint+format, typecheck, and (if applicable) a targeted bench.
-4. On all-pass: complete the Mission. On any-fail: either fix-and-retry, or transition to Explore on the failing dimension by setting `posture: explore` on the Blackboard and calling `dispatch_swarm` with hypothesis-shaped experiments.
+4. On all-pass: complete the Mission. On any-fail: either fix-and-retry, or transition to Explore on the failing dimension by setting `posture: explore` on the MissionState and calling `dispatch_swarm` with hypothesis-shaped experiments.
 
 ### 11.2 Explore
 
 Trigger: an open-ended ask, a Mission-to-Explore transition, or a `SchedulerTick` (always-on mode). The Deliberator's system prompt instructs it to:
 
-1. Establish a Done Contract (target metric, baseline, stop conditions) on the Blackboard. May ask up to 2 clarifying questions.
+1. Establish a Done Contract (target metric, baseline, stop conditions) on the MissionState. May ask up to 2 clarifying questions.
 2. Run a baseline measurement experiment to validate the metric script.
 3. Dispatch hypothesis swarms in waves of size ≤ `concurrent_max`, choosing batch sizes that respect the wallet.
-4. After each wave, update the Blackboard's `best_known` and `things_tried`, distil any persistent learnings via `record_lesson`, and decide whether to exploit (variations on the winner) or explore (genuinely new directions).
+4. After each wave, update the MissionState's `best_known` and `things_tried`, distil any persistent learnings via `record_lesson`, and decide whether to exploit (variations on the winner) or explore (genuinely new directions).
 5. Stop when the contract's `stop_conditions` fire (default: 3 consecutive waves fail to improve `best_known.score` by ≥ X%) or the wallet is exhausted.
 
 The implementer ships default prompts in `.bakudo/prompts/mission.md` and `.bakudo/prompts/explore.md`. See Appendix C.
@@ -864,7 +864,7 @@ The TUI subscribes to a `tokio::sync::broadcast` channel exposed by the Supervis
 
 System prompts live in `.bakudo/prompts/` and are versioned. They are not embedded in the binary so users can iterate on them without recompiling. The Supervisor reads the `system_prompt_file` from the active provider TOML and prepends it to every `WakeEvent` it sends to the harness.
 
-The prompts MUST teach the Deliberator: the Blackboard schema; the meta sidecar contract; the `suspend` discipline (one Mission step per wake — dispatch and suspend, do not stay alive polling); the wallet rules; and the posture-specific behaviour described in §11.
+The prompts MUST teach the Deliberator: the MissionState schema; the meta sidecar contract; the `suspend` discipline (one Mission step per wake — dispatch and suspend, do not stay alive polling); the wallet rules; and the posture-specific behaviour described in §11.
 
 Recommended starter prompts are in Appendix C; treat them as starting points to be tuned with usage.
 
@@ -937,7 +937,7 @@ This plan is sized for approximately 8 working sessions for a single experienced
 ### Phase 2 — SQLite store (1 day)
 
 - Implement migration `0001_initial.sql` and a typed wrapper `bakudo-supervisor::store::Store`.
-- Provide CRUD for `missions`, `experiments`, `wake_events`, `blackboards`, `ledger`, `user_messages`.
+- Provide CRUD for `missions`, `experiments`, `wake_events`, `mission_states`, `ledger`, `user_messages`.
 - Provide a `MemoryStore` implementing the same trait for tests.
 - Acceptance: integration test creates a Mission, dispatches an experiment, persists a summary, restarts the store, reloads everything intact.
 
@@ -1020,7 +1020,7 @@ A single one-shot script `scripts/import-v1-skills.sh` is provided to do the ski
 | Level | Tooling | What it covers |
 |---|---|---|
 | Unit | `cargo test` per crate | Pure types in `bakudo-core`; tool-schema serde; SQL query correctness against `MemoryStore`; provider TOML parsing. |
-| Property | `proptest` | Wallet arithmetic; debouncer correctness under random event ordering; JSON merge-patch behaviour for `update_blackboard`. |
+| Property | `proptest` | Wallet arithmetic; debouncer correctness under random event ordering; JSON merge-patch behaviour for `update_mission_state`. |
 | Integration | `cargo nextest` with `tempfile` | Spawn the Supervisor with the `exec` mock harness; run a scripted Mission; assert end-state in SQLite. |
 | End-to-end | Shell scripts in `scripts/e2e/` | Real `claude` / `codex` against a checked-in toy repo. Manually triggered (CI-optional). |
 | Crash | Kill-restart harness in integration tests | Verifies §8.5. |
@@ -1067,7 +1067,7 @@ These are choices intentionally left unmade so the implementer can take them bas
         "summary": { "exit_code": 101, "duration_ms": 12110, "stderr_tail": "thread 'main' panicked..." } }
     ]
   },
-  "blackboard": {
+  "mission_state": {
     "version": 1,
     "objective": "reduce p50 query latency by ≥30%",
     "done_contract": {
@@ -1177,13 +1177,13 @@ These are starter prompts. Tune with usage.
 You are the Bakudo Deliberator operating in MISSION posture.
 
 Each time you wake, you will receive a WakeEvent JSON describing the
-trigger, the Blackboard, the Wallet, and any user messages.
+trigger, the MissionState, the Wallet, and any user messages.
 
 Your responsibilities, in order:
 
 1. Read the WakeEvent in full. If `reason` is `user_message`, treat the
    most recent user_inbox entry as your immediate instruction.
-2. Maintain the Blackboard via the `update_blackboard` tool. The
+2. Maintain the MissionState via the `update_mission_state` tool. The
    recommended schema is described in the system addendum below.
 3. Make code changes via `abox_apply_patch` (preferred) or, for very
    small probes, `abox_exec`. Do not use any harness-native shell tool
@@ -1191,9 +1191,9 @@ Your responsibilities, in order:
 4. Verify changes by calling `dispatch_swarm` with a homogeneous batch
    of verifiers (tests, lint, typecheck, targeted bench). On
    all-success, mark the Mission complete in your final action by
-   updating Blackboard status to "completed". On any failure, either
+   updating MissionState status to "completed". On any failure, either
    fix-and-retry, or transition to EXPLORE posture by setting
-   `posture: "explore"` on the Blackboard and dispatching a hypothesis
+   `posture: "explore"` on the MissionState and dispatching a hypothesis
    batch on the failing dimension.
 5. Respect the Wallet. Reject any plan that would exceed
    `abox_workers_remaining` or `wall_clock_remaining`. The meta sidecar
@@ -1219,15 +1219,15 @@ parallel `dispatch_swarm` experiments under a strict Wallet.
 
 Each wake:
 
-1. Read the WakeEvent. The Blackboard's `done_contract` defines what
+1. Read the WakeEvent. The MissionState's `done_contract` defines what
    "improvement" means.
-2. If the Blackboard has no `done_contract`, your first task is to
+2. If the MissionState has no `done_contract`, your first task is to
    establish one. You may call `ask_user` at most twice for
    clarification. Then write a measurement script (or pick one from a
    skill) and run it once via `abox_exec` to record a baseline.
 3. Generate hypotheses. Use `search_skills` to find relevant
    recipes. Aim for 3–5 distinct directions per wave. Record each in
-   the Blackboard's `hypotheses` and `things_tried` arrays.
+   the MissionState's `hypotheses` and `things_tried` arrays.
 4. Dispatch a wave via `dispatch_swarm`. Do not exceed the Wallet.
    Prefer a wave size that uses ≤ `concurrent_max` workers and ≤ 50%
    of `abox_workers_remaining`.
@@ -1237,11 +1237,11 @@ Each wake:
    beat it. If a clear winner emerges, decide whether to **exploit**
    (variations on the winner) or **explore** (genuinely new direction).
    Distil persistent learnings via `record_lesson`.
-7. Stop when the Blackboard's `stop_conditions` fire or the Wallet
+7. Stop when the MissionState's `stop_conditions` fire or the Wallet
    is exhausted. Write a final Ledger entry summarising what was tried
    and what the best known result is.
 
-Always update the Blackboard before suspending so your future self can
+Always update the MissionState before suspending so your future self can
 pick up the thread.
 ```
 
@@ -1250,9 +1250,9 @@ pick up the thread.
 ## 23. Glossary
 
 - **abox.** The microVM-backed sandboxing tool that Bakudo dispatches work into. Owned by a separate repository.
-- **Blackboard.** The Deliberator's externalised working memory; a JSON document stored per Mission.
+- **MissionState.** The Deliberator's externalised working memory; a JSON document stored per Mission.
 - **Deliberator.** The ephemeral LLM-harness process spawned by Bakudo to do reasoning.
-- **Done Contract.** The agreed-on success criteria for an Explore Mission, captured on the Blackboard.
+- **Done Contract.** The agreed-on success criteria for an Explore Mission, captured on the MissionState.
 - **Ledger.** Append-only summaries of decisions, experiment outcomes, and lessons.
 - **Lesson.** A distilled, persistent learning written to `.bakudo/lessons/` as Markdown.
 - **Mission.** A user-initiated unit of work, of a specific posture.

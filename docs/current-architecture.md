@@ -43,8 +43,9 @@ For autonomous missions:
 
 - The deliberator process receives `BAKUDO_WAKE_EVENT_PATH`, `BAKUDO_SYSTEM_PROMPT_PATH`, `BAKUDO_MISSION_ID`, `BAKUDO_POSTURE`, `BAKUDO_REPO_ROOT`, and `BAKUDO_MCP_TRANSPORT=stdio`.
 - Provider `.toml` files declare the engine, prompt file, abox profile, wake budget, and environment passthrough.
+- The supervisor enforces each provider's per-wake `wake_budget` wall-clock and tool-call limits, then re-queues a timeout wake instead of leaving the deliberator running indefinitely.
 - The current tool surface is:
-  `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_blackboard`, `record_lesson`, `ask_user`, `cancel_experiments`, and `suspend`.
+  `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_mission_state`, `record_lesson`, `ask_user`, `cancel_experiments`, and `suspend`.
 - Every tool result includes a `meta` sidecar with wallet, fleet, posture, pending-user-message, and wake metadata.
 
 ## State Model
@@ -69,8 +70,8 @@ Autonomous missions add a second durable state model in `MissionStore`:
 
 - `Mission`: top-level objective, posture, provider, wallet, and mission status.
 - `Experiment`: each dispatched abox worker, its spec, status, and summary.
-- `WakeEvent`: durable wake queue entries, including blackboard, wallet snapshot, user inbox, and recent ledger context.
-- `Blackboard`: the mission working memory carried across wakes.
+- `WakeEvent`: durable wake queue entries, including Mission State, wallet snapshot, user inbox, and recent ledger context.
+- `MissionState`: the mission working memory carried across wakes.
 - `UserMessage`: steering from the host layer that should wake or inform the deliberator.
 - `LedgerEntry`: durable mission-side decisions, summaries, and lessons.
 - `ActiveWaveRecord`: persisted experiment-wave bookkeeping so multi-wave missions survive races and restarts.
@@ -85,6 +86,12 @@ Wake payload snapshots are also written to:
 
 ```text
 <bakudo-data>/repos/<repo-scope>/wakes/<wake-id>.json
+```
+
+Append-only mission provenance is written to:
+
+```text
+<repo>/.bakudo/provenance/<mission-id>.ndjson
 ```
 
 ## Worktree Lifecycle
@@ -153,7 +160,7 @@ Mission-aware headless commands now include:
 The current test suite is layered:
 
 - Unit tests for protocol/config/provider/state logic.
-- Deterministic fake-`abox` integration tests in `tests/runtime.rs`, including wake flow, blackboard updates, wallet enforcement, host approvals, ask-user flow, multi-wave dispatch, lesson persistence, and restart recovery.
+- Deterministic fake-`abox` integration tests in `tests/runtime.rs`, including wake flow, Mission State updates, wallet enforcement, host approvals, ask-user flow, multi-wave dispatch, lesson persistence, and restart recovery.
 - TUI state and render tests.
 - Optional live smoke tests against installed `abox 0.3.1` when available locally.
 

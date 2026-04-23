@@ -213,16 +213,10 @@ pub fn read_swarm_artifact(
     mission_id: &str,
     artifact_path: &str,
 ) -> Result<String> {
-    let primary = swarm_artifact_path(repo_data_dir, mission_id, artifact_path)?;
-    if primary.exists() {
-        return std::fs::read_to_string(&primary)
-            .with_context(|| format!("failed to read swarm artifact '{}'", primary.display()));
-    }
-
-    let legacy = legacy_swarm_artifact_path(repo_data_dir, mission_id, artifact_path)?;
-    if legacy.exists() {
-        return std::fs::read_to_string(&legacy)
-            .with_context(|| format!("failed to read swarm artifact '{}'", legacy.display()));
+    let path = swarm_artifact_path(repo_data_dir, mission_id, artifact_path)?;
+    if path.exists() {
+        return std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read swarm artifact '{}'", path.display()));
     }
 
     anyhow::bail!(
@@ -272,19 +266,6 @@ pub fn storage_key(value: &str) -> String {
     };
     let id = Uuid::new_v5(&Uuid::NAMESPACE_URL, normalized.as_bytes());
     format!("{label}-{id}")
-}
-
-fn legacy_swarm_artifact_path(
-    repo_data_dir: &Path,
-    mission_id: &str,
-    artifact_path: &str,
-) -> Result<PathBuf> {
-    let relative = normalize_artifact_path(artifact_path)
-        .map_err(|err| anyhow::anyhow!("invalid swarm artifact path '{artifact_path}': {err}"))?;
-    Ok(repo_data_dir
-        .join("swarm-artifacts")
-        .join(mission_id)
-        .join(relative))
 }
 
 fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {

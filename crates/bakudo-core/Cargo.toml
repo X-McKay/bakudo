@@ -1,7 +1,9 @@
 [package]
 name = "bakudo-core"
 version = "2.0.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true

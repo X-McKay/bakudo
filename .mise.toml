@@ -3,7 +3,7 @@ rust = "stable"
 just = "latest"
 
 [tasks.check]
-run = "cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo test --workspace"
+run = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
 description = "Full CI check: format, lint, and tests (used by pre-commit hook)"
 
 [tasks."hooks:install"]

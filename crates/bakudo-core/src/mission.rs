@@ -391,7 +391,7 @@ pub struct WakeEvent {
     pub reason: WakeReason,
     pub created_at: DateTime<Utc>,
     pub payload: serde_json::Value,
-    pub blackboard: Blackboard,
+    pub mission_state: MissionState,
     pub wallet: Wallet,
     #[serde(default)]
     pub user_inbox: Vec<UserMessage>,
@@ -420,9 +420,9 @@ pub struct UserMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Blackboard(pub serde_json::Value);
+pub struct MissionState(pub serde_json::Value);
 
-impl Blackboard {
+impl MissionState {
     pub fn default_layout() -> Self {
         Self(serde_json::json!({
             "version": 1,
@@ -568,9 +568,9 @@ mod tests {
     }
 
     #[test]
-    fn blackboard_default_layout_contains_required_keys() {
-        let board = Blackboard::default_layout();
-        let obj = board.0.as_object().unwrap();
+    fn mission_state_default_layout_contains_required_keys() {
+        let mission_state = MissionState::default_layout();
+        let obj = mission_state.0.as_object().unwrap();
         assert!(obj.contains_key("objective"));
         assert!(obj.contains_key("done_contract"));
         assert!(obj.contains_key("best_known"));

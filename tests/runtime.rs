@@ -11,7 +11,7 @@ use bakudo_core::config::BakudoConfig;
 use bakudo_core::control::swarm_artifact_root;
 use bakudo_core::error::AboxError;
 use bakudo_core::mission::{
-    Experiment, ExperimentStatus, Mission, MissionId, MissionStatus, Posture, Wallet,
+    Experiment, ExperimentStatus, Mission, MissionId, MissionState, MissionStatus, Posture, Wallet,
 };
 use bakudo_core::policy::{ExecutionPolicy, ExecutionPolicyRule, PolicyDecision};
 use bakudo_core::protocol::{
@@ -221,15 +221,28 @@ def call_error(name, arguments=None):
 }
 
 fn write_exec_provider_files(repo: &TempRepo, script_path: &Path) {
+    write_exec_provider_files_with_budget(repo, script_path, 20, "5m");
+}
+
+fn write_exec_provider_files_with_budget(
+    repo: &TempRepo,
+    script_path: &Path,
+    tool_calls: u32,
+    wall_clock: &str,
+) {
     let providers_dir = repo.path().join(".bakudo").join("providers");
     fs::create_dir_all(&providers_dir).unwrap();
     let mission = format!(
-        "name = \"exec-mission\"\nengine = \"exec\"\nposture = \"mission\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/mission.md\"\n[wake_budget]\ntool_calls = 20\nwall_clock = \"5m\"\ndebounce = \"0.1s\"\n",
-        script_path.display().to_string()
+        "name = \"exec-mission\"\nengine = \"exec\"\nposture = \"mission\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/mission.md\"\n[wake_budget]\ntool_calls = {}\nwall_clock = {:?}\ndebounce = \"0.1s\"\n",
+        script_path.display().to_string(),
+        tool_calls,
+        wall_clock,
     );
     let explore = format!(
-        "name = \"exec-explore\"\nengine = \"exec\"\nposture = \"explore\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/explore.md\"\n[wake_budget]\ntool_calls = 20\nwall_clock = \"5m\"\ndebounce = \"0.1s\"\n",
-        script_path.display().to_string()
+        "name = \"exec-explore\"\nengine = \"exec\"\nposture = \"explore\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/explore.md\"\n[wake_budget]\ntool_calls = {}\nwall_clock = {:?}\ndebounce = \"0.1s\"\n",
+        script_path.display().to_string(),
+        tool_calls,
+        wall_clock,
     );
     fs::write(providers_dir.join("exec-mission.toml"), mission).unwrap();
     fs::write(providers_dir.join("exec-explore.toml"), explore).unwrap();
@@ -1315,14 +1328,14 @@ async fn session_controller_answers_progress_queries_from_host_layer() {
 }
 
 #[tokio::test]
-async fn mission_runtime_completes_wake_flow_and_persists_blackboard() {
+async fn mission_runtime_completes_wake_flow_and_persists_mission_state() {
     let dir = TempDir::new("bakudo-mission-runtime");
     let repo = TempRepo::new();
     let script = write_mock_deliberator_script(
         &dir,
         r#"
 if wake["reason"] in ("manual_resume", "user_message"):
-    call("update_blackboard", {"patch": {"next_steps": ["wave-1"], "best_known": {"label": "baseline", "score": 0}}})
+    call("update_mission_state", {"patch": {"next_steps": ["wave-1"], "best_known": {"label": "baseline", "score": 0}}})
     call("dispatch_swarm", {
         "experiments": [{
             "label": "wave-1",
@@ -1335,7 +1348,7 @@ if wake["reason"] in ("manual_resume", "user_message"):
     })
     call("suspend", {"reason": "experiments_dispatched"})
 elif wake["reason"] == "experiments_complete":
-    call("update_blackboard", {"patch": {"best_known": {"label": "wave-1", "score": 42}, "next_steps": []}})
+    call("update_mission_state", {"patch": {"best_known": {"label": "wave-1", "score": 42}, "next_steps": []}})
     call("suspend", {"reason": "complete", "complete": True})
 else:
     call("suspend", {"reason": "noop", "complete": True})
@@ -1435,8 +1448,8 @@ else:
         }
     };
 
-    let blackboard = store.blackboard(mission.id).await.unwrap();
-    assert_eq!(blackboard.0["best_known"]["score"].as_i64(), Some(42));
+    let mission_state = store.mission_state(mission.id).await.unwrap();
+    assert_eq!(mission_state.0["best_known"]["score"].as_i64(), Some(42));
     let experiments = store.experiments_for_mission(mission.id).await.unwrap();
     assert_eq!(experiments.len(), 1);
     assert_eq!(experiments[0].status, ExperimentStatus::Succeeded);
@@ -1467,7 +1480,7 @@ if wake["reason"] == "manual_resume":
 elif wake["reason"] == "experiments_complete":
     experiments = wake["payload"]["experiments"]
     if experiments[0]["label"] == "wave-1":
-        call("update_blackboard", {"patch": {"next_steps": ["wave-2"]}})
+        call("update_mission_state", {"patch": {"next_steps": ["wave-2"]}})
         call("dispatch_swarm", {
             "experiments": [{
                 "label": "wave-2",
@@ -1480,7 +1493,7 @@ elif wake["reason"] == "experiments_complete":
         })
         call("suspend", {"reason": "wave-2"})
     else:
-        call("update_blackboard", {"patch": {
+        call("update_mission_state", {"patch": {
             "best_known": {"label": "wave-2", "score": 84},
             "next_steps": []
         }})
@@ -1583,9 +1596,12 @@ else:
         }
     };
 
-    let blackboard = store.blackboard(mission.id).await.unwrap();
-    assert_eq!(blackboard.0["best_known"]["label"].as_str(), Some("wave-2"));
-    assert_eq!(blackboard.0["best_known"]["score"].as_i64(), Some(84));
+    let mission_state = store.mission_state(mission.id).await.unwrap();
+    assert_eq!(
+        mission_state.0["best_known"]["label"].as_str(),
+        Some("wave-2")
+    );
+    assert_eq!(mission_state.0["best_known"]["score"].as_i64(), Some(84));
     let experiments = store.experiments_for_mission(mission.id).await.unwrap();
     assert_eq!(experiments.len(), 2);
     assert!(experiments
@@ -2033,6 +2049,217 @@ call("suspend", {"reason": "complete", "complete": True})
 }
 
 #[tokio::test]
+async fn mission_runtime_writes_append_only_provenance_log() {
+    let dir = TempDir::new("bakudo-provenance");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+call("update_mission_state", {"patch": {"next_steps": ["done"]}})
+call("suspend", {"reason": "complete", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-provenance".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Write provenance".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let provenance_path = repo
+        .path()
+        .join(".bakudo")
+        .join("provenance")
+        .join(format!("{}.ndjson", mission.id));
+    let provenance = fs::read_to_string(&provenance_path).unwrap();
+    let events: Vec<serde_json::Value> = provenance
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events.iter().any(|entry| entry["event"] == "wake_queued"));
+    assert!(events.iter().any(|entry| entry["event"] == "wake_started"));
+    assert!(events
+        .iter()
+        .any(|entry| { entry["event"] == "tool_call" && entry["tool"] == "update_mission_state" }));
+    assert!(events.iter().any(|entry| entry["event"] == "wake_finished"));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_enforces_per_wake_tool_call_budget() {
+    let dir = TempDir::new("bakudo-wake-budget");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+if wake["reason"] == "manual_resume":
+    call("update_mission_state", {"patch": {"next_steps": ["first"]}})
+    response = call_error("update_mission_state", {"patch": {"next_steps": ["second"]}})
+    assert response["error"]["message"].startswith("wake tool-call budget exhausted")
+elif wake["reason"] == "timeout":
+    assert wake["payload"]["kind"] == "wake_budget_tool_calls"
+    call("suspend", {"reason": "complete", "complete": True})
+else:
+    call("suspend", {"reason": "noop", "complete": True})
+"#,
+    );
+    write_exec_provider_files_with_budget(&repo, &script, 1, "5m");
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-wake-budget".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Enforce wake budget".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let wakes = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+    assert!(wakes.is_empty());
+    let provenance_path = repo
+        .path()
+        .join(".bakudo")
+        .join("provenance")
+        .join(format!("{}.ndjson", mission.id));
+    let provenance = fs::read_to_string(&provenance_path).unwrap();
+    assert!(provenance.contains("\"event\":\"wake_budget_exhausted\""));
+    assert!(provenance.contains("\"kind\":\"tool_calls\""));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mission_runtime_recovers_running_experiment_on_restart() {
     let dir = TempDir::new("bakudo-mission-recovery");
     let repo = TempRepo::new();
@@ -2078,10 +2305,7 @@ call("suspend", {"reason": "complete", "complete": True})
     };
     store.upsert_mission(&mission).await.unwrap();
     store
-        .save_blackboard(
-            mission.id,
-            &bakudo_core::mission::Blackboard::default_layout(),
-        )
+        .save_mission_state(mission.id, &MissionState::default_layout())
         .await
         .unwrap();
     store

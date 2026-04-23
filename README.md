@@ -5,18 +5,18 @@ Bakudo is a Rust agent harness for running provider CLIs inside isolated `abox` 
 Version 2 now ships two complementary execution paths:
 
 - a classic task runner for one-off `bakudo run` and `bakudo swarm` execution
-- a wake-based mission runtime that keeps a durable blackboard, wallet, wake queue, and conversational host layer around a long-lived objective
+- a wake-based mission runtime that keeps a durable Mission State, wallet, wake queue, and conversational host layer around a long-lived objective
 
 ## Features
 
-- **Wake-based mission runtime**: A supervisor loop persists `Mission`, `Experiment`, `WakeEvent`, `Blackboard`, `Wallet`, `UserMessage`, and ledger state in a repo-scoped SQLite store so missions can resume after restarts.
+- **Wake-based mission runtime**: A supervisor loop persists `Mission`, `Experiment`, `WakeEvent`, `MissionState`, `Wallet`, `UserMessage`, and ledger state in a repo-scoped SQLite store so missions can resume after restarts.
 - **Provider agnostic**: Run Claude Code, Codex, OpenCode, Gemini, or repo-local `exec` deliberators headlessly. Classic runs still use the provider registry; autonomous missions load `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
-- **Deliberator MCP tool surface**: Autonomous missions speak to Bakudo over stdio and can call `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_blackboard`, `record_lesson`, `ask_user`, `cancel_experiments`, and `suspend`, each with a shared `meta` sidecar.
+- **Deliberator MCP tool surface**: Autonomous missions speak to Bakudo over stdio and can call `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_mission_state`, `record_lesson`, `ask_user`, `cancel_experiments`, and `suspend`, each with a shared `meta` sidecar.
 - **Execution policy**: A native Bakudo policy can allow, prompt, or forbid provider execution per provider, and can independently decide whether Bakudo passes the provider's "allow all tools" flag.
 - **Host-owned worktree lifecycle**: Bakudo decides whether to preserve, merge, or discard the sandbox worktree after the provider exits.
 - **Polished TUI**: A responsive `ratatui` interface with a persisted chat transcript, observability shelf, wallet/fleet status, slash commands, approval and ask-user modals, and keyboard-driven worktree actions.
 - **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
-- **Durable lessons and wake provenance**: Lessons are written to `<repo>/.bakudo/lessons/`, and wake payloads plus mission state are stored under Bakudo's repo-scoped data root.
+- **Durable lessons and wake provenance**: Lessons are written to `<repo>/.bakudo/lessons/`, per-mission provenance is appended to `<repo>/.bakudo/provenance/<mission-id>.ndjson`, and wake payloads plus mission state are stored under Bakudo's repo-scoped data root.
 - **Machine-readable headless runs**: `bakudo run --json` streams newline-delimited JSON events, `--output-schema` validates the final summary, and `post_run_hook` can hand completed run payloads to external tooling.
 - **Headless swarm execution**: `bakudo swarm --plan plan.json` executes dependency-aware task graphs with bounded concurrency, per-task artifacts, and the same JSON/schema integration surface as single runs.
 - **Repo-scoped control plane**: Persisted run summaries, mission state, candidate listings, and swarm artifacts can be queried later with `bakudo result`, `bakudo wait`, `bakudo candidates`, `bakudo artifact`, and `bakudo status`.
@@ -167,6 +167,7 @@ Autonomous missions use a durable wake/supervisor model:
 - Each wake writes a JSON snapshot to `<repo-data>/wakes/<wake-id>.json`.
 - Deliberators are loaded from `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
 - `dispatch_swarm` launches `abox` experiments, enforces the mission wallet, and schedules the next wake when the selected completion condition is reached.
+- Each provider wake also respects its configured `wake_budget`; if the deliberator exceeds its per-wake wall-clock or tool-call budget, Bakudo ends that wake and queues a timeout wake.
 - `record_lesson` writes Markdown lessons to `<repo>/.bakudo/lessons/`.
 
 Classic `bakudo run` and `bakudo swarm` remain available and still use the provider registry plus the host-owned worktree lifecycle.

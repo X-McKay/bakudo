@@ -21,18 +21,22 @@ repository.
 
 2. **Write the implementation.** Follow the architecture invariants in
    `AGENTS.md`. Key rules:
-   - All state mutations go through `SandboxLedger::update`.
-   - Provider invocations use `ProviderRegistry`; never hard-code CLI flags.
+   - Sandbox lifecycle updates go through `SandboxLedger::update_state`.
+   - Mission runtime persistence goes through `MissionStore`.
+   - Classic headless providers use `ProviderRegistry`; wake-based missions
+     use `ProviderCatalog` plus `.bakudo/providers/*.toml`.
    - TUI and daemon communicate only via the typed channel pair.
+   - Use `MissionState` terminology in current runtime code and docs.
 
 3. **Write tests.** Every new public function needs a unit test in its crate.
-   Cross-crate integration scenarios go in `tests/integration.rs`.
+   Cross-crate scenarios go in `tests/integration.rs` or `tests/runtime.rs`
+   depending on whether the change is classic execution or wake-based runtime.
 
 4. **Run the quality gate:**
    ```bash
    just check
    ```
-   This runs `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`,
+   This runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
    and `cargo test --workspace`. All must pass with zero warnings.
 
 5. **Commit** using Conventional Commits (see `AGENTS.md`).

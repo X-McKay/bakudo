@@ -7,8 +7,8 @@ When asked to fix a bug in the `bakudo` repository.
 ## Process
 
 1. **Reproduce the bug.** Write a failing test in the relevant crate
-   (`cargo test -p <crate>`) or in `tests/integration.rs` that demonstrates
-   the incorrect behaviour.
+   (`cargo test -p <crate>`) or in `tests/integration.rs` /
+   `tests/runtime.rs` that demonstrates the incorrect behaviour.
 
 2. **Locate the root cause.** Use `cargo check`, `cargo clippy`, and the
    failing test output to narrow down the source. Check `AGENTS.md` for

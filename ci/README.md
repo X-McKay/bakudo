@@ -1,10 +1,14 @@
 # CI configuration
 
-The file `github-workflow-example.yml` is a ready-to-use GitHub Actions
-workflow that runs the full `just check` gate on PRs and release builds on
-pushes to `main`.
+The live workflow is installed at `.github/workflows/ci.yml`. It runs two
+jobs on every push to `main` and every pull request:
 
-To activate it, copy the file into place:
+- **check** — `just check` (fmt + clippy + test)
+- **cargo-deny** — `cargo deny check` (supply-chain audit)
+
+`github-workflow-example.yml` in this directory is kept as a mirrored
+fallback in case the live workflow file needs to be re-installed. To
+(re)install it:
 
 ```bash
 mkdir -p .github/workflows
@@ -13,6 +17,7 @@ git add .github/workflows/ci.yml
 git commit -m "ci: install GitHub Actions workflow"
 ```
 
-(It lives here rather than in `.github/workflows/` because a GitHub App that
-lacks the `workflows` permission cannot create workflow files directly. A
-maintainer with repo write access needs to install it.)
+This fallback exists because a GitHub App that lacks the `workflows`
+permission cannot create workflow files directly — a maintainer with repo
+write access has to install it. Keep both files in sync when editing
+either one.

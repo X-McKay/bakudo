@@ -29,8 +29,8 @@ use bakudo_core::config::BakudoConfig;
 use bakudo_core::control::{save_run_summary, update_run_summary_outcome, RunSummary};
 use bakudo_core::hook::{HookWorktreeAction, PostRunHookPayload};
 use bakudo_core::mission::{
-    Blackboard, Experiment, ExperimentId, ExperimentScript, ExperimentStatus, ExperimentSummary,
-    LedgerEntry, LedgerKind, Mission, MissionId, MissionStatus, Posture, UserMessage, WakeEvent,
+    Experiment, ExperimentId, ExperimentScript, ExperimentStatus, ExperimentSummary, LedgerEntry,
+    LedgerKind, Mission, MissionId, MissionState, MissionStatus, Posture, UserMessage, WakeEvent,
     WakeId, WakeReason, WakeWhen, Wallet,
 };
 use bakudo_core::policy::PolicyDecision;
@@ -296,7 +296,7 @@ struct HostExecArgs {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct BlackboardPatchArgs {
+struct MissionStatePatchArgs {
     patch: Value,
 }
 
@@ -1361,11 +1361,11 @@ impl MissionCore {
             created_at: Utc::now(),
             completed_at: None,
         };
-        let blackboard =
-            initial_blackboard(&goal, posture, done_contract.clone(), constraints.clone());
+        let mission_state =
+            initial_mission_state(&goal, posture, done_contract.clone(), constraints.clone());
         self.mission_store.upsert_mission(&mission).await?;
         self.mission_store
-            .save_blackboard(mission.id, &blackboard)
+            .save_mission_state(mission.id, &mission_state)
             .await?;
         self.mission_store
             .append_ledger(&LedgerEntry {
@@ -1515,10 +1515,23 @@ impl MissionCore {
         payload: Value,
         immediate: bool,
     ) -> Result<WakeId> {
+        let wake_id = self.enqueue_wake(mission_id, reason, payload).await?;
+        if immediate {
+            self.process_next_wake(mission_id).await?;
+        }
+        Ok(wake_id)
+    }
+
+    async fn enqueue_wake(
+        &self,
+        mission_id: MissionId,
+        reason: WakeReason,
+        payload: Value,
+    ) -> Result<WakeId> {
         let Some(mut mission) = self.mission_store.mission(mission_id).await? else {
             anyhow::bail!("mission '{}' not found", mission_id);
         };
-        let blackboard = self.mission_store.blackboard(mission_id).await?;
+        let mission_state = self.mission_store.mission_state(mission_id).await?;
         let queued_messages = self
             .mission_store
             .undelivered_user_messages(mission_id)
@@ -1535,12 +1548,21 @@ impl MissionCore {
             reason,
             created_at: Utc::now(),
             payload,
-            blackboard,
+            mission_state,
             wallet: mission.wallet.clone(),
             user_inbox,
             recent_ledger,
         };
         self.mission_store.insert_wake(&wake).await?;
+        self.append_provenance(
+            mission_id,
+            json!({
+                "event": "wake_queued",
+                "at": Utc::now(),
+                "wake": wake.clone(),
+            }),
+        )
+        .await?;
         mission.status = MissionStatus::AwaitingDeliberator;
         self.mission_store.upsert_mission(&mission).await?;
         {
@@ -1548,9 +1570,6 @@ impl MissionCore {
             state.wake_user_message_ids.insert(wake.id, message_ids);
         }
         self.emit_banner().await;
-        if immediate {
-            self.process_next_wake(mission_id).await?;
-        }
         Ok(wake.id)
     }
 
@@ -1642,6 +1661,17 @@ impl MissionCore {
         tokio::fs::create_dir_all(&wake_dir).await?;
         let wake_path = wake_dir.join(format!("{}.json", wake.id));
         tokio::fs::write(&wake_path, serde_json::to_vec_pretty(wake)?).await?;
+        self.append_provenance(
+            mission.id,
+            json!({
+                "event": "wake_started",
+                "at": Utc::now(),
+                "wake_id": wake.id,
+                "wake_reason": wake.reason,
+                "wake_path": wake_path,
+            }),
+        )
+        .await?;
 
         let (binary, args) = match provider.engine {
             ProviderEngine::Exec => {
@@ -1709,7 +1739,42 @@ impl MissionCore {
         let mut stdout_lines = BufReader::new(stdout).lines();
         let mut desired_status = None;
         let mut saw_suspend = false;
-        while let Some(line) = stdout_lines.next_line().await? {
+        let deadline = tokio::time::Instant::now() + provider.wake_budget.wall_clock;
+        let mut tool_calls_used = 0_u32;
+        let mut forced_stop = false;
+        loop {
+            let next_line = match tokio::time::timeout_at(deadline, stdout_lines.next_line()).await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    self.append_provenance(
+                        mission.id,
+                        json!({
+                            "event": "wake_budget_exhausted",
+                            "at": Utc::now(),
+                            "wake_id": wake.id,
+                            "kind": "wall_clock",
+                            "limit_ms": provider.wake_budget.wall_clock.as_millis(),
+                        }),
+                    )
+                    .await?;
+                    self.enqueue_wake(
+                        mission.id,
+                        WakeReason::Timeout,
+                        json!({
+                            "kind": "wake_budget_wall_clock",
+                            "limit_ms": provider.wake_budget.wall_clock.as_millis(),
+                        }),
+                    )
+                    .await?;
+                    desired_status = Some(MissionStatus::Sleeping);
+                    forced_stop = true;
+                    break;
+                }
+            };
+            let Some(line) = next_line else {
+                break;
+            };
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -1717,6 +1782,54 @@ impl MissionCore {
             match serde_json::from_str::<RpcRequest>(trimmed) {
                 Ok(request) => {
                     let id = request.id.clone().unwrap_or(json!(null));
+                    if request.method == "tools/call"
+                        && tool_calls_used >= provider.wake_budget.tool_calls
+                    {
+                        let message = format!(
+                            "wake tool-call budget exhausted after {} calls",
+                            provider.wake_budget.tool_calls
+                        );
+                        let response = RpcResponse {
+                            jsonrpc: "2.0",
+                            id,
+                            result: None,
+                            error: Some(RpcError {
+                                code: -32001,
+                                message: message.clone(),
+                            }),
+                        };
+                        stdin
+                            .write_all(serde_json::to_string(&response)?.as_bytes())
+                            .await?;
+                        stdin.write_all(b"\n").await?;
+                        stdin.flush().await?;
+                        self.append_provenance(
+                            mission.id,
+                            json!({
+                                "event": "wake_budget_exhausted",
+                                "at": Utc::now(),
+                                "wake_id": wake.id,
+                                "kind": "tool_calls",
+                                "limit": provider.wake_budget.tool_calls,
+                            }),
+                        )
+                        .await?;
+                        self.enqueue_wake(
+                            mission.id,
+                            WakeReason::Timeout,
+                            json!({
+                                "kind": "wake_budget_tool_calls",
+                                "limit": provider.wake_budget.tool_calls,
+                            }),
+                        )
+                        .await?;
+                        desired_status = Some(MissionStatus::Sleeping);
+                        forced_stop = true;
+                        break;
+                    }
+                    if request.method == "tools/call" {
+                        tool_calls_used = tool_calls_used.saturating_add(1);
+                    }
                     match self.handle_rpc_request(mission, wake, request).await {
                         Ok(outcome) => {
                             let response = RpcResponse {
@@ -1768,7 +1881,16 @@ impl MissionCore {
             }
         }
 
-        if saw_suspend {
+        if forced_stop {
+            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => return Err(err.into()),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+            }
+        } else if saw_suspend {
             match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
                 Ok(Ok(status)) => {
                     if !status.success() && desired_status.is_none() {
@@ -1787,6 +1909,18 @@ impl MissionCore {
                 desired_status = Some(MissionStatus::Failed);
             }
         }
+
+        self.append_provenance(
+            mission.id,
+            json!({
+                "event": "wake_finished",
+                "at": Utc::now(),
+                "wake_id": wake.id,
+                "mission_status": desired_status,
+                "saw_suspend": saw_suspend,
+            }),
+        )
+        .await?;
 
         Ok(desired_status)
     }
@@ -1813,7 +1947,27 @@ impl MissionCore {
             }),
             "tools/call" => {
                 let call: ToolCallParams = serde_json::from_value(request.params)?;
-                self.handle_tool_call(mission, wake, call).await
+                let tool_name = call.name.clone();
+                let tool_args = call.arguments.clone();
+                match self.handle_tool_call(mission, wake, call).await {
+                    Ok(outcome) => Ok(outcome),
+                    Err(err) => {
+                        let _ = self
+                            .append_provenance(
+                                mission.id,
+                                json!({
+                                    "event": "tool_call_error",
+                                    "at": Utc::now(),
+                                    "wake_id": wake.id,
+                                    "tool": tool_name,
+                                    "arguments": tool_args,
+                                    "error": err.to_string(),
+                                }),
+                            )
+                            .await;
+                        Err(err)
+                    }
+                }
             }
             other => anyhow::bail!("unsupported rpc method '{}'", other),
         }
@@ -1825,7 +1979,9 @@ impl MissionCore {
         wake: &WakeEvent,
         call: ToolCallParams,
     ) -> Result<ToolCallOutcome> {
-        let raw = match call.name.as_str() {
+        let tool_name = call.name.clone();
+        let tool_arguments = call.arguments.clone();
+        let raw = match tool_name.as_str() {
             "dispatch_swarm" => {
                 self.tool_dispatch_swarm(mission, wake, call.arguments)
                     .await?
@@ -1836,8 +1992,8 @@ impl MissionCore {
                     .await?
             }
             "host_exec" => self.tool_host_exec(mission, wake, call.arguments).await?,
-            "update_blackboard" => {
-                self.tool_update_blackboard(mission, wake, call.arguments)
+            "update_mission_state" => {
+                self.tool_update_mission_state(mission, wake, call.arguments)
                     .await?
             }
             "record_lesson" => {
@@ -1854,11 +2010,26 @@ impl MissionCore {
         };
 
         let meta = self.meta_sidecar(mission.id, wake.id).await?;
-        Ok(ToolCallOutcome {
-            payload: json!({
-                "result": raw.payload,
-                "meta": meta,
+        let payload = json!({
+            "result": raw.payload,
+            "meta": meta,
+        });
+        self.append_provenance(
+            mission.id,
+            json!({
+                "event": "tool_call",
+                "at": Utc::now(),
+                "wake_id": wake.id,
+                "tool": tool_name,
+                "arguments": tool_arguments,
+                "response": payload.clone(),
+                "suspend": raw.suspend,
+                "mission_status": raw.mission_status,
             }),
+        )
+        .await?;
+        Ok(ToolCallOutcome {
+            payload,
             suspend: raw.suspend,
             mission_status: raw.mission_status,
         })
@@ -2117,17 +2288,17 @@ impl MissionCore {
         })
     }
 
-    async fn tool_update_blackboard(
+    async fn tool_update_mission_state(
         &self,
         mission: &Mission,
         _wake: &WakeEvent,
         arguments: Value,
     ) -> Result<ToolCallOutcome> {
-        let args: BlackboardPatchArgs = serde_json::from_value(arguments)?;
-        let mut blackboard = self.mission_store.blackboard(mission.id).await?;
-        merge_patch(&mut blackboard.0, args.patch);
+        let args: MissionStatePatchArgs = serde_json::from_value(arguments)?;
+        let mut mission_state = self.mission_store.mission_state(mission.id).await?;
+        merge_patch(&mut mission_state.0, args.patch);
         self.mission_store
-            .save_blackboard(mission.id, &blackboard)
+            .save_mission_state(mission.id, &mission_state)
             .await?;
         Ok(ToolCallOutcome {
             payload: json!({ "applied": true }),
@@ -2395,6 +2566,18 @@ impl MissionCore {
         experiment.finished_at = Some(Utc::now());
         experiment.summary = Some(summary.clone());
         self.mission_store.upsert_experiment(&experiment).await?;
+        self.append_provenance(
+            experiment.mission_id,
+            json!({
+                "event": "experiment_finished",
+                "at": Utc::now(),
+                "experiment_id": experiment.id,
+                "label": experiment.label,
+                "status": experiment.status,
+                "summary": summary,
+            }),
+        )
+        .await?;
         self.mission_store
             .append_ledger(&LedgerEntry {
                 at: Utc::now(),
@@ -2536,6 +2719,28 @@ impl MissionCore {
         self.config
             .resolved_repo_data_dir_from_str(self.session.repo_root.as_deref())
     }
+
+    fn provenance_path(&self, mission_id: MissionId) -> PathBuf {
+        self.provider_catalog
+            .provenance_dir()
+            .join(format!("{mission_id}.ndjson"))
+    }
+
+    async fn append_provenance(&self, mission_id: MissionId, record: Value) -> Result<()> {
+        let path = self.provenance_path(mission_id);
+        let line = format!("{}\n", serde_json::to_string(&record)?);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
+        file.flush().await?;
+        Ok(())
+    }
 }
 
 struct InlineExecOutcome {
@@ -2573,14 +2778,14 @@ fn hook_action_from_worktree_action(action: &WorktreeAction) -> (HookWorktreeAct
     }
 }
 
-fn initial_blackboard(
+fn initial_mission_state(
     goal: &str,
     posture: Posture,
     done_contract: Option<String>,
     constraints: Option<String>,
-) -> Blackboard {
-    let mut blackboard = Blackboard::default_layout();
-    if let Some(obj) = blackboard.0.as_object_mut() {
+) -> MissionState {
+    let mut mission_state = MissionState::default_layout();
+    if let Some(obj) = mission_state.0.as_object_mut() {
         obj.insert("objective".to_string(), json!(goal));
         obj.insert("posture".to_string(), json!(posture.to_string()));
         if let Some(done_contract) = done_contract {
@@ -2595,7 +2800,7 @@ fn initial_blackboard(
             );
         }
     }
-    blackboard
+    mission_state
 }
 
 fn tool_list_value() -> Vec<Value> {
@@ -2604,7 +2809,7 @@ fn tool_list_value() -> Vec<Value> {
         json!({"name": "abox_exec", "description": "Run a one-off command inside an abox."}),
         json!({"name": "abox_apply_patch", "description": "Apply a patch in an abox and verify it."}),
         json!({"name": "host_exec", "description": "Run an approved command on the host."}),
-        json!({"name": "update_blackboard", "description": "Apply a JSON merge patch to the blackboard."}),
+        json!({"name": "update_mission_state", "description": "Apply a JSON merge patch to the Mission State."}),
         json!({"name": "record_lesson", "description": "Persist a durable lesson."}),
         json!({"name": "ask_user", "description": "Prompt the user for a decision."}),
         json!({"name": "cancel_experiments", "description": "Cancel running experiments."}),

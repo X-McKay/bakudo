@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use bakudo_core::mission::{
-    Blackboard, Experiment, ExperimentId, ExperimentStatus, LedgerEntry, LedgerKind, Mission,
-    MissionId, MissionStatus, Posture, UserMessage, WakeEvent, WakeId, WakeReason, WakeWhen,
+    Experiment, ExperimentId, ExperimentStatus, LedgerEntry, LedgerKind, Mission, MissionId,
+    MissionState, MissionStatus, Posture, UserMessage, WakeEvent, WakeId, WakeReason, WakeWhen,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -132,53 +132,53 @@ impl MissionStore {
         .context("active mission list join failed")?
     }
 
-    pub async fn save_blackboard(
+    pub async fn save_mission_state(
         &self,
         mission_id: MissionId,
-        blackboard: &Blackboard,
+        mission_state: &MissionState,
     ) -> Result<()> {
         let db_path = self.db_path.clone();
-        let blackboard = blackboard.clone();
+        let mission_state = mission_state.clone();
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&db_path)?;
             conn.execute(
-                "INSERT INTO blackboards (mission_id, state_json, updated_at)
+                "INSERT INTO mission_states (mission_id, state_json, updated_at)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(mission_id) DO UPDATE SET
                     state_json = excluded.state_json,
                     updated_at = excluded.updated_at",
                 params![
                     mission_id.to_string(),
-                    serde_json::to_string(&blackboard)?,
+                    serde_json::to_string(&mission_state)?,
                     Utc::now().to_rfc3339(),
                 ],
             )
-            .context("failed to save blackboard")?;
+            .context("failed to save mission state")?;
             Ok(())
         })
         .await
-        .context("blackboard save join failed")?
+        .context("mission state save join failed")?
     }
 
-    pub async fn blackboard(&self, mission_id: MissionId) -> Result<Blackboard> {
+    pub async fn mission_state(&self, mission_id: MissionId) -> Result<MissionState> {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&db_path)?;
             let json: Option<String> = conn
                 .query_row(
-                    "SELECT state_json FROM blackboards WHERE mission_id = ?1",
+                    "SELECT state_json FROM mission_states WHERE mission_id = ?1",
                     params![mission_id.to_string()],
                     |row| row.get(0),
                 )
                 .optional()
-                .context("failed to load blackboard")?;
+                .context("failed to load mission state")?;
             match json {
-                Some(json) => serde_json::from_str(&json).context("invalid blackboard json"),
-                None => Ok(Blackboard::default_layout()),
+                Some(json) => serde_json::from_str(&json).context("invalid mission state json"),
+                None => Ok(MissionState::default_layout()),
             }
         })
         .await
-        .context("blackboard load join failed")?
+        .context("mission state load join failed")?
     }
 
     pub async fn append_ledger(&self, entry: &LedgerEntry) -> Result<()> {
@@ -591,7 +591,7 @@ fn init_schema(path: &Path) -> Result<()> {
            wake_sent INTEGER NOT NULL DEFAULT 0,
            updated_at TEXT NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS blackboards (
+         CREATE TABLE IF NOT EXISTS mission_states (
            mission_id TEXT PRIMARY KEY,
            state_json TEXT NOT NULL,
            updated_at TEXT NOT NULL
@@ -816,7 +816,7 @@ fn parse_ledger_kind(value: &str) -> Result<LedgerKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bakudo_core::mission::{Blackboard, Wallet};
+    use bakudo_core::mission::{MissionState, Wallet};
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -844,15 +844,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mission_store_roundtrips_mission_blackboard_and_ledger() {
+    async fn mission_store_roundtrips_mission_state_and_ledger() {
         let path = temp_db_path();
         let store = MissionStore::open(&path).unwrap();
         let mission = sample_mission();
-        let blackboard = Blackboard::default_layout();
+        let mission_state = MissionState::default_layout();
 
         store.upsert_mission(&mission).await.unwrap();
         store
-            .save_blackboard(mission.id, &blackboard)
+            .save_mission_state(mission.id, &mission_state)
             .await
             .unwrap();
         store
@@ -868,7 +868,10 @@ mod tests {
 
         let loaded = store.mission(mission.id).await.unwrap().unwrap();
         assert_eq!(loaded.goal, mission.goal);
-        assert_eq!(store.blackboard(mission.id).await.unwrap().0, blackboard.0);
+        assert_eq!(
+            store.mission_state(mission.id).await.unwrap().0,
+            mission_state.0
+        );
         assert_eq!(store.recent_ledger(mission.id, 8).await.unwrap().len(), 1);
 
         let _ = std::fs::remove_file(path);

@@ -179,7 +179,7 @@ pub struct AttemptSpec {
     pub provider_id: String,
     /// Model override (e.g. "claude-opus-4-5"). `None` means use the
     /// provider default.
-    #[serde(default, deserialize_with = "deserialize_optional_model")]
+    #[serde(default)]
     pub model: Option<String>,
     /// Optional path to the repo root on the host. Passed as `abox --repo`.
     pub repo_root: Option<String>,
@@ -203,16 +203,6 @@ impl AttemptSpec {
             repo_root: None,
         }
     }
-}
-
-/// Accept `""` as `None` for backward compatibility with earlier config files
-/// that used the empty-string sentinel.
-fn deserialize_optional_model<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    Ok(opt.filter(|s| !s.is_empty()))
 }
 
 /// A progress event emitted by the worker to stdout during execution.

@@ -10,7 +10,9 @@ making any code changes.
 Bakudo v2 uses Rust's built-in test framework. Tests live in two places:
 - **Crate-level unit tests**: `#[cfg(test)]` modules inside each crate's
   source files (e.g., `crates/bakudo-core/src/provider.rs`).
-- **Workspace integration tests**: `tests/integration.rs` at the repo root.
+- **Workspace integration tests**: `tests/integration.rs` for classic CLI and
+  provider paths, plus `tests/runtime.rs` for wake-based mission runtime,
+  host approvals, wallet enforcement, restart, provenance, and related flows.
 
 ## Process
 
@@ -34,6 +36,7 @@ Bakudo v2 uses Rust's built-in test framework. Tests live in two places:
 4. **Run integration tests only:**
    ```bash
    cargo test --test integration
+   cargo test --test runtime
    ```
 
 5. **Interpret results.** All tests must pass. If a test fails, read the
@@ -42,8 +45,9 @@ Bakudo v2 uses Rust's built-in test framework. Tests live in two places:
    provider flag strings, or stale ledger state in async tests.
 
 6. **Add new tests.** Unit tests go in the relevant source file under
-   `#[cfg(test)]`. Integration tests go in `tests/integration.rs` in a
-   clearly named module (e.g., `mod provider_registry_tests`).
+   `#[cfg(test)]`. Integration tests go in `tests/integration.rs` or
+   `tests/runtime.rs`, depending on whether the behavior is classic CLI flow
+   or wake-based mission flow.
 
 ## Quality Gate
 

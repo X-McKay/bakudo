@@ -3,9 +3,13 @@
 
 use tokio::process::Command;
 
-use bakudo_core::abox::AboxAdapter;
+use bakudo_core::abox::{AboxAdapter, AboxVersionStatus, MIN_ABOX_VERSION};
 use bakudo_core::config::BakudoConfig;
 use bakudo_core::provider::ProviderRegistry;
+
+fn fmt_version(v: (u32, u32, u32)) -> String {
+    format!("{}.{}.{}", v.0, v.1, v.2)
+}
 
 /// Build a multi-line human-readable health report.
 pub async fn run(config: &BakudoConfig, abox: &AboxAdapter, registry: &ProviderRegistry) -> String {
@@ -13,16 +17,26 @@ pub async fn run(config: &BakudoConfig, abox: &AboxAdapter, registry: &ProviderR
     lines.push(String::from("Bakudo health check"));
     lines.push(String::from("────────────────────"));
 
-    // Abox.
     match abox.version().await {
-        Ok(v) if v.contains("abox ") => {
-            lines.push(format!("  abox       [ ok ]  {v}  ({})", config.abox_bin));
-        }
-        Ok(other) => {
-            lines.push(format!(
-                "  abox       [warn]  unexpected version output: {other}"
-            ));
-        }
+        Ok(raw) => match bakudo_core::abox::check_abox_version(&raw) {
+            AboxVersionStatus::Ok { .. } => {
+                lines.push(format!("  abox       [ ok ]  {raw}  ({})", config.abox_bin));
+            }
+            AboxVersionStatus::TooOld { current, min } => {
+                lines.push(format!(
+                    "  abox       [warn]  {raw}  ({})  — bakudo requires ≥ {}; current {} is too old. Run `just install-abox` from the bakudo-abox workspace root.",
+                    config.abox_bin,
+                    fmt_version(min),
+                    fmt_version(current),
+                ));
+            }
+            AboxVersionStatus::Unparseable(raw) => {
+                lines.push(format!(
+                    "  abox       [warn]  unexpected version output: {raw}  (expected `abox X.Y.Z` where X.Y.Z ≥ {})",
+                    fmt_version(MIN_ABOX_VERSION),
+                ));
+            }
+        },
         Err(e) => {
             lines.push(format!(
                 "  abox       [FAIL]  '{}' not runnable: {e}",

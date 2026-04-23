@@ -2,41 +2,30 @@
 
 Target spec: `docs/archive/bakudo-v2-architecture-and-implementation-plan.md`
 
-This checklist tracks the concrete work needed to move the current Rust runtime back toward the archived v2 supervisor/wake design while preserving the restored chat-first host layer and existing runtime behavior.
+Audit date: `2026-04-23`
 
-## Runtime Architecture
+The current Rust runtime is already materially aligned with the archived v2 plan in the areas below:
 
-- [x] Introduce archived-plan domain types in `bakudo-core`:
-  `Mission`, `Experiment`, `WakeEvent`, `Blackboard`, `Wallet`, `UserMessage`, `LedgerEntry`, `Posture`, and related ids/status enums.
-- [x] Add durable mission storage close to the archived plan:
-  persisted missions, experiments, wakes, blackboards, ledger entries, user messages, active waves, lessons, and wake provenance snapshots.
-- [x] Evolve the current host/session path into a real supervisor-style loop:
-  wake queue, wake coalescing, wallet enforcement, and mission resume after restart.
-- [x] Preserve the current `SandboxLedger` and timeout classification behavior in `crates/bakudo-core/src/abox.rs`.
+## Already Landed
 
-## Deliberator + Tooling
+- [x] Supervisor-style wake runtime layered through `SessionController` and the restored chat-first host path.
+- [x] Durable mission persistence for `Mission`, `Experiment`, `WakeEvent`, wallet state, user messages, lessons, ledger entries, active waves, and restart resume.
+- [x] Deliberator stdio runner with the planned MCP-style tool surface and `meta` sidecar.
+- [x] Append-only mission provenance logging under `.bakudo/provenance/<mission-id>.ndjson`.
+- [x] Mission and Explore postures, multi-wave dispatch, wallet enforcement, host approvals, ask-user flow, and restart coverage in `tests/runtime.rs`.
+- [x] Provider/prompt materialisation into `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
+- [x] TUI and CLI extensions for mission lifecycle, approvals, wake control, `bakudo daemon`, and `bakudo status`.
+- [x] Preservation of the timeout-classification fix in `crates/bakudo-core/src/abox.rs`.
 
-- [x] Replace the hard-wired provider worker launch path for autonomous missions with a Deliberator runner that exchanges tool calls with Bakudo over stdio.
-- [x] Implement the planned tool surface with a shared `meta` sidecar on every response:
-  `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_blackboard`, `record_lesson`, `ask_user`, `cancel_experiments`, `suspend`.
-- [x] Add mission/explore posture handling and autonomous multi-wave dispatch/wake behavior.
-- [x] Move provider/prompt loading toward `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`, with sensible defaults for the current runtime.
+## Completed Cleanup
 
-## UX Surfaces
-
-- [x] Extend the TUI with mission/fleet/wallet visibility, approval flow for `host_exec`, and slash commands:
-  `/mission`, `/explore`, `/budget`, `/wake`, `/lessons`.
-- [x] Extend the CLI with `bakudo daemon` and `bakudo status`.
-- [x] Keep the restored conversational host layer and route it into the new wake-based mission runtime instead of deleting it.
-
-## Verification
-
-- [x] Add or update tests for wake flow.
-- [x] Add or update tests for mission persistence and crash/restart resume.
-- [x] Add or update tests for blackboard updates and lessons/provenance persistence.
-- [x] Add or update tests for wallet enforcement and multi-wave dispatch.
-- [x] Add or update tests for host approvals and ask-user flow.
-- [x] Finish with:
+- [x] Replace the remaining public/runtime Mission State terminology drift:
+  domain types, wake payload fields, tool names, prompts, docs, comments, and tests.
+- [x] Rename persistence surfaces where practical to `mission_state`:
+  mission store APIs, SQLite table names, and stored wake payload snapshots.
+- [x] Remove transitional compatibility and migration code instead of preserving it:
+  old wake field aliases, old tool aliases, old mission-state table migration, and old swarm-artifact path fallback.
+- [x] Re-run and pass:
   `cargo test --workspace`
-- [x] Finish with:
+- [x] Re-run and pass:
   `cargo clippy --workspace --all-targets -- -D warnings`

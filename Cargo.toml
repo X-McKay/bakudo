@@ -6,6 +6,11 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+license = "Apache-2.0"
+edition = "2021"
+repository = "https://github.com/X-McKay/bakudo"
+
 [workspace.dependencies]
 anyhow = "1.0"
 tokio = { version = "1.37", features = ["full"] }
@@ -23,7 +28,9 @@ chrono = { version = "0.4", features = ["serde"] }
 [package]
 name = "bakudo"
 version = "2.0.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 bakudo-core = { version = "2.0.0", path = "crates/bakudo-core" }
