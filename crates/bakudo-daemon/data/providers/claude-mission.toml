@@ -1,0 +1,15 @@
+name = "claude-mission"
+engine = "claude-code"
+posture = "mission"
+engine_args = ["-p"]
+abox_profile = "dev-strict"
+system_prompt_file = "prompts/mission.md"
+
+[wake_budget]
+tool_calls = 60
+wall_clock = "10m"
+debounce = "1.5s"
+
+[resume]
+flag = "--resume"
+session_id_file = ".bakudo/sessions/{mission_id}.id"

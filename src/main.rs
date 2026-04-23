@@ -49,6 +49,7 @@ use bakudo_core::{
     session::SessionRecord,
     state::{SandboxLedger, SandboxRecord, SandboxState},
 };
+use bakudo_daemon::mission_store::MissionStore;
 use bakudo_daemon::session_controller::{
     SessionBootstrap, SessionCommand, SessionController, SessionEvent,
 };
@@ -180,6 +181,10 @@ enum Commands {
     },
     /// Run health checks on abox and all registered provider binaries.
     Doctor,
+    /// Run the Bakudo supervisor without the TUI.
+    Daemon,
+    /// Show mission status from the durable mission store.
+    Status,
     /// List saved interactive sessions, newest first.
     Sessions,
     /// Resume a previous TUI session by loading its persisted ledger.
@@ -224,6 +229,12 @@ async fn main() -> Result<()> {
         .resolved_repo_data_dir(repo_root.as_deref())
         .join("ledger.jsonl");
     let ledger = Arc::new(SandboxLedger::with_persistence(&ledger_path));
+
+    // `doctor` runs its own richer version check; skip the preflight warning
+    // there to avoid duplicating output.
+    if !matches!(cli.command, Some(Commands::Doctor)) {
+        warn_if_abox_outdated(&abox, &config.abox_bin).await;
+    }
 
     match cli.command {
         None => {
@@ -307,10 +318,43 @@ async fn main() -> Result<()> {
             println!("{report}");
             Ok(())
         }
+        Some(Commands::Daemon) => {
+            let session = create_session(&config)?;
+            run_daemon(config, abox, registry, ledger, session).await
+        }
+        Some(Commands::Status) => cmd_status(&config).await,
         Some(Commands::Sessions) => cmd_sessions(&config),
         Some(Commands::Resume { session_id }) => {
             let session = load_session(&config, &session_id)?;
             run_tui(config, abox, registry, ledger, session, true).await
+        }
+    }
+}
+
+/// Best-effort preflight: if `abox --version` reports a version older than
+/// [`bakudo_core::abox::MIN_ABOX_VERSION`], warn to stderr. Silently skips when
+/// abox is unreachable (a real failure will surface from whatever command the
+/// user invoked).
+async fn warn_if_abox_outdated(abox: &Arc<AboxAdapter>, abox_bin: &str) {
+    use bakudo_core::abox::AboxVersionStatus;
+    let Ok(status) = abox.check_version().await else {
+        return;
+    };
+    match status {
+        AboxVersionStatus::Ok { .. } => {}
+        AboxVersionStatus::TooOld { current, min } => {
+            eprintln!(
+                "warning: abox {}.{}.{} is older than the minimum {}.{}.{} bakudo requires. \
+                 Update by running `just install-abox` from the bakudo-abox workspace root \
+                 (current: `{abox_bin}`).",
+                current.0, current.1, current.2, min.0, min.1, min.2,
+            );
+        }
+        AboxVersionStatus::Unparseable(raw) => {
+            eprintln!(
+                "warning: `{abox_bin} --version` returned unexpected output: {raw}  \
+                 (expected `abox X.Y.Z`)"
+            );
         }
     }
 }
@@ -560,6 +604,37 @@ fn cmd_sessions(config: &Arc<BakudoConfig>) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_status(config: &Arc<BakudoConfig>) -> Result<()> {
+    let repo_root = std::env::current_dir().ok();
+    let repo_data_dir = config.resolved_repo_data_dir(repo_root.as_deref());
+    let store = MissionStore::open(repo_data_dir.join("state.db"))?;
+    let missions = store.list_missions().await?;
+    if missions.is_empty() {
+        println!("No missions recorded for this repo.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<38} {:<9} {:<20} {:<12} GOAL",
+        "MISSION ID", "POSTURE", "STATUS", "WORKERS"
+    );
+    println!("{}", "-".repeat(120));
+    for mission in missions {
+        println!(
+            "{:<38} {:<9} {:<20} {:<12} {}",
+            mission.id,
+            mission.posture,
+            format!("{:?}", mission.status),
+            format!(
+                "{}/{}",
+                mission.wallet.abox_workers_in_flight, mission.wallet.abox_workers_remaining
+            ),
+            mission.goal
+        );
+    }
+    Ok(())
+}
+
 fn current_repo_root() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let repo_root = std::process::Command::new("git")
@@ -662,6 +737,7 @@ async fn run_tui(
             session: session.clone(),
             resume_only: resumed,
         },
+        cmd_tx.clone(),
         cmd_rx,
         event_tx,
     );
@@ -720,6 +796,50 @@ async fn run_tui(
     // _guard Drops here — terminal restored regardless of panic/result.
     let _ = terminal.show_cursor();
     result
+}
+
+async fn run_daemon(
+    config: Arc<BakudoConfig>,
+    abox: Arc<AboxAdapter>,
+    registry: Arc<ProviderRegistry>,
+    ledger: Arc<SandboxLedger>,
+    session: SessionRecord,
+) -> Result<()> {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<SessionCommand>(64);
+    let (event_tx, mut event_rx) = mpsc::channel::<SessionEvent>(256);
+    let ctrl = SessionController::with_session(
+        config,
+        abox,
+        ledger,
+        registry,
+        SessionBootstrap {
+            session,
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    tokio::spawn(ctrl.run());
+
+    println!("Bakudo daemon running. Press Ctrl+C to stop.");
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                let _ = cmd_tx.send(SessionCommand::Shutdown).await;
+                break;
+            }
+            maybe_event = event_rx.recv() => {
+                match maybe_event {
+                    Some(SessionEvent::Info(msg)) => println!("{msg}"),
+                    Some(SessionEvent::Error(msg)) => eprintln!("{msg}"),
+                    Some(SessionEvent::Shutdown) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn run_event_loop<B: ratatui::backend::Backend>(

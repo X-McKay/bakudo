@@ -16,6 +16,13 @@ use strum::{AsRefStr, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum SlashCommand {
+    // ── Mission control ───────────────────────────────────────────────────
+    Mission,
+    Explore,
+    Budget,
+    Wake,
+    Lessons,
+
     // ── Provider / model ─────────────────────────────────────────────────
     Provider,
     Approve,
@@ -49,6 +56,11 @@ impl SlashCommand {
     /// Short user-visible description shown in `/help`.
     pub fn description(&self) -> &'static str {
         match self {
+            SlashCommand::Mission => "start a mission posture  e.g. /mission fix timeout handling",
+            SlashCommand::Explore => "start an explore posture  e.g. /explore reduce build time",
+            SlashCommand::Budget => "adjust mission wallet  e.g. /budget time=30m workers=12",
+            SlashCommand::Wake => "force a manual wake for the active mission",
+            SlashCommand::Lessons => "show the repo lessons directory",
             SlashCommand::Provider => "switch the active AI provider  e.g. /provider claude",
             SlashCommand::Approve => {
                 "approve the next task dispatch when execution policy requires prompting"
@@ -80,7 +92,10 @@ impl SlashCommand {
     pub fn available_during_task(&self) -> bool {
         matches!(
             self,
-            SlashCommand::Providers
+            SlashCommand::Budget
+                | SlashCommand::Wake
+                | SlashCommand::Lessons
+                | SlashCommand::Providers
                 | SlashCommand::Sandboxes
                 | SlashCommand::Status
                 | SlashCommand::Config
@@ -98,7 +113,10 @@ impl SlashCommand {
     pub fn supports_inline_arg(&self) -> bool {
         matches!(
             self,
-            SlashCommand::Provider
+            SlashCommand::Mission
+                | SlashCommand::Explore
+                | SlashCommand::Budget
+                | SlashCommand::Provider
                 | SlashCommand::Model
                 | SlashCommand::Apply
                 | SlashCommand::Discard
@@ -159,6 +177,9 @@ pub fn parse_slash(input: &str) -> Option<Result<ParsedCommand, String>> {
     // provider default" so it is not required.
     if command.supports_inline_arg() && arg.is_empty() && command != SlashCommand::Model {
         let usage = match command {
+            SlashCommand::Mission => "Usage: /mission <goal>",
+            SlashCommand::Explore => "Usage: /explore <goal>",
+            SlashCommand::Budget => "Usage: /budget time=<minutes>m workers=<count>",
             SlashCommand::Provider => "Usage: /provider <id>  (e.g. /provider claude)",
             SlashCommand::Apply => "Usage: /apply <task_id>",
             SlashCommand::Discard => "Usage: /discard <task_id>",

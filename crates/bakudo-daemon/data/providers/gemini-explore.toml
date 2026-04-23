@@ -1,0 +1,15 @@
+name = "gemini-explore"
+engine = "gemini"
+posture = "explore"
+engine_args = ["-p"]
+abox_profile = "dev-broad"
+system_prompt_file = "prompts/explore.md"
+
+[wake_budget]
+tool_calls = 30
+wall_clock = "5m"
+debounce = "1.5s"
+
+[resume]
+flag = "--resume"
+session_id_file = ".bakudo/sessions/{mission_id}.id"

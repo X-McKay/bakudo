@@ -10,6 +10,9 @@ use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
 use bakudo_core::config::BakudoConfig;
 use bakudo_core::control::swarm_artifact_root;
 use bakudo_core::error::AboxError;
+use bakudo_core::mission::{
+    Experiment, ExperimentStatus, Mission, MissionId, MissionStatus, Posture, Wallet,
+};
 use bakudo_core::policy::{ExecutionPolicy, ExecutionPolicyRule, PolicyDecision};
 use bakudo_core::protocol::{
     AttemptId, AttemptSpec, CandidatePolicy, SessionId, TaskId, WorkerProgressEvent,
@@ -18,6 +21,7 @@ use bakudo_core::protocol::{
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::session::SessionRecord;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
+use bakudo_daemon::mission_store::MissionStore;
 use bakudo_daemon::session_controller::{
     SessionBootstrap, SessionCommand, SessionController, SessionEvent,
 };
@@ -116,6 +120,13 @@ fn write_fake_abox_script(dir: &TempDir, body: &str) -> (PathBuf, PathBuf) {
     let script = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
+# Preflight: bakudo calls `abox --version` at startup to verify the minimum
+# version. Answer with a version that satisfies the check without logging the
+# invocation, so tests that assert on invocation counts stay stable.
+if [[ "${{1:-}}" == "--version" ]]; then
+  echo "abox 0.3.1"
+  exit 0
+fi
 {{
   printf '%s\n' "$@"
   printf '__END__\n'
@@ -148,6 +159,80 @@ esac
     fs::set_permissions(&script_path, perms).unwrap();
     std::thread::sleep(Duration::from_millis(20));
     (script_path, log_path)
+}
+
+fn write_mock_deliberator_script(dir: &TempDir, body: &str) -> PathBuf {
+    let script_path = dir.path.join("mock-deliberator.py");
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import json, os, sys
+
+with open(os.environ["BAKUDO_WAKE_EVENT_PATH"], "r", encoding="utf-8") as handle:
+    wake = json.load(handle)
+
+_next_id = 0
+
+def _send(payload):
+    print(json.dumps(payload), flush=True)
+
+def _read():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit("no response from bakudo")
+    return json.loads(line)
+
+def call(name, arguments=None):
+    global _next_id
+    _next_id += 1
+    _send({{
+        "id": _next_id,
+        "method": "tools/call",
+        "params": {{
+            "name": name,
+            "arguments": arguments or {{}}
+        }}
+    }})
+    response = _read()
+    if "error" in response and response["error"] is not None:
+        raise RuntimeError(response["error"]["message"])
+    return response["result"]["result"], response["result"]["meta"]
+
+def call_error(name, arguments=None):
+    global _next_id
+    _next_id += 1
+    _send({{
+        "id": _next_id,
+        "method": "tools/call",
+        "params": {{
+            "name": name,
+            "arguments": arguments or {{}}
+        }}
+    }})
+    return _read()
+
+{body}
+"#
+    );
+    fs::write(&script_path, script).unwrap();
+    let mut perms = fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).unwrap();
+    script_path
+}
+
+fn write_exec_provider_files(repo: &TempRepo, script_path: &Path) {
+    let providers_dir = repo.path().join(".bakudo").join("providers");
+    fs::create_dir_all(&providers_dir).unwrap();
+    let mission = format!(
+        "name = \"exec-mission\"\nengine = \"exec\"\nposture = \"mission\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/mission.md\"\n[wake_budget]\ntool_calls = 20\nwall_clock = \"5m\"\ndebounce = \"0.1s\"\n",
+        script_path.display().to_string()
+    );
+    let explore = format!(
+        "name = \"exec-explore\"\nengine = \"exec\"\nposture = \"explore\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/explore.md\"\n[wake_budget]\ntool_calls = 20\nwall_clock = \"5m\"\ndebounce = \"0.1s\"\n",
+        script_path.display().to_string()
+    );
+    fs::write(providers_dir.join("exec-mission.toml"), mission).unwrap();
+    fs::write(providers_dir.join("exec-explore.toml"), explore).unwrap();
 }
 
 fn read_invocations(log_path: &Path) -> Vec<Vec<String>> {
@@ -410,6 +495,34 @@ async fn adapter_run_marks_stdout_as_truncated_when_limit_hit() {
 }
 
 #[tokio::test]
+async fn adapter_run_treats_abox_exit_124_as_timeout() {
+    let dir = TempDir::new("bakudo-fake-abox");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "sandbox timed out" >&2
+    exit 124
+    ;;
+"#,
+    );
+    let adapter = AboxAdapter::new(&script);
+    let mut params = RunParams::new(
+        "task-timeout-124",
+        vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            "sleep 999".to_string(),
+        ],
+    );
+    params.timeout_secs = Some(30);
+
+    let result = adapter.run(&params, |_| {}).await.unwrap();
+    assert_eq!(result.exit_code, 124);
+    assert!(result.timed_out);
+    assert!(result.stderr.contains("sandbox timed out"));
+}
+
+#[tokio::test]
 async fn task_runner_emits_progress_and_updates_ledger() {
     let dir = TempDir::new("bakudo-task-runner");
     let progress = WorkerProgressEvent {
@@ -487,6 +600,54 @@ EOF
     assert_eq!(record.state, SandboxState::Preserved);
     assert!(record.finished_at.is_some());
     assert!(!data_dir.join(format!("{sandbox_id}.spec.json")).exists());
+}
+
+#[tokio::test]
+async fn task_runner_maps_exit_124_to_timed_out_state() {
+    let dir = TempDir::new("bakudo-task-runner-timeout");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "sandbox timed out" >&2
+    exit 124
+    ;;
+"#,
+    );
+
+    let ledger = Arc::new(SandboxLedger::new());
+    let adapter = Arc::new(AboxAdapter::new(&script));
+    let cfg = Arc::new(TaskRunnerConfig {
+        abox: adapter,
+        ledger: ledger.clone(),
+        data_dir: dir.path.join("data"),
+        worker_command: vec!["fake-worker".to_string()],
+        memory_mib: None,
+        cpus: None,
+    });
+
+    let mut spec = AttemptSpec::new("wait forever", "claude");
+    spec.attempt_id = AttemptId("attempt-runner-timeout".to_string());
+    let sandbox_id = sandbox_task_id(&spec.attempt_id.0);
+
+    let (mut rx, handle) = run_attempt(spec, cfg).await;
+    let mut final_result = None;
+    while let Some(event) = rx.recv().await {
+        if let RunnerEvent::Finished(result) = event {
+            final_result = Some(result);
+            break;
+        }
+    }
+
+    let joined = handle.await.unwrap().unwrap();
+    let result = final_result.expect("runner finished event");
+    assert_eq!(result.exit_code, 124);
+    assert!(result.timed_out);
+    assert_eq!(result.status, WorkerStatus::TimedOut);
+    assert_eq!(joined.status, WorkerStatus::TimedOut);
+
+    let record = ledger.get(&sandbox_id).await.unwrap();
+    assert_eq!(record.state, SandboxState::TimedOut);
+    assert!(record.finished_at.is_some());
 }
 
 #[tokio::test]
@@ -624,6 +785,7 @@ async fn session_controller_diverge_uses_configured_base_branch() {
             ),
             resume_only: false,
         },
+        cmd_tx.clone(),
         cmd_rx,
         event_tx,
     );
@@ -703,6 +865,7 @@ async fn session_controller_diff_uses_task_branch() {
             ),
             resume_only: false,
         },
+        cmd_tx.clone(),
         cmd_rx,
         event_tx,
     );
@@ -775,6 +938,7 @@ async fn session_controller_resume_only_filters_snapshot_to_requested_session() 
             ),
             resume_only: true,
         },
+        cmd_tx.clone(),
         cmd_rx,
         event_tx,
     );
@@ -828,6 +992,7 @@ async fn session_controller_reports_failed_tasks_as_failed() {
         Arc::new(AboxAdapter::new(&script)),
         Arc::new(SandboxLedger::new()),
         Arc::new(ProviderRegistry::with_defaults()),
+        cmd_tx.clone(),
         cmd_rx,
         event_tx,
     );
@@ -896,6 +1061,7 @@ async fn session_controller_requires_approval_when_policy_prompts() {
         Arc::new(AboxAdapter::new(&script)),
         Arc::new(SandboxLedger::new()),
         Arc::new(ProviderRegistry::with_defaults()),
+        cmd_tx.clone(),
         cmd_rx,
         event_tx,
     );
@@ -947,6 +1113,1042 @@ async fn session_controller_requires_approval_when_policy_prompts() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn session_controller_routes_host_objectives_into_staged_plan_dispatch() {
+    let dir = TempDir::new("bakudo-session-host-plan");
+    let script = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    echo "worker completed"
+    ;;
+"#,
+    )
+    .0;
+
+    let config = BakudoConfig {
+        abox_bin: script.display().to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::new(
+        Arc::new(config),
+        Arc::new(AboxAdapter::new(&script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+
+    let handle = tokio::spawn(controller.run());
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "Restore the missing host layer".to_string(),
+        })
+        .await
+        .unwrap();
+    let first_reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(first_reply.contains("what does success look like"));
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "Interactive chat, progress queries, and planning before dispatch".to_string(),
+        })
+        .await
+        .unwrap();
+    let second_reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(second_reply.contains("What constraints should I respect"));
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "Keep the existing Rust execution core and avoid a rewrite".to_string(),
+        })
+        .await
+        .unwrap();
+    let plan_reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) if msg.contains("Plan ready") => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(plan_reply.contains("Reply 'yes'"));
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "yes".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let mut saw_banner = false;
+    timeout(Duration::from_secs(2), async {
+        while !saw_banner {
+            match event_rx.recv().await {
+                Some(SessionEvent::MissionUpdated { banner }) => {
+                    if let Some(banner) = banner {
+                        saw_banner = banner.goal.contains("Restore the missing host layer");
+                    }
+                }
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(saw_banner);
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_controller_answers_progress_queries_from_host_layer() {
+    let dir = TempDir::new("bakudo-session-host-progress");
+    let script = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    echo "worker is warming up"
+    sleep 1
+    echo "worker completed"
+    ;;
+"#,
+    )
+    .0;
+
+    let config = BakudoConfig {
+        abox_bin: script.display().to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::new(
+        Arc::new(config),
+        Arc::new(AboxAdapter::new(&script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::Dispatch {
+            prompt: "do a long-running thing".to_string(),
+            approved: false,
+        })
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::TaskStarted { .. }) => break,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "Tell me about how things are progressing".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let progress_reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) if msg.contains("running 1") => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(progress_reply.contains("Host status"));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_completes_wake_flow_and_persists_blackboard() {
+    let dir = TempDir::new("bakudo-mission-runtime");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+if wake["reason"] in ("manual_resume", "user_message"):
+    call("update_blackboard", {"patch": {"next_steps": ["wave-1"], "best_known": {"label": "baseline", "score": 0}}})
+    call("dispatch_swarm", {
+        "experiments": [{
+            "label": "wave-1",
+            "hypothesis": "measure baseline",
+            "base_branch": "main",
+            "script": {"kind": "inline", "source": "echo '{\"score\": 42}'"},
+            "metric_keys": ["score"]
+        }],
+        "wake_when": "all_complete"
+    })
+    call("suspend", {"reason": "experiments_dispatched"})
+elif wake["reason"] == "experiments_complete":
+    call("update_blackboard", {"patch": {"best_known": {"label": "wave-1", "score": 42}, "next_steps": []}})
+    call("suspend", {"reason": "complete", "complete": True})
+else:
+    call("suspend", {"reason": "noop", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-mission".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Persist wake state".to_string(),
+            done_contract: Some("score must be recorded".to_string()),
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mut observed_events = Vec::new();
+    let mission_wait = timeout(Duration::from_secs(3), async {
+        loop {
+            while let Ok(event) = event_rx.try_recv() {
+                observed_events.push(format!("{event:?}"));
+            }
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    let mission = match mission_wait {
+        Ok(mission) => mission,
+        Err(_) => {
+            let missions = store.list_missions().await.unwrap();
+            let experiments = if let Some(mission) = missions.first() {
+                store.experiments_for_mission(mission.id).await.unwrap()
+            } else {
+                Vec::new()
+            };
+            panic!(
+                "missions after timeout: {:?}\nexperiments: {:?}\nobserved events: {:?}",
+                missions, experiments, observed_events,
+            );
+        }
+    };
+
+    let blackboard = store.blackboard(mission.id).await.unwrap();
+    assert_eq!(blackboard.0["best_known"]["score"].as_i64(), Some(42));
+    let experiments = store.experiments_for_mission(mission.id).await.unwrap();
+    assert_eq!(experiments.len(), 1);
+    assert_eq!(experiments[0].status, ExperimentStatus::Succeeded);
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_dispatches_multiple_waves() {
+    let dir = TempDir::new("bakudo-multi-wave-runtime");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+if wake["reason"] == "manual_resume":
+    call("dispatch_swarm", {
+        "experiments": [{
+            "label": "wave-1",
+            "hypothesis": "first pass",
+            "base_branch": "main",
+            "script": {"kind": "inline", "source": "echo '{\"score\": 21}'"},
+            "metric_keys": ["score"]
+        }],
+        "wake_when": "all_complete"
+    })
+    call("suspend", {"reason": "wave-1"})
+elif wake["reason"] == "experiments_complete":
+    experiments = wake["payload"]["experiments"]
+    if experiments[0]["label"] == "wave-1":
+        call("update_blackboard", {"patch": {"next_steps": ["wave-2"]}})
+        call("dispatch_swarm", {
+            "experiments": [{
+                "label": "wave-2",
+                "hypothesis": "second pass",
+                "base_branch": "main",
+                "script": {"kind": "inline", "source": "echo '{\"score\": 84}'"},
+                "metric_keys": ["score"]
+            }],
+            "wake_when": "all_complete"
+        })
+        call("suspend", {"reason": "wave-2"})
+    else:
+        call("update_blackboard", {"patch": {
+            "best_known": {"label": "wave-2", "score": 84},
+            "next_steps": []
+        }})
+        call("suspend", {"reason": "complete", "complete": True})
+else:
+    call("suspend", {"reason": "noop", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-multi-wave".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Run multiple waves".to_string(),
+            done_contract: Some("second wave should complete".to_string()),
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mut observed_events = Vec::new();
+    let mission_wait = timeout(Duration::from_secs(3), async {
+        loop {
+            while let Ok(event) = event_rx.try_recv() {
+                observed_events.push(format!("{event:?}"));
+            }
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    let mission = match mission_wait {
+        Ok(mission) => mission,
+        Err(_) => {
+            let missions = store.list_missions().await.unwrap();
+            let experiments = if let Some(mission) = missions.first() {
+                store.experiments_for_mission(mission.id).await.unwrap()
+            } else {
+                Vec::new()
+            };
+            panic!(
+                "missions after timeout: {:?}\nexperiments: {:?}\nobserved events: {:?}",
+                missions, experiments, observed_events,
+            );
+        }
+    };
+
+    let blackboard = store.blackboard(mission.id).await.unwrap();
+    assert_eq!(blackboard.0["best_known"]["label"].as_str(), Some("wave-2"));
+    assert_eq!(blackboard.0["best_known"]["score"].as_i64(), Some(84));
+    let experiments = store.experiments_for_mission(mission.id).await.unwrap();
+    assert_eq!(experiments.len(), 2);
+    assert!(experiments
+        .iter()
+        .all(|experiment| experiment.status == ExperimentStatus::Succeeded));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_enforces_wallet_on_dispatch_swarm() {
+    let dir = TempDir::new("bakudo-wallet-enforcement");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+experiments = [{
+    "label": f"exp-{idx}",
+    "hypothesis": "overflow wallet",
+    "base_branch": "main",
+    "script": {"kind": "inline", "source": "echo wallet"},
+    "metric_keys": []
+} for idx in range(13)]
+response = call_error("dispatch_swarm", {"experiments": experiments, "wake_when": "all_complete"})
+assert response.get("error"), response
+call("suspend", {"reason": "wallet_rejected", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-wallet".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Reject oversized wave".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(store
+        .experiments_for_mission(mission.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_requests_host_approval_for_host_exec() {
+    let dir = TempDir::new("bakudo-host-approval");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+result, _meta = call("host_exec", {"command": "echo host-ok", "reason": "verify approval"})
+assert result["approved"] is True
+assert "host-ok" in result["stdout_tail"]
+call("suspend", {"reason": "complete", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-approval".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Approve host exec".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let mut observed_events = Vec::new();
+    let approval_wait = timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::ApprovalRequested { request_id, .. }) => break request_id,
+                Some(event) => observed_events.push(format!("{event:?}")),
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await;
+    let request_id = match approval_wait {
+        Ok(request_id) => request_id,
+        Err(_) => panic!(
+            "mission events timed out before approval; observed events: {:?}",
+            observed_events
+        ),
+    };
+    cmd_tx
+        .send(SessionCommand::ResolveHostApproval {
+            request_id,
+            approved: true,
+            edited_command: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if missions
+                .iter()
+                .any(|mission| mission.status == MissionStatus::Completed)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_asks_user_and_records_answer() {
+    let dir = TempDir::new("bakudo-ask-user");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+result, _meta = call("ask_user", {
+    "question": "Choose the next step",
+    "choices": ["wave-1", "wave-2"]
+})
+assert result["answer"] == "wave-2"
+call("suspend", {"reason": "complete", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-ask-user".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Ask the user".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let request_id = timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::UserQuestionRequested { request_id, .. }) => break request_id,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    cmd_tx
+        .send(SessionCommand::AnswerUserQuestion {
+            request_id,
+            answer: "wave-2".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let ledger = store.recent_ledger(mission.id, 8).await.unwrap();
+    assert!(ledger.iter().any(|entry| entry.summary.contains("wave-2")
+        && entry.kind == bakudo_core::mission::LedgerKind::UserSteering));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_records_lessons_to_repo_storage() {
+    let dir = TempDir::new("bakudo-record-lesson");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+result, _meta = call("record_lesson", {
+    "title": "Start with the baseline",
+    "body": "Measure the baseline before dispatching a second wave."
+})
+assert result["path"].endswith(".md")
+call("suspend", {"reason": "complete", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-record-lesson".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Record a lesson".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let lessons_dir = repo.path().join(".bakudo").join("lessons");
+    let lesson_entries = fs::read_dir(&lessons_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(lesson_entries.len(), 1);
+    let lesson_text = fs::read_to_string(lesson_entries[0].path()).unwrap();
+    assert!(lesson_text.contains("Start with the baseline"));
+    let ledger = store.recent_ledger(mission.id, 8).await.unwrap();
+    assert!(ledger
+        .iter()
+        .any(|entry| entry.kind == bakudo_core::mission::LedgerKind::Lesson));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_recovers_running_experiment_on_restart() {
+    let dir = TempDir::new("bakudo-mission-recovery");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+call("suspend", {"reason": "complete", "complete": True})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let repo_data_dir = config.resolved_repo_data_dir(Some(repo.path()));
+    let store = MissionStore::open(repo_data_dir.join("state.db")).unwrap();
+    let mission = Mission {
+        id: MissionId::new(),
+        goal: "Recover after restart".to_string(),
+        posture: Posture::Mission,
+        provider_name: "exec-mission".to_string(),
+        abox_profile: "dev-broad".to_string(),
+        wallet: Wallet::default(),
+        status: MissionStatus::Sleeping,
+        created_at: Utc::now(),
+        completed_at: None,
+    };
+    store.upsert_mission(&mission).await.unwrap();
+    store
+        .save_blackboard(
+            mission.id,
+            &bakudo_core::mission::Blackboard::default_layout(),
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_experiment(&Experiment {
+            id: bakudo_core::mission::ExperimentId::new(),
+            mission_id: mission.id,
+            label: "stale-running".to_string(),
+            spec: bakudo_core::mission::ExperimentSpec {
+                base_branch: "main".to_string(),
+                script: bakudo_core::mission::ExperimentScript::Inline {
+                    source: "echo stale".to_string(),
+                },
+                skill: None,
+                hypothesis: "stale".to_string(),
+                metric_keys: Vec::new(),
+            },
+            status: ExperimentStatus::Running,
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            summary: None,
+        })
+        .await
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-recovery".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if missions.iter().any(|candidate| {
+                candidate.id == mission.id && candidate.status == MissionStatus::Completed
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let recovered = store.experiments_for_mission(mission.id).await.unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].status, ExperimentStatus::Failed);
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
 #[test]
 fn app_can_reload_persisted_transcript() {
     let dir = TempDir::new("bakudo-transcript-store");
@@ -982,6 +2184,32 @@ fn app_can_reload_persisted_transcript() {
     assert_eq!(resumed.transcript.len(), 2);
     assert_eq!(resumed.transcript.front().unwrap().role, MessageRole::User);
     assert!(resumed.transcript.back().unwrap().content.contains("world"));
+}
+
+#[test]
+fn app_routes_freeform_input_through_host_layer() {
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+    let (_event_tx, event_rx) = mpsc::channel(8);
+    let mut app = App::new(
+        Arc::new(BakudoConfig::default()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        Arc::new(SandboxLedger::new()),
+        cmd_tx,
+        event_rx,
+        None,
+        true,
+    );
+
+    app.input = "Restore the missing host layer".to_string();
+    app.cursor = app.input.len();
+    app.handle_input_key(enter_key());
+
+    match cmd_rx.try_recv() {
+        Ok(SessionCommand::HostInput { text }) => {
+            assert!(text.contains("Restore the missing host layer"));
+        }
+        other => panic!("expected HostInput command, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1409,6 +2637,7 @@ async fn bakudo_wait_cli_observes_session_controller_result() {
             ),
             resume_only: false,
         },
+        cmd_tx.clone(),
         cmd_rx,
         event_tx,
     );

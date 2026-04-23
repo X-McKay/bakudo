@@ -4,32 +4,48 @@ This document describes the implementation that currently ships on `v2-architect
 
 ## Overview
 
-Bakudo runs provider tasks inside `abox` sandboxes and manages the resulting worktrees from the host. Tasks can be launched from either the TUI, the headless `bakudo run` command, or the dependency-aware headless `bakudo swarm` command.
+Bakudo has two execution modes that share the same Rust runtime:
 
-The runtime is intentionally small:
+1. A classic one-shot task path used by `bakudo run` and `bakudo swarm`.
+2. A durable mission path used by the TUI, `bakudo daemon`, and `bakudo status`.
 
-1. `src/main.rs` loads config, constructs shared services, and starts either the TUI loop, a single headless run, or a headless swarm scheduler.
-2. `SessionController` receives typed `SessionCommand`s, applies the execution policy, dispatches attempts, and emits typed `SessionEvent`s.
-3. `TaskRunner` writes the `AttemptSpec`, launches `abox run`, streams worker output, and records state transitions in the `SandboxLedger`.
-4. `worktree.rs` applies the host-side candidate policy after successful runs.
-5. Optional post-run hooks receive a JSON payload after the final sandbox state is known.
+The interactive mission path is explicitly layered:
+
+1. `src/main.rs` loads config, constructs shared services, and starts either the TUI loop, a headless one-shot command, the headless daemon, or the repo mission status view.
+2. `SessionController` is the typed command/event boundary for the TUI and host CLI. It preserves the restored conversational host layer and routes host turns into the mission runtime instead of directly deleting or bypassing them.
+3. `MissionCore` inside `SessionController` acts as the supervisor. It persists mission state, maintains the wake queue, enforces the wallet, and resumes active missions after restart.
+4. `run_deliberator()` launches the active mission provider as a deliberator process over stdio and answers tool calls through a JSON-RPC-like MCP transport.
+5. `TaskRunner` and `run_experiment()` still launch `abox run`, stream progress, and update the `SandboxLedger` for classic runs and mission experiments alike.
+6. `worktree.rs` still applies the host-side candidate policy after successful one-shot runs.
 
 ## Crate Responsibilities
 
 - `bakudo-core`: Protocol types, config loading, provider registry, swarm plan validation, `abox` adapter, and shared state models.
-- `bakudo-daemon`: Session orchestration, task execution, divergence queries, and worktree lifecycle management.
+- `bakudo-daemon`: Session orchestration, mission supervisor/deliberator runtime, durable mission storage, divergence queries, and worktree lifecycle management.
 - `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
 - `src/main.rs`: CLI entrypoint and TUI bootstrap.
 
 ## Provider Execution Model
 
-Providers are defined in `bakudo-core/src/provider.rs`.
+Bakudo now has two provider-loading paths:
+
+- Classic one-shot runs use `bakudo-core/src/provider.rs` and `ProviderRegistry`.
+- Autonomous missions use `ProviderCatalog` from `bakudo-daemon/src/provider_runtime.rs`, which loads `.bakudo/providers/*.toml` plus `.bakudo/prompts/*.md` and materializes defaults on demand.
+
+For classic runs:
 
 - Bakudo never hard-codes provider flags outside the registry.
 - Prompts are forwarded through `stdin` using `ProviderSpec::build_worker_command(...)`.
 - The execution policy can allow, prompt, or forbid a provider launch and can independently enable or disable the provider's "allow all tools" flag.
 - Each run also receives `BAKUDO_PROMPT`, `BAKUDO_SPEC_PATH`, and `BAKUDO_TASK_ID`.
-- Provider specs can supply sandbox sizing hints (`memory_mib`, `cpus`), and those are forwarded to `abox run`.
+
+For autonomous missions:
+
+- The deliberator process receives `BAKUDO_WAKE_EVENT_PATH`, `BAKUDO_SYSTEM_PROMPT_PATH`, `BAKUDO_MISSION_ID`, `BAKUDO_POSTURE`, `BAKUDO_REPO_ROOT`, and `BAKUDO_MCP_TRANSPORT=stdio`.
+- Provider `.toml` files declare the engine, prompt file, abox profile, wake budget, and environment passthrough.
+- The current tool surface is:
+  `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_blackboard`, `record_lesson`, `ask_user`, `cancel_experiments`, and `suspend`.
+- Every tool result includes a `meta` sidecar with wallet, fleet, posture, pending-user-message, and wake metadata.
 
 ## State Model
 
@@ -49,6 +65,28 @@ Startup recovery is ledger-based:
 
 The persisted ledger is repo-scoped. Each repository gets its own runtime state directory under the configured Bakudo data root, so preserved sandboxes from one repo do not leak into another repo's TUI session.
 
+Autonomous missions add a second durable state model in `MissionStore`:
+
+- `Mission`: top-level objective, posture, provider, wallet, and mission status.
+- `Experiment`: each dispatched abox worker, its spec, status, and summary.
+- `WakeEvent`: durable wake queue entries, including blackboard, wallet snapshot, user inbox, and recent ledger context.
+- `Blackboard`: the mission working memory carried across wakes.
+- `UserMessage`: steering from the host layer that should wake or inform the deliberator.
+- `LedgerEntry`: durable mission-side decisions, summaries, and lessons.
+- `ActiveWaveRecord`: persisted experiment-wave bookkeeping so multi-wave missions survive races and restarts.
+
+The mission store is a repo-scoped SQLite database at:
+
+```text
+<bakudo-data>/repos/<repo-scope>/state.db
+```
+
+Wake payload snapshots are also written to:
+
+```text
+<bakudo-data>/repos/<repo-scope>/wakes/<wake-id>.json
+```
+
 ## Worktree Lifecycle
 
 Bakudo uses a host-owned preserved-worktree model.
@@ -63,12 +101,22 @@ The agent inside the sandbox never merges its own changes.
 
 The TUI only communicates with the daemon through channels.
 
-- `SessionCommand`: dispatch, provider/model changes, apply/discard/diverge, shutdown.
-- `SessionEvent`: startup ledger snapshot, task lifecycle events, provider changes, info, and errors.
+- `SessionCommand`: host chat input, mission start/budget/wake commands, approval/question responses, classic dispatch, provider/model changes, apply/discard/diverge, and shutdown.
+- `SessionEvent`: startup ledger snapshot, task lifecycle events, mission banner updates, approval prompts, user questions, provider changes, info, and errors.
 
-The TUI does not spawn sandbox work directly. It renders transcript output and shelf state derived from the daemon and ledger.
+The TUI does not spawn sandbox work directly. Freeform text is treated as a host turn first, so the daemon can answer status/progress questions, ask clarifying questions, stage a plan, steer an active mission, and only then dispatch sandbox work. The TUI renders transcript output, shelf state, mission wallet/fleet status, and approval/question modals derived from daemon events.
 
 Interactive transcript history is persisted to a repo-scoped JSONL log and reloaded on `bakudo resume`, so resume restores both preserved sandboxes and the visible transcript instead of only rebuilding the shelf from the ledger.
+
+The current mission-oriented slash commands are:
+
+- `/mission <goal>`
+- `/explore <goal>`
+- `/budget time=<minutes>m workers=<count>`
+- `/wake`
+- `/lessons`
+
+Classic commands such as `/provider`, `/model`, `/apply`, `/discard`, `/diff`, `/status`, and `/doctor` remain available.
 
 ## Headless Contract
 
@@ -95,12 +143,17 @@ Bakudo does not expose a generic host `shell`, arbitrary host file write, or hos
 - `artifact_path` is treated as a logical relative path. Bakudo rejects absolute paths and traversal segments, then writes the JSON summary for that task under a Bakudo-owned repo-scoped mission directory derived from `mission_id`.
 - Dependencies gate scheduling, but downstream tasks only see upstream code changes if the upstream task merged them back to the repo, typically via `candidate_policy = "auto_apply"`.
 
+Mission-aware headless commands now include:
+
+- `bakudo daemon`: run the session controller without the TUI.
+- `bakudo status`: read the durable mission store for the current repo and print mission posture, state, wallet counters, and goal.
+
 ## Testing Strategy
 
 The current test suite is layered:
 
 - Unit tests for protocol/config/provider/state logic.
-- Deterministic fake-`abox` integration tests in `tests/runtime.rs`.
+- Deterministic fake-`abox` integration tests in `tests/runtime.rs`, including wake flow, blackboard updates, wallet enforcement, host approvals, ask-user flow, multi-wave dispatch, lesson persistence, and restart recovery.
 - TUI state and render tests.
 - Optional live smoke tests against installed `abox 0.3.1` when available locally.
 

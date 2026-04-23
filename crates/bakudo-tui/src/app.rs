@@ -22,10 +22,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use bakudo_core::config::BakudoConfig;
+use bakudo_core::mission::Posture;
 use bakudo_core::protocol::{WorkerProgressKind, WorkerStatus};
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
-use bakudo_daemon::session_controller::{SessionCommand, SessionEvent};
+use bakudo_daemon::session_controller::{MissionBanner, SessionCommand, SessionEvent};
 
 use crate::commands::{completions_for, parse_slash, ParsedCommand, SlashCommand};
 use crate::transcript_store::TranscriptStore;
@@ -148,6 +149,24 @@ pub enum FocusedPanel {
     Shelf,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApprovalPrompt {
+    pub request_id: String,
+    pub command: String,
+    pub reason: String,
+    pub editing: bool,
+    pub edited_command: String,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserQuestionPrompt {
+    pub request_id: String,
+    pub question: String,
+    pub choices: Vec<String>,
+    pub selected: usize,
+}
+
 // ─── App state ─────────────────────────────────────────────────────────────
 
 /// The top-level application state.
@@ -184,12 +203,11 @@ pub struct App {
     pub provider_id: String,
     /// Current model (None = provider default).
     pub model: Option<String>,
+    /// Active durable mission banner, when one exists.
+    pub mission_banner: Option<MissionBanner>,
 
     /// Number of tasks currently in-flight (used to gate commands).
     pub active_task_count: usize,
-    /// Whether the next dispatch has an explicit approval token.
-    pub next_dispatch_approved: bool,
-
     /// Spinner tick counter, incremented every Tick event.
     pub tick: u64,
 
@@ -205,6 +223,9 @@ pub struct App {
 
     /// Whether the app should exit.
     pub should_quit: bool,
+
+    pub approval_prompt: Option<ApprovalPrompt>,
+    pub user_question_prompt: Option<UserQuestionPrompt>,
 
     /// Channel to send commands to the session controller.
     cmd_tx: mpsc::Sender<SessionCommand>,
@@ -250,14 +271,16 @@ impl App {
             terminal_focused: true,
             provider_id,
             model,
+            mission_banner: None,
             active_task_count: 0,
-            next_dispatch_approved: false,
             tick: 0,
             completions: Vec::new(),
             completion_idx: 0,
             help_visible: false,
             help_scroll: 0,
             should_quit: false,
+            approval_prompt: None,
+            user_question_prompt: None,
             cmd_tx,
             event_rx,
             transcript_store,
@@ -265,8 +288,9 @@ impl App {
         if show_welcome {
             app.push_message(ChatMessage::system(
                 "Welcome to Bakudo v2.\n\
-                 Type a prompt and press Enter to dispatch a task to a sandbox.\n\
-                 Type /help for available commands, or /status to see the current session id.",
+                 Describe an objective, ask for progress, or steer the current mission in plain language.\n\
+                 Bakudo will clarify, stage a plan, and only then dispatch sandbox workers.\n\
+                 Type /help for available commands, or /status to see the local session summary.",
             ));
         }
         app
@@ -393,6 +417,14 @@ impl App {
             let _ = self.cmd_tx.try_send(SessionCommand::Shutdown);
             return true;
         }
+        if self.approval_prompt.is_some() {
+            self.handle_approval_key(key);
+            return true;
+        }
+        if self.user_question_prompt.is_some() {
+            self.handle_question_key(key);
+            return true;
+        }
         // The help overlay consumes all other keys while it's visible.
         if self.help_visible {
             self.handle_help_key(key);
@@ -434,6 +466,133 @@ impl App {
             }
             KeyCode::Home => {
                 self.help_scroll = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_approval_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let Some(prompt) = self.approval_prompt.as_mut() else {
+            return;
+        };
+        if prompt.editing {
+            match key.code {
+                KeyCode::Esc => {
+                    prompt.editing = false;
+                    prompt.edited_command = prompt.command.clone();
+                    prompt.cursor = prompt.edited_command.len();
+                }
+                KeyCode::Enter => {
+                    let request_id = prompt.request_id.clone();
+                    let edited_command = prompt.edited_command.clone();
+                    let _ = self.cmd_tx.try_send(SessionCommand::ResolveHostApproval {
+                        request_id,
+                        approved: true,
+                        edited_command: Some(edited_command.clone()),
+                    });
+                    self.approval_prompt = None;
+                    self.push_message(ChatMessage::info(format!(
+                        "Approved host command: {}",
+                        edited_command
+                    )));
+                }
+                KeyCode::Backspace if prompt.cursor > 0 => {
+                    let prev = prompt.cursor - 1;
+                    prompt.edited_command.drain(prev..prompt.cursor);
+                    prompt.cursor = prev;
+                }
+                KeyCode::Left if prompt.cursor > 0 => {
+                    prompt.cursor -= 1;
+                }
+                KeyCode::Right if prompt.cursor < prompt.edited_command.len() => {
+                    prompt.cursor += 1;
+                }
+                KeyCode::Char(ch) => {
+                    prompt.edited_command.insert(prompt.cursor, ch);
+                    prompt.cursor += 1;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('a') => {
+                let request_id = prompt.request_id.clone();
+                let command = prompt.command.clone();
+                let _ = self.cmd_tx.try_send(SessionCommand::ResolveHostApproval {
+                    request_id,
+                    approved: true,
+                    edited_command: None,
+                });
+                self.approval_prompt = None;
+                self.push_message(ChatMessage::info(format!(
+                    "Approved host command: {}",
+                    command
+                )));
+            }
+            KeyCode::Char('d') | KeyCode::Esc => {
+                let request_id = prompt.request_id.clone();
+                let command = prompt.command.clone();
+                let _ = self.cmd_tx.try_send(SessionCommand::ResolveHostApproval {
+                    request_id,
+                    approved: false,
+                    edited_command: None,
+                });
+                self.approval_prompt = None;
+                self.push_message(ChatMessage::info(format!(
+                    "Denied host command: {}",
+                    command
+                )));
+            }
+            KeyCode::Char('e') => {
+                prompt.editing = true;
+                prompt.edited_command = prompt.command.clone();
+                prompt.cursor = prompt.edited_command.len();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_question_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let Some(prompt) = self.user_question_prompt.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Left if prompt.selected > 0 => {
+                prompt.selected -= 1;
+            }
+            KeyCode::Down | KeyCode::Right if prompt.selected + 1 < prompt.choices.len() => {
+                prompt.selected += 1;
+            }
+            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                let idx = ch.to_digit(10).unwrap_or(0) as usize;
+                if idx > 0 && idx <= prompt.choices.len() {
+                    prompt.selected = idx - 1;
+                }
+            }
+            KeyCode::Enter => {
+                let answer = prompt
+                    .choices
+                    .get(prompt.selected)
+                    .cloned()
+                    .unwrap_or_default();
+                let _ = self.cmd_tx.try_send(SessionCommand::AnswerUserQuestion {
+                    request_id: prompt.request_id.clone(),
+                    answer: answer.clone(),
+                });
+                self.push_message(ChatMessage::info(format!("Answered question: {}", answer)));
+                self.user_question_prompt = None;
+            }
+            KeyCode::Esc => {
+                let answer = prompt.choices.first().cloned().unwrap_or_default();
+                let _ = self.cmd_tx.try_send(SessionCommand::AnswerUserQuestion {
+                    request_id: prompt.request_id.clone(),
+                    answer,
+                });
+                self.user_question_prompt = None;
             }
             _ => {}
         }
@@ -794,6 +953,35 @@ impl App {
                     "Provider → {provider_id}  model → {model_label}"
                 )));
             }
+            SessionEvent::MissionUpdated { banner } => {
+                self.mission_banner = banner;
+            }
+            SessionEvent::ApprovalRequested {
+                request_id,
+                command,
+                reason,
+            } => {
+                self.approval_prompt = Some(ApprovalPrompt {
+                    request_id,
+                    cursor: command.len(),
+                    edited_command: command.clone(),
+                    command,
+                    reason,
+                    editing: false,
+                });
+            }
+            SessionEvent::UserQuestionRequested {
+                request_id,
+                question,
+                choices,
+            } => {
+                self.user_question_prompt = Some(UserQuestionPrompt {
+                    request_id,
+                    question,
+                    selected: 0,
+                    choices,
+                });
+            }
             SessionEvent::Info(message) => {
                 self.push_message(ChatMessage::info(message));
             }
@@ -915,11 +1103,9 @@ impl App {
                 if let Err(reason) = self.preflight_dispatch() {
                     self.push_message(ChatMessage::error(reason));
                 } else {
-                    let approved = std::mem::take(&mut self.next_dispatch_approved);
-                    let _ = self.cmd_tx.try_send(SessionCommand::Dispatch {
-                        prompt: input,
-                        approved,
-                    });
+                    let _ = self
+                        .cmd_tx
+                        .try_send(SessionCommand::HostInput { text: input });
                 }
             }
         }
@@ -938,6 +1124,11 @@ impl App {
         }
 
         match command {
+            SlashCommand::Mission => self.cmd_start_mission(Posture::Mission, arg),
+            SlashCommand::Explore => self.cmd_start_mission(Posture::Explore, arg),
+            SlashCommand::Budget => self.cmd_budget(arg),
+            SlashCommand::Wake => self.cmd_wake(),
+            SlashCommand::Lessons => self.cmd_lessons(),
             SlashCommand::Provider => self.cmd_provider(arg),
             SlashCommand::Approve => self.cmd_approve(),
             SlashCommand::Model => self.cmd_model(arg),
@@ -973,10 +1164,68 @@ impl App {
     }
 
     fn cmd_approve(&mut self) {
-        self.next_dispatch_approved = true;
+        let _ = self.cmd_tx.try_send(SessionCommand::ApproveExecution);
         self.push_message(ChatMessage::info(
-            "The next task dispatch is approved under the current execution policy.",
+            "The next provider execution is approved under the current execution policy.",
         ));
+    }
+
+    fn cmd_start_mission(&mut self, posture: Posture, goal: String) {
+        let trimmed = goal.trim();
+        if trimmed.is_empty() {
+            self.push_message(ChatMessage::error("Mission goal must not be empty."));
+            return;
+        }
+        let _ = self.cmd_tx.try_send(SessionCommand::StartMission {
+            posture,
+            goal: trimmed.to_string(),
+            done_contract: None,
+            constraints: None,
+        });
+        self.push_message(ChatMessage::info(format!(
+            "Starting {} mission: {}",
+            posture, trimmed
+        )));
+    }
+
+    fn cmd_budget(&mut self, arg: String) {
+        let mut wall_clock_minutes = None;
+        let mut workers = None;
+        for token in arg.split_whitespace() {
+            if let Some(value) = token.strip_prefix("time=") {
+                wall_clock_minutes = parse_budget_minutes(value);
+            } else if let Some(value) = token.strip_prefix("workers=") {
+                workers = value.parse::<u32>().ok();
+            }
+        }
+        if wall_clock_minutes.is_none() && workers.is_none() {
+            self.push_message(ChatMessage::error(
+                "Usage: /budget time=<minutes>m workers=<count>",
+            ));
+            return;
+        }
+        let _ = self.cmd_tx.try_send(SessionCommand::SetMissionBudget {
+            wall_clock_minutes,
+            workers,
+        });
+        self.push_message(ChatMessage::info("Updating mission wallet…"));
+    }
+
+    fn cmd_wake(&mut self) {
+        let _ = self.cmd_tx.try_send(SessionCommand::ForceWake);
+        self.push_message(ChatMessage::info("Forcing a manual wake…"));
+    }
+
+    fn cmd_lessons(&mut self) {
+        let path = std::env::current_dir()
+            .ok()
+            .unwrap_or_default()
+            .join(".bakudo")
+            .join("lessons");
+        self.push_message(ChatMessage::info(format!(
+            "Lessons directory: {}",
+            path.display()
+        )));
     }
 
     fn cmd_model(&mut self, arg: String) {
@@ -1107,7 +1356,7 @@ impl App {
     }
 
     fn cmd_status(&mut self) {
-        let info = format!(
+        let mut lines = vec![format!(
             "Status:\n  session:        {}\n  workspace:      {}\n  provider:       {}\n  model:          {}\n  active tasks:   {}\n  preserved:      {}\n  conflicts:      {}\n  shelf entries:  {}",
             if self.session_id.is_empty() {
                 "<uninitialised>"
@@ -1121,7 +1370,20 @@ impl App {
             self.preserved_shelf_count(),
             self.conflict_shelf_count(),
             self.shelf.len(),
-        );
+        )];
+        if let Some(banner) = &self.mission_banner {
+            lines.push(format!(
+                "  mission:        {} [{} / {:?}]\n  wallet:         {}s left, {} workers remaining, {} in flight, max {}",
+                banner.goal,
+                banner.mission_id,
+                banner.posture,
+                banner.wall_clock_remaining_secs,
+                banner.abox_workers_remaining,
+                banner.abox_workers_in_flight,
+                banner.concurrent_max,
+            ));
+        }
+        let info = lines.join("\n");
         self.push_message(ChatMessage::info(info));
     }
 
@@ -1317,6 +1579,17 @@ fn render_worker_status(status: &WorkerStatus) -> &'static str {
         WorkerStatus::Failed => "failed",
         WorkerStatus::TimedOut => "timed out",
         WorkerStatus::Cancelled => "cancelled",
+    }
+}
+
+fn parse_budget_minutes(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if let Some(minutes) = trimmed.strip_suffix('m') {
+        minutes.parse().ok()
+    } else if let Some(hours) = trimmed.strip_suffix('h') {
+        hours.parse::<u64>().ok().map(|hours| hours * 60)
+    } else {
+        trimmed.parse().ok()
     }
 }
 

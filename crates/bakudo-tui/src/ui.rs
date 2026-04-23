@@ -107,6 +107,13 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_completion_popup(frame, app, v_chunks[2]);
     }
 
+    if app.approval_prompt.is_some() {
+        render_approval_modal(frame, app);
+    }
+    if app.user_question_prompt.is_some() {
+        render_question_modal(frame, app);
+    }
+
     // ── Help overlay (drawn last so it sits on top of everything) ───────────
     if app.help_visible {
         render_help_overlay(frame, app);
@@ -134,7 +141,31 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("model: ", Style::default().fg(palette::header_fg())),
         Span::styled(model_str, Style::default().fg(palette::model_accent())),
     ]);
-    let line_2 = if area.width < SHELF_MIN_TERM_WIDTH {
+    let line_2 = if let Some(banner) = &app.mission_banner {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("mission ", palette::dim_style()),
+            Span::styled(&banner.goal, Style::default().fg(Color::White).bold()),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("posture ", palette::dim_style()),
+            Span::styled(
+                banner.posture.to_string(),
+                Style::default().fg(palette::provider_accent()).bold(),
+            ),
+            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("wallet ", palette::dim_style()),
+            Span::styled(
+                format!(
+                    "{}s · {} remain · {} in flight / {} max",
+                    banner.wall_clock_remaining_secs,
+                    banner.abox_workers_remaining,
+                    banner.abox_workers_in_flight,
+                    banner.concurrent_max
+                ),
+                Style::default().fg(Color::White),
+            ),
+        ])
+    } else if area.width < SHELF_MIN_TERM_WIDTH {
         let counts = format!(
             "r{} p{} c{}",
             app.running_shelf_count(),
@@ -201,6 +232,78 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let header = Paragraph::new(Text::from(vec![line_1, line_2]))
         .style(Style::default().bg(palette::header_bg()));
     frame.render_widget(header, area);
+}
+
+fn render_approval_modal(frame: &mut Frame, app: &App) {
+    let Some(prompt) = &app.approval_prompt else {
+        return;
+    };
+    let area = centered_rect(frame.size(), 70, if prompt.editing { 40 } else { 34 });
+    frame.render_widget(Clear, area);
+    let body = if prompt.editing {
+        format!(
+            "Approval required\n\nCommand:\n{}\n\nReason:\n{}\n\nEdit command, then press Enter to approve.\nEsc returns to approve/deny.",
+            prompt.edited_command, prompt.reason
+        )
+    } else {
+        format!(
+            "Approval required\n\nCommand:\n{}\n\nReason:\n{}\n\n[a] approve   [d] deny   [e] edit",
+            prompt.command, prompt.reason
+        )
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Approval ");
+    frame.render_widget(
+        Paragraph::new(body).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_question_modal(frame: &mut Frame, app: &App) {
+    let Some(prompt) = &app.user_question_prompt else {
+        return;
+    };
+    let area = centered_rect(frame.size(), 70, 34);
+    frame.render_widget(Clear, area);
+    let mut lines = vec![Line::from(prompt.question.as_str()), Line::from("")];
+    for (idx, choice) in prompt.choices.iter().enumerate() {
+        let prefix = if idx == prompt.selected { "> " } else { "  " };
+        lines.push(Line::from(format!("{prefix}{}: {}", idx + 1, choice)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Use arrows or number keys, then Enter."));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Question ");
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - height_percent) / 2),
+            Constraint::Percentage(height_percent),
+            Constraint::Percentage((100 - height_percent) / 2),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_percent) / 2),
+            Constraint::Percentage(width_percent),
+            Constraint::Percentage((100 - width_percent) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
 }
 
 // ─── Transcript ────────────────────────────────────────────────────────────
@@ -1293,6 +1396,8 @@ mod tests {
         assert!(rendered.contains("Slash Commands"));
         assert!(rendered.contains("/provider"));
         assert!(rendered.contains("/help"));
+        app.help_scroll = 64;
+        let rendered = render_to_string(&app, 100, 30);
         assert!(rendered.contains("Keybinds"));
         assert!(rendered.contains("Shift+Enter"));
     }

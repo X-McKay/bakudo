@@ -1,19 +1,25 @@
 # Bakudo
 
-Bakudo is a Rust agent harness for running provider CLIs inside isolated `abox` sandboxes and managing the resulting worktrees from the host.
+Bakudo is a Rust agent harness for running provider CLIs inside isolated `abox` sandboxes, supervising autonomous multi-wave missions, and managing worktrees from the host.
 
-Version 2 ships a `ratatui` interface, a headless CLI mode, and a host-owned preserved-worktree lifecycle.
+Version 2 now ships two complementary execution paths:
+
+- a classic task runner for one-off `bakudo run` and `bakudo swarm` execution
+- a wake-based mission runtime that keeps a durable blackboard, wallet, wake queue, and conversational host layer around a long-lived objective
 
 ## Features
 
-- **Provider agnostic**: Run Claude Code, Codex, OpenCode, or Gemini CLI headlessly. Prompts are injected via `stdin`, structured specs are passed into the sandbox with `BAKUDO_*` env vars, and a guest-side wrapper emits structured progress/result events.
+- **Wake-based mission runtime**: A supervisor loop persists `Mission`, `Experiment`, `WakeEvent`, `Blackboard`, `Wallet`, `UserMessage`, and ledger state in a repo-scoped SQLite store so missions can resume after restarts.
+- **Provider agnostic**: Run Claude Code, Codex, OpenCode, Gemini, or repo-local `exec` deliberators headlessly. Classic runs still use the provider registry; autonomous missions load `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
+- **Deliberator MCP tool surface**: Autonomous missions speak to Bakudo over stdio and can call `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_blackboard`, `record_lesson`, `ask_user`, `cancel_experiments`, and `suspend`, each with a shared `meta` sidecar.
 - **Execution policy**: A native Bakudo policy can allow, prompt, or forbid provider execution per provider, and can independently decide whether Bakudo passes the provider's "allow all tools" flag.
 - **Host-owned worktree lifecycle**: Bakudo decides whether to preserve, merge, or discard the sandbox worktree after the provider exits.
-- **Polished TUI**: A responsive `ratatui` interface with a persisted chat transcript, observability shelf, slash commands, and keyboard-driven worktree actions.
+- **Polished TUI**: A responsive `ratatui` interface with a persisted chat transcript, observability shelf, wallet/fleet status, slash commands, approval and ask-user modals, and keyboard-driven worktree actions.
 - **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
+- **Durable lessons and wake provenance**: Lessons are written to `<repo>/.bakudo/lessons/`, and wake payloads plus mission state are stored under Bakudo's repo-scoped data root.
 - **Machine-readable headless runs**: `bakudo run --json` streams newline-delimited JSON events, `--output-schema` validates the final summary, and `post_run_hook` can hand completed run payloads to external tooling.
 - **Headless swarm execution**: `bakudo swarm --plan plan.json` executes dependency-aware task graphs with bounded concurrency, per-task artifacts, and the same JSON/schema integration surface as single runs.
-- **Repo-scoped control plane**: Persisted run summaries, candidate listings, and swarm artifacts can be queried later with `bakudo result`, `bakudo wait`, `bakudo candidates`, and `bakudo artifact`.
+- **Repo-scoped control plane**: Persisted run summaries, mission state, candidate listings, and swarm artifacts can be queried later with `bakudo result`, `bakudo wait`, `bakudo candidates`, `bakudo artifact`, and `bakudo status`.
 - **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.1`.
 
 ## Prerequisites
@@ -24,13 +30,19 @@ Version 2 ships a `ratatui` interface, a headless CLI mode, and a host-owned pre
 
 ## Installation
 
+Fastest path — runs the installer, which verifies Rust + abox + provider CLIs and installs `bakudo` into `~/.cargo/bin`:
+
 ```bash
 git clone https://github.com/X-McKay/bakudo.git
 cd bakudo
-cargo build --release
+./scripts/install.sh
 ```
 
-The binary will be available at `target/release/bakudo`.
+From inside an existing checkout, `just install` is equivalent (delegates to `cargo install --path . --force`).
+
+From the `bakudo-abox` workspace root, `just install-all` installs both `abox` and `bakudo` from their respective checkouts; `just install-bakudo` installs only bakudo.
+
+If you prefer a manual build, `cargo build --release` writes the binary to `target/release/bakudo`. `abox` must be on `PATH` (see the [abox repo](https://github.com/X-McKay/abox) or `just install-abox` from the workspace root).
 
 ## Usage
 
@@ -42,6 +54,11 @@ bakudo
 
 ### TUI Slash Commands
 
+- `/mission <goal>`: start a mission posture.
+- `/explore <goal>`: start an explore posture.
+- `/budget time=<minutes>m workers=<count>`: adjust the active mission wallet.
+- `/wake`: force a manual wake for the active mission.
+- `/lessons`: show the repo lessons directory.
 - `/provider <name>`: set the active provider.
 - `/approve`: approve the next task dispatch when execution policy requires prompting.
 - `/model <name>`: set the active model override.
@@ -59,6 +76,8 @@ bakudo
 - `/help`: show the command catalog.
 - `/quit`: exit the application.
 
+When a mission is active, freeform chat is routed through the restored host layer first. Status questions are answered locally; steering messages are persisted as `UserMessage`s and wake the mission supervisor; `host_exec` and `ask_user` tool calls surface as approval/question modals in the TUI.
+
 ### Headless CLI
 
 ```bash
@@ -71,6 +90,8 @@ bakudo result <task-id> --json
 bakudo wait <task-id> --json --timeout-secs 30
 bakudo candidates --json
 bakudo artifact --mission mission-build --path artifacts/prepare.json
+bakudo daemon
+bakudo status
 bakudo list
 bakudo apply <task-id>
 bakudo discard <task-id>
@@ -118,6 +139,8 @@ Dependencies gate execution, but they do not automatically transfer preserved wo
 
 Single-task results are also persisted under the repo-scoped Bakudo data root, so host-side automation can safely query outcomes after TUI or headless dispatch without adding a generic host shell surface.
 
+`bakudo daemon` runs the session controller without the TUI. `bakudo status` reads the durable mission store for the current repo and prints mission posture, status, wallet counters, and the active goal.
+
 ### Configuration
 
 Bakudo loads configuration in layered order:
@@ -136,6 +159,18 @@ Useful keys:
 
 Repo-scoped runtime state such as the sandbox ledger, run specs, and persisted TUI transcript now lives under a per-repo subdirectory of Bakudo's data root.
 
+## Mission Runtime
+
+Autonomous missions use a durable wake/supervisor model:
+
+- Bakudo persists mission state to a repo-scoped SQLite store under the Bakudo data root.
+- Each wake writes a JSON snapshot to `<repo-data>/wakes/<wake-id>.json`.
+- Deliberators are loaded from `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
+- `dispatch_swarm` launches `abox` experiments, enforces the mission wallet, and schedules the next wake when the selected completion condition is reached.
+- `record_lesson` writes Markdown lessons to `<repo>/.bakudo/lessons/`.
+
+Classic `bakudo run` and `bakudo swarm` remain available and still use the provider registry plus the host-owned worktree lifecycle.
+
 ## Architecture
 
 Bakudo is a Cargo workspace with three main crates plus a thin root binary:
@@ -145,17 +180,23 @@ Bakudo is a Cargo workspace with three main crates plus a thin root binary:
 3. `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
 4. `src/main.rs`: CLI entrypoint and TUI bootstrap.
 
-See [AGENTS.md](AGENTS.md) for development invariants and [docs/current-architecture.md](docs/current-architecture.md) for the current implementation walkthrough. Historical design drafts remain in `docs/` and are marked as archived.
+See [AGENTS.md](AGENTS.md) for development invariants and [docs/current-architecture.md](docs/current-architecture.md) for the current implementation walkthrough. Historical design drafts remain in `docs/archive/` and are marked as archived.
 
 ## Development
 
+Common recipes (run `just --list` for the full catalog):
+
 ```bash
-just check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo build --release
+just check              # fmt-check + clippy + test (local gate, fast)
+just ci                 # just check + cargo deny (what GitHub Actions runs)
+just install            # cargo install --path . --force  (sync ~/.cargo/bin/bakudo to this tree)
+just tier-integration   # Rust integration + runtime tests (no API calls)
+just tier-smoke         # real provider dispatch (costs tokens — see scripts/local/agent_smoke_test.sh)
+just doc                # open rustdoc
 ```
+
+The CI gate is installed at `.github/workflows/ci.yml`; `ci/github-workflow-example.yml` is a mirrored copy kept in the repo for re-install scenarios (see `ci/README.md`). Supply-chain audit config lives in `deny.toml`.
 
 ## License
 
-This project is private and intended for internal use.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

@@ -189,8 +189,16 @@ impl AboxAdapter {
             }
         };
 
+        let exit_code = status.code().unwrap_or(-1);
+        // `abox run --timeout ...` exits with 124 when the sandbox itself hits
+        // its wall-clock budget. That is distinct from this adapter's outer
+        // read deadline (`timeout_secs + 30`), but it should still surface as a
+        // timeout to higher layers so the ledger/UI don't misclassify it as a
+        // generic failure.
+        let timed_out = timed_out || exit_code == 124;
+
         Ok(RunResult {
-            exit_code: status.code().unwrap_or(-1),
+            exit_code,
             stdout: out_buf,
             stderr: err_buf,
             timed_out,
@@ -440,6 +448,65 @@ fn parse_by_offsets(line: &str, offsets: &[usize; 5]) -> Option<SandboxEntry> {
     })
 }
 
+/// Minimum abox version bakudo is known to work with. Keep in sync with the
+/// `//! abox v<X.Y.Z> adapter.` doc-comment at the top of this file.
+pub const MIN_ABOX_VERSION: (u32, u32, u32) = (0, 3, 1);
+
+/// Result of cross-checking `abox --version` output against [`MIN_ABOX_VERSION`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AboxVersionStatus {
+    Ok {
+        current: (u32, u32, u32),
+    },
+    TooOld {
+        current: (u32, u32, u32),
+        min: (u32, u32, u32),
+    },
+    /// `--version` returned output we couldn't parse — wrap the raw stdout so
+    /// callers can surface it to the user.
+    Unparseable(String),
+}
+
+/// Parse `"abox 0.3.1"` (or a line containing that phrase) into `(0, 3, 1)`.
+pub fn parse_abox_version(output: &str) -> Option<(u32, u32, u32)> {
+    let trimmed = output.trim();
+    let after_prefix = trimmed
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("abox "))?
+        .trim();
+    // Take everything up to the first whitespace/plus/dash-followed-by-letter so
+    // a build-metadata suffix like "0.3.1-dev" or "0.3.1 (abcdef)" doesn't break us.
+    let core = after_prefix
+        .split(|c: char| c.is_whitespace() || c == '+')
+        .next()?
+        .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.');
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Classify the abox version output against [`MIN_ABOX_VERSION`].
+pub fn check_abox_version(output: &str) -> AboxVersionStatus {
+    match parse_abox_version(output) {
+        Some(current) if current >= MIN_ABOX_VERSION => AboxVersionStatus::Ok { current },
+        Some(current) => AboxVersionStatus::TooOld {
+            current,
+            min: MIN_ABOX_VERSION,
+        },
+        None => AboxVersionStatus::Unparseable(output.trim().to_string()),
+    }
+}
+
+impl AboxAdapter {
+    /// Run `abox --version` and classify the result against [`MIN_ABOX_VERSION`].
+    pub async fn check_version(&self) -> Result<AboxVersionStatus, AboxError> {
+        let raw = self.version().await?;
+        Ok(check_abox_version(&raw))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +515,69 @@ mod tests {
     fn sandbox_task_id_sanitises() {
         assert_eq!(sandbox_task_id("attempt-abc-123"), "bakudo-attempt-abc-123");
         assert_eq!(sandbox_task_id(""), "bakudo-attempt");
+    }
+
+    #[test]
+    fn parse_abox_version_plain() {
+        assert_eq!(parse_abox_version("abox 0.3.1"), Some((0, 3, 1)));
+        assert_eq!(parse_abox_version("abox 1.2.3\n"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn parse_abox_version_tolerates_suffixes_and_build_metadata() {
+        assert_eq!(parse_abox_version("abox 0.3.1-dev"), Some((0, 3, 1)));
+        assert_eq!(parse_abox_version("abox 0.3.1+gabcdef"), Some((0, 3, 1)));
+        assert_eq!(parse_abox_version("abox 0.3.1 (abcdef)"), Some((0, 3, 1)));
+    }
+
+    #[test]
+    fn parse_abox_version_accepts_two_component_versions() {
+        assert_eq!(parse_abox_version("abox 1.0"), Some((1, 0, 0)));
+    }
+
+    #[test]
+    fn parse_abox_version_rejects_garbage() {
+        assert_eq!(parse_abox_version(""), None);
+        assert_eq!(parse_abox_version("not abox output"), None);
+        assert_eq!(parse_abox_version("abox vX.Y"), None);
+    }
+
+    #[test]
+    fn check_abox_version_ok_when_meets_minimum() {
+        assert!(matches!(
+            check_abox_version("abox 0.3.1"),
+            AboxVersionStatus::Ok { current: (0, 3, 1) }
+        ));
+        assert!(matches!(
+            check_abox_version("abox 1.0.0"),
+            AboxVersionStatus::Ok { .. }
+        ));
+    }
+
+    #[test]
+    fn check_abox_version_too_old() {
+        assert_eq!(
+            check_abox_version("abox 0.2.0"),
+            AboxVersionStatus::TooOld {
+                current: (0, 2, 0),
+                min: MIN_ABOX_VERSION,
+            }
+        );
+        assert_eq!(
+            check_abox_version("abox 0.3.0"),
+            AboxVersionStatus::TooOld {
+                current: (0, 3, 0),
+                min: MIN_ABOX_VERSION,
+            }
+        );
+    }
+
+    #[test]
+    fn check_abox_version_unparseable_preserves_raw() {
+        match check_abox_version("something weird") {
+            AboxVersionStatus::Unparseable(raw) => assert_eq!(raw, "something weird"),
+            other => panic!("expected Unparseable, got {other:?}"),
+        }
     }
 
     #[test]
