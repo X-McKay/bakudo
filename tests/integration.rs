@@ -82,6 +82,7 @@ mod state_ledger_tests {
             attempt_id: AttemptId(format!("attempt-{task_id}")),
             session_id: SessionId("session-test".to_string()),
             task_id: task_id.to_string(),
+            repo_root: None,
             provider_id: "claude".to_string(),
             model: None,
             prompt_summary: "integration test".to_string(),

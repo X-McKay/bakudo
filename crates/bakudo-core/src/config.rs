@@ -1,11 +1,13 @@
 //! Bakudo configuration, loaded from `~/.config/bakudo/config.toml` or
 //! a repo-local `.bakudo/config.toml`.
 
+use crate::policy::ExecutionPolicy;
 use crate::protocol::{
     AttemptBudget, AttemptPermissions, AttemptSpec, CandidatePolicy, SandboxLifecycle,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BakudoConfig {
@@ -37,6 +39,14 @@ pub struct BakudoConfig {
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 
+    /// Execution / approval policy for provider runs.
+    #[serde(default)]
+    pub execution_policy: ExecutionPolicy,
+
+    /// Optional post-run hook command. Bakudo writes the JSON payload to stdin.
+    #[serde(default)]
+    pub post_run_hook: Option<Vec<String>>,
+
     /// Directory where bakudo stores session data.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
@@ -58,6 +68,10 @@ struct BakudoConfigLayer {
     sandbox_lifecycle: Option<SandboxLifecycle>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    execution_policy: Option<ExecutionPolicy>,
+    #[serde(default)]
+    post_run_hook: Option<Option<Vec<String>>>,
     #[serde(default)]
     data_dir: Option<PathBuf>,
 }
@@ -103,6 +117,8 @@ impl Default for BakudoConfig {
             candidate_policy: CandidatePolicy::default(),
             sandbox_lifecycle: SandboxLifecycle::default(),
             timeout_secs: default_timeout_secs(),
+            execution_policy: ExecutionPolicy::default(),
+            post_run_hook: None,
             data_dir: None,
         }
     }
@@ -158,12 +174,25 @@ impl BakudoConfig {
         })
     }
 
+    /// Resolve a per-repo data dir nested under the shared bakudo data root.
+    pub fn resolved_repo_data_dir(&self, repo_root: Option<&Path>) -> PathBuf {
+        self.resolved_data_dir()
+            .join("repos")
+            .join(repo_scope_key(repo_root))
+    }
+
+    pub fn resolved_repo_data_dir_from_str(&self, repo_root: Option<&str>) -> PathBuf {
+        self.resolved_repo_data_dir(repo_root.map(Path::new))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn build_attempt_spec(
         &self,
         prompt: impl Into<String>,
         provider_id: impl Into<String>,
         model: Option<String>,
         repo_root: Option<String>,
+        allow_all_tools: bool,
         candidate_policy: CandidatePolicy,
         sandbox_lifecycle: SandboxLifecycle,
     ) -> AttemptSpec {
@@ -174,9 +203,7 @@ impl BakudoConfig {
             timeout_secs: self.timeout_secs,
             ..Default::default()
         };
-        spec.permissions = AttemptPermissions {
-            allow_all_tools: true,
-        };
+        spec.permissions = AttemptPermissions { allow_all_tools };
         spec.candidate_policy = candidate_policy;
         spec.sandbox_lifecycle = sandbox_lifecycle;
         spec
@@ -203,9 +230,47 @@ impl BakudoConfigLayer {
             candidate_policy: self.candidate_policy.unwrap_or(base.candidate_policy),
             sandbox_lifecycle: self.sandbox_lifecycle.unwrap_or(base.sandbox_lifecycle),
             timeout_secs: self.timeout_secs.unwrap_or(base.timeout_secs),
+            execution_policy: self.execution_policy.unwrap_or(base.execution_policy),
+            post_run_hook: self.post_run_hook.unwrap_or(base.post_run_hook),
             data_dir: self.data_dir.or(base.data_dir),
         }
     }
+}
+
+fn repo_scope_key(repo_root: Option<&Path>) -> String {
+    let normalized = repo_root
+        .map(normalize_repo_root)
+        .unwrap_or_else(|| "no-repo".to_string());
+    let label = repo_root
+        .and_then(|path| path.file_name())
+        .map(|name| sanitize_path_component(&name.to_string_lossy()))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+    let id = Uuid::new_v5(&Uuid::NAMESPACE_URL, normalized.as_bytes());
+    format!("{label}-{id}")
+}
+
+fn normalize_repo_root(repo_root: &Path) -> String {
+    repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 #[cfg(test)]
@@ -226,6 +291,7 @@ mod tests {
             "codex",
             Some("gpt-5".to_string()),
             Some("/tmp/repo".to_string()),
+            false,
             CandidatePolicy::Discard,
             SandboxLifecycle::Ephemeral,
         );
@@ -234,7 +300,7 @@ mod tests {
         assert_eq!(spec.model.as_deref(), Some("gpt-5"));
         assert_eq!(spec.repo_root.as_deref(), Some("/tmp/repo"));
         assert_eq!(spec.budget.timeout_secs, 42);
-        assert!(spec.permissions.allow_all_tools);
+        assert!(!spec.permissions.allow_all_tools);
         assert_eq!(spec.candidate_policy, CandidatePolicy::Discard);
         assert_eq!(spec.sandbox_lifecycle, SandboxLifecycle::Ephemeral);
     }
@@ -292,5 +358,16 @@ mod tests {
         assert!(err.to_string().contains("candidate_policy"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resolved_repo_data_dir_is_stable_per_repo() {
+        let cfg = BakudoConfig::default();
+        let repo_a = cfg.resolved_repo_data_dir(Some(Path::new("/tmp/repo-a")));
+        let repo_a_again = cfg.resolved_repo_data_dir(Some(Path::new("/tmp/repo-a")));
+        let repo_b = cfg.resolved_repo_data_dir(Some(Path::new("/tmp/repo-b")));
+
+        assert_eq!(repo_a, repo_a_again);
+        assert_ne!(repo_a, repo_b);
     }
 }

@@ -85,6 +85,7 @@ async fn run_attempt_inner(
         attempt_id: spec.attempt_id.clone(),
         session_id: spec.session_id.clone(),
         task_id: task_id.clone(),
+        repo_root: spec.repo_root.clone(),
         provider_id: spec.provider_id.clone(),
         model: spec.model.clone(),
         prompt_summary: spec.prompt.chars().take(120).collect(),
@@ -136,6 +137,7 @@ async fn run_attempt_inner(
         memory_mib: cfg.memory_mib,
         cpus: cfg.cpus,
         timeout_secs: Some(spec.budget.timeout_secs),
+        max_output_bytes: spec.budget.max_output_bytes,
         env_vars,
     };
 
@@ -219,8 +221,8 @@ async fn run_attempt_inner(
             result.timed_out = run.timed_out;
             result.stdout = clean_stdout;
             result.stderr = run.stderr.clone();
-            result.stdout_truncated = run.stdout.len() >= spec.budget.max_output_bytes;
-            result.stderr_truncated = false;
+            result.stdout_truncated = run.stdout_truncated;
+            result.stderr_truncated = run.stderr_truncated;
 
             let _ = tx.send(RunnerEvent::Finished(result.clone())).await;
             Ok(result)

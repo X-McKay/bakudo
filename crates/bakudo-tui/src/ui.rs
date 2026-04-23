@@ -864,6 +864,8 @@ mod tests {
             Arc::new(SandboxLedger::new()),
             cmd_tx,
             event_rx,
+            None,
+            true,
         );
         app.provider_id = "codex".to_string();
         app.model = Some("gpt-5".to_string());

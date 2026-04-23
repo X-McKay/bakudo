@@ -7,9 +7,11 @@ Version 2 ships a `ratatui` interface, a headless CLI mode, and a host-owned pre
 ## Features
 
 - **Provider agnostic**: Run Claude Code, Codex, OpenCode, or Gemini CLI headlessly. Prompts are injected via `stdin`, structured specs are passed into the sandbox with `BAKUDO_*` env vars, and a guest-side wrapper emits structured progress/result events.
+- **Execution policy**: A native Bakudo policy can allow, prompt, or forbid provider execution per provider, and can independently decide whether Bakudo passes the provider's "allow all tools" flag.
 - **Host-owned worktree lifecycle**: Bakudo decides whether to preserve, merge, or discard the sandbox worktree after the provider exits.
-- **Polished TUI**: A responsive `ratatui` interface with a chat transcript, observability shelf, slash commands, and keyboard-driven worktree actions.
+- **Polished TUI**: A responsive `ratatui` interface with a persisted chat transcript, observability shelf, slash commands, and keyboard-driven worktree actions.
 - **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
+- **Machine-readable headless runs**: `bakudo run --json` streams newline-delimited JSON events, `--output-schema` validates the final summary, and `post_run_hook` can hand completed run payloads to external tooling.
 - **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.1`.
 
 ## Prerequisites
@@ -39,6 +41,7 @@ bakudo
 ### TUI Slash Commands
 
 - `/provider <name>`: set the active provider.
+- `/approve`: approve the next task dispatch when execution policy requires prompting.
 - `/model <name>`: set the active model override.
 - `/providers`: list registered providers.
 - `/apply <task-id>`: merge a preserved worktree.
@@ -58,6 +61,8 @@ bakudo
 
 ```bash
 bakudo run "Fix the failing tests"
+bakudo run --json --output-schema schema.json "Summarize this refactor"
+bakudo run --approve-execution "Run a prompted provider task"
 bakudo list
 bakudo apply <task-id>
 bakudo discard <task-id>
@@ -78,6 +83,14 @@ Bakudo loads configuration in layered order:
 3. `-c <path>`                      (CLI-explicit file; suppresses layering)
 
 Each layer may set any subset of fields; later layers override earlier ones.
+
+Useful keys:
+
+- `execution_policy.default_decision = "allow" | "prompt" | "forbid"`
+- `execution_policy.default_allow_all_tools = true | false`
+- `post_run_hook = ["/absolute/path/to/script"]`
+
+Repo-scoped runtime state such as the sandbox ledger, run specs, and persisted TUI transcript now lives under a per-repo subdirectory of Bakudo's data root.
 
 ## Architecture
 

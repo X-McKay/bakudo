@@ -26,12 +26,18 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 use bakudo_core::{
-    abox::AboxAdapter, config::BakudoConfig, provider::ProviderRegistry, session::SessionRecord,
-    state::SandboxLedger,
+    abox::AboxAdapter,
+    config::BakudoConfig,
+    hook::{HookWorktreeAction, PostRunHookPayload},
+    policy::PolicyDecision,
+    provider::ProviderRegistry,
+    session::SessionRecord,
+    state::{SandboxLedger, SandboxState},
 };
 use bakudo_daemon::session_controller::{
     SessionBootstrap, SessionCommand, SessionController, SessionEvent,
@@ -39,6 +45,7 @@ use bakudo_daemon::session_controller::{
 use bakudo_tui::{
     app::App,
     events::{poll_event, TermEvent},
+    transcript_store::TranscriptStore,
     ui::render,
 };
 
@@ -81,6 +88,15 @@ enum Commands {
         /// Auto-apply (merge) the worktree after success.
         #[arg(long)]
         apply: bool,
+        /// Approve execution when policy requires an explicit opt-in.
+        #[arg(long)]
+        approve_execution: bool,
+        /// Emit newline-delimited JSON events instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Validate the final run summary against a JSON Schema file.
+        #[arg(long)]
+        output_schema: Option<PathBuf>,
     },
     /// List all sandboxes for the current repo.
     List,
@@ -133,7 +149,7 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let repo_root = std::env::current_dir().ok();
+    let repo_root = current_repo_root_path().or_else(|| std::env::current_dir().ok());
     let config = Arc::new(
         BakudoConfig::load_layered(cli.config.as_deref(), repo_root.as_deref())
             .context("failed to load config")?,
@@ -142,7 +158,9 @@ async fn main() -> Result<()> {
     // Build shared components.
     let abox = Arc::new(AboxAdapter::new(&config.abox_bin));
     let registry = Arc::new(ProviderRegistry::with_defaults());
-    let ledger_path = config.resolved_data_dir().join("ledger.jsonl");
+    let ledger_path = config
+        .resolved_repo_data_dir(repo_root.as_deref())
+        .join("ledger.jsonl");
     let ledger = Arc::new(SandboxLedger::with_persistence(&ledger_path));
 
     match cli.command {
@@ -156,6 +174,9 @@ async fn main() -> Result<()> {
             model,
             discard,
             apply,
+            approve_execution,
+            json,
+            output_schema,
         }) => {
             run_headless(
                 config,
@@ -168,6 +189,13 @@ async fn main() -> Result<()> {
                     model_override: model,
                     discard,
                     apply,
+                    approve_execution,
+                    output_mode: if json {
+                        HeadlessOutputMode::Json
+                    } else {
+                        HeadlessOutputMode::Human
+                    },
+                    output_schema,
                 },
             )
             .await
@@ -310,6 +338,10 @@ fn current_repo_root() -> Option<String> {
     repo_root.or_else(|| Some(cwd.to_string_lossy().to_string()))
 }
 
+fn current_repo_root_path() -> Option<PathBuf> {
+    current_repo_root().map(PathBuf::from)
+}
+
 fn create_session(config: &Arc<BakudoConfig>) -> Result<SessionRecord> {
     let session = SessionRecord::new(
         config.default_provider.clone(),
@@ -414,11 +446,31 @@ async fn run_tui(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(config, registry, ledger, cmd_tx, event_rx);
+    let transcript_store = TranscriptStore::new(
+        config
+            .resolved_repo_data_dir_from_str(session.repo_root.as_deref())
+            .join("session-events")
+            .join(format!("{}.jsonl", session.session_id.0)),
+    );
+    let mut app = App::new(
+        config,
+        registry,
+        ledger,
+        cmd_tx,
+        event_rx,
+        Some(transcript_store),
+        !resumed,
+    );
     app.session_id = session.session_id.0.clone();
     app.provider_id = session.provider_id.clone();
     app.model = session.model.clone();
     if resumed {
+        app.load_transcript();
+        if app.transcript.is_empty() {
+            app.push_message(bakudo_tui::app::ChatMessage::system(
+                "Welcome back to Bakudo v2.",
+            ));
+        }
         app.note_resume(session.session_id.0.clone());
     }
 
@@ -466,6 +518,64 @@ struct HeadlessRunRequest {
     model_override: Option<String>,
     discard: bool,
     apply: bool,
+    approve_execution: bool,
+    output_mode: HeadlessOutputMode,
+    output_schema: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessOutputMode {
+    Human,
+    Json,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum HeadlessJsonEvent {
+    TaskStarted {
+        task_id: String,
+        provider_id: String,
+        model: Option<String>,
+    },
+    Progress {
+        task_id: String,
+        message: String,
+    },
+    RawLine {
+        task_id: String,
+        line: String,
+    },
+    Error {
+        task_id: Option<String>,
+        message: String,
+    },
+    Finished {
+        summary: HeadlessRunSummary,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HeadlessRunSummary {
+    task_id: String,
+    attempt_id: String,
+    session_id: String,
+    provider_id: String,
+    model: Option<String>,
+    repo_root: Option<String>,
+    worker_status: bakudo_core::protocol::WorkerStatus,
+    final_state: SandboxState,
+    worktree_action: HookWorktreeAction,
+    merge_conflicts: Vec<String>,
+    candidate_policy: bakudo_core::protocol::CandidatePolicy,
+    sandbox_lifecycle: bakudo_core::protocol::SandboxLifecycle,
+    summary: String,
+    exit_code: i32,
+    duration_ms: u64,
+    timed_out: bool,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
 }
 
 async fn run_headless(
@@ -477,6 +587,7 @@ async fn run_headless(
 ) -> Result<()> {
     use bakudo_core::abox::sandbox_task_id;
     use bakudo_core::protocol::{CandidatePolicy, SandboxLifecycle};
+    use bakudo_daemon::hooks::run_post_run_hook;
     use bakudo_daemon::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
     use bakudo_daemon::worktree::apply_candidate_policy;
 
@@ -490,6 +601,19 @@ async fn run_headless(
     let provider = registry
         .get(&provider_id)
         .with_context(|| format!("Unknown provider '{provider_id}'"))?;
+
+    let execution_decision = config.execution_policy.evaluate(&provider_id);
+    match execution_decision.decision {
+        PolicyDecision::Forbid => {
+            anyhow::bail!("execution policy forbids provider '{provider_id}'");
+        }
+        PolicyDecision::Prompt if !request.approve_execution => {
+            anyhow::bail!(
+                "execution policy requires approval for '{provider_id}'; rerun with --approve-execution"
+            );
+        }
+        PolicyDecision::Allow | PolicyDecision::Prompt => {}
+    }
 
     let candidate_policy = if request.discard {
         CandidatePolicy::Discard
@@ -506,60 +630,255 @@ async fn run_headless(
         std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string()),
+        execution_decision.allow_all_tools,
         candidate_policy,
         SandboxLifecycle::Preserved,
     );
 
     let task_id = sandbox_task_id(&spec.attempt_id.0);
 
-    let worker_cmd = provider.build_worker_command(model.as_deref(), true);
-
     let cfg = Arc::new(TaskRunnerConfig {
         abox: abox.clone(),
         ledger: ledger.clone(),
-        data_dir: config.resolved_data_dir().join("runs"),
-        worker_command: worker_cmd,
+        data_dir: config
+            .resolved_repo_data_dir_from_str(spec.repo_root.as_deref())
+            .join("runs"),
+        worker_command: provider
+            .build_worker_command(model.as_deref(), execution_decision.allow_all_tools),
         memory_mib: provider.memory_mib,
         cpus: provider.cpus,
     });
 
-    println!("Dispatching task {task_id} to provider '{provider_id}'...");
+    emit_headless_event(
+        request.output_mode,
+        &HeadlessJsonEvent::TaskStarted {
+            task_id: task_id.clone(),
+            provider_id: provider_id.clone(),
+            model: model.clone(),
+        },
+    )?;
+    if request.output_mode == HeadlessOutputMode::Human {
+        println!("Dispatching task {task_id} to provider '{provider_id}'...");
+    }
 
-    let (mut rx, _handle) = run_attempt(spec.clone(), cfg).await;
+    let (mut rx, handle) = run_attempt(spec.clone(), cfg).await;
 
     while let Some(event) = rx.recv().await {
-        match &event {
-            RunnerEvent::RawLine(line) => println!("{line}"),
-            RunnerEvent::Progress(p) => println!("[event] {}", p.message),
-            RunnerEvent::InfraError(e) => eprintln!("[error] {e}"),
-            RunnerEvent::Finished(r) => {
-                println!("\nTask finished: {:?} in {}ms", r.status, r.duration_ms);
+        match event {
+            RunnerEvent::RawLine(line) => {
+                emit_headless_event(
+                    request.output_mode,
+                    &HeadlessJsonEvent::RawLine {
+                        task_id: task_id.clone(),
+                        line: line.clone(),
+                    },
+                )?;
+                if request.output_mode == HeadlessOutputMode::Human {
+                    println!("{line}");
+                }
+            }
+            RunnerEvent::Progress(progress) => {
+                emit_headless_event(
+                    request.output_mode,
+                    &HeadlessJsonEvent::Progress {
+                        task_id: task_id.clone(),
+                        message: progress.message.clone(),
+                    },
+                )?;
+                if request.output_mode == HeadlessOutputMode::Human {
+                    println!("[event] {}", progress.message);
+                }
+            }
+            RunnerEvent::InfraError(err) => {
+                emit_headless_event(
+                    request.output_mode,
+                    &HeadlessJsonEvent::Error {
+                        task_id: Some(task_id.clone()),
+                        message: err.clone(),
+                    },
+                )?;
+                if request.output_mode == HeadlessOutputMode::Human {
+                    eprintln!("[error] {err}");
+                }
+            }
+            RunnerEvent::Finished(result) => {
+                if request.output_mode == HeadlessOutputMode::Human {
+                    println!(
+                        "\nTask finished: {:?} in {}ms",
+                        result.status, result.duration_ms
+                    );
+                }
             }
         }
     }
 
-    match apply_candidate_policy(
-        &task_id,
-        &spec.candidate_policy,
-        &config.base_branch,
-        std::env::current_dir().ok().as_deref(),
-        &abox,
-        &ledger,
-    )
-    .await?
-    {
-        bakudo_daemon::worktree::WorktreeAction::Merged => println!("Worktree merged."),
-        bakudo_daemon::worktree::WorktreeAction::MergeConflicts(c) => {
-            eprintln!("Merge conflicts:");
-            for conflict in c {
-                eprintln!("  {conflict}");
+    let result = match handle.await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => return Err(err.into()),
+        Err(err) => return Err(err.into()),
+    };
+
+    let (final_state, worktree_action, merge_conflicts) =
+        if result.status == bakudo_core::protocol::WorkerStatus::Succeeded {
+            match apply_candidate_policy(
+                &task_id,
+                &spec.candidate_policy,
+                &config.base_branch,
+                std::env::current_dir().ok().as_deref(),
+                &abox,
+                &ledger,
+            )
+            .await?
+            {
+                bakudo_daemon::worktree::WorktreeAction::Merged => {
+                    (SandboxState::Merged, HookWorktreeAction::Merged, Vec::new())
+                }
+                bakudo_daemon::worktree::WorktreeAction::MergeConflicts(conflicts) => (
+                    SandboxState::MergeConflicts,
+                    HookWorktreeAction::MergeConflicts,
+                    conflicts,
+                ),
+                bakudo_daemon::worktree::WorktreeAction::Discarded => (
+                    SandboxState::Discarded,
+                    HookWorktreeAction::Discarded,
+                    Vec::new(),
+                ),
+                bakudo_daemon::worktree::WorktreeAction::Preserved => (
+                    SandboxState::Preserved,
+                    HookWorktreeAction::Preserved,
+                    Vec::new(),
+                ),
             }
-        }
-        bakudo_daemon::worktree::WorktreeAction::Discarded => println!("Worktree discarded."),
-        bakudo_daemon::worktree::WorktreeAction::Preserved => {
-            println!("Worktree preserved at task_id: {task_id}")
+        } else {
+            (
+                match result.status {
+                    bakudo_core::protocol::WorkerStatus::Succeeded => SandboxState::Preserved,
+                    bakudo_core::protocol::WorkerStatus::TimedOut => SandboxState::TimedOut,
+                    bakudo_core::protocol::WorkerStatus::Failed
+                    | bakudo_core::protocol::WorkerStatus::Cancelled => SandboxState::Failed {
+                        exit_code: result.exit_code,
+                    },
+                },
+                HookWorktreeAction::NotApplied,
+                Vec::new(),
+            )
+        };
+
+    let summary = HeadlessRunSummary {
+        task_id: task_id.clone(),
+        attempt_id: spec.attempt_id.0.clone(),
+        session_id: spec.session_id.0.clone(),
+        provider_id: provider_id.clone(),
+        model: model.clone(),
+        repo_root: spec.repo_root.clone(),
+        worker_status: result.status.clone(),
+        final_state: final_state.clone(),
+        worktree_action,
+        merge_conflicts: merge_conflicts.clone(),
+        candidate_policy: spec.candidate_policy,
+        sandbox_lifecycle: spec.sandbox_lifecycle,
+        summary: result.summary.clone(),
+        exit_code: result.exit_code,
+        duration_ms: result.duration_ms,
+        timed_out: result.timed_out,
+        stdout: result.stdout.clone(),
+        stderr: result.stderr.clone(),
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+    };
+
+    validate_output_schema(request.output_schema.as_deref(), &summary)?;
+
+    let hook_payload = PostRunHookPayload {
+        session_id: spec.session_id.clone(),
+        attempt_id: spec.attempt_id.clone(),
+        task_id: task_id.clone(),
+        repo_root: spec.repo_root.clone(),
+        provider_id: provider_id.clone(),
+        model: model.clone(),
+        candidate_policy: spec.candidate_policy,
+        sandbox_lifecycle: spec.sandbox_lifecycle,
+        worker_status: result.status.clone(),
+        final_state: final_state.clone(),
+        worktree_action,
+        summary: result.summary.clone(),
+        exit_code: result.exit_code,
+        duration_ms: result.duration_ms,
+        timed_out: result.timed_out,
+        merge_conflicts: merge_conflicts.clone(),
+    };
+    if let Err(err) = run_post_run_hook(&config, &hook_payload).await {
+        emit_headless_event(
+            request.output_mode,
+            &HeadlessJsonEvent::Error {
+                task_id: Some(task_id.clone()),
+                message: format!("post-run hook failed: {err}"),
+            },
+        )?;
+        if request.output_mode == HeadlessOutputMode::Human {
+            eprintln!("Post-run hook failed: {err}");
         }
     }
 
+    emit_headless_event(
+        request.output_mode,
+        &HeadlessJsonEvent::Finished {
+            summary: summary.clone(),
+        },
+    )?;
+
+    if request.output_mode == HeadlessOutputMode::Human {
+        match summary.worktree_action {
+            HookWorktreeAction::Merged => println!("Worktree merged."),
+            HookWorktreeAction::MergeConflicts => {
+                eprintln!("Merge conflicts:");
+                for conflict in &summary.merge_conflicts {
+                    eprintln!("  {conflict}");
+                }
+            }
+            HookWorktreeAction::Discarded => println!("Worktree discarded."),
+            HookWorktreeAction::Preserved => {
+                println!("Worktree preserved at task_id: {task_id}");
+            }
+            HookWorktreeAction::NotApplied => {}
+        }
+    }
+
+    if summary.worker_status == bakudo_core::protocol::WorkerStatus::Succeeded {
+        Ok(())
+    } else {
+        anyhow::bail!("task {task_id} finished with {:?}", summary.worker_status);
+    }
+}
+
+fn emit_headless_event(mode: HeadlessOutputMode, event: &HeadlessJsonEvent) -> Result<()> {
+    if mode == HeadlessOutputMode::Json {
+        println!("{}", serde_json::to_string(event)?);
+    }
+    Ok(())
+}
+
+fn validate_output_schema(
+    schema_path: Option<&std::path::Path>,
+    summary: &HeadlessRunSummary,
+) -> Result<()> {
+    let Some(schema_path) = schema_path else {
+        return Ok(());
+    };
+    let schema_value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(schema_path)?)?;
+    let instance = serde_json::to_value(summary)?;
+    let compiled = jsonschema::JSONSchema::compile(&schema_value)
+        .map_err(|err| anyhow::anyhow!("invalid JSON Schema '{}': {err}", schema_path.display()))?;
+    if let Err(errors) = compiled.validate(&instance) {
+        let details = errors
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!(
+            "final output failed schema validation against '{}': {details}",
+            schema_path.display()
+        );
+    }
     Ok(())
 }

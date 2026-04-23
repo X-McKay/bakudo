@@ -17,11 +17,14 @@ use tracing::{info, warn};
 
 use bakudo_core::abox::AboxAdapter;
 use bakudo_core::config::BakudoConfig;
+use bakudo_core::hook::{HookWorktreeAction, PostRunHookPayload};
+use bakudo_core::policy::PolicyDecision;
 use bakudo_core::protocol::WorkerStatus;
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::session::SessionRecord;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 
+use crate::hooks::run_post_run_hook;
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use crate::worktree::{apply_candidate_policy, WorktreeAction};
 
@@ -29,7 +32,7 @@ use crate::worktree::{apply_candidate_policy, WorktreeAction};
 #[derive(Debug)]
 pub enum SessionCommand {
     /// Dispatch a new task with the current provider/model.
-    Dispatch { prompt: String },
+    Dispatch { prompt: String, approved: bool },
     /// Change the active provider.
     SetProvider { provider_id: String },
     /// Change the active model. `None` resets to the provider default.
@@ -172,8 +175,8 @@ impl SessionController {
 
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
-                SessionCommand::Dispatch { prompt } => {
-                    self.dispatch_task(prompt).await;
+                SessionCommand::Dispatch { prompt, approved } => {
+                    self.dispatch_task(prompt, approved).await;
                 }
                 SessionCommand::SetProvider { provider_id } => {
                     self.set_provider(provider_id).await;
@@ -249,7 +252,7 @@ impl SessionController {
         }
     }
 
-    async fn dispatch_task(&self, prompt: String) {
+    async fn dispatch_task(&self, prompt: String, approved: bool) {
         let provider = match self.registry.get(&self.current_provider) {
             Some(p) => p,
             None => {
@@ -264,11 +267,40 @@ impl SessionController {
             }
         };
 
+        let execution_decision = self
+            .config
+            .execution_policy
+            .evaluate(&self.current_provider);
+        match execution_decision.decision {
+            PolicyDecision::Forbid => {
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Error(format!(
+                        "Execution policy forbids provider '{}'.",
+                        self.current_provider
+                    )))
+                    .await;
+                return;
+            }
+            PolicyDecision::Prompt if !approved => {
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Error(format!(
+                        "Execution policy requires approval before running '{}'. Use /approve, then resubmit the task.",
+                        self.current_provider
+                    )))
+                    .await;
+                return;
+            }
+            PolicyDecision::Allow | PolicyDecision::Prompt => {}
+        }
+
         let mut spec = self.config.build_attempt_spec(
             &prompt,
             &self.current_provider,
             self.current_model.clone(),
             self.repo_path().map(|p| p.to_string_lossy().to_string()),
+            execution_decision.allow_all_tools,
             self.config.candidate_policy,
             self.config.sandbox_lifecycle,
         );
@@ -287,24 +319,35 @@ impl SessionController {
             })
             .await;
 
-        let worker_cmd = provider.build_worker_command(self.current_model.as_deref(), true);
-
         let cfg = Arc::new(TaskRunnerConfig {
             abox: self.abox.clone(),
             ledger: self.ledger.clone(),
-            data_dir: self.config.resolved_data_dir().join("runs"),
-            worker_command: worker_cmd,
+            data_dir: self
+                .config
+                .resolved_repo_data_dir_from_str(self.session.repo_root.as_deref())
+                .join("runs"),
+            worker_command: provider.build_worker_command(
+                self.current_model.as_deref(),
+                execution_decision.allow_all_tools,
+            ),
             memory_mib: provider.memory_mib,
             cpus: provider.cpus,
         });
 
         let event_tx = self.event_tx.clone();
+        let config = self.config.clone();
         let ledger = self.ledger.clone();
         let abox = self.abox.clone();
         let base_branch = self.config.base_branch.clone();
         let repo = self.repo_path();
         let candidate_policy = spec.candidate_policy;
         let tid = task_id.clone();
+        let provider_id = spec.provider_id.clone();
+        let model = spec.model.clone();
+        let repo_root = spec.repo_root.clone();
+        let session_id = spec.session_id.clone();
+        let attempt_id = spec.attempt_id.clone();
+        let sandbox_lifecycle = spec.sandbox_lifecycle;
 
         let (mut rx, handle) = run_attempt(spec, cfg).await;
 
@@ -318,40 +361,75 @@ impl SessionController {
                     .await;
             }
 
-            let final_state = match handle.await {
+            let (final_state, hook_payload) = match handle.await {
                 Ok(Ok(result)) => {
-                    if result.status == WorkerStatus::Succeeded {
-                        match apply_candidate_policy(
-                            &tid,
-                            &candidate_policy,
-                            &base_branch,
-                            repo.as_deref(),
-                            &abox,
-                            &ledger,
-                        )
-                        .await
-                        {
-                            Ok(action) => state_from_worktree_action(action),
-                            Err(e) => {
-                                let _ = event_tx
-                                    .send(SessionEvent::Error(format!(
-                                        "Candidate policy error for {tid}: {e}"
-                                    )))
-                                    .await;
-                                ledger
-                                    .get(&tid)
-                                    .await
-                                    .map(|record| record.state)
-                                    .unwrap_or(SandboxState::Preserved)
+                    let (final_state, worktree_action, merge_conflicts) =
+                        if result.status == WorkerStatus::Succeeded {
+                            match apply_candidate_policy(
+                                &tid,
+                                &candidate_policy,
+                                &base_branch,
+                                repo.as_deref(),
+                                &abox,
+                                &ledger,
+                            )
+                            .await
+                            {
+                                Ok(action) => {
+                                    let (hook_action, conflicts) =
+                                        hook_action_from_worktree_action(&action);
+                                    (state_from_worktree_action(action), hook_action, conflicts)
+                                }
+                                Err(e) => {
+                                    let _ = event_tx
+                                        .send(SessionEvent::Error(format!(
+                                            "Candidate policy error for {tid}: {e}"
+                                        )))
+                                        .await;
+                                    (
+                                        ledger
+                                            .get(&tid)
+                                            .await
+                                            .map(|record| record.state)
+                                            .unwrap_or(SandboxState::Preserved),
+                                        HookWorktreeAction::NotApplied,
+                                        Vec::new(),
+                                    )
+                                }
                             }
-                        }
-                    } else {
-                        state_from_worker_status(&result.status, result.exit_code)
-                    }
+                        } else {
+                            (
+                                state_from_worker_status(&result.status, result.exit_code),
+                                HookWorktreeAction::NotApplied,
+                                Vec::new(),
+                            )
+                        };
+
+                    (
+                        final_state.clone(),
+                        Some(PostRunHookPayload {
+                            session_id,
+                            attempt_id,
+                            task_id: tid.clone(),
+                            repo_root,
+                            provider_id,
+                            model,
+                            candidate_policy,
+                            sandbox_lifecycle,
+                            worker_status: result.status.clone(),
+                            final_state,
+                            worktree_action,
+                            summary: result.summary,
+                            exit_code: result.exit_code,
+                            duration_ms: result.duration_ms,
+                            timed_out: result.timed_out,
+                            merge_conflicts,
+                        }),
+                    )
                 }
                 Ok(Err(e)) => {
                     warn!("Task {tid} failed before producing a final result: {e}");
-                    SandboxState::Failed { exit_code: -1 }
+                    (SandboxState::Failed { exit_code: -1 }, None)
                 }
                 Err(e) => {
                     let _ = event_tx
@@ -359,9 +437,19 @@ impl SessionController {
                             "Task join error for {tid}: {e}"
                         )))
                         .await;
-                    SandboxState::Failed { exit_code: -1 }
+                    (SandboxState::Failed { exit_code: -1 }, None)
                 }
             };
+
+            if let Some(payload) = hook_payload {
+                if let Err(err) = run_post_run_hook(&config, &payload).await {
+                    let _ = event_tx
+                        .send(SessionEvent::Error(format!(
+                            "Post-run hook failed for {tid}: {err}"
+                        )))
+                        .await;
+                }
+            }
 
             let _ = event_tx
                 .send(SessionEvent::TaskFinished {
@@ -528,5 +616,16 @@ fn state_from_worktree_action(action: WorktreeAction) -> SandboxState {
         WorktreeAction::MergeConflicts(_) => SandboxState::MergeConflicts,
         WorktreeAction::Discarded => SandboxState::Discarded,
         WorktreeAction::Preserved => SandboxState::Preserved,
+    }
+}
+
+fn hook_action_from_worktree_action(action: &WorktreeAction) -> (HookWorktreeAction, Vec<String>) {
+    match action {
+        WorktreeAction::Merged => (HookWorktreeAction::Merged, Vec::new()),
+        WorktreeAction::MergeConflicts(conflicts) => {
+            (HookWorktreeAction::MergeConflicts, conflicts.clone())
+        }
+        WorktreeAction::Discarded => (HookWorktreeAction::Discarded, Vec::new()),
+        WorktreeAction::Preserved => (HookWorktreeAction::Preserved, Vec::new()),
     }
 }

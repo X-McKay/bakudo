@@ -35,6 +35,8 @@ pub struct RunResult {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 /// The abox adapter wraps the `abox` binary and exposes typed methods for
@@ -102,6 +104,8 @@ impl AboxAdapter {
 
         let mut out_buf = String::new();
         let mut err_buf = String::new();
+        let mut stdout_truncated = false;
+        let mut stderr_truncated = false;
 
         let mut out_reader = BufReader::new(stdout).lines();
         let mut err_reader = BufReader::new(stderr).lines();
@@ -118,8 +122,12 @@ impl AboxAdapter {
                         match line {
                             Ok(Some(l)) => {
                                 on_line(&l);
-                                out_buf.push_str(&l);
-                                out_buf.push('\n');
+                                push_capped_line(
+                                    &mut out_buf,
+                                    &l,
+                                    params.max_output_bytes,
+                                    &mut stdout_truncated,
+                                );
                             }
                             Ok(None) => {
                                 stdout_open = false;
@@ -133,8 +141,12 @@ impl AboxAdapter {
                     line = err_reader.next_line(), if stderr_open => {
                         match line {
                             Ok(Some(l)) => {
-                                err_buf.push_str(&l);
-                                err_buf.push('\n');
+                                push_capped_line(
+                                    &mut err_buf,
+                                    &l,
+                                    params.max_output_bytes,
+                                    &mut stderr_truncated,
+                                );
                             }
                             Ok(None) => {
                                 stderr_open = false;
@@ -164,6 +176,8 @@ impl AboxAdapter {
                         stdout: out_buf,
                         stderr: err_buf,
                         timed_out: true,
+                        stdout_truncated,
+                        stderr_truncated,
                     });
                 }
             }
@@ -180,6 +194,8 @@ impl AboxAdapter {
             stdout: out_buf,
             stderr: err_buf,
             timed_out,
+            stdout_truncated,
+            stderr_truncated,
         })
     }
 
@@ -188,6 +204,11 @@ impl AboxAdapter {
         let mut cmd = self.base_cmd(repo);
         cmd.arg("list");
         let out = cmd.output().await.map_err(AboxError::Io)?;
+        if !out.status.success() {
+            return Err(AboxError::ListFailed {
+                detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            });
+        }
         parse_list_output(&String::from_utf8_lossy(&out.stdout))
     }
 
@@ -271,6 +292,7 @@ pub struct RunParams {
     pub memory_mib: Option<u32>,
     pub cpus: Option<u8>,
     pub timeout_secs: Option<u64>,
+    pub max_output_bytes: usize,
     pub env_vars: Vec<(String, String)>,
 }
 
@@ -284,9 +306,23 @@ impl RunParams {
             memory_mib: None,
             cpus: None,
             timeout_secs: None,
+            max_output_bytes: 512 * 1024,
             env_vars: vec![],
         }
     }
+}
+
+fn push_capped_line(buf: &mut String, line: &str, limit: usize, truncated: &mut bool) {
+    if *truncated {
+        return;
+    }
+    let additional = line.len() + 1;
+    if buf.len().saturating_add(additional) > limit {
+        *truncated = true;
+        return;
+    }
+    buf.push_str(line);
+    buf.push('\n');
 }
 
 /// Generate a deterministic abox task ID from an attempt ID.

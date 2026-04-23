@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use bakudo_core::config::BakudoConfig;
@@ -26,7 +27,8 @@ use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 use bakudo_daemon::session_controller::{SessionCommand, SessionEvent};
 
-use crate::commands::{completions_for, help_text, parse_slash, ParsedCommand, SlashCommand};
+use crate::commands::{completions_for, parse_slash, ParsedCommand, SlashCommand};
+use crate::transcript_store::TranscriptStore;
 
 /// Maximum number of chat messages to keep in the transcript ring buffer.
 const MAX_TRANSCRIPT_LINES: usize = 2000;
@@ -37,14 +39,14 @@ const MAX_SHELF_ENTRIES: usize = 50;
 // ─── Chat message ──────────────────────────────────────────────────────────
 
 /// A single message in the chat transcript.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: MessageRole,
     pub content: String,
     pub timestamp: DateTime<Local>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     User,
     System,
@@ -185,6 +187,8 @@ pub struct App {
 
     /// Number of tasks currently in-flight (used to gate commands).
     pub active_task_count: usize,
+    /// Whether the next dispatch has an explicit approval token.
+    pub next_dispatch_approved: bool,
 
     /// Spinner tick counter, incremented every Tick event.
     pub tick: u64,
@@ -194,6 +198,11 @@ pub struct App {
     /// Index into `completions` for cycling with Tab.
     pub completion_idx: usize,
 
+    /// Whether the `/help` overlay is currently showing.
+    pub help_visible: bool,
+    /// Line scroll offset inside the help overlay.
+    pub help_scroll: usize,
+
     /// Whether the app should exit.
     pub should_quit: bool,
 
@@ -201,6 +210,8 @@ pub struct App {
     cmd_tx: mpsc::Sender<SessionCommand>,
     /// Channel to receive events from the session controller.
     event_rx: mpsc::Receiver<SessionEvent>,
+    /// Optional on-disk transcript event log for session resume.
+    transcript_store: Option<TranscriptStore>,
 }
 
 impl App {
@@ -210,6 +221,8 @@ impl App {
         ledger: Arc<SandboxLedger>,
         cmd_tx: mpsc::Sender<SessionCommand>,
         event_rx: mpsc::Receiver<SessionEvent>,
+        transcript_store: Option<TranscriptStore>,
+        show_welcome: bool,
     ) -> Self {
         let provider_id = config.default_provider.clone();
         let model = config.default_model.clone();
@@ -238,18 +251,24 @@ impl App {
             provider_id,
             model,
             active_task_count: 0,
+            next_dispatch_approved: false,
             tick: 0,
             completions: Vec::new(),
             completion_idx: 0,
+            help_visible: false,
+            help_scroll: 0,
             should_quit: false,
             cmd_tx,
             event_rx,
+            transcript_store,
         };
-        app.push_message(ChatMessage::system(
-            "Welcome to Bakudo v2.\n\
-             Type a prompt and press Enter to dispatch a task to a sandbox.\n\
-             Type /help for available commands, or /status to see the current session id.",
-        ));
+        if show_welcome {
+            app.push_message(ChatMessage::system(
+                "Welcome to Bakudo v2.\n\
+                 Type a prompt and press Enter to dispatch a task to a sandbox.\n\
+                 Type /help for available commands, or /status to see the current session id.",
+            ));
+        }
         app
     }
 
@@ -261,6 +280,9 @@ impl App {
     /// by incrementing `scroll_offset` by the number of newly-added lines.
     pub fn push_message(&mut self, msg: ChatMessage) {
         let added_lines = msg.content.lines().count().max(1);
+        if let Some(store) = &self.transcript_store {
+            let _ = store.append(&msg);
+        }
         self.transcript.push_back(msg);
         while self.transcript.len() > MAX_TRANSCRIPT_LINES {
             self.transcript.pop_front();
@@ -268,6 +290,19 @@ impl App {
         if self.scroll_offset > 0 {
             self.scroll_offset = self.scroll_offset.saturating_add(added_lines);
         }
+    }
+
+    pub fn load_transcript(&mut self) {
+        let Some(store) = &self.transcript_store else {
+            return;
+        };
+        let Ok(messages) = store.load() else {
+            return;
+        };
+        if messages.is_empty() {
+            return;
+        }
+        self.transcript = messages.into_iter().collect();
     }
 
     pub fn running_shelf_count(&self) -> usize {
@@ -352,13 +387,18 @@ impl App {
     pub fn handle_global_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl+C / Ctrl+Q always quits, even with the help modal open.
+        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
+            self.should_quit = true;
+            let _ = self.cmd_tx.try_send(SessionCommand::Shutdown);
+            return true;
+        }
+        // The help overlay consumes all other keys while it's visible.
+        if self.help_visible {
+            self.handle_help_key(key);
+            return true;
+        }
         match key.code {
-            // Ctrl+C / Ctrl+Q — quit.
-            KeyCode::Char('c') | KeyCode::Char('q') if ctrl => {
-                self.should_quit = true;
-                let _ = self.cmd_tx.try_send(SessionCommand::Shutdown);
-                true
-            }
             // PageUp / PageDown — scroll transcript.
             KeyCode::PageUp => {
                 self.scroll_offset = self.scroll_offset.saturating_add(10);
@@ -372,6 +412,33 @@ impl App {
         }
     }
 
+    /// Dispatch a key press while the `/help` overlay is visible.
+    fn handle_help_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.help_visible = false;
+                self.help_scroll = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.help_scroll = self.help_scroll.saturating_add(1);
+            }
+            KeyCode::PageUp => {
+                self.help_scroll = self.help_scroll.saturating_sub(5);
+            }
+            KeyCode::PageDown => {
+                self.help_scroll = self.help_scroll.saturating_add(5);
+            }
+            KeyCode::Home => {
+                self.help_scroll = 0;
+            }
+            _ => {}
+        }
+    }
+
     // ── Composer key handler ───────────────────────────────────────────────
 
     /// Handle a key press when the composer (chat input) has focus.
@@ -380,10 +447,20 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         match key.code {
-            // ── Submit ────────────────────────────────────────────────────
+            // ── Submit / insert newline ──────────────────────────────────
+            // Shift+Enter or Alt+Enter inserts a '\n' so multi-line prompts
+            // can be composed without submitting. Plain Enter submits.
             KeyCode::Enter => {
-                self.clear_completions();
-                self.submit_input();
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    self.input.insert(self.cursor, '\n');
+                    self.cursor += 1;
+                    self.clear_completions();
+                } else {
+                    self.clear_completions();
+                    self.submit_input();
+                }
             }
 
             // ── Tab — slash-command autocomplete ─────────────────────────
@@ -485,18 +562,52 @@ impl App {
                 self.cursor = self.next_char_boundary();
             }
 
+            // ── Up / Down — move between rows of multi-line input ─────────
+            KeyCode::Up => {
+                self.move_cursor_line(-1);
+            }
+            KeyCode::Down => {
+                self.move_cursor_line(1);
+            }
+
             _ => {}
         }
     }
 
+    /// Move the cursor up (`delta = -1`) or down (`delta = 1`) one row in the
+    /// composer, preserving the byte column when possible. No-op when already
+    /// at the top/bottom row.
+    fn move_cursor_line(&mut self, delta: i32) {
+        if !self.input.contains('\n') {
+            return;
+        }
+        let (row, row_start) = locate_cursor_row(&self.input, self.cursor);
+        let col = self.cursor - row_start;
+        let lines: Vec<&str> = self.input.split('\n').collect();
+        let new_row_i = row as i32 + delta;
+        if new_row_i < 0 || new_row_i as usize >= lines.len() {
+            return;
+        }
+        let new_row = new_row_i as usize;
+        let mut start = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            if i == new_row {
+                break;
+            }
+            start += line.len() + 1;
+        }
+        self.cursor = start + col.min(lines[new_row].len());
+    }
+
     /// Insert a pasted string at the cursor position.
+    ///
+    /// Newlines are preserved so multi-paragraph prompts paste in cleanly
+    /// (Enter still submits; Shift+Enter inserts a newline interactively).
+    /// Carriage returns and other control characters are stripped.
     pub fn handle_paste(&mut self, text: String) {
-        // Strip control characters except newlines; collapse newlines to spaces
-        // so a multi-line paste doesn't accidentally submit.
         let sanitised: String = text
             .chars()
-            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-            .filter(|c| !c.is_control())
+            .filter(|c| *c == '\n' || !c.is_control())
             .collect();
         self.input.insert_str(self.cursor, &sanitised);
         self.cursor += sanitised.len();
@@ -804,9 +915,11 @@ impl App {
                 if let Err(reason) = self.preflight_dispatch() {
                     self.push_message(ChatMessage::error(reason));
                 } else {
-                    let _ = self
-                        .cmd_tx
-                        .try_send(SessionCommand::Dispatch { prompt: input });
+                    let approved = std::mem::take(&mut self.next_dispatch_approved);
+                    let _ = self.cmd_tx.try_send(SessionCommand::Dispatch {
+                        prompt: input,
+                        approved,
+                    });
                 }
             }
         }
@@ -826,6 +939,7 @@ impl App {
 
         match command {
             SlashCommand::Provider => self.cmd_provider(arg),
+            SlashCommand::Approve => self.cmd_approve(),
             SlashCommand::Model => self.cmd_model(arg),
             SlashCommand::Providers => self.cmd_providers(),
             SlashCommand::Apply => self.cmd_apply(arg),
@@ -839,7 +953,8 @@ impl App {
             SlashCommand::Status => self.cmd_status(),
             SlashCommand::Doctor => self.cmd_doctor(),
             SlashCommand::Help => {
-                self.push_message(ChatMessage::info(help_text()));
+                self.help_visible = true;
+                self.help_scroll = 0;
             }
             SlashCommand::Quit => self.cmd_quit(),
         }
@@ -855,6 +970,13 @@ impl App {
                 .cmd_tx
                 .try_send(SessionCommand::SetProvider { provider_id: arg });
         }
+    }
+
+    fn cmd_approve(&mut self) {
+        self.next_dispatch_approved = true;
+        self.push_message(ChatMessage::info(
+            "The next task dispatch is approved under the current execution policy.",
+        ));
     }
 
     fn cmd_model(&mut self, arg: String) {
@@ -971,13 +1093,15 @@ impl App {
     fn cmd_config(&mut self) {
         let cfg = &self.config;
         let info = format!(
-            "Configuration:\n  provider:          {}\n  model:             {}\n  base_branch:       {}\n  timeout:           {}s\n  candidate_policy:  {}\n  sandbox_lifecycle: {}",
+            "Configuration:\n  provider:          {}\n  model:             {}\n  base_branch:       {}\n  timeout:           {}s\n  candidate_policy:  {}\n  sandbox_lifecycle: {}\n  exec_policy:       {:?}\n  post_run_hook:     {}",
             self.provider_id,
             self.model_label(),
             cfg.base_branch,
             cfg.timeout_secs,
             cfg.candidate_policy,
             cfg.sandbox_lifecycle,
+            cfg.execution_policy.default_decision,
+            if cfg.post_run_hook.is_some() { "configured" } else { "none" },
         );
         self.push_message(ChatMessage::info(info));
     }
@@ -1103,25 +1227,71 @@ fn is_abox_lifecycle_noise(line: &str) -> bool {
 /// Build the multi-line chat body for a failed Finished event.
 fn failure_chat_body(headline: String, result: &bakudo_core::protocol::WorkerResult) -> String {
     let mut out = headline;
-    let stderr_tail = result
-        .stderr
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map(str::to_string);
-    if let Some(line) = stderr_tail {
+
+    // Prefer a human-readable explanation when the stderr matches a known
+    // infrastructure-error pattern; otherwise fall back to the raw tail.
+    if let Some(explanation) = humanize_infra_error(&result.stderr) {
         out.push('\n');
-        out.push_str("→ stderr: ");
-        out.push_str(&truncate_line(line.trim(), 200));
+        out.push_str("→ ");
+        out.push_str(&explanation);
+    } else {
+        let stderr_tail = result
+            .stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(str::to_string);
+        if let Some(line) = stderr_tail {
+            out.push('\n');
+            out.push_str("→ stderr: ");
+            out.push_str(&truncate_line(line.trim(), 200));
+        }
     }
+
     out.push('\n');
     out.push_str("→ full logs at ~/.local/share/bakudo/bakudo.log");
     out
 }
 
+/// Recognise common abox/libgit2 failure fingerprints in `stderr` and return a
+/// friendlier, actionable explanation. Returns `None` when nothing matches —
+/// callers should fall back to showing the raw stderr tail.
+fn humanize_infra_error(stderr: &str) -> Option<String> {
+    // libgit2: `revspec 'main' not found; class=Reference (4); code=NotFound (-3)`
+    if let Some(idx) = stderr.find("revspec '") {
+        let rest = &stderr[idx + "revspec '".len()..];
+        if let Some(end) = rest.find("' not found") {
+            let branch = &rest[..end];
+            return Some(format!(
+                "Base branch '{branch}' not found in this repo. Create or check out '{branch}', \
+                 or change `base_branch` in ~/.config/bakudo/config.toml."
+            ));
+        }
+    }
+    None
+}
+
+/// Locate the row (0-based) containing the byte offset `cursor` and the byte
+/// offset where that row begins. Used by the multi-line composer for cursor
+/// navigation.
+fn locate_cursor_row(input: &str, cursor: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut start = 0usize;
+    for (i, byte) in input.as_bytes().iter().enumerate() {
+        if i >= cursor {
+            break;
+        }
+        if *byte == b'\n' {
+            row += 1;
+            start = i + 1;
+        }
+    }
+    (row, start)
+}
+
 /// Compact a `bakudo-attempt-<uuid>` id down to the first 8 chars of the UUID
 /// for inline chat display.
-fn short_task_id(task_id: &str) -> &str {
+pub fn short_task_id(task_id: &str) -> &str {
     let tail = task_id.strip_prefix("bakudo-attempt-").unwrap_or(task_id);
     let end = tail
         .char_indices()
@@ -1198,5 +1368,46 @@ fn shelf_entry_from_record(record: SandboxRecord) -> ShelfEntry {
         started_at: record.started_at.with_timezone(&Local),
         updated_at,
         pending_action: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_revspec_not_found() {
+        let stderr = "stderr: 1: revspec 'main' not found; class=Reference (4); code=NotFound (-3)";
+        let got = humanize_infra_error(stderr).expect("should match");
+        assert!(got.contains("Base branch 'main' not found"));
+        assert!(got.contains("check out 'main'"));
+        assert!(got.contains("base_branch"));
+    }
+
+    #[test]
+    fn humanize_infra_error_returns_none_for_unknown() {
+        assert!(humanize_infra_error("some unrelated error").is_none());
+        assert!(humanize_infra_error("").is_none());
+    }
+
+    #[test]
+    fn short_task_id_strips_prefix() {
+        assert_eq!(
+            short_task_id("bakudo-attempt-02bf30c1-40c8-4ac5"),
+            "02bf30c1"
+        );
+        assert_eq!(short_task_id("plain"), "plain");
+    }
+
+    #[test]
+    fn locate_cursor_row_finds_correct_row() {
+        let input = "aaa\nbbb\nccc";
+        assert_eq!(locate_cursor_row(input, 0), (0, 0));
+        assert_eq!(locate_cursor_row(input, 2), (0, 0));
+        // Cursor at the newline after "aaa" should still be on row 0.
+        assert_eq!(locate_cursor_row(input, 3), (0, 0));
+        // Cursor at start of "bbb".
+        assert_eq!(locate_cursor_row(input, 4), (1, 4));
+        assert_eq!(locate_cursor_row(input, 8), (2, 8));
     }
 }

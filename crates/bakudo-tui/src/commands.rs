@@ -18,6 +18,7 @@ use strum::{AsRefStr, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 pub enum SlashCommand {
     // ── Provider / model ─────────────────────────────────────────────────
     Provider,
+    Approve,
     Model,
     Providers,
 
@@ -49,6 +50,9 @@ impl SlashCommand {
     pub fn description(&self) -> &'static str {
         match self {
             SlashCommand::Provider => "switch the active AI provider  e.g. /provider claude",
+            SlashCommand::Approve => {
+                "approve the next task dispatch when execution policy requires prompting"
+            }
             SlashCommand::Model => {
                 "set the model for the current provider  e.g. /model claude-opus-4-5"
             }
@@ -83,6 +87,7 @@ impl SlashCommand {
                 | SlashCommand::Doctor
                 | SlashCommand::Help
                 | SlashCommand::Clear
+                | SlashCommand::Approve
                 | SlashCommand::Diverge
                 | SlashCommand::Diff
                 | SlashCommand::Quit

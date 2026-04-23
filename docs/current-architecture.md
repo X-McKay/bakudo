@@ -9,9 +9,10 @@ Bakudo runs provider tasks inside `abox` sandboxes and manages the resulting wor
 The runtime is intentionally small:
 
 1. `src/main.rs` loads config, constructs shared services, and starts either the TUI loop or a single headless run.
-2. `SessionController` receives typed `SessionCommand`s, dispatches attempts, and emits typed `SessionEvent`s.
+2. `SessionController` receives typed `SessionCommand`s, applies the execution policy, dispatches attempts, and emits typed `SessionEvent`s.
 3. `TaskRunner` writes the `AttemptSpec`, launches `abox run`, streams worker output, and records state transitions in the `SandboxLedger`.
 4. `worktree.rs` applies the host-side candidate policy after successful runs.
+5. Optional post-run hooks receive a JSON payload after the final sandbox state is known.
 
 ## Crate Responsibilities
 
@@ -25,7 +26,8 @@ The runtime is intentionally small:
 Providers are defined in `bakudo-core/src/provider.rs`.
 
 - Bakudo never hard-codes provider flags outside the registry.
-- Prompts are forwarded through `stdin` using `ProviderSpec::build_stdin_command(...)`.
+- Prompts are forwarded through `stdin` using `ProviderSpec::build_worker_command(...)`.
+- The execution policy can allow, prompt, or forbid a provider launch and can independently enable or disable the provider's "allow all tools" flag.
 - Each run also receives `BAKUDO_PROMPT`, `BAKUDO_SPEC_PATH`, and `BAKUDO_TASK_ID`.
 - Provider specs can supply sandbox sizing hints (`memory_mib`, `cpus`), and those are forwarded to `abox run`.
 
@@ -45,6 +47,8 @@ Startup recovery is ledger-based:
 2. The ledger reconciles any missing running sandboxes as failed.
 3. The TUI receives a `LedgerSnapshot` and rebuilds the shelf from it.
 
+The persisted ledger is repo-scoped. Each repository gets its own runtime state directory under the configured Bakudo data root, so preserved sandboxes from one repo do not leak into another repo's TUI session.
+
 ## Worktree Lifecycle
 
 Bakudo uses a host-owned preserved-worktree model.
@@ -63,6 +67,17 @@ The TUI only communicates with the daemon through channels.
 - `SessionEvent`: startup ledger snapshot, task lifecycle events, provider changes, info, and errors.
 
 The TUI does not spawn sandbox work directly. It renders transcript output and shelf state derived from the daemon and ledger.
+
+Interactive transcript history is persisted to a repo-scoped JSONL log and reloaded on `bakudo resume`, so resume restores both preserved sandboxes and the visible transcript instead of only rebuilding the shelf from the ledger.
+
+## Headless Contract
+
+`bakudo run` now supports two machine-facing integrations:
+
+- `--json`: emit newline-delimited JSON events for task start, progress, raw output, errors, and the final summary.
+- `--output-schema <path>`: validate the final summary object against a JSON Schema file before returning success.
+
+If `post_run_hook` is configured, Bakudo writes a JSON payload describing the completed run to the hook's stdin after the final state is known.
 
 ## Testing Strategy
 

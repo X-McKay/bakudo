@@ -34,6 +34,8 @@ pub enum AboxError {
     MergeFailed { task_id: String, detail: String },
     #[error("abox stop failed for '{task_id}': {detail}")]
     StopFailed { task_id: String, detail: String },
+    #[error("abox list failed: {detail}")]
+    ListFailed { detail: String },
     #[error("failed to parse abox list output: {0}")]
     ParseError(String),
     #[error("io error: {0}")]

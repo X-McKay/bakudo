@@ -48,6 +48,8 @@ pub struct SandboxRecord {
     pub attempt_id: AttemptId,
     pub session_id: SessionId,
     pub task_id: String,
+    #[serde(default)]
+    pub repo_root: Option<String>,
     pub provider_id: String,
     #[serde(default)]
     pub model: Option<String>,
@@ -216,6 +218,7 @@ impl SandboxLedger {
                             attempt_id: AttemptId(format!("recovered-{}", entry.id)),
                             session_id: SessionId("session-recovered".to_string()),
                             task_id: entry.id.clone(),
+                            repo_root: None,
                             provider_id: "unknown".to_string(),
                             model: None,
                             prompt_summary: String::from("(recovered from abox list)"),
@@ -310,6 +313,7 @@ mod tests {
             attempt_id: AttemptId(format!("attempt-{task_id}")),
             session_id: SessionId("session-test".to_string()),
             task_id: task_id.to_string(),
+            repo_root: None,
             provider_id: "claude".to_string(),
             model: None,
             prompt_summary: "test".to_string(),

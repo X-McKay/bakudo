@@ -9,6 +9,7 @@ use std::time::Duration;
 use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
 use bakudo_core::config::BakudoConfig;
 use bakudo_core::error::AboxError;
+use bakudo_core::policy::{ExecutionPolicy, ExecutionPolicyRule, PolicyDecision};
 use bakudo_core::protocol::{
     AttemptId, AttemptSpec, CandidatePolicy, SessionId, TaskId, WorkerProgressEvent,
     WorkerProgressKind, WorkerStatus, WORKER_EVENT_PREFIX,
@@ -21,7 +22,8 @@ use bakudo_daemon::session_controller::{
 };
 use bakudo_daemon::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use bakudo_daemon::worktree::{apply_candidate_policy, WorktreeAction};
-use bakudo_tui::app::{App, MessageRole, ShelfColor};
+use bakudo_tui::app::{App, ChatMessage, MessageRole, ShelfColor};
+use bakudo_tui::transcript_store::TranscriptStore;
 use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
@@ -188,6 +190,7 @@ fn make_record(task_id: &str, state: SandboxState) -> SandboxRecord {
         attempt_id: AttemptId(format!("attempt-{task_id}")),
         session_id: SessionId("session-runtime".to_string()),
         task_id: task_id.to_string(),
+        repo_root: None,
         provider_id: "claude".to_string(),
         model: None,
         prompt_summary: "runtime test".to_string(),
@@ -353,6 +356,48 @@ async fn adapter_stop_returns_error_on_failure() {
         }
         other => panic!("expected StopFailed, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn adapter_list_returns_error_on_failure() {
+    let dir = TempDir::new("bakudo-fake-abox");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "list failed" >&2
+    exit 9
+    ;;
+"#,
+    );
+    let adapter = AboxAdapter::new(&script);
+    let err = adapter.list(None).await.unwrap_err();
+    match err {
+        AboxError::ListFailed { detail } => assert!(detail.contains("list failed")),
+        other => panic!("expected ListFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn adapter_run_marks_stdout_as_truncated_when_limit_hit() {
+    let dir = TempDir::new("bakudo-fake-abox");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "1234567890"
+    ;;
+"#,
+    );
+    let adapter = AboxAdapter::new(&script);
+    let mut params = RunParams::new(
+        "task-truncated",
+        vec!["bash".to_string(), "-lc".to_string(), "true".to_string()],
+    );
+    params.max_output_bytes = 4;
+
+    let result = adapter.run(&params, |_| {}).await.unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stdout_truncated);
+    assert!(result.stdout.len() <= 4);
 }
 
 #[tokio::test]
@@ -782,6 +827,7 @@ async fn session_controller_reports_failed_tasks_as_failed() {
     cmd_tx
         .send(SessionCommand::Dispatch {
             prompt: "break immediately".to_string(),
+            approved: false,
         })
         .await
         .unwrap();
@@ -802,6 +848,131 @@ async fn session_controller_reports_failed_tasks_as_failed() {
 
     cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_controller_requires_approval_when_policy_prompts() {
+    let dir = TempDir::new("bakudo-session-approval");
+    let script = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    echo "approved run"
+    ;;
+"#,
+    )
+    .0;
+
+    let config = BakudoConfig {
+        abox_bin: script.display().to_string(),
+        data_dir: Some(dir.path.join("data")),
+        execution_policy: ExecutionPolicy {
+            default_decision: PolicyDecision::Prompt,
+            default_allow_all_tools: true,
+            rules: vec![ExecutionPolicyRule {
+                provider: "claude".to_string(),
+                decision: PolicyDecision::Prompt,
+                allow_all_tools: Some(true),
+            }],
+        },
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let controller = SessionController::new(
+        Arc::new(config),
+        Arc::new(AboxAdapter::new(&script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        cmd_rx,
+        event_tx,
+    );
+
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::Dispatch {
+            prompt: "needs approval".to_string(),
+            approved: false,
+        })
+        .await
+        .unwrap();
+
+    let first_error = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Error(msg)) => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(first_error.contains("requires approval"));
+
+    cmd_tx
+        .send(SessionCommand::Dispatch {
+            prompt: "approved".to_string(),
+            approved: true,
+        })
+        .await
+        .unwrap();
+
+    let saw_started = timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::TaskStarted { prompt_summary, .. }) => break prompt_summary,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(saw_started.contains("approved"));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[test]
+fn app_can_reload_persisted_transcript() {
+    let dir = TempDir::new("bakudo-transcript-store");
+    let store = TranscriptStore::new(dir.path.join("session.jsonl"));
+
+    let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+    let (_event_tx, event_rx) = mpsc::channel(8);
+    let mut app = App::new(
+        Arc::new(BakudoConfig::default()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        Arc::new(SandboxLedger::new()),
+        cmd_tx,
+        event_rx,
+        Some(store.clone()),
+        false,
+    );
+    app.push_message(ChatMessage::user("hello"));
+    app.push_message(ChatMessage::info("world"));
+
+    let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+    let (_event_tx, event_rx) = mpsc::channel(8);
+    let mut resumed = App::new(
+        Arc::new(BakudoConfig::default()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        Arc::new(SandboxLedger::new()),
+        cmd_tx,
+        event_rx,
+        Some(store),
+        false,
+    );
+    resumed.load_transcript();
+
+    assert_eq!(resumed.transcript.len(), 2);
+    assert_eq!(resumed.transcript.front().unwrap().role, MessageRole::User);
+    assert!(resumed.transcript.back().unwrap().content.contains("world"));
 }
 
 #[test]
@@ -958,6 +1129,184 @@ fn bakudo_sessions_lists_saved_sessions_for_current_repo() {
 }
 
 #[test]
+fn bakudo_run_cli_emits_json_and_validates_schema() {
+    let dir = TempDir::new("bakudo-cli-json");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "JSON_PROVIDER_OUTPUT"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+    let schema_path = dir.path.join("summary.schema.json");
+    fs::write(
+        &schema_path,
+        r#"{
+  "type": "object",
+  "required": ["task_id", "worker_status", "worktree_action"],
+  "properties": {
+    "worker_status": { "const": "succeeded" },
+    "worktree_action": { "const": "discarded" }
+  }
+}"#,
+    )
+    .unwrap();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "run",
+            "-p",
+            "codex",
+            "--discard",
+            "--json",
+            "--output-schema",
+            schema_path.to_str().unwrap(),
+            "Return JSON",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "bakudo run --json failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("\"event\":\"task_started\"")));
+    assert!(stdout
+        .lines()
+        .any(|line| line.contains("\"event\":\"finished\"")));
+    assert!(stdout.contains("\"worker_status\":\"succeeded\""));
+    assert!(stdout.contains("\"worktree_action\":\"discarded\""));
+}
+
+#[test]
+fn bakudo_run_cli_executes_post_run_hook() {
+    let dir = TempDir::new("bakudo-cli-hook");
+    let payload_path = dir.path.join("hook-payload.json");
+    let hook_script = dir.path.join("hook.sh");
+    fs::write(
+        &hook_script,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\ncat > '{}'\n",
+            payload_path.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&hook_script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hook_script, perms).unwrap();
+
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "HOOK_PROVIDER_OUTPUT"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap()
+        .write_all(
+            format!(
+                "post_run_hook = [{:?}]\n",
+                hook_script.display().to_string()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let repo = TempRepo::new();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "run",
+            "-p",
+            "codex",
+            "--discard",
+            "Run hook",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "bakudo run with hook failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&payload_path).unwrap()).unwrap();
+    assert_eq!(payload["worker_status"], "succeeded");
+    assert_eq!(payload["worktree_action"], "discarded");
+    assert_eq!(payload["provider_id"], "codex");
+}
+
+#[test]
+fn bakudo_run_cli_does_not_apply_policy_after_failure() {
+    let dir = TempDir::new("bakudo-cli-failed-policy");
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "provider failed" >&2
+    exit 19
+    ;;
+  stop)
+    echo "unexpected stop"
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "run",
+            "-p",
+            "codex",
+            "--discard",
+            "Fail without discard",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected failed headless run:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocations = read_invocations(&log);
+    assert_eq!(
+        invocations.len(),
+        1,
+        "failed run should not call stop/merge"
+    );
+}
+
+#[test]
 fn app_submits_provider_command_when_idle() {
     let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
     let (_event_tx, event_rx) = mpsc::channel(8);
@@ -967,6 +1316,8 @@ fn app_submits_provider_command_when_idle() {
         Arc::new(SandboxLedger::new()),
         cmd_tx,
         event_rx,
+        None,
+        true,
     );
 
     app.input = "/provider codex".to_string();
@@ -989,6 +1340,8 @@ fn app_drain_session_events_updates_shelf_and_blocks_mutating_commands() {
         Arc::new(SandboxLedger::new()),
         cmd_tx,
         event_rx,
+        None,
+        true,
     );
 
     event_tx
@@ -1041,6 +1394,8 @@ fn app_drain_session_info_events_use_info_role() {
         Arc::new(SandboxLedger::new()),
         cmd_tx,
         event_rx,
+        None,
+        true,
     );
 
     event_tx
@@ -1065,6 +1420,8 @@ fn app_rebuilds_shelf_from_recovered_ledger_snapshot() {
         Arc::new(SandboxLedger::new()),
         cmd_tx,
         event_rx,
+        None,
+        true,
     );
 
     event_tx
