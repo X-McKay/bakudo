@@ -20,8 +20,19 @@ pub const SHELF_MIN_TERM_WIDTH: u16 = 90;
 /// Height of the header bar (2 rows).
 pub const HEADER_HEIGHT: u16 = 2;
 
-/// Height of the composer block (border + 1 input line + border = 3).
-pub const COMPOSER_HEIGHT: u16 = 3;
+/// Minimum height of the composer block (2 borders + 1 input row).
+pub const COMPOSER_MIN_HEIGHT: u16 = 3;
+
+/// Maximum height the composer may grow to when rendering multi-line input.
+/// Beyond this, the input scrolls vertically to keep the cursor in view.
+pub const COMPOSER_MAX_HEIGHT: u16 = 12;
+
+/// Compute the composer's rendered height for an input buffer containing
+/// `line_count` lines (split on `\n`), clamped to the min/max constants.
+pub fn composer_height_for(line_count: usize) -> u16 {
+    let rows = line_count.max(1) as u16;
+    (rows + 2).clamp(COMPOSER_MIN_HEIGHT, COMPOSER_MAX_HEIGHT)
+}
 
 /// Height of the footer hint bar.
 pub const FOOTER_HEIGHT: u16 = 1;

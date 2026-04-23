@@ -22,23 +22,29 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, FocusedPanel, MessageRole, ShelfColor};
+use crate::app::{short_task_id, App, FocusedPanel, MessageRole, ShelfColor};
+use crate::commands::SlashCommand;
 use crate::palette::{
-    self, COMPOSER_HEIGHT, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH,
+    self, composer_height_for, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH,
+    SHELF_WIDTH,
 };
+use strum::IntoEnumIterator;
 
 // ─── Top-level render ──────────────────────────────────────────────────────
 
 /// Render the full TUI into `frame`.
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.size();
-    let use_shelf = area.width >= SHELF_MIN_TERM_WIDTH;
+    // Only carve out the shelf column when the terminal is wide enough AND
+    // there is at least one sandbox to show — an empty sidebar is chrome,
+    // not content.
+    let show_shelf = area.width >= SHELF_MIN_TERM_WIDTH && !app.shelf.is_empty();
 
     // ── Slice the header off the top so it spans the full terminal width and
     //    the shelf naturally starts below it. ──────────────────────────────
@@ -50,7 +56,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let body_area = outer[1];
 
     // ── Horizontal split of the body: main | shelf ────────────────────────
-    let h_chunks = if use_shelf {
+    let h_chunks = if show_shelf {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(SHELF_WIDTH)])
@@ -64,28 +70,46 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let main_area = h_chunks[0];
 
-    // ── Vertical split of main: transcript | composer | footer ────────────
+    // ── Vertical split of main: transcript | status | composer | footer ──
+    // The status strip appears only when at least one task is running; it
+    // shows a spinner, the running count, and the latest phase of the most
+    // recently-started running task. Composer grows with multi-line input.
+    let composer_h = composer_height_for(app.input.split('\n').count());
+    let status_h: u16 = if app.active_task_count > 0 || has_running_entry(app) {
+        1
+    } else {
+        0
+    };
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(5),
-            Constraint::Length(COMPOSER_HEIGHT),
+            Constraint::Length(status_h),
+            Constraint::Length(composer_h),
             Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(main_area);
 
     render_header(frame, app, header_area);
     render_transcript(frame, app, v_chunks[0]);
-    render_composer(frame, app, v_chunks[1]);
-    render_footer(frame, app, v_chunks[2]);
+    if status_h > 0 {
+        render_status_strip(frame, app, v_chunks[1]);
+    }
+    render_composer(frame, app, v_chunks[2]);
+    render_footer(frame, app, v_chunks[3]);
 
-    if use_shelf {
+    if show_shelf {
         render_shelf(frame, app, h_chunks[1]);
     }
 
     // ── Completion popup ────────────────────────────────────────────────────
     if !app.completions.is_empty() && app.focus == FocusedPanel::Chat {
-        render_completion_popup(frame, app, v_chunks[1]);
+        render_completion_popup(frame, app, v_chunks[2]);
+    }
+
+    // ── Help overlay (drawn last so it sits on top of everything) ───────────
+    if app.help_visible {
+        render_help_overlay(frame, app);
     }
 }
 
@@ -191,6 +215,7 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(Span::styled(" Chat ", panel_title_style(focused)));
 
@@ -283,25 +308,12 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         palette::unfocused_border_style()
     };
 
-    // Title badge: first letter of provider in brackets.
-    let provider_initial = app
-        .provider_id
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string();
-    let title = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(
-            format!("[{provider_initial}]"),
-            Style::default().fg(palette::provider_accent()).bold(),
-        ),
-        Span::styled(" Input ", panel_title_style(focused)),
-    ]);
+    // Border color signals focus; the title is just a plain label.
+    let title = Span::styled(" Input ", panel_title_style(focused));
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(title);
 
@@ -309,67 +321,146 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     const PROMPT_WIDTH: u16 = 2;
+    let prompt_width = PROMPT_WIDTH.min(inner.width);
     let prompt_area = Rect {
         x: inner.x,
         y: inner.y,
-        width: PROMPT_WIDTH.min(inner.width),
+        width: prompt_width,
         height: inner.height,
     };
     let text_area = Rect {
-        x: inner.x + PROMPT_WIDTH.min(inner.width),
+        x: inner.x + prompt_width,
         y: inner.y,
-        width: inner.width.saturating_sub(PROMPT_WIDTH),
+        width: inner.width.saturating_sub(prompt_width),
         height: inner.height,
     };
 
-    let prompt = Paragraph::new(Line::from(Span::styled(
-        "> ",
-        Style::default().fg(palette::dim_border()),
-    )));
-    frame.render_widget(prompt, prompt_area);
+    // Prompt column: "> " on the first row, "  " on continuation rows so that
+    // multi-line input reads as a single indented block.
+    let prompt_lines: Vec<Line> = (0..inner.height)
+        .map(|i| {
+            if i == 0 {
+                Line::from(Span::styled(
+                    "> ",
+                    Style::default().fg(palette::dim_border()),
+                ))
+            } else {
+                Line::from(Span::raw("  "))
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(prompt_lines), prompt_area);
 
-    let before_cursor = &app.input[..app.cursor];
-    let (at_cursor, after_cursor) = if app.cursor < app.input.len() {
-        let tail = &app.input[app.cursor..];
-        let g_len = tail.graphemes(true).next().map(str::len).unwrap_or(0);
-        if g_len == 0 {
-            (" ", "")
+    // ── Empty input: show a dim placeholder with a reversed cursor cell ──
+    if app.input.is_empty() {
+        let placeholder_line = Line::from(vec![
+            Span::styled(
+                " ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ),
+            Span::styled(
+                "Describe a task…  ",
+                palette::dim_style().add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled(
+                "Shift+Enter",
+                Style::default()
+                    .fg(palette::hint_key_fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" for newline", palette::dim_style()),
+        ]);
+        frame.render_widget(Paragraph::new(placeholder_line), text_area);
+        return;
+    }
+
+    // ── Multi-line input ─────────────────────────────────────────────────
+    let input_lines: Vec<&str> = app.input.split('\n').collect();
+
+    // Find which rendered row and byte offset within that row the cursor sits.
+    let (cursor_row, row_start_byte) = locate_cursor(&app.input, app.cursor);
+    let current_line = input_lines[cursor_row];
+    let col_byte = app
+        .cursor
+        .saturating_sub(row_start_byte)
+        .min(current_line.len());
+
+    let mut text_lines: Vec<Line> = Vec::with_capacity(input_lines.len());
+    for (i, line_s) in input_lines.iter().enumerate() {
+        if i == cursor_row {
+            let before = &line_s[..col_byte];
+            let (at, after) = if col_byte < line_s.len() {
+                let tail = &line_s[col_byte..];
+                let g_len = tail.graphemes(true).next().map(str::len).unwrap_or(0);
+                if g_len == 0 {
+                    (" ", "")
+                } else {
+                    (&tail[..g_len], &tail[g_len..])
+                }
+            } else {
+                (" ", "")
+            };
+            text_lines.push(Line::from(vec![
+                Span::styled(before, Style::default().fg(Color::White)),
+                Span::styled(
+                    at,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                ),
+                Span::styled(after, Style::default().fg(Color::White)),
+            ]));
         } else {
-            (&tail[..g_len], &tail[g_len..])
+            text_lines.push(Line::from(Span::styled(
+                *line_s,
+                Style::default().fg(Color::White),
+            )));
         }
-    } else {
-        (" ", "")
-    };
+    }
 
-    let cursor_col = before_cursor.width();
-    let cursor_cell_w = if app.cursor < app.input.len() {
-        at_cursor.width().max(1)
-    } else {
-        1
-    };
+    // Horizontal scroll — keep the cursor column in view for the current row.
+    let cursor_col = current_line[..col_byte].width();
     let visible_w = text_area.width as usize;
     let scroll_x: u16 = if visible_w == 0 {
         0
-    } else if cursor_col + cursor_cell_w > visible_w {
-        let target_col = visible_w.saturating_sub(4);
-        (cursor_col.saturating_sub(target_col)) as u16
+    } else if cursor_col + 1 > visible_w {
+        let target = visible_w.saturating_sub(4);
+        cursor_col.saturating_sub(target) as u16
     } else {
         0
     };
 
-    let line = Line::from(vec![
-        Span::styled(before_cursor, Style::default().fg(Color::White)),
-        Span::styled(
-            at_cursor,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        ),
-        Span::styled(after_cursor, Style::default().fg(Color::White)),
-    ]);
+    // Vertical scroll — keep the cursor row in view when input grows beyond
+    // the composer's visible height.
+    let visible_h = text_area.height as usize;
+    let scroll_y: u16 = if text_lines.len() > visible_h && visible_h > 0 {
+        cursor_row.saturating_sub(visible_h - 1) as u16
+    } else {
+        0
+    };
 
-    let para = Paragraph::new(line).scroll((0, scroll_x));
+    let para = Paragraph::new(text_lines).scroll((scroll_y, scroll_x));
     frame.render_widget(para, text_area);
+}
+
+/// Given `input` and a byte-offset cursor position, return (row_index,
+/// row_start_byte_offset) so the renderer knows which line the cursor sits on
+/// and where that line begins in the buffer.
+fn locate_cursor(input: &str, cursor: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut start = 0usize;
+    for (i, byte) in input.as_bytes().iter().enumerate() {
+        if i >= cursor {
+            break;
+        }
+        if *byte == b'\n' {
+            row += 1;
+            start = i + 1;
+        }
+    }
+    (row, start)
 }
 
 // ─── Completion popup ──────────────────────────────────────────────────────
@@ -423,6 +514,7 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
 
     let popup_block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(palette::focus_border()))
         .title(Span::styled(" Tab: complete ", palette::dim_style()));
 
@@ -430,11 +522,211 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
     frame.render_widget(list, popup_rect);
 }
 
+// ─── Live status strip ─────────────────────────────────────────────────────
+
+/// Whether the shelf has at least one entry currently in the Running state.
+fn has_running_entry(app: &App) -> bool {
+    app.shelf
+        .iter()
+        .any(|entry| entry.state_color == ShelfColor::Running)
+}
+
+/// A single-row status line shown above the composer when at least one
+/// sandbox task is running. Format:
+///
+///    ⠋  1 running · [02bf30c1] Booting sandbox…
+fn render_status_strip(frame: &mut Frame, app: &App, area: Rect) {
+    let running = app
+        .shelf
+        .iter()
+        .filter(|e| e.state_color == ShelfColor::Running)
+        .count();
+
+    // Prefer the `active_task_count` if it disagrees with the shelf — that's
+    // the dispatcher's authoritative view and the shelf may lag briefly.
+    let count = app.active_task_count.max(running);
+    if count == 0 {
+        return;
+    }
+
+    let latest = app
+        .shelf
+        .iter()
+        .find(|e| e.state_color == ShelfColor::Running);
+
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            palette::spinner_frame(app.tick),
+            Style::default().fg(palette::shelf_running()).bold(),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            count.to_string(),
+            Style::default().fg(palette::shelf_running()).bold(),
+        ),
+        Span::styled(" running", palette::dim_style()),
+    ];
+
+    if let Some(entry) = latest {
+        spans.push(Span::styled("  ·  ", palette::dim_style()));
+        spans.push(Span::styled(
+            format!("[{}]", short_task_id(&entry.task_id)),
+            Style::default().fg(palette::role_info_fg()).bold(),
+        ));
+        spans.push(Span::raw(" "));
+        // Phase: latest note, truncated to fit within the remaining width.
+        let used: usize = spans.iter().map(|s| s.content.width()).sum();
+        let remaining = (area.width as usize).saturating_sub(used + 2);
+        spans.push(Span::styled(
+            word_truncate(&entry.last_note, remaining.max(10)),
+            Style::default().fg(Color::White),
+        ));
+    }
+
+    let strip = Paragraph::new(Line::from(spans));
+    frame.render_widget(strip, area);
+}
+
+// ─── Help overlay ──────────────────────────────────────────────────────────
+
+fn render_help_overlay(frame: &mut Frame, app: &App) {
+    let area = frame.size();
+    // Centered, bounded so we never render smaller than a minimum useful size
+    // and never larger than roughly 80×28. The overlay is clamped to fit the
+    // current terminal so narrow windows still work.
+    let max_w: u16 = 80;
+    let max_h: u16 = 28;
+    let w = area
+        .width
+        .saturating_sub(4)
+        .min(max_w)
+        .max(30)
+        .min(area.width);
+    let h = area
+        .height
+        .saturating_sub(2)
+        .min(max_h)
+        .max(10)
+        .min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    // Blank out whatever was behind, so the modal reads as a lifted surface.
+    frame.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette::focus_border()))
+        .title(Span::styled(
+            " Slash Commands ",
+            Style::default().fg(Color::White).bold(),
+        ));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    // Split the inner area: body + 1-row footer hint inside the modal.
+    let v = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let lines = build_help_lines(v[0].width as usize);
+    let visible = v[0].height as usize;
+    let max_scroll = lines.len().saturating_sub(visible);
+    let scroll = app.help_scroll.min(max_scroll) as u16;
+    let body = Paragraph::new(lines).scroll((scroll, 0));
+    frame.render_widget(body, v[0]);
+
+    let hint = Line::from(vec![
+        Span::styled(" ", palette::dim_style()),
+        hint_key("↑/↓"),
+        Span::styled(" scroll  ", palette::dim_style()),
+        hint_key("Esc"),
+        Span::styled(" / ", palette::dim_style()),
+        hint_key("Enter"),
+        Span::styled(" close", palette::dim_style()),
+    ]);
+    frame.render_widget(Paragraph::new(hint), v[1]);
+}
+
+fn build_help_lines(width: usize) -> Vec<Line<'static>> {
+    const NAME_COL: usize = 14;
+    const INDENT: &str = "  ";
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    out.push(Line::from(Span::styled(
+        "Type a command below, or press a listed key to control the session.",
+        palette::dim_style(),
+    )));
+    out.push(Line::raw(""));
+
+    for cmd in SlashCommand::iter() {
+        let name = format!("/{}", cmd.command());
+        let desc = cmd.description().to_string();
+        let body_width = width.saturating_sub(INDENT.len() + NAME_COL + 2).max(10);
+        let wrapped = wrap_to_width(&desc, body_width);
+        for (i, segment) in wrapped.into_iter().enumerate() {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
+            spans.push(Span::raw(INDENT));
+            if i == 0 {
+                spans.push(Span::styled(
+                    format!("{:<NAME_COL$}", name),
+                    Style::default().fg(palette::role_info_fg()).bold(),
+                ));
+            } else {
+                spans.push(Span::raw(format!("{:<NAME_COL$}", "")));
+            }
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(segment, Style::default().fg(Color::White)));
+            out.push(Line::from(spans));
+        }
+    }
+
+    out.push(Line::raw(""));
+    out.push(Line::from(vec![
+        Span::raw(INDENT),
+        Span::styled("Keybinds", Style::default().fg(Color::White).bold()),
+    ]));
+    for (k, v) in &[
+        ("Enter", "send the composed message"),
+        ("Shift+Enter", "insert a newline in the composer"),
+        (
+            "Tab",
+            "autocomplete /slash commands · cycle focus to the shelf",
+        ),
+        ("↑ / ↓", "move between rows of multi-line input"),
+        ("PgUp / PgDn", "scroll the transcript"),
+        ("Ctrl+W", "delete the previous word"),
+        ("Ctrl+U", "delete from cursor to start of line"),
+        ("Ctrl+C", "quit"),
+    ] {
+        out.push(Line::from(vec![
+            Span::raw(INDENT),
+            Span::styled(
+                format!("{:<NAME_COL$}", k),
+                Style::default().fg(palette::hint_key_fg()).bold(),
+            ),
+            Span::raw("  "),
+            Span::styled(v.to_string(), Style::default().fg(Color::White)),
+        ]));
+    }
+
+    out
+}
+
 // ─── Footer ────────────────────────────────────────────────────────────────
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let hints: Line = if app.focus == FocusedPanel::Chat {
-        let shelf_visible = area.width >= SHELF_MIN_TERM_WIDTH;
+        let shelf_visible = area.width >= SHELF_MIN_TERM_WIDTH && !app.shelf.is_empty();
         let mut spans = vec![
             hint_key("Enter"),
             Span::styled(": send  ", palette::footer_fg()),
@@ -509,6 +801,7 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(title);
 
@@ -571,13 +864,14 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                 ShelfColor::TimedOut => "⌛",
             };
 
-            // Truncate task_id from the head so the distinguishing suffix stays visible.
-            let id_max = (list_area.width as usize).saturating_sub(6);
-            let id_short = tail_truncate(&entry.task_id, id_max);
+            // Use the short UUID suffix (e.g. "02bf30c1") — dense and scannable.
+            // The full id is still visible in the Selection detail pane below.
+            let id_short = short_task_id(&entry.task_id).to_string();
 
-            // Truncate summary.
-            let summary: String = entry.prompt_summary.chars().take(max_summary_w).collect();
-            let note: String = entry.last_note.chars().take(max_summary_w).collect();
+            // Truncate summary and note at word boundaries so we don't cut
+            // mid-word (e.g. "make the readme add a trai…").
+            let summary = word_truncate(&entry.prompt_summary, max_summary_w);
+            let note = word_truncate(&entry.last_note, max_summary_w);
             let provider_model = match entry.model.as_deref().filter(|m| !m.is_empty()) {
                 Some(m) => format!("{}/{}", entry.provider, m),
                 None => entry.provider.clone(),
@@ -781,18 +1075,35 @@ fn push_hard_broken(
     }
 }
 
-fn tail_truncate(text: &str, max_chars: usize) -> String {
-    let count = text.chars().count();
-    if count <= max_chars {
+/// Truncate `text` to at most `max_chars` display characters, preferring a
+/// word boundary — so we don't emit "make the readme add a trai…". Falls back
+/// to a hard cut if there's no whitespace in range. An ellipsis is appended
+/// when truncation actually happened.
+fn word_truncate(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let total = text.chars().count();
+    if total <= max_chars {
         return text.to_string();
     }
-    if max_chars <= 1 {
+    if max_chars == 1 {
         return "…".to_string();
     }
-    let skip = count - (max_chars - 1);
-    let mut out = String::from("…");
-    out.extend(text.chars().skip(skip));
-    out
+
+    // Collect up to max_chars-1 chars (reserve 1 for the ellipsis), then walk
+    // back to the last whitespace char so we don't split a word.
+    let budget = max_chars - 1;
+    let head: String = text.chars().take(budget).collect();
+    let cut = head.rfind(char::is_whitespace).unwrap_or(head.len());
+    // Only accept the word boundary if it leaves something meaningful (at
+    // least a third of the budget); otherwise fall back to a hard cut.
+    let trimmed = if cut >= budget / 3 {
+        head[..cut].trim_end().to_string()
+    } else {
+        head
+    };
+    format!("{trimmed}…")
 }
 
 fn human_elapsed(started_at: chrono::DateTime<chrono::Local>) -> String {
@@ -906,5 +1217,118 @@ mod tests {
             rendered.push('\n');
         }
         rendered
+    }
+
+    fn fresh_app() -> App {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(4);
+        let (_event_tx, event_rx) = mpsc::channel(4);
+        App::new(
+            Arc::new(BakudoConfig::default()),
+            Arc::new(ProviderRegistry::with_defaults()),
+            Arc::new(SandboxLedger::new()),
+            cmd_tx,
+            event_rx,
+            None,
+            true,
+        )
+    }
+
+    fn render_to_string(app: &App, cols: u16, rows: u16) -> String {
+        let backend = TestBackend::new(cols, rows);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn composer_shows_placeholder_when_input_is_empty() {
+        let app = fresh_app();
+        let rendered = render_to_string(&app, 100, 20);
+        assert!(
+            rendered.contains("Describe a task"),
+            "placeholder should render when input is empty: {rendered}"
+        );
+    }
+
+    #[test]
+    fn composer_renders_multiline_input_on_separate_rows() {
+        let mut app = fresh_app();
+        app.input = "line one\nline two\nline three".to_string();
+        app.cursor = app.input.len();
+        let rendered = render_to_string(&app, 100, 24);
+        // Each logical line should appear as its own row in the composer.
+        let count = rendered.matches("line one").count();
+        assert!(count >= 1, "expected 'line one' in output: {rendered}");
+        assert!(rendered.contains("line two"));
+        assert!(rendered.contains("line three"));
+        // Placeholder must not show once input has content.
+        assert!(!rendered.contains("Describe a task"));
+    }
+
+    #[test]
+    fn shelf_hidden_when_empty_at_wide_terminal() {
+        let app = fresh_app();
+        let rendered = render_to_string(&app, 140, 30);
+        assert!(!rendered.contains("Sandboxes"));
+        assert!(!rendered.contains("No sandboxes"));
+    }
+
+    #[test]
+    fn rounded_border_corners_used() {
+        let app = fresh_app();
+        let rendered = render_to_string(&app, 100, 20);
+        // Rounded top-left corner for the Chat and Input blocks.
+        assert!(
+            rendered.contains('╭'),
+            "expected rounded ╭ corner in: {rendered}"
+        );
+        assert!(rendered.contains('╯'));
+    }
+
+    #[test]
+    fn help_overlay_renders_slash_commands_when_visible() {
+        let mut app = fresh_app();
+        app.help_visible = true;
+        let rendered = render_to_string(&app, 100, 30);
+        assert!(rendered.contains("Slash Commands"));
+        assert!(rendered.contains("/provider"));
+        assert!(rendered.contains("/help"));
+        assert!(rendered.contains("Keybinds"));
+        assert!(rendered.contains("Shift+Enter"));
+    }
+
+    #[test]
+    fn status_strip_shows_spinner_and_count_when_tasks_running() {
+        let mut app = fresh_app();
+        app.active_task_count = 2;
+        app.shelf.push_back(ShelfEntry {
+            task_id: "bakudo-attempt-02bf30c1-abcd".to_string(),
+            provider: "claude".to_string(),
+            model: None,
+            prompt_summary: "fix the readme".to_string(),
+            last_note: "Booting sandbox".to_string(),
+            state_label: "running".to_string(),
+            state_color: crate::app::ShelfColor::Running,
+            started_at: Local::now(),
+            updated_at: Local::now(),
+            pending_action: None,
+        });
+        let rendered = render_to_string(&app, 140, 30);
+        assert!(rendered.contains("running"));
+        assert!(rendered.contains("[02bf30c1]"));
+        assert!(rendered.contains("Booting sandbox"));
+    }
+
+    #[test]
+    fn word_truncate_cuts_at_word_boundary() {
+        // Far shorter than text → should cut at last space before budget.
+        let got = super::word_truncate("make the readme add a trailing newline", 25);
+        assert!(
+            !got.contains("trai "),
+            "should not cut mid-word, got: {got}"
+        );
+        assert!(got.ends_with('…'));
+        // No-op when text already fits.
+        assert_eq!(super::word_truncate("hi", 25), "hi");
     }
 }
