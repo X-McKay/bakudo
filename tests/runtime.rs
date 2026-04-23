@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
 use bakudo_core::config::BakudoConfig;
+use bakudo_core::control::swarm_artifact_root;
 use bakudo_core::error::AboxError;
 use bakudo_core::policy::{ExecutionPolicy, ExecutionPolicyRule, PolicyDecision};
 use bakudo_core::protocol::{
@@ -164,6 +165,14 @@ fn read_invocations(log_path: &Path) -> Vec<Vec<String>> {
         invocations.push(current);
     }
     invocations
+}
+
+fn invocation_task_id(invocation: &[String]) -> String {
+    let task_pos = invocation
+        .iter()
+        .position(|arg| arg == "--task")
+        .expect("invocation has --task");
+    invocation[task_pos + 1].clone()
 }
 
 fn write_config_file(dir: &TempDir, abox_bin: &Path) -> PathBuf {
@@ -1307,6 +1316,286 @@ fn bakudo_run_cli_does_not_apply_policy_after_failure() {
 }
 
 #[test]
+fn bakudo_result_cli_reads_persisted_summary() {
+    let dir = TempDir::new("bakudo-cli-result");
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "RESULT_PROVIDER_OUTPUT"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+
+    let run_output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "run",
+            "-p",
+            "codex",
+            "--discard",
+            "persist a result",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(
+        run_output.status.success(),
+        "bakudo run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run_output.stdout),
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+
+    let invocations = read_invocations(&log);
+    let task_id = invocation_task_id(&invocations[0]);
+    let result_output = StdCommand::new(bakudo_bin())
+        .args(["-c", config.to_str().unwrap(), "result", "--json", &task_id])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        result_output.status.success(),
+        "bakudo result failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&result_output.stdout),
+        String::from_utf8_lossy(&result_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result_output.stdout);
+    assert!(stdout.contains(&format!("\"task_id\":\"{task_id}\"")));
+    assert!(stdout.contains("\"worker_status\":\"succeeded\""));
+    assert!(stdout.contains("\"final_state\":\"discarded\""));
+    assert!(stdout.contains("\"worktree_action\":\"discarded\""));
+}
+
+#[tokio::test]
+async fn bakudo_wait_cli_observes_session_controller_result() {
+    let dir = TempDir::new("bakudo-cli-wait");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    sleep 0.4
+    echo "WAIT_PROVIDER_OUTPUT"
+    ;;
+"#,
+    );
+    let config_path = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+    let loaded_config = Arc::new(BakudoConfig::load(&config_path).unwrap());
+    let repo_data_dir = loaded_config.resolved_repo_data_dir(Some(repo.path()));
+    let ledger = Arc::new(SandboxLedger::with_persistence(
+        repo_data_dir.join("ledger.jsonl"),
+    ));
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let controller = SessionController::with_session(
+        loaded_config.clone(),
+        Arc::new(AboxAdapter::new(&script)),
+        ledger,
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-wait".to_string()),
+                "codex",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_rx,
+        event_tx,
+    );
+
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::Dispatch {
+            prompt: "wait for me".to_string(),
+            approved: false,
+        })
+        .await
+        .unwrap();
+
+    let task_id = timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::TaskStarted { task_id, .. }) => break task_id,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let config_for_wait = config_path.clone();
+    let repo_for_wait = repo.path().to_path_buf();
+    let task_for_wait = task_id.clone();
+    let wait_output = tokio::task::spawn_blocking(move || {
+        StdCommand::new(bakudo_bin())
+            .args([
+                "-c",
+                config_for_wait.to_str().unwrap(),
+                "wait",
+                "--json",
+                "--timeout-secs",
+                "5",
+                &task_for_wait,
+            ])
+            .current_dir(repo_for_wait)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        wait_output.status.success(),
+        "bakudo wait failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&wait_output.stdout),
+        String::from_utf8_lossy(&wait_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&wait_output.stdout);
+    assert!(stdout.contains(&format!("\"task_id\":\"{task_id}\"")));
+    assert!(stdout.contains("\"summary\":\"WAIT_PROVIDER_OUTPUT\""));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn bakudo_candidates_cli_lists_actionable_candidates() {
+    let dir = TempDir::new("bakudo-cli-candidates");
+    let script = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+"#,
+    )
+    .0;
+    let config = write_config_file(&dir, &script);
+    let loaded_config = BakudoConfig::load(&config).unwrap();
+    let repo = TempRepo::new();
+    let ledger_path = loaded_config
+        .resolved_repo_data_dir(Some(repo.path()))
+        .join("ledger.jsonl");
+    let ledger = SandboxLedger::with_persistence(&ledger_path);
+
+    ledger
+        .insert(make_record("task-preserved", SandboxState::Preserved))
+        .await;
+    ledger
+        .insert(make_record("task-conflicts", SandboxState::MergeConflicts))
+        .await;
+    ledger
+        .insert(make_record("task-merged", SandboxState::Merged))
+        .await;
+
+    let output = StdCommand::new(bakudo_bin())
+        .args(["-c", config.to_str().unwrap(), "candidates", "--json"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "bakudo candidates failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("valid candidates json");
+    assert_eq!(candidates.len(), 2);
+    let ids: Vec<_> = candidates
+        .iter()
+        .map(|candidate| candidate["task_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"task-preserved"));
+    assert!(ids.contains(&"task-conflicts"));
+    assert!(!ids.contains(&"task-merged"));
+}
+
+#[test]
+fn bakudo_artifact_cli_reads_swarm_artifact() {
+    let dir = TempDir::new("bakudo-cli-artifact");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "ARTIFACT_PROVIDER_OUTPUT"
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+    let plan_path = dir.path.join("swarm-plan-artifact.json");
+    fs::write(
+        &plan_path,
+        r#"{
+  "mission_id": "artifact-mission",
+  "concurrent_max": 1,
+  "tasks": [
+    {
+      "id": "capture",
+      "prompt": "capture artifact",
+      "provider": "codex",
+      "artifact_path": "artifacts/capture.json"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let swarm_output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "swarm",
+            "--plan",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(
+        swarm_output.status.success(),
+        "bakudo swarm failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&swarm_output.stdout),
+        String::from_utf8_lossy(&swarm_output.stderr)
+    );
+
+    let artifact_output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "artifact",
+            "--mission",
+            "artifact-mission",
+            "--path",
+            "artifacts/capture.json",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        artifact_output.status.success(),
+        "bakudo artifact failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&artifact_output.stdout),
+        String::from_utf8_lossy(&artifact_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&artifact_output.stdout);
+    assert!(stdout.contains("\"status\": \"succeeded\""));
+    assert!(stdout.contains("\"summary\": \"ARTIFACT_PROVIDER_OUTPUT\""));
+}
+
+#[test]
 fn bakudo_swarm_cli_runs_plan_and_writes_artifacts() {
     let dir = TempDir::new("bakudo-cli-swarm");
     let (script, log) = write_fake_abox_script(
@@ -1383,8 +1672,13 @@ fn bakudo_swarm_cli_runs_plan_and_writes_artifacts() {
     assert!(stdout.contains("\"mission_id\":\"mission-build\""));
     assert!(stdout.contains("\"status\":\"succeeded\""));
 
-    let prepare_artifact = dir.path.join("artifacts").join("prepare.json");
-    let verify_artifact = dir.path.join("artifacts").join("verify.json");
+    let loaded_config = BakudoConfig::load(&config).unwrap();
+    let artifact_root = swarm_artifact_root(
+        &loaded_config.resolved_repo_data_dir(Some(repo.path())),
+        "mission-build",
+    );
+    let prepare_artifact = artifact_root.join("artifacts").join("prepare.json");
+    let verify_artifact = artifact_root.join("artifacts").join("verify.json");
     let prepare_summary: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&prepare_artifact).unwrap()).unwrap();
     let verify_summary: serde_json::Value =
@@ -1415,6 +1709,70 @@ fn bakudo_swarm_cli_runs_plan_and_writes_artifacts() {
         .position(|prompt| prompt == "BAKUDO_PROMPT=run tests")
         .unwrap();
     assert!(prepare_idx < verify_idx);
+}
+
+#[test]
+fn bakudo_swarm_cli_rejects_unsafe_artifact_paths() {
+    let dir = TempDir::new("bakudo-cli-swarm-unsafe-artifact");
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "should not run"
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+    let forbidden = dir.path.join("escape.json");
+    let plan_path = dir.path.join("swarm-plan-unsafe.json");
+    fs::write(
+        &plan_path,
+        format!(
+            r#"{{
+  "mission_id": "mission-unsafe",
+  "concurrent_max": 1,
+  "tasks": [
+    {{
+      "id": "unsafe",
+      "prompt": "should not dispatch",
+      "provider": "codex",
+      "artifact_path": "{}"
+    }}
+  ]
+}}"#,
+            forbidden.display()
+        ),
+    )
+    .unwrap();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "swarm",
+            "--plan",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected unsafe artifact plan to fail:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid swarm plan"));
+    assert!(stderr.contains("artifact_path"));
+    assert!(!forbidden.exists());
+
+    let invocations = read_invocations(&log);
+    assert!(
+        invocations.is_empty(),
+        "unsafe plan should not dispatch abox"
+    );
 }
 
 #[test]

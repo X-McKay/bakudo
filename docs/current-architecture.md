@@ -79,11 +79,20 @@ Interactive transcript history is persisted to a repo-scoped JSONL log and reloa
 
 If `post_run_hook` is configured, Bakudo writes a JSON payload describing the completed run to the hook's stdin after the final state is known.
 
+Completed run summaries are persisted under the repo-scoped Bakudo data root, so later host-side queries can read them without re-entering the sandbox. The current CLI control surface is intentionally narrow:
+
+- `bakudo result <task-id>` reads a persisted run summary.
+- `bakudo wait <task-id>` polls for a persisted run summary to appear.
+- `bakudo candidates` lists preserved and merge-conflict worktrees from the repo-scoped ledger.
+- `bakudo artifact --mission ... --path ...` reads a swarm artifact from Bakudo-owned storage.
+
+Bakudo does not expose a generic host `shell`, arbitrary host file write, or host-side patch application surface.
+
 `bakudo swarm --plan <path>` builds on the same execution path, but schedules multiple tasks from a JSON plan:
 
 - `mission_id`, `goal`, and `concurrent_max` describe the overall run.
 - Each task may set `id`, `prompt`, `provider`, `model`, `depends_on`, `parent_task_id`, `role`, `goal`, `artifact_path`, `candidate_policy`, `sandbox_lifecycle`, and `approve_execution`.
-- Relative `artifact_path` values are resolved from the plan file's directory and receive a JSON summary for that task.
+- `artifact_path` is treated as a logical relative path. Bakudo rejects absolute paths and traversal segments, then writes the JSON summary for that task under a Bakudo-owned repo-scoped mission directory derived from `mission_id`.
 - Dependencies gate scheduling, but downstream tasks only see upstream code changes if the upstream task merged them back to the repo, typically via `candidate_policy = "auto_apply"`.
 
 ## Testing Strategy

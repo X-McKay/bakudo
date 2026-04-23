@@ -1,5 +1,6 @@
 pub mod abox;
 pub mod config;
+pub mod control;
 pub mod error;
 pub mod hook;
 pub mod mission;

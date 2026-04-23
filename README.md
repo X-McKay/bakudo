@@ -13,6 +13,7 @@ Version 2 ships a `ratatui` interface, a headless CLI mode, and a host-owned pre
 - **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
 - **Machine-readable headless runs**: `bakudo run --json` streams newline-delimited JSON events, `--output-schema` validates the final summary, and `post_run_hook` can hand completed run payloads to external tooling.
 - **Headless swarm execution**: `bakudo swarm --plan plan.json` executes dependency-aware task graphs with bounded concurrency, per-task artifacts, and the same JSON/schema integration surface as single runs.
+- **Repo-scoped control plane**: Persisted run summaries, candidate listings, and swarm artifacts can be queried later with `bakudo result`, `bakudo wait`, `bakudo candidates`, and `bakudo artifact`.
 - **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.1`.
 
 ## Prerequisites
@@ -66,6 +67,10 @@ bakudo run --json --output-schema schema.json "Summarize this refactor"
 bakudo run --approve-execution "Run a prompted provider task"
 bakudo swarm --plan plan.json
 bakudo swarm --plan plan.json --json --output-schema swarm-schema.json
+bakudo result <task-id> --json
+bakudo wait <task-id> --json --timeout-secs 30
+bakudo candidates --json
+bakudo artifact --mission mission-build --path artifacts/prepare.json
 bakudo list
 bakudo apply <task-id>
 bakudo discard <task-id>
@@ -104,6 +109,14 @@ Swarm plans are JSON documents. Minimal example:
 ```
 
 Dependencies gate execution, but they do not automatically transfer preserved worktrees into downstream tasks. If a downstream task must see upstream code changes, use `candidate_policy = "auto_apply"` or pass data through artifacts.
+
+`artifact_path` is a logical relative path, not an arbitrary host filesystem destination. Bakudo validates it, rejects absolute paths and `..` traversal, and writes artifacts under a Bakudo-owned repo-scoped mission directory derived from `mission_id`:
+
+```text
+<bakudo-data>/repos/<repo-scope>/swarm-artifacts/<mission-storage-key>/<artifact_path>
+```
+
+Single-task results are also persisted under the repo-scoped Bakudo data root, so host-side automation can safely query outcomes after TUI or headless dispatch without adding a generic host shell surface.
 
 ### Configuration
 

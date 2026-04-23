@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +77,10 @@ impl SwarmPlan {
             if task.depends_on.iter().any(|dep| dep == id) {
                 return Err(format!("swarm task '{id}' cannot depend on itself"));
             }
+            if let Some(path) = task.artifact_path.as_deref() {
+                normalize_artifact_path(path)
+                    .map_err(|err| format!("swarm task '{id}' has invalid artifact_path: {err}"))?;
+            }
         }
 
         for task in &self.tasks {
@@ -121,6 +126,40 @@ impl SwarmPlan {
 
         Ok(())
     }
+}
+
+pub fn normalize_artifact_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("artifact_path must not be empty".to_string());
+    }
+
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        return Err("artifact_path must be relative".to_string());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {
+                return Err("artifact_path must not contain '.' path segments".to_string());
+            }
+            Component::ParentDir => {
+                return Err("artifact_path must not contain '..' path segments".to_string());
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("artifact_path must be relative".to_string());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err("artifact_path must contain at least one normal path segment".to_string());
+    }
+
+    Ok(normalized)
 }
 
 fn has_cycle<'a>(
@@ -209,5 +248,20 @@ mod tests {
         plan.tasks[0].depends_on = vec!["verify".to_string()];
         let err = plan.validate().unwrap_err();
         assert!(err.contains("dependency cycle"));
+    }
+
+    #[test]
+    fn swarm_plan_validation_rejects_absolute_artifact_paths() {
+        let mut plan = base_plan();
+        plan.tasks[0].artifact_path = Some("/tmp/out.json".to_string());
+        let err = plan.validate().unwrap_err();
+        assert!(err.contains("artifact_path"));
+        assert!(err.contains("relative"));
+    }
+
+    #[test]
+    fn normalize_artifact_path_rejects_parent_segments() {
+        let err = normalize_artifact_path("../out.json").unwrap_err();
+        assert!(err.contains(".."));
     }
 }

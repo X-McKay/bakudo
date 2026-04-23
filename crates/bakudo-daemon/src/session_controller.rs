@@ -17,6 +17,7 @@ use tracing::{info, warn};
 
 use bakudo_core::abox::AboxAdapter;
 use bakudo_core::config::BakudoConfig;
+use bakudo_core::control::{save_run_summary, update_run_summary_outcome, RunSummary};
 use bakudo_core::hook::{HookWorktreeAction, PostRunHookPayload};
 use bakudo_core::policy::PolicyDecision;
 use bakudo_core::protocol::WorkerStatus;
@@ -340,6 +341,9 @@ impl SessionController {
         let abox = self.abox.clone();
         let base_branch = self.config.base_branch.clone();
         let repo = self.repo_path();
+        let repo_data_dir = self
+            .config
+            .resolved_repo_data_dir_from_str(self.session.repo_root.as_deref());
         let candidate_policy = spec.candidate_policy;
         let tid = task_id.clone();
         let provider_id = spec.provider_id.clone();
@@ -405,6 +409,37 @@ impl SessionController {
                             )
                         };
 
+                    let summary = RunSummary {
+                        task_id: tid.clone(),
+                        attempt_id: attempt_id.0.clone(),
+                        session_id: session_id.0.clone(),
+                        provider_id: provider_id.clone(),
+                        model: model.clone(),
+                        repo_root: repo_root.clone(),
+                        worker_status: result.status.clone(),
+                        final_state: final_state.clone(),
+                        worktree_action,
+                        merge_conflicts: merge_conflicts.clone(),
+                        candidate_policy,
+                        sandbox_lifecycle,
+                        summary: result.summary.clone(),
+                        exit_code: result.exit_code,
+                        duration_ms: result.duration_ms,
+                        timed_out: result.timed_out,
+                        stdout: result.stdout.clone(),
+                        stderr: result.stderr.clone(),
+                        stdout_truncated: result.stdout_truncated,
+                        stderr_truncated: result.stderr_truncated,
+                        error: None,
+                    };
+                    if let Err(err) = save_run_summary(&repo_data_dir, &summary) {
+                        let _ = event_tx
+                            .send(SessionEvent::Error(format!(
+                                "Failed to persist result for {tid}: {err}"
+                            )))
+                            .await;
+                    }
+
                     (
                         final_state.clone(),
                         Some(PostRunHookPayload {
@@ -429,6 +464,24 @@ impl SessionController {
                 }
                 Ok(Err(e)) => {
                     warn!("Task {tid} failed before producing a final result: {e}");
+                    let summary = RunSummary::infra_error(
+                        tid.clone(),
+                        attempt_id.0.clone(),
+                        session_id.0.clone(),
+                        provider_id.clone(),
+                        model.clone(),
+                        repo_root.clone(),
+                        candidate_policy,
+                        sandbox_lifecycle,
+                        e.to_string(),
+                    );
+                    if let Err(err) = save_run_summary(&repo_data_dir, &summary) {
+                        let _ = event_tx
+                            .send(SessionEvent::Error(format!(
+                                "Failed to persist infra-error result for {tid}: {err}"
+                            )))
+                            .await;
+                    }
                     (SandboxState::Failed { exit_code: -1 }, None)
                 }
                 Err(e) => {
@@ -437,6 +490,24 @@ impl SessionController {
                             "Task join error for {tid}: {e}"
                         )))
                         .await;
+                    let summary = RunSummary::infra_error(
+                        tid.clone(),
+                        attempt_id.0.clone(),
+                        session_id.0.clone(),
+                        provider_id.clone(),
+                        model.clone(),
+                        repo_root.clone(),
+                        candidate_policy,
+                        sandbox_lifecycle,
+                        e.to_string(),
+                    );
+                    if let Err(err) = save_run_summary(&repo_data_dir, &summary) {
+                        let _ = event_tx
+                            .send(SessionEvent::Error(format!(
+                                "Failed to persist join-error result for {tid}: {err}"
+                            )))
+                            .await;
+                    }
                     (SandboxState::Failed { exit_code: -1 }, None)
                 }
             };
@@ -500,12 +571,48 @@ impl SessionController {
         )
         .await
         {
-            Ok(_) => {
+            Ok(action) => {
+                let (state, hook_action, conflicts) = match action {
+                    WorktreeAction::Merged => {
+                        (SandboxState::Merged, HookWorktreeAction::Merged, Vec::new())
+                    }
+                    WorktreeAction::MergeConflicts(conflicts) => (
+                        SandboxState::MergeConflicts,
+                        HookWorktreeAction::MergeConflicts,
+                        conflicts,
+                    ),
+                    WorktreeAction::Discarded => (
+                        SandboxState::Discarded,
+                        HookWorktreeAction::Discarded,
+                        Vec::new(),
+                    ),
+                    WorktreeAction::Preserved => (
+                        SandboxState::Preserved,
+                        HookWorktreeAction::Preserved,
+                        Vec::new(),
+                    ),
+                };
+                if let Err(err) = update_run_summary_outcome(
+                    &self
+                        .config
+                        .resolved_repo_data_dir_from_str(self.session.repo_root.as_deref()),
+                    task_id,
+                    state.clone(),
+                    hook_action,
+                    conflicts,
+                ) {
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::Error(format!(
+                            "Failed to update persisted result for {task_id}: {err}"
+                        )))
+                        .await;
+                }
                 let _ = self
                     .event_tx
                     .send(SessionEvent::TaskFinished {
                         task_id: task_id.to_string(),
-                        state: SandboxState::Merged,
+                        state,
                     })
                     .await;
             }
@@ -525,6 +632,22 @@ impl SessionController {
         .await
         {
             Ok(_) => {
+                if let Err(err) = update_run_summary_outcome(
+                    &self
+                        .config
+                        .resolved_repo_data_dir_from_str(self.session.repo_root.as_deref()),
+                    task_id,
+                    SandboxState::Discarded,
+                    HookWorktreeAction::Discarded,
+                    Vec::new(),
+                ) {
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::Error(format!(
+                            "Failed to update persisted result for {task_id}: {err}"
+                        )))
+                        .await;
+                }
                 let _ = self
                     .event_tx
                     .send(SessionEvent::TaskFinished {

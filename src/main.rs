@@ -36,13 +36,18 @@ use uuid::Uuid;
 use bakudo_core::{
     abox::AboxAdapter,
     config::BakudoConfig,
+    control::{
+        load_run_summary, read_swarm_artifact, save_run_summary, save_swarm_run_summary,
+        swarm_artifact_root, update_run_summary_outcome, RunSummary, SwarmRunSummary,
+        SwarmRunTotals, SwarmTaskStatus, SwarmTaskSummary,
+    },
     hook::{HookWorktreeAction, PostRunHookPayload},
     mission::{SwarmPlan, SwarmTaskPlan},
     policy::PolicyDecision,
     protocol::{CandidatePolicy, SandboxLifecycle, WorkerStatus},
     provider::ProviderRegistry,
     session::SessionRecord,
-    state::{SandboxLedger, SandboxState},
+    state::{SandboxLedger, SandboxRecord, SandboxState},
 };
 use bakudo_daemon::session_controller::{
     SessionBootstrap, SessionCommand, SessionController, SessionEvent,
@@ -120,6 +125,40 @@ enum Commands {
         /// Validate the final swarm summary against a JSON Schema file.
         #[arg(long)]
         output_schema: Option<PathBuf>,
+    },
+    /// List preserved/merge-conflict candidates for the current repo.
+    Candidates {
+        /// Emit JSON instead of the table view.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a persisted task result by task ID.
+    Result {
+        /// The bakudo task ID.
+        task_id: String,
+        /// Emit JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for a persisted task result to appear.
+    Wait {
+        /// The bakudo task ID.
+        task_id: String,
+        /// Maximum time to wait before failing.
+        #[arg(long, default_value_t = 60)]
+        timeout_secs: u64,
+        /// Emit JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a swarm artifact from Bakudo-owned storage.
+    Artifact {
+        /// Mission ID from the swarm plan.
+        #[arg(long)]
+        mission: String,
+        /// Logical artifact path from the swarm plan.
+        #[arg(long)]
+        path: String,
     },
     /// List all sandboxes for the current repo.
     List,
@@ -249,9 +288,19 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Some(Commands::Candidates { json }) => cmd_candidates(&ledger, json).await,
+        Some(Commands::Result { task_id, json }) => {
+            cmd_result(&config, &ledger, &task_id, json).await
+        }
+        Some(Commands::Wait {
+            task_id,
+            timeout_secs,
+            json,
+        }) => cmd_wait(&config, &ledger, &task_id, timeout_secs, json).await,
+        Some(Commands::Artifact { mission, path }) => cmd_artifact(&config, &mission, &path),
         Some(Commands::List) => cmd_list(&abox, &config).await,
         Some(Commands::Apply { task_id }) => cmd_apply(&abox, &config, &task_id).await,
-        Some(Commands::Discard { task_id }) => cmd_discard(&abox, &task_id).await,
+        Some(Commands::Discard { task_id }) => cmd_discard(&abox, &config, &task_id).await,
         Some(Commands::Divergence { task_id, base }) => cmd_divergence(&task_id, &base).await,
         Some(Commands::Doctor) => {
             let report = bakudo_daemon::doctor::run(&config, &abox, &registry).await;
@@ -296,8 +345,24 @@ async fn cmd_apply(
         )
         .await?;
     if conflicts.is_empty() {
+        let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
+        let _ = update_run_summary_outcome(
+            &repo_data_dir,
+            task_id,
+            SandboxState::Merged,
+            HookWorktreeAction::Merged,
+            Vec::new(),
+        )?;
         println!("Merged {} into {}", task_id, config.base_branch);
     } else {
+        let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
+        let _ = update_run_summary_outcome(
+            &repo_data_dir,
+            task_id,
+            SandboxState::MergeConflicts,
+            HookWorktreeAction::MergeConflicts,
+            conflicts.clone(),
+        )?;
         eprintln!("Merge conflicts:");
         for c in conflicts {
             eprintln!("  {c}");
@@ -307,9 +372,21 @@ async fn cmd_apply(
     Ok(())
 }
 
-async fn cmd_discard(abox: &Arc<AboxAdapter>, task_id: &str) -> Result<()> {
+async fn cmd_discard(
+    abox: &Arc<AboxAdapter>,
+    config: &Arc<BakudoConfig>,
+    task_id: &str,
+) -> Result<()> {
     abox.stop(std::env::current_dir().ok().as_deref(), task_id, true)
         .await?;
+    let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
+    let _ = update_run_summary_outcome(
+        &repo_data_dir,
+        task_id,
+        SandboxState::Discarded,
+        HookWorktreeAction::Discarded,
+        Vec::new(),
+    )?;
     println!("Discarded {task_id}");
     Ok(())
 }
@@ -321,6 +398,121 @@ async fn cmd_divergence(task_id: &str, base: &str) -> Result<()> {
         print!("{}", summary.raw_output);
     } else {
         println!("{task_id} is up to date with '{base}'");
+    }
+    Ok(())
+}
+
+async fn cmd_candidates(ledger: &Arc<SandboxLedger>, json: bool) -> Result<()> {
+    let mut candidates: Vec<SandboxRecord> = ledger
+        .all()
+        .await
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.state,
+                SandboxState::Preserved | SandboxState::MergeConflicts
+            )
+        })
+        .collect();
+    candidates.sort_by(|left, right| {
+        right
+            .finished_at
+            .cmp(&left.finished_at)
+            .then_with(|| right.started_at.cmp(&left.started_at))
+            .then_with(|| left.task_id.cmp(&right.task_id))
+    });
+
+    if json {
+        println!("{}", serde_json::to_string(&candidates)?);
+        return Ok(());
+    }
+
+    if candidates.is_empty() {
+        println!("No preserved candidates.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<24} {:<16} {:<10} {:<12} SUMMARY",
+        "TASK ID", "STATE", "PROVIDER", "MODEL"
+    );
+    println!("{}", "-".repeat(96));
+    for record in candidates {
+        println!(
+            "{:<24} {:<16} {:<10} {:<12} {}",
+            record.task_id,
+            format!("{:?}", record.state),
+            record.provider_id,
+            record.model.as_deref().unwrap_or("-"),
+            record.prompt_summary
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_result(
+    config: &Arc<BakudoConfig>,
+    ledger: &Arc<SandboxLedger>,
+    task_id: &str,
+    json: bool,
+) -> Result<()> {
+    let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
+    if let Some(summary) = load_run_summary(&repo_data_dir, task_id)? {
+        print_run_summary(&summary, json)?;
+        return Ok(());
+    }
+
+    let state_hint = ledger
+        .get(task_id)
+        .await
+        .map(|record| format!(" Current ledger state: {:?}.", record.state))
+        .unwrap_or_default();
+    anyhow::bail!("No persisted result found for task '{task_id}'.{state_hint}");
+}
+
+async fn cmd_wait(
+    config: &Arc<BakudoConfig>,
+    ledger: &Arc<SandboxLedger>,
+    task_id: &str,
+    timeout_secs: u64,
+    json: bool,
+) -> Result<()> {
+    let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+    loop {
+        if let Some(summary) = load_run_summary(&repo_data_dir, task_id)? {
+            print_run_summary(&summary, json)?;
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            let state_hint = ledger
+                .get(task_id)
+                .await
+                .map(|record| format!(" Last known ledger state: {:?}.", record.state))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "Timed out waiting for persisted result for task '{task_id}'.{state_hint}"
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn cmd_artifact(config: &Arc<BakudoConfig>, mission_id: &str, artifact_path: &str) -> Result<()> {
+    let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
+    let artifact = read_swarm_artifact(&repo_data_dir, mission_id, artifact_path)?;
+    print!("{artifact}");
+    Ok(())
+}
+
+fn print_run_summary(summary: &RunSummary, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(summary)?);
+    } else {
+        render_single_run_footer(summary);
     }
     Ok(())
 }
@@ -617,104 +809,11 @@ enum HeadlessJsonEvent {
         message: String,
     },
     Finished {
-        summary: HeadlessRunSummary,
+        summary: Box<HeadlessRunSummary>,
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct HeadlessRunSummary {
-    task_id: String,
-    attempt_id: String,
-    session_id: String,
-    provider_id: String,
-    model: Option<String>,
-    repo_root: Option<String>,
-    worker_status: bakudo_core::protocol::WorkerStatus,
-    final_state: SandboxState,
-    worktree_action: HookWorktreeAction,
-    merge_conflicts: Vec<String>,
-    candidate_policy: bakudo_core::protocol::CandidatePolicy,
-    sandbox_lifecycle: bakudo_core::protocol::SandboxLifecycle,
-    summary: String,
-    exit_code: i32,
-    duration_ms: u64,
-    timed_out: bool,
-    stdout: String,
-    stderr: String,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SwarmTaskStatus {
-    Succeeded,
-    Failed,
-    TimedOut,
-    Cancelled,
-    Blocked,
-    InfraError,
-}
-
-impl SwarmTaskStatus {
-    fn is_success(&self) -> bool {
-        matches!(self, Self::Succeeded)
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SwarmTaskSummary {
-    id: String,
-    parent_task_id: Option<String>,
-    depends_on: Vec<String>,
-    role: Option<String>,
-    goal: Option<String>,
-    artifact_path: Option<String>,
-    status: SwarmTaskStatus,
-    blocked_by: Vec<String>,
-    error: Option<String>,
-    run: Option<HeadlessRunSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-struct SwarmRunTotals {
-    total: usize,
-    succeeded: usize,
-    failed: usize,
-    timed_out: usize,
-    cancelled: usize,
-    blocked: usize,
-    infra_error: usize,
-}
-
-impl SwarmRunTotals {
-    fn from_tasks(tasks: &[SwarmTaskSummary]) -> Self {
-        let mut totals = Self {
-            total: tasks.len(),
-            ..Self::default()
-        };
-        for task in tasks {
-            match task.status {
-                SwarmTaskStatus::Succeeded => totals.succeeded += 1,
-                SwarmTaskStatus::Failed => totals.failed += 1,
-                SwarmTaskStatus::TimedOut => totals.timed_out += 1,
-                SwarmTaskStatus::Cancelled => totals.cancelled += 1,
-                SwarmTaskStatus::Blocked => totals.blocked += 1,
-                SwarmTaskStatus::InfraError => totals.infra_error += 1,
-            }
-        }
-        totals
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SwarmRunSummary {
-    mission_id: String,
-    goal: Option<String>,
-    concurrent_max: usize,
-    totals: SwarmRunTotals,
-    tasks: Vec<SwarmTaskSummary>,
-}
+type HeadlessRunSummary = RunSummary;
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -833,7 +932,7 @@ async fn run_headless(
     emit_headless_event(
         request.output_mode,
         &HeadlessJsonEvent::Finished {
-            summary: summary.clone(),
+            summary: Box::new(summary.clone()),
         },
     )?;
 
@@ -884,16 +983,18 @@ async fn run_swarm_headless(
         .take()
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| format!("mission-{}", Uuid::new_v4()));
-    let plan_dir = request
-        .plan_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let artifact_repo_root = current_repo_root_path().or_else(|| std::env::current_dir().ok());
+    let repo_data_dir = config.resolved_repo_data_dir(artifact_repo_root.as_deref());
+    let artifact_root = swarm_artifact_root(&repo_data_dir, &mission_id);
 
     let mut pending: HashSet<String> = plan.tasks.iter().map(|task| task.id.clone()).collect();
     let mut completed: HashMap<String, SwarmTaskSummary> = HashMap::new();
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<AttemptStreamEvent>();
     let mut running = JoinSet::<(String, SwarmTaskSummary)>::new();
+
+    if request.output_mode == HeadlessOutputMode::Human {
+        println!("Swarm artifacts root: {}", artifact_root.display());
+    }
 
     while completed.len() < plan.tasks.len() {
         let mut progressed = false;
@@ -927,7 +1028,8 @@ async fn run_swarm_headless(
                     let task_id = task.id.clone();
                     pending.remove(&task_id);
                     let summary = build_blocked_task_summary(task, blocked_by.clone());
-                    let summary = finalize_swarm_task_summary(&plan_dir, summary)?;
+                    let summary =
+                        finalize_swarm_task_summary(&repo_data_dir, &mission_id, summary)?;
                     completed.insert(task_id.clone(), summary);
                     emit_swarm_event(
                         request.output_mode,
@@ -1011,7 +1113,8 @@ async fn run_swarm_headless(
                     continue;
                 };
                 let (task_id, summary) = joined?;
-                let summary = finalize_swarm_task_summary(&plan_dir, summary)?;
+                let summary =
+                    finalize_swarm_task_summary(&repo_data_dir, &mission_id, summary)?;
                 emit_swarm_event(
                     request.output_mode,
                     &SwarmJsonEvent::TaskFinished {
@@ -1045,6 +1148,7 @@ async fn run_swarm_headless(
         totals: SwarmRunTotals::from_tasks(&tasks),
         tasks,
     };
+    save_swarm_run_summary(&repo_data_dir, &summary)?;
 
     validate_output_schema(request.output_schema.as_deref(), &summary)?;
     emit_swarm_event(
@@ -1126,6 +1230,7 @@ async fn execute_headless_attempt(
     );
 
     let task_id = sandbox_task_id(&spec.attempt_id.0);
+    let repo_data_dir = config.resolved_repo_data_dir_from_str(spec.repo_root.as_deref());
     if let Some(tx) = &stream_tx {
         let _ = tx.send(AttemptStreamEvent::TaskStarted {
             plan_task_id: plan_task_id.clone(),
@@ -1138,9 +1243,7 @@ async fn execute_headless_attempt(
     let cfg = Arc::new(TaskRunnerConfig {
         abox: abox.clone(),
         ledger: ledger.clone(),
-        data_dir: config
-            .resolved_repo_data_dir_from_str(spec.repo_root.as_deref())
-            .join("runs"),
+        data_dir: repo_data_dir.join("runs"),
         worker_command: provider
             .build_worker_command(model.as_deref(), execution_decision.allow_all_tools),
         memory_mib: provider.memory_mib,
@@ -1179,8 +1282,36 @@ async fn execute_headless_attempt(
 
     let result = match handle.await {
         Ok(Ok(result)) => result,
-        Ok(Err(err)) => return Err(err.into()),
-        Err(err) => return Err(err.into()),
+        Ok(Err(err)) => {
+            let summary = HeadlessRunSummary::infra_error(
+                task_id,
+                spec.attempt_id.0.clone(),
+                spec.session_id.0.clone(),
+                provider_id,
+                model,
+                spec.repo_root.clone(),
+                spec.candidate_policy,
+                spec.sandbox_lifecycle,
+                err.to_string(),
+            );
+            save_run_summary(&repo_data_dir, &summary)?;
+            return Err(err.into());
+        }
+        Err(err) => {
+            let summary = HeadlessRunSummary::infra_error(
+                task_id,
+                spec.attempt_id.0.clone(),
+                spec.session_id.0.clone(),
+                provider_id,
+                model,
+                spec.repo_root.clone(),
+                spec.candidate_policy,
+                spec.sandbox_lifecycle,
+                err.to_string(),
+            );
+            save_run_summary(&repo_data_dir, &summary)?;
+            return Err(err.into());
+        }
     };
 
     let (final_state, worktree_action, merge_conflicts) =
@@ -1249,7 +1380,9 @@ async fn execute_headless_attempt(
         stderr: result.stderr.clone(),
         stdout_truncated: result.stdout_truncated,
         stderr_truncated: result.stderr_truncated,
+        error: None,
     };
+    save_run_summary(&repo_data_dir, &summary)?;
 
     let hook_payload = PostRunHookPayload {
         session_id: spec.session_id.clone(),
@@ -1347,30 +1480,14 @@ fn swarm_status_from_worker(status: &WorkerStatus) -> SwarmTaskStatus {
 }
 
 fn finalize_swarm_task_summary(
-    plan_dir: &Path,
+    repo_data_dir: &Path,
+    mission_id: &str,
     summary: SwarmTaskSummary,
 ) -> Result<SwarmTaskSummary> {
     if let Some(path) = &summary.artifact_path {
-        write_swarm_artifact(plan_dir, path, &summary)?;
+        bakudo_core::control::write_swarm_artifact(repo_data_dir, mission_id, path, &summary)?;
     }
     Ok(summary)
-}
-
-fn write_swarm_artifact(
-    plan_dir: &Path,
-    artifact_path: &str,
-    summary: &SwarmTaskSummary,
-) -> Result<()> {
-    let path = if Path::new(artifact_path).is_absolute() {
-        PathBuf::from(artifact_path)
-    } else {
-        plan_dir.join(artifact_path)
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(summary)?)?;
-    Ok(())
 }
 
 fn emit_headless_event(mode: HeadlessOutputMode, event: &HeadlessJsonEvent) -> Result<()> {
@@ -1546,6 +1663,9 @@ fn render_single_run_footer(summary: &HeadlessRunSummary) {
         "\nTask finished: {:?} in {}ms",
         summary.worker_status, summary.duration_ms
     );
+    if let Some(error) = &summary.error {
+        eprintln!("Error: {error}");
+    }
     match summary.worktree_action {
         HookWorktreeAction::Merged => println!("Worktree merged."),
         HookWorktreeAction::MergeConflicts => {
