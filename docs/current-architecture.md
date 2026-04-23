@@ -4,11 +4,11 @@ This document describes the implementation that currently ships on `v2-architect
 
 ## Overview
 
-Bakudo runs provider tasks inside `abox` sandboxes and manages the resulting worktrees from the host. Tasks can be launched from either the TUI or the headless `bakudo run` command.
+Bakudo runs provider tasks inside `abox` sandboxes and manages the resulting worktrees from the host. Tasks can be launched from either the TUI, the headless `bakudo run` command, or the dependency-aware headless `bakudo swarm` command.
 
 The runtime is intentionally small:
 
-1. `src/main.rs` loads config, constructs shared services, and starts either the TUI loop or a single headless run.
+1. `src/main.rs` loads config, constructs shared services, and starts either the TUI loop, a single headless run, or a headless swarm scheduler.
 2. `SessionController` receives typed `SessionCommand`s, applies the execution policy, dispatches attempts, and emits typed `SessionEvent`s.
 3. `TaskRunner` writes the `AttemptSpec`, launches `abox run`, streams worker output, and records state transitions in the `SandboxLedger`.
 4. `worktree.rs` applies the host-side candidate policy after successful runs.
@@ -16,7 +16,7 @@ The runtime is intentionally small:
 
 ## Crate Responsibilities
 
-- `bakudo-core`: Protocol types, config loading, provider registry, `abox` adapter, and shared state models.
+- `bakudo-core`: Protocol types, config loading, provider registry, swarm plan validation, `abox` adapter, and shared state models.
 - `bakudo-daemon`: Session orchestration, task execution, divergence queries, and worktree lifecycle management.
 - `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
 - `src/main.rs`: CLI entrypoint and TUI bootstrap.
@@ -78,6 +78,13 @@ Interactive transcript history is persisted to a repo-scoped JSONL log and reloa
 - `--output-schema <path>`: validate the final summary object against a JSON Schema file before returning success.
 
 If `post_run_hook` is configured, Bakudo writes a JSON payload describing the completed run to the hook's stdin after the final state is known.
+
+`bakudo swarm --plan <path>` builds on the same execution path, but schedules multiple tasks from a JSON plan:
+
+- `mission_id`, `goal`, and `concurrent_max` describe the overall run.
+- Each task may set `id`, `prompt`, `provider`, `model`, `depends_on`, `parent_task_id`, `role`, `goal`, `artifact_path`, `candidate_policy`, `sandbox_lifecycle`, and `approve_execution`.
+- Relative `artifact_path` values are resolved from the plan file's directory and receive a JSON summary for that task.
+- Dependencies gate scheduling, but downstream tasks only see upstream code changes if the upstream task merged them back to the repo, typically via `candidate_policy = "auto_apply"`.
 
 ## Testing Strategy
 

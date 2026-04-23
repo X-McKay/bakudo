@@ -12,6 +12,7 @@ Version 2 ships a `ratatui` interface, a headless CLI mode, and a host-owned pre
 - **Polished TUI**: A responsive `ratatui` interface with a persisted chat transcript, observability shelf, slash commands, and keyboard-driven worktree actions.
 - **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
 - **Machine-readable headless runs**: `bakudo run --json` streams newline-delimited JSON events, `--output-schema` validates the final summary, and `post_run_hook` can hand completed run payloads to external tooling.
+- **Headless swarm execution**: `bakudo swarm --plan plan.json` executes dependency-aware task graphs with bounded concurrency, per-task artifacts, and the same JSON/schema integration surface as single runs.
 - **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.1`.
 
 ## Prerequisites
@@ -63,6 +64,8 @@ bakudo
 bakudo run "Fix the failing tests"
 bakudo run --json --output-schema schema.json "Summarize this refactor"
 bakudo run --approve-execution "Run a prompted provider task"
+bakudo swarm --plan plan.json
+bakudo swarm --plan plan.json --json --output-schema swarm-schema.json
 bakudo list
 bakudo apply <task-id>
 bakudo discard <task-id>
@@ -73,6 +76,34 @@ bakudo resume <session-id>
 ```
 
 `bakudo sessions` lists saved interactive sessions newest-first and filters to the current repo when possible, so you can discover the right ID before calling `bakudo resume`.
+
+Swarm plans are JSON documents. Minimal example:
+
+```json
+{
+  "mission_id": "mission-build",
+  "goal": "prepare and verify",
+  "concurrent_max": 2,
+  "tasks": [
+    {
+      "id": "prepare",
+      "prompt": "Prepare the repo for testing",
+      "provider": "codex",
+      "artifact_path": "artifacts/prepare.json"
+    },
+    {
+      "id": "verify",
+      "prompt": "Run the test suite and summarize failures",
+      "provider": "codex",
+      "depends_on": ["prepare"],
+      "parent_task_id": "prepare",
+      "artifact_path": "artifacts/verify.json"
+    }
+  ]
+}
+```
+
+Dependencies gate execution, but they do not automatically transfer preserved worktrees into downstream tasks. If a downstream task must see upstream code changes, use `candidate_policy = "auto_apply"` or pass data through artifacts.
 
 ### Configuration
 

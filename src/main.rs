@@ -13,8 +13,9 @@
 //!
 //! With no subcommand, bakudo launches the interactive ratatui TUI.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,13 +29,17 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use serde::Serialize;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 use bakudo_core::{
     abox::AboxAdapter,
     config::BakudoConfig,
     hook::{HookWorktreeAction, PostRunHookPayload},
+    mission::{SwarmPlan, SwarmTaskPlan},
     policy::PolicyDecision,
+    protocol::{CandidatePolicy, SandboxLifecycle, WorkerStatus},
     provider::ProviderRegistry,
     session::SessionRecord,
     state::{SandboxLedger, SandboxState},
@@ -95,6 +100,24 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Validate the final run summary against a JSON Schema file.
+        #[arg(long)]
+        output_schema: Option<PathBuf>,
+    },
+    /// Execute a dependency-aware swarm plan from JSON.
+    Swarm {
+        /// Path to a JSON plan file describing mission tasks and dependencies.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Approve execution when policy requires an explicit opt-in.
+        #[arg(long)]
+        approve_execution: bool,
+        /// Override the plan's concurrency limit.
+        #[arg(long)]
+        concurrent_max: Option<usize>,
+        /// Emit newline-delimited JSON events instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Validate the final swarm summary against a JSON Schema file.
         #[arg(long)]
         output_schema: Option<PathBuf>,
     },
@@ -190,6 +213,32 @@ async fn main() -> Result<()> {
                     discard,
                     apply,
                     approve_execution,
+                    output_mode: if json {
+                        HeadlessOutputMode::Json
+                    } else {
+                        HeadlessOutputMode::Human
+                    },
+                    output_schema,
+                },
+            )
+            .await
+        }
+        Some(Commands::Swarm {
+            plan,
+            approve_execution,
+            concurrent_max,
+            json,
+            output_schema,
+        }) => {
+            run_swarm_headless(
+                config,
+                abox,
+                registry,
+                ledger,
+                SwarmRunRequest {
+                    plan_path: plan,
+                    approve_execution,
+                    concurrent_max,
                     output_mode: if json {
                         HeadlessOutputMode::Json
                     } else {
@@ -523,6 +572,24 @@ struct HeadlessRunRequest {
     output_schema: Option<PathBuf>,
 }
 
+#[derive(Clone)]
+struct AttemptExecutionRequest {
+    prompt: String,
+    provider_override: Option<String>,
+    model_override: Option<String>,
+    approve_execution: bool,
+    candidate_policy: CandidatePolicy,
+    sandbox_lifecycle: SandboxLifecycle,
+}
+
+struct SwarmRunRequest {
+    plan_path: PathBuf,
+    approve_execution: bool,
+    concurrent_max: Option<usize>,
+    output_mode: HeadlessOutputMode,
+    output_schema: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeadlessOutputMode {
     Human,
@@ -578,6 +645,145 @@ struct HeadlessRunSummary {
     stderr_truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SwarmTaskStatus {
+    Succeeded,
+    Failed,
+    TimedOut,
+    Cancelled,
+    Blocked,
+    InfraError,
+}
+
+impl SwarmTaskStatus {
+    fn is_success(&self) -> bool {
+        matches!(self, Self::Succeeded)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SwarmTaskSummary {
+    id: String,
+    parent_task_id: Option<String>,
+    depends_on: Vec<String>,
+    role: Option<String>,
+    goal: Option<String>,
+    artifact_path: Option<String>,
+    status: SwarmTaskStatus,
+    blocked_by: Vec<String>,
+    error: Option<String>,
+    run: Option<HeadlessRunSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct SwarmRunTotals {
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    timed_out: usize,
+    cancelled: usize,
+    blocked: usize,
+    infra_error: usize,
+}
+
+impl SwarmRunTotals {
+    fn from_tasks(tasks: &[SwarmTaskSummary]) -> Self {
+        let mut totals = Self {
+            total: tasks.len(),
+            ..Self::default()
+        };
+        for task in tasks {
+            match task.status {
+                SwarmTaskStatus::Succeeded => totals.succeeded += 1,
+                SwarmTaskStatus::Failed => totals.failed += 1,
+                SwarmTaskStatus::TimedOut => totals.timed_out += 1,
+                SwarmTaskStatus::Cancelled => totals.cancelled += 1,
+                SwarmTaskStatus::Blocked => totals.blocked += 1,
+                SwarmTaskStatus::InfraError => totals.infra_error += 1,
+            }
+        }
+        totals
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SwarmRunSummary {
+    mission_id: String,
+    goal: Option<String>,
+    concurrent_max: usize,
+    totals: SwarmRunTotals,
+    tasks: Vec<SwarmTaskSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum SwarmJsonEvent {
+    TaskStarted {
+        mission_id: String,
+        plan_task_id: String,
+        task_id: String,
+        provider_id: String,
+        model: Option<String>,
+    },
+    Progress {
+        mission_id: String,
+        plan_task_id: String,
+        task_id: String,
+        message: String,
+    },
+    RawLine {
+        mission_id: String,
+        plan_task_id: String,
+        task_id: String,
+        line: String,
+    },
+    Error {
+        mission_id: String,
+        plan_task_id: Option<String>,
+        task_id: Option<String>,
+        message: String,
+    },
+    TaskBlocked {
+        mission_id: String,
+        plan_task_id: String,
+        blocked_by: Vec<String>,
+    },
+    TaskFinished {
+        mission_id: String,
+        plan_task_id: String,
+        summary: Box<SwarmTaskSummary>,
+    },
+    Finished {
+        summary: Box<SwarmRunSummary>,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum AttemptStreamEvent {
+    TaskStarted {
+        plan_task_id: Option<String>,
+        task_id: String,
+        provider_id: String,
+        model: Option<String>,
+    },
+    Progress {
+        plan_task_id: Option<String>,
+        task_id: String,
+        message: String,
+    },
+    RawLine {
+        plan_task_id: Option<String>,
+        task_id: String,
+        line: String,
+    },
+    Error {
+        plan_task_id: Option<String>,
+        task_id: Option<String>,
+        message: String,
+    },
+}
+
 async fn run_headless(
     config: Arc<BakudoConfig>,
     abox: Arc<AboxAdapter>,
@@ -585,8 +791,300 @@ async fn run_headless(
     ledger: Arc<SandboxLedger>,
     request: HeadlessRunRequest,
 ) -> Result<()> {
+    let candidate_policy = resolve_candidate_policy(request.discard, request.apply);
+    let execution_request = AttemptExecutionRequest {
+        prompt: request.prompt,
+        provider_override: request.provider_override,
+        model_override: request.model_override,
+        approve_execution: request.approve_execution,
+        candidate_policy,
+        sandbox_lifecycle: SandboxLifecycle::Preserved,
+    };
+
+    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+    let config_for_task = config.clone();
+    let abox_for_task = abox.clone();
+    let registry_for_task = registry.clone();
+    let ledger_for_task = ledger.clone();
+    let exec_handle = tokio::spawn(async move {
+        execute_headless_attempt(
+            config_for_task,
+            abox_for_task,
+            registry_for_task,
+            ledger_for_task,
+            execution_request,
+            Some(stream_tx),
+            None,
+        )
+        .await
+    });
+
+    while let Some(event) = stream_rx.recv().await {
+        emit_headless_stream_event(request.output_mode, event)?;
+    }
+
+    let summary = match exec_handle.await {
+        Ok(Ok(summary)) => summary,
+        Ok(Err(err)) => return Err(err),
+        Err(err) => return Err(err.into()),
+    };
+
+    validate_output_schema(request.output_schema.as_deref(), &summary)?;
+    emit_headless_event(
+        request.output_mode,
+        &HeadlessJsonEvent::Finished {
+            summary: summary.clone(),
+        },
+    )?;
+
+    if request.output_mode == HeadlessOutputMode::Human {
+        render_single_run_footer(&summary);
+    }
+
+    if summary.worker_status == WorkerStatus::Succeeded {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "task {} finished with {:?}",
+            summary.task_id,
+            summary.worker_status
+        );
+    }
+}
+
+async fn run_swarm_headless(
+    config: Arc<BakudoConfig>,
+    abox: Arc<AboxAdapter>,
+    registry: Arc<ProviderRegistry>,
+    ledger: Arc<SandboxLedger>,
+    request: SwarmRunRequest,
+) -> Result<()> {
+    let plan_text = std::fs::read_to_string(&request.plan_path).with_context(|| {
+        format!(
+            "failed to read swarm plan '{}'",
+            request.plan_path.display()
+        )
+    })?;
+    let mut plan: SwarmPlan = serde_json::from_str(&plan_text).with_context(|| {
+        format!(
+            "failed to parse swarm plan '{}'",
+            request.plan_path.display()
+        )
+    })?;
+    plan.validate()
+        .map_err(|err| anyhow::anyhow!("invalid swarm plan: {err}"))?;
+
+    let concurrent_max = request.concurrent_max.unwrap_or(plan.concurrent_max);
+    if concurrent_max == 0 {
+        anyhow::bail!("swarm concurrency must be at least 1");
+    }
+
+    let mission_id = plan
+        .mission_id
+        .take()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| format!("mission-{}", Uuid::new_v4()));
+    let plan_dir = request
+        .plan_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut pending: HashSet<String> = plan.tasks.iter().map(|task| task.id.clone()).collect();
+    let mut completed: HashMap<String, SwarmTaskSummary> = HashMap::new();
+    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<AttemptStreamEvent>();
+    let mut running = JoinSet::<(String, SwarmTaskSummary)>::new();
+
+    while completed.len() < plan.tasks.len() {
+        let mut progressed = false;
+
+        while running.len() < concurrent_max {
+            let mut next_task = None;
+
+            for task in &plan.tasks {
+                if !pending.contains(&task.id) {
+                    continue;
+                }
+
+                let mut waiting_on = false;
+                let mut blocked_by = Vec::new();
+                for dep in &task.depends_on {
+                    match completed.get(dep) {
+                        Some(summary) if summary.status.is_success() => {}
+                        Some(_) => blocked_by.push(dep.clone()),
+                        None => {
+                            waiting_on = true;
+                            break;
+                        }
+                    }
+                }
+
+                if waiting_on {
+                    continue;
+                }
+
+                if !blocked_by.is_empty() {
+                    let task_id = task.id.clone();
+                    pending.remove(&task_id);
+                    let summary = build_blocked_task_summary(task, blocked_by.clone());
+                    let summary = finalize_swarm_task_summary(&plan_dir, summary)?;
+                    completed.insert(task_id.clone(), summary);
+                    emit_swarm_event(
+                        request.output_mode,
+                        &SwarmJsonEvent::TaskBlocked {
+                            mission_id: mission_id.clone(),
+                            plan_task_id: task_id.clone(),
+                            blocked_by: blocked_by.clone(),
+                        },
+                    )?;
+                    if request.output_mode == HeadlessOutputMode::Human {
+                        println!(
+                            "[{task_id}] blocked by failed dependencies: {}",
+                            blocked_by.join(", ")
+                        );
+                    }
+                    progressed = true;
+                    continue;
+                }
+
+                next_task = Some(task.clone());
+                break;
+            }
+
+            let Some(task) = next_task else {
+                break;
+            };
+
+            pending.remove(&task.id);
+            let config_for_task = config.clone();
+            let abox_for_task = abox.clone();
+            let registry_for_task = registry.clone();
+            let ledger_for_task = ledger.clone();
+            let stream_tx_for_task = stream_tx.clone();
+            let plan_task_id = task.id.clone();
+            let execution_request = AttemptExecutionRequest {
+                prompt: task.prompt.clone(),
+                provider_override: task.provider.clone(),
+                model_override: task.model.clone(),
+                approve_execution: request.approve_execution || task.approve_execution,
+                candidate_policy: task.candidate_policy.unwrap_or(config.candidate_policy),
+                sandbox_lifecycle: task.sandbox_lifecycle.unwrap_or(config.sandbox_lifecycle),
+            };
+
+            running.spawn(async move {
+                let summary = match execute_headless_attempt(
+                    config_for_task,
+                    abox_for_task,
+                    registry_for_task,
+                    ledger_for_task,
+                    execution_request,
+                    Some(stream_tx_for_task),
+                    Some(plan_task_id.clone()),
+                )
+                .await
+                {
+                    Ok(run) => build_completed_task_summary(&task, run),
+                    Err(err) => build_infra_error_task_summary(&task, err.to_string()),
+                };
+                (plan_task_id, summary)
+            });
+            progressed = true;
+        }
+
+        if completed.len() == plan.tasks.len() {
+            break;
+        }
+
+        if running.is_empty() {
+            if progressed {
+                continue;
+            }
+            anyhow::bail!("swarm scheduler stalled before all tasks completed");
+        }
+
+        tokio::select! {
+            Some(event) = stream_rx.recv() => {
+                emit_swarm_stream_event(request.output_mode, &mission_id, event)?;
+            }
+            maybe_joined = running.join_next() => {
+                let Some(joined) = maybe_joined else {
+                    continue;
+                };
+                let (task_id, summary) = joined?;
+                let summary = finalize_swarm_task_summary(&plan_dir, summary)?;
+                emit_swarm_event(
+                    request.output_mode,
+                    &SwarmJsonEvent::TaskFinished {
+                        mission_id: mission_id.clone(),
+                        plan_task_id: task_id.clone(),
+                        summary: Box::new(summary.clone()),
+                    },
+                )?;
+                if request.output_mode == HeadlessOutputMode::Human {
+                    println!("[{task_id}] finished: {:?}", summary.status);
+                }
+                completed.insert(task_id, summary);
+            }
+        }
+    }
+
+    while let Ok(event) = stream_rx.try_recv() {
+        emit_swarm_stream_event(request.output_mode, &mission_id, event)?;
+    }
+
+    let mut tasks = Vec::with_capacity(plan.tasks.len());
+    for task in &plan.tasks {
+        if let Some(summary) = completed.remove(&task.id) {
+            tasks.push(summary);
+        }
+    }
+    let summary = SwarmRunSummary {
+        mission_id,
+        goal: plan.goal.clone(),
+        concurrent_max,
+        totals: SwarmRunTotals::from_tasks(&tasks),
+        tasks,
+    };
+
+    validate_output_schema(request.output_schema.as_deref(), &summary)?;
+    emit_swarm_event(
+        request.output_mode,
+        &SwarmJsonEvent::Finished {
+            summary: Box::new(summary.clone()),
+        },
+    )?;
+
+    if request.output_mode == HeadlessOutputMode::Human {
+        println!(
+            "Swarm finished: {} succeeded, {} failed, {} timed out, {} blocked, {} infra errors.",
+            summary.totals.succeeded,
+            summary.totals.failed,
+            summary.totals.timed_out,
+            summary.totals.blocked,
+            summary.totals.infra_error
+        );
+    }
+
+    if summary.tasks.iter().all(|task| task.status.is_success()) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "swarm mission '{}' completed with non-success task outcomes",
+            summary.mission_id
+        );
+    }
+}
+
+async fn execute_headless_attempt(
+    config: Arc<BakudoConfig>,
+    abox: Arc<AboxAdapter>,
+    registry: Arc<ProviderRegistry>,
+    ledger: Arc<SandboxLedger>,
+    request: AttemptExecutionRequest,
+    stream_tx: Option<mpsc::UnboundedSender<AttemptStreamEvent>>,
+    plan_task_id: Option<String>,
+) -> Result<HeadlessRunSummary> {
     use bakudo_core::abox::sandbox_task_id;
-    use bakudo_core::protocol::{CandidatePolicy, SandboxLifecycle};
     use bakudo_daemon::hooks::run_post_run_hook;
     use bakudo_daemon::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
     use bakudo_daemon::worktree::apply_candidate_policy;
@@ -615,14 +1113,6 @@ async fn run_headless(
         PolicyDecision::Allow | PolicyDecision::Prompt => {}
     }
 
-    let candidate_policy = if request.discard {
-        CandidatePolicy::Discard
-    } else if request.apply {
-        CandidatePolicy::AutoApply
-    } else {
-        CandidatePolicy::Review
-    };
-
     let spec = config.build_attempt_spec(
         &request.prompt,
         &provider_id,
@@ -631,11 +1121,19 @@ async fn run_headless(
             .ok()
             .map(|p| p.to_string_lossy().to_string()),
         execution_decision.allow_all_tools,
-        candidate_policy,
-        SandboxLifecycle::Preserved,
+        request.candidate_policy,
+        request.sandbox_lifecycle,
     );
 
     let task_id = sandbox_task_id(&spec.attempt_id.0);
+    if let Some(tx) = &stream_tx {
+        let _ = tx.send(AttemptStreamEvent::TaskStarted {
+            plan_task_id: plan_task_id.clone(),
+            task_id: task_id.clone(),
+            provider_id: provider_id.clone(),
+            model: model.clone(),
+        });
+    }
 
     let cfg = Arc::new(TaskRunnerConfig {
         abox: abox.clone(),
@@ -649,65 +1147,32 @@ async fn run_headless(
         cpus: provider.cpus,
     });
 
-    emit_headless_event(
-        request.output_mode,
-        &HeadlessJsonEvent::TaskStarted {
-            task_id: task_id.clone(),
-            provider_id: provider_id.clone(),
-            model: model.clone(),
-        },
-    )?;
-    if request.output_mode == HeadlessOutputMode::Human {
-        println!("Dispatching task {task_id} to provider '{provider_id}'...");
-    }
-
     let (mut rx, handle) = run_attempt(spec.clone(), cfg).await;
-
     while let Some(event) = rx.recv().await {
-        match event {
-            RunnerEvent::RawLine(line) => {
-                emit_headless_event(
-                    request.output_mode,
-                    &HeadlessJsonEvent::RawLine {
+        if let Some(tx) = &stream_tx {
+            match event {
+                RunnerEvent::RawLine(line) => {
+                    let _ = tx.send(AttemptStreamEvent::RawLine {
+                        plan_task_id: plan_task_id.clone(),
                         task_id: task_id.clone(),
-                        line: line.clone(),
-                    },
-                )?;
-                if request.output_mode == HeadlessOutputMode::Human {
-                    println!("{line}");
+                        line,
+                    });
                 }
-            }
-            RunnerEvent::Progress(progress) => {
-                emit_headless_event(
-                    request.output_mode,
-                    &HeadlessJsonEvent::Progress {
+                RunnerEvent::Progress(progress) => {
+                    let _ = tx.send(AttemptStreamEvent::Progress {
+                        plan_task_id: plan_task_id.clone(),
                         task_id: task_id.clone(),
-                        message: progress.message.clone(),
-                    },
-                )?;
-                if request.output_mode == HeadlessOutputMode::Human {
-                    println!("[event] {}", progress.message);
+                        message: progress.message,
+                    });
                 }
-            }
-            RunnerEvent::InfraError(err) => {
-                emit_headless_event(
-                    request.output_mode,
-                    &HeadlessJsonEvent::Error {
+                RunnerEvent::InfraError(message) => {
+                    let _ = tx.send(AttemptStreamEvent::Error {
+                        plan_task_id: plan_task_id.clone(),
                         task_id: Some(task_id.clone()),
-                        message: err.clone(),
-                    },
-                )?;
-                if request.output_mode == HeadlessOutputMode::Human {
-                    eprintln!("[error] {err}");
+                        message,
+                    });
                 }
-            }
-            RunnerEvent::Finished(result) => {
-                if request.output_mode == HeadlessOutputMode::Human {
-                    println!(
-                        "\nTask finished: {:?} in {}ms",
-                        result.status, result.duration_ms
-                    );
-                }
+                RunnerEvent::Finished(_) => {}
             }
         }
     }
@@ -719,7 +1184,7 @@ async fn run_headless(
     };
 
     let (final_state, worktree_action, merge_conflicts) =
-        if result.status == bakudo_core::protocol::WorkerStatus::Succeeded {
+        if result.status == WorkerStatus::Succeeded {
             match apply_candidate_policy(
                 &task_id,
                 &spec.candidate_policy,
@@ -752,10 +1217,9 @@ async fn run_headless(
         } else {
             (
                 match result.status {
-                    bakudo_core::protocol::WorkerStatus::Succeeded => SandboxState::Preserved,
-                    bakudo_core::protocol::WorkerStatus::TimedOut => SandboxState::TimedOut,
-                    bakudo_core::protocol::WorkerStatus::Failed
-                    | bakudo_core::protocol::WorkerStatus::Cancelled => SandboxState::Failed {
+                    WorkerStatus::Succeeded => SandboxState::Preserved,
+                    WorkerStatus::TimedOut => SandboxState::TimedOut,
+                    WorkerStatus::Failed | WorkerStatus::Cancelled => SandboxState::Failed {
                         exit_code: result.exit_code,
                     },
                 },
@@ -787,68 +1251,126 @@ async fn run_headless(
         stderr_truncated: result.stderr_truncated,
     };
 
-    validate_output_schema(request.output_schema.as_deref(), &summary)?;
-
     let hook_payload = PostRunHookPayload {
         session_id: spec.session_id.clone(),
         attempt_id: spec.attempt_id.clone(),
         task_id: task_id.clone(),
         repo_root: spec.repo_root.clone(),
-        provider_id: provider_id.clone(),
-        model: model.clone(),
+        provider_id,
+        model,
         candidate_policy: spec.candidate_policy,
         sandbox_lifecycle: spec.sandbox_lifecycle,
         worker_status: result.status.clone(),
-        final_state: final_state.clone(),
+        final_state,
         worktree_action,
         summary: result.summary.clone(),
         exit_code: result.exit_code,
         duration_ms: result.duration_ms,
         timed_out: result.timed_out,
-        merge_conflicts: merge_conflicts.clone(),
+        merge_conflicts,
     };
     if let Err(err) = run_post_run_hook(&config, &hook_payload).await {
-        emit_headless_event(
-            request.output_mode,
-            &HeadlessJsonEvent::Error {
-                task_id: Some(task_id.clone()),
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send(AttemptStreamEvent::Error {
+                plan_task_id,
+                task_id: Some(task_id),
                 message: format!("post-run hook failed: {err}"),
-            },
-        )?;
-        if request.output_mode == HeadlessOutputMode::Human {
-            eprintln!("Post-run hook failed: {err}");
+            });
         }
     }
 
-    emit_headless_event(
-        request.output_mode,
-        &HeadlessJsonEvent::Finished {
-            summary: summary.clone(),
-        },
-    )?;
+    Ok(summary)
+}
 
-    if request.output_mode == HeadlessOutputMode::Human {
-        match summary.worktree_action {
-            HookWorktreeAction::Merged => println!("Worktree merged."),
-            HookWorktreeAction::MergeConflicts => {
-                eprintln!("Merge conflicts:");
-                for conflict in &summary.merge_conflicts {
-                    eprintln!("  {conflict}");
-                }
-            }
-            HookWorktreeAction::Discarded => println!("Worktree discarded."),
-            HookWorktreeAction::Preserved => {
-                println!("Worktree preserved at task_id: {task_id}");
-            }
-            HookWorktreeAction::NotApplied => {}
-        }
-    }
-
-    if summary.worker_status == bakudo_core::protocol::WorkerStatus::Succeeded {
-        Ok(())
+fn resolve_candidate_policy(discard: bool, apply: bool) -> CandidatePolicy {
+    if discard {
+        CandidatePolicy::Discard
+    } else if apply {
+        CandidatePolicy::AutoApply
     } else {
-        anyhow::bail!("task {task_id} finished with {:?}", summary.worker_status);
+        CandidatePolicy::Review
     }
+}
+
+fn build_completed_task_summary(task: &SwarmTaskPlan, run: HeadlessRunSummary) -> SwarmTaskSummary {
+    SwarmTaskSummary {
+        id: task.id.clone(),
+        parent_task_id: task.parent_task_id.clone(),
+        depends_on: task.depends_on.clone(),
+        role: task.role.clone(),
+        goal: task.goal.clone(),
+        artifact_path: task.artifact_path.clone(),
+        status: swarm_status_from_worker(&run.worker_status),
+        blocked_by: Vec::new(),
+        error: None,
+        run: Some(run),
+    }
+}
+
+fn build_infra_error_task_summary(task: &SwarmTaskPlan, error: String) -> SwarmTaskSummary {
+    SwarmTaskSummary {
+        id: task.id.clone(),
+        parent_task_id: task.parent_task_id.clone(),
+        depends_on: task.depends_on.clone(),
+        role: task.role.clone(),
+        goal: task.goal.clone(),
+        artifact_path: task.artifact_path.clone(),
+        status: SwarmTaskStatus::InfraError,
+        blocked_by: Vec::new(),
+        error: Some(error),
+        run: None,
+    }
+}
+
+fn build_blocked_task_summary(task: &SwarmTaskPlan, blocked_by: Vec<String>) -> SwarmTaskSummary {
+    SwarmTaskSummary {
+        id: task.id.clone(),
+        parent_task_id: task.parent_task_id.clone(),
+        depends_on: task.depends_on.clone(),
+        role: task.role.clone(),
+        goal: task.goal.clone(),
+        artifact_path: task.artifact_path.clone(),
+        status: SwarmTaskStatus::Blocked,
+        blocked_by,
+        error: None,
+        run: None,
+    }
+}
+
+fn swarm_status_from_worker(status: &WorkerStatus) -> SwarmTaskStatus {
+    match status {
+        WorkerStatus::Succeeded => SwarmTaskStatus::Succeeded,
+        WorkerStatus::Failed => SwarmTaskStatus::Failed,
+        WorkerStatus::TimedOut => SwarmTaskStatus::TimedOut,
+        WorkerStatus::Cancelled => SwarmTaskStatus::Cancelled,
+    }
+}
+
+fn finalize_swarm_task_summary(
+    plan_dir: &Path,
+    summary: SwarmTaskSummary,
+) -> Result<SwarmTaskSummary> {
+    if let Some(path) = &summary.artifact_path {
+        write_swarm_artifact(plan_dir, path, &summary)?;
+    }
+    Ok(summary)
+}
+
+fn write_swarm_artifact(
+    plan_dir: &Path,
+    artifact_path: &str,
+    summary: &SwarmTaskSummary,
+) -> Result<()> {
+    let path = if Path::new(artifact_path).is_absolute() {
+        PathBuf::from(artifact_path)
+    } else {
+        plan_dir.join(artifact_path)
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(summary)?)?;
+    Ok(())
 }
 
 fn emit_headless_event(mode: HeadlessOutputMode, event: &HeadlessJsonEvent) -> Result<()> {
@@ -858,10 +1380,189 @@ fn emit_headless_event(mode: HeadlessOutputMode, event: &HeadlessJsonEvent) -> R
     Ok(())
 }
 
-fn validate_output_schema(
-    schema_path: Option<&std::path::Path>,
-    summary: &HeadlessRunSummary,
+fn emit_headless_stream_event(mode: HeadlessOutputMode, event: AttemptStreamEvent) -> Result<()> {
+    match event {
+        AttemptStreamEvent::TaskStarted {
+            task_id,
+            provider_id,
+            model,
+            ..
+        } => {
+            emit_headless_event(
+                mode,
+                &HeadlessJsonEvent::TaskStarted {
+                    task_id: task_id.clone(),
+                    provider_id: provider_id.clone(),
+                    model: model.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                println!("Dispatching task {task_id} to provider '{provider_id}'...");
+            }
+        }
+        AttemptStreamEvent::Progress {
+            task_id, message, ..
+        } => {
+            emit_headless_event(
+                mode,
+                &HeadlessJsonEvent::Progress {
+                    task_id,
+                    message: message.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                println!("[event] {message}");
+            }
+        }
+        AttemptStreamEvent::RawLine { task_id, line, .. } => {
+            emit_headless_event(
+                mode,
+                &HeadlessJsonEvent::RawLine {
+                    task_id,
+                    line: line.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                println!("{line}");
+            }
+        }
+        AttemptStreamEvent::Error {
+            task_id, message, ..
+        } => {
+            emit_headless_event(
+                mode,
+                &HeadlessJsonEvent::Error {
+                    task_id,
+                    message: message.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                eprintln!("[error] {message}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_swarm_event(mode: HeadlessOutputMode, event: &SwarmJsonEvent) -> Result<()> {
+    if mode == HeadlessOutputMode::Json {
+        println!("{}", serde_json::to_string(event)?);
+    }
+    Ok(())
+}
+
+fn emit_swarm_stream_event(
+    mode: HeadlessOutputMode,
+    mission_id: &str,
+    event: AttemptStreamEvent,
 ) -> Result<()> {
+    match event {
+        AttemptStreamEvent::TaskStarted {
+            plan_task_id,
+            task_id,
+            provider_id,
+            model,
+        } => {
+            let plan_task_id = plan_task_id.unwrap_or_else(|| task_id.clone());
+            emit_swarm_event(
+                mode,
+                &SwarmJsonEvent::TaskStarted {
+                    mission_id: mission_id.to_string(),
+                    plan_task_id: plan_task_id.clone(),
+                    task_id,
+                    provider_id: provider_id.clone(),
+                    model: model.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                println!("[{plan_task_id}] dispatching to provider '{provider_id}'...");
+            }
+        }
+        AttemptStreamEvent::Progress {
+            plan_task_id,
+            task_id,
+            message,
+        } => {
+            let plan_task_id = plan_task_id.unwrap_or_else(|| task_id.clone());
+            emit_swarm_event(
+                mode,
+                &SwarmJsonEvent::Progress {
+                    mission_id: mission_id.to_string(),
+                    plan_task_id: plan_task_id.clone(),
+                    task_id,
+                    message: message.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                println!("[{plan_task_id}] {message}");
+            }
+        }
+        AttemptStreamEvent::RawLine {
+            plan_task_id,
+            task_id,
+            line,
+        } => {
+            let plan_task_id = plan_task_id.unwrap_or_else(|| task_id.clone());
+            emit_swarm_event(
+                mode,
+                &SwarmJsonEvent::RawLine {
+                    mission_id: mission_id.to_string(),
+                    plan_task_id: plan_task_id.clone(),
+                    task_id,
+                    line: line.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                println!("[{plan_task_id}] {line}");
+            }
+        }
+        AttemptStreamEvent::Error {
+            plan_task_id,
+            task_id,
+            message,
+        } => {
+            emit_swarm_event(
+                mode,
+                &SwarmJsonEvent::Error {
+                    mission_id: mission_id.to_string(),
+                    plan_task_id: plan_task_id.clone(),
+                    task_id,
+                    message: message.clone(),
+                },
+            )?;
+            if mode == HeadlessOutputMode::Human {
+                match plan_task_id {
+                    Some(id) => eprintln!("[{id}] error: {message}"),
+                    None => eprintln!("[swarm] error: {message}"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_single_run_footer(summary: &HeadlessRunSummary) {
+    println!(
+        "\nTask finished: {:?} in {}ms",
+        summary.worker_status, summary.duration_ms
+    );
+    match summary.worktree_action {
+        HookWorktreeAction::Merged => println!("Worktree merged."),
+        HookWorktreeAction::MergeConflicts => {
+            eprintln!("Merge conflicts:");
+            for conflict in &summary.merge_conflicts {
+                eprintln!("  {conflict}");
+            }
+        }
+        HookWorktreeAction::Discarded => println!("Worktree discarded."),
+        HookWorktreeAction::Preserved => {
+            println!("Worktree preserved at task_id: {}", summary.task_id);
+        }
+        HookWorktreeAction::NotApplied => {}
+    }
+}
+
+fn validate_output_schema<T: Serialize>(schema_path: Option<&Path>, summary: &T) -> Result<()> {
     let Some(schema_path) = schema_path else {
         return Ok(());
     };

@@ -2,6 +2,7 @@ pub mod abox;
 pub mod config;
 pub mod error;
 pub mod hook;
+pub mod mission;
 pub mod policy;
 pub mod protocol;
 pub mod provider;

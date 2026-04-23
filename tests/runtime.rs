@@ -1307,6 +1307,271 @@ fn bakudo_run_cli_does_not_apply_policy_after_failure() {
 }
 
 #[test]
+fn bakudo_swarm_cli_runs_plan_and_writes_artifacts() {
+    let dir = TempDir::new("bakudo-cli-swarm");
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    if printf '%s\n' "$@" | grep -q 'BAKUDO_PROMPT=prepare repo'; then
+      echo "PREPARE_DONE"
+    elif printf '%s\n' "$@" | grep -q 'BAKUDO_PROMPT=run tests'; then
+      echo "TESTS_DONE"
+    else
+      echo "UNKNOWN_PROMPT"
+    fi
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+    let plan_path = dir.path.join("swarm-plan.json");
+    fs::write(
+        &plan_path,
+        r#"{
+  "mission_id": "mission-build",
+  "goal": "prepare and verify",
+  "concurrent_max": 2,
+  "tasks": [
+    {
+      "id": "prepare",
+      "prompt": "prepare repo",
+      "provider": "codex",
+      "role": "builder",
+      "goal": "prepare the repo",
+      "artifact_path": "artifacts/prepare.json"
+    },
+    {
+      "id": "verify",
+      "prompt": "run tests",
+      "provider": "codex",
+      "depends_on": ["prepare"],
+      "parent_task_id": "prepare",
+      "role": "verifier",
+      "goal": "verify the output",
+      "artifact_path": "artifacts/verify.json"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "swarm",
+            "--plan",
+            plan_path.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "bakudo swarm failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"event\":\"task_started\""));
+    assert!(stdout.contains("\"plan_task_id\":\"prepare\""));
+    assert!(stdout.contains("\"plan_task_id\":\"verify\""));
+    assert!(stdout.contains("\"event\":\"finished\""));
+    assert!(stdout.contains("\"mission_id\":\"mission-build\""));
+    assert!(stdout.contains("\"status\":\"succeeded\""));
+
+    let prepare_artifact = dir.path.join("artifacts").join("prepare.json");
+    let verify_artifact = dir.path.join("artifacts").join("verify.json");
+    let prepare_summary: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&prepare_artifact).unwrap()).unwrap();
+    let verify_summary: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&verify_artifact).unwrap()).unwrap();
+    assert_eq!(prepare_summary["status"], "succeeded");
+    assert_eq!(prepare_summary["run"]["summary"], "PREPARE_DONE");
+    assert_eq!(verify_summary["status"], "succeeded");
+    assert_eq!(verify_summary["depends_on"][0], "prepare");
+    assert_eq!(verify_summary["parent_task_id"], "prepare");
+    assert_eq!(verify_summary["run"]["summary"], "TESTS_DONE");
+
+    let invocations = read_invocations(&log);
+    let prompts: Vec<String> = invocations
+        .iter()
+        .filter_map(|invocation| {
+            invocation
+                .iter()
+                .find(|arg| arg.starts_with("BAKUDO_PROMPT="))
+                .cloned()
+        })
+        .collect();
+    let prepare_idx = prompts
+        .iter()
+        .position(|prompt| prompt == "BAKUDO_PROMPT=prepare repo")
+        .unwrap();
+    let verify_idx = prompts
+        .iter()
+        .position(|prompt| prompt == "BAKUDO_PROMPT=run tests")
+        .unwrap();
+    assert!(prepare_idx < verify_idx);
+}
+
+#[test]
+fn bakudo_swarm_cli_blocks_tasks_on_failed_dependency() {
+    let dir = TempDir::new("bakudo-cli-swarm-blocked");
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    if printf '%s\n' "$@" | grep -q 'BAKUDO_PROMPT=fail root'; then
+      echo "root failed" >&2
+      exit 17
+    fi
+    echo "unexpected child run"
+    ;;
+"#,
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+    let plan_path = dir.path.join("swarm-plan-blocked.json");
+    fs::write(
+        &plan_path,
+        r#"{
+  "mission_id": "mission-blocked",
+  "concurrent_max": 2,
+  "tasks": [
+    {
+      "id": "root",
+      "prompt": "fail root",
+      "provider": "codex"
+    },
+    {
+      "id": "child",
+      "prompt": "should never run",
+      "provider": "codex",
+      "depends_on": ["root"]
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "swarm",
+            "--plan",
+            plan_path.to_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected blocked swarm to fail:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"event\":\"task_blocked\""));
+    assert!(stdout.contains("\"plan_task_id\":\"child\""));
+    assert!(stdout.contains("\"blocked_by\":[\"root\"]"));
+    assert!(stdout.contains("\"mission_id\":\"mission-blocked\""));
+    assert!(stdout.contains("\"status\":\"blocked\""));
+
+    let invocations = read_invocations(&log);
+    assert_eq!(invocations.len(), 1, "dependent task should not have run");
+    assert!(invocations[0]
+        .join("\n")
+        .contains("BAKUDO_PROMPT=fail root"));
+}
+
+#[test]
+fn bakudo_swarm_cli_runs_independent_tasks_in_parallel() {
+    let dir = TempDir::new("bakudo-cli-swarm-parallel");
+    let lock_path = dir.path.join("parallel.lock");
+    let count_path = dir.path.join("parallel-count.txt");
+    let max_path = dir.path.join("parallel-max.txt");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        &format!(
+            r#"  run)
+    python3 - <<'PY'
+import fcntl
+import pathlib
+import time
+
+lock = pathlib.Path(r"{lock_path}")
+count = pathlib.Path(r"{count_path}")
+peak = pathlib.Path(r"{max_path}")
+
+with lock.open("w") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    current = int(count.read_text() if count.exists() else "0") + 1
+    count.write_text(str(current))
+    highest = max(int(peak.read_text() if peak.exists() else "0"), current)
+    peak.write_text(str(highest))
+    fcntl.flock(handle, fcntl.LOCK_UN)
+
+time.sleep(0.2)
+
+with lock.open("w") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    current = int(count.read_text() if count.exists() else "0") - 1
+    count.write_text(str(current))
+    fcntl.flock(handle, fcntl.LOCK_UN)
+PY
+    echo "parallel run"
+    ;;
+"#,
+            lock_path = lock_path.display(),
+            count_path = count_path.display(),
+            max_path = max_path.display(),
+        ),
+    );
+    let config = write_config_file(&dir, &script);
+    let repo = TempRepo::new();
+    let plan_path = dir.path.join("swarm-plan-parallel.json");
+    fs::write(
+        &plan_path,
+        r#"{
+  "mission_id": "mission-parallel",
+  "concurrent_max": 2,
+  "tasks": [
+    { "id": "one", "prompt": "first", "provider": "codex" },
+    { "id": "two", "prompt": "second", "provider": "codex" }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let output = StdCommand::new(bakudo_bin())
+        .args([
+            "-c",
+            config.to_str().unwrap(),
+            "swarm",
+            "--plan",
+            plan_path.to_str().unwrap(),
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "parallel swarm failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(fs::read_to_string(&max_path).unwrap().trim(), "2");
+}
+
+#[test]
 fn app_submits_provider_command_when_idle() {
     let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
     let (_event_tx, event_rx) = mpsc::channel(8);
