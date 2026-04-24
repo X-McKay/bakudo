@@ -1,6 +1,10 @@
 # Provider-Conductor Mission Architecture Plan
 
-Status: Draft for review
+> Archived historical design draft. The shipped runtime is described by
+> `docs/current-architecture.md`; the landed target architecture is captured in
+> `docs/codex-revised-plan.md`.
+
+Status: Archived historical draft
 
 Owner: Bakudo maintainers
 

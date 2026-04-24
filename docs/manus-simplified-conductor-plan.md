@@ -1,6 +1,10 @@
 # Manus-Simplified Provider-Conductor Implementation Plan
 
-**Status:** Draft  
+> Archived historical design draft. The shipped runtime is described by
+> `docs/current-architecture.md`; the landed target architecture is captured in
+> `docs/codex-revised-plan.md`.
+
+**Status:** Archived historical draft  
 **Supersedes:** `provider-conductor-implementation-plan.md`  
 **Informed by:** Manus agent system prompt analysis and prior review of the original plan
 

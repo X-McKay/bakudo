@@ -2206,7 +2206,10 @@ else:
                 .into_iter()
                 .find(|mission| mission.status == MissionStatus::Completed)
             {
-                break mission;
+                let wakes = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+                if wakes.is_empty() {
+                    break mission;
+                }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

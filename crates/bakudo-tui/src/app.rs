@@ -297,7 +297,7 @@ impl App {
             app.push_message(ChatMessage::system(
                 "Welcome to Bakudo v2.\n\
                  Describe an objective, ask for progress, or steer the current mission in plain language.\n\
-                 Bakudo will clarify, stage a plan, and only then dispatch sandbox workers.\n\
+                 Bakudo routes clear objectives directly into the mission runtime and shows plan and worker activity as it happens.\n\
                  Type /help for available commands, or /status to see the local session summary.",
             ));
         }

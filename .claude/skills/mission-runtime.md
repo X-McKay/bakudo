@@ -18,34 +18,41 @@ The mission runtime lives primarily in:
 
 ## Key Invariants
 
-1. The restored conversational host layer stays in place. Freeform user input
-   is routed through the host/session path before the mission runtime decides
-   whether to answer locally, persist a `UserMessage`, or wake the deliberator.
+1. The host layer stays in place, but it is a thin router rather than a staged
+   planner. Freeform user input is routed through the host/session path first
+   so the runtime can answer status locally, start a clear objective
+   immediately, or persist steering as a `UserMessage`.
 
 2. The deliberator is stateless across wakes. Durable state belongs in the
    supervisor side:
    - `MissionStore` persists `Mission`, `Experiment`, `WakeEvent`,
      `MissionState`, `UserMessage`, active waves, and ledger entries.
-   - Wake snapshots are written under the repo-scoped data root.
+   - `mission_plan.md` lives under the repo-scoped data root.
+   - Wake and attempt traces live under `<repo-data>/traces/`.
    - Append-only provenance is written to
      `.bakudo/provenance/<mission-id>.ndjson`.
 
 3. The mission tool surface is fixed unless the product contract changes:
-   `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`,
-   `update_mission_state`, `record_lesson`, `ask_user`,
-   `cancel_experiments`, and `suspend`.
-   Every tool response carries the `meta` sidecar.
+   `read_plan`, `update_plan`, `notify_user`, `ask_user`,
+   `complete_mission`, `read_experiment_summary`, `dispatch_swarm`,
+   `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`,
+   `update_mission_state`, `record_lesson`, and `suspend`.
 
-4. Use `Mission State` terminology everywhere in current runtime code, docs,
-   prompts, comments, and tests. Do not reintroduce `blackboard` aliases or
-   migration paths.
+4. `MissionState` remains the compact durable execution state, but
+   `mission_plan.md` is the conductor-facing planning artifact. Do not
+   reintroduce older state aliases or migration paths.
 
 5. Provider wake execution comes from `ProviderCatalog` and
    `.bakudo/providers/*.toml` plus `.bakudo/prompts/*.md`, not the classic
    `ProviderRegistry` path.
 
-6. `wake_budget` is part of the runtime contract. Per-wake wall-clock and
-   tool-call limits must be enforced by the supervisor, not left to prompts.
+6. `wake_budget`, `concurrency_hint`, and active-wave refill behavior are part
+   of the runtime contract. Per-wake limits and restart-safe wave scheduling
+   must be enforced by the supervisor, not left to prompts.
+
+7. Worker outputs remain host-owned after execution. Agent workers can produce
+   preserved worktrees, but merge/apply/discard decisions still happen on the
+   host side.
 
 ## Process
 

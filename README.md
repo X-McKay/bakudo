@@ -5,7 +5,7 @@ Bakudo is a Rust agent harness for running provider CLIs inside isolated `abox` 
 Version 2 now ships two complementary execution paths:
 
 - a classic task runner for one-off `bakudo run` and `bakudo swarm` execution
-- a wake-based mission runtime that keeps a durable Mission State, wallet, wake queue, and conversational host layer around a long-lived objective
+- a wake-based mission runtime that keeps durable Mission State, `mission_plan.md`, a wake queue, and a thin host router around a long-lived objective
 
 ## Features
 

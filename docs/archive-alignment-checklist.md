@@ -1,5 +1,9 @@
 # Archived Plan Alignment Checklist
 
+> Archived historical checklist from the pre-cutover audit. The shipped runtime
+> is described by `docs/current-architecture.md`; the landed target
+> architecture is captured in `docs/codex-revised-plan.md`.
+
 Target spec: `docs/archive/bakudo-v2-architecture-and-implementation-plan.md`
 
 Audit date: `2026-04-23`

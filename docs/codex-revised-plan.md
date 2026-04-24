@@ -1,6 +1,6 @@
 # Codex Revised Mission Conductor Plan
 
-Status: Proposed implementation plan
+Status: Implemented target architecture reference
 
 Date: 2026-04-24
 
@@ -604,8 +604,8 @@ Goal: make prompt and provider contract updates safe without tool aliases.
 
 - add a mission contract version constant
 - add repo-local contract manifest storage under `.bakudo/`
-- teach `ProviderCatalog` to distinguish unsynced repo-local defaults from
-  intentional local customization
+- teach `ProviderCatalog` to gate repo-local prompt/provider defaults behind an
+  explicit contract sync when the local contract version is unknown
 - add `bakudo doctor --sync-mission-contract`
 - update default prompt and provider assets to the new contract only after the
   sync mechanism exists
@@ -621,8 +621,9 @@ Goal: make prompt and provider contract updates safe without tool aliases.
 
 ### Acceptance Criteria
 
-- a stale repo with untouched default prompts syncs automatically
-- a stale repo with modified prompts fails with a clear action message
+- a repo without mission defaults materializes the shipped contract
+- a repo with unknown-version prompt/provider defaults fails with a clear action
+  message
 - the runtime no longer depends on old tool-name compatibility aliases
 
 ### Reasoning
@@ -894,8 +895,8 @@ The test strategy must focus on runtime behavior, not just helper functions.
 
 ### End-to-end runtime tests to add
 
-- mission contract sync updates untouched default prompt files
-- mission contract sync rejects modified stale prompts with a clear error
+- mission contract sync writes the shipped prompt/provider defaults
+- ensure-defaults rejects unknown-version repo-local defaults with a clear error
 - `read_plan` returns seeded plan contents
 - `update_plan` rewrites the plan file and, after Phase 5, emits a mission
   activity event
@@ -904,7 +905,6 @@ The test strategy must focus on runtime behavior, not just helper functions.
 - host status queries still work after the host router is simplified
 - `dispatch_swarm` respects `concurrency_hint`
 - queued experiments resume correctly after process restart
-- legacy experiment rows with top-level `script` still deserialize
 - agent workload launches through mission-native provider config
 - preserved agent workload worktrees remain host-reviewable
 - approval-required agent wave returns a structured refusal instead of silently

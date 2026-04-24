@@ -1,6 +1,10 @@
 # Conductor Implementation Plan (Merged)
 
-**Status:** Accepted — implementation ready
+> Archived historical design draft. The shipped runtime is described by
+> `docs/current-architecture.md`; the landed target architecture is captured in
+> `docs/codex-revised-plan.md`.
+
+**Status:** Archived historical draft
 **Supersedes:** `provider-conductor-implementation-plan.md`, `manus-simplified-conductor-plan.md`
 **Date:** 2026-04-24
 **Owner:** Bakudo maintainers
