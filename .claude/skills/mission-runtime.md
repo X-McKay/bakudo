@@ -46,6 +46,11 @@ The mission runtime lives primarily in:
    `.bakudo/providers/*.toml` plus `.bakudo/prompts/*.md`, not the classic
    `ProviderRegistry` path.
 
+   The wake bootstrap prompt is passed as the provider's prompt argument. It
+   includes the shipped mission prompt plus the current `WakeEvent` JSON.
+   Deliberator `stdin` stays reserved for Bakudo's line-delimited JSON-RPC
+   tool responses.
+
 6. `wake_budget`, `concurrency_hint`, and active-wave refill behavior are part
    of the runtime contract. Per-wake limits and restart-safe wave scheduling
    must be enforced by the supervisor, not left to prompts.

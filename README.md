@@ -170,6 +170,7 @@ Autonomous missions use a durable wake/supervisor model:
 - Bakudo persists mission state to a repo-scoped SQLite store under the Bakudo data root.
 - Each mission starts with a durable `mission_plan.md` artifact plus a compact `MissionState` JSON layout for execution-relevant state.
 - Deliberators are loaded from `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`; `bakudo doctor --sync-mission-contract` overwrites repo-local defaults with the currently shipped contract when needed.
+- Each wake is bootstrapped by passing the provider a prompt argument built from the shipped mission prompt plus the current `WakeEvent` JSON; stdin stays reserved for line-delimited JSON-RPC tool responses.
 - `dispatch_swarm` launches `abox` experiments, enforces the mission wallet, reserves worker capacity up front, and schedules waves according to `concurrency_hint` instead of starting the entire wave at once.
 - Mission waves can use script workloads or provider-backed agent workloads through the mission-native worker config in `ProviderCatalog`.
 - Each provider wake also respects its configured `wake_budget`; if the deliberator exceeds its per-wake wall-clock or tool-call budget, Bakudo ends that wake and queues a timeout wake.

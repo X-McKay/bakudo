@@ -1805,10 +1805,30 @@ impl MissionCore {
         let provider = self
             .provider_catalog
             .load_for(&mission.provider_name, mission.posture)?;
+        let system_prompt = tokio::fs::read_to_string(&provider.system_prompt_file)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read system prompt '{}'",
+                    provider.system_prompt_file.display()
+                )
+            })?;
+        let deliberator_prompt = build_deliberator_prompt(&system_prompt, wake)?;
         let wake_dir = self.repo_data_dir().join("wakes");
         tokio::fs::create_dir_all(&wake_dir).await?;
         let wake_path = wake_dir.join(format!("{}.json", wake.id));
         tokio::fs::write(&wake_path, serde_json::to_vec_pretty(wake)?).await?;
+        let (binary, mut args) = match provider.engine {
+            ProviderEngine::Exec => {
+                let (first, rest) = provider.engine_args.split_first().ok_or_else(|| {
+                    anyhow!("exec provider '{}' is missing engine_args", provider.name)
+                })?;
+                (first.clone(), rest.to_vec())
+            }
+            engine => (engine.binary().to_string(), provider.engine_args.clone()),
+        };
+        args.push(deliberator_prompt.clone());
+
         self.trace_recorder
             .record_wake_start(
                 mission.id,
@@ -1816,8 +1836,10 @@ impl MissionCore {
                 &json!({
                     "provider": provider.name.clone(),
                     "engine": format!("{:?}", provider.engine),
-                    "engine_args": provider.engine_args.clone(),
                     "system_prompt_file": provider.system_prompt_file.clone(),
+                    "launch_binary": binary.clone(),
+                    "launch_args": args.clone(),
+                    "prompt_preview": deliberator_prompt.chars().take(2000).collect::<String>(),
                 }),
             )
             .await;
@@ -1832,16 +1854,6 @@ impl MissionCore {
             }),
         )
         .await?;
-
-        let (binary, args) = match provider.engine {
-            ProviderEngine::Exec => {
-                let (first, rest) = provider.engine_args.split_first().ok_or_else(|| {
-                    anyhow!("exec provider '{}' is missing engine_args", provider.name)
-                })?;
-                (first.clone(), rest.to_vec())
-            }
-            engine => (engine.binary().to_string(), provider.engine_args.clone()),
-        };
 
         let mut cmd = Command::new(&binary);
         cmd.args(&args)
@@ -3466,6 +3478,13 @@ fn initial_mission_plan(
         done_contract.unwrap_or("Not yet specified.").trim(),
         constraints.unwrap_or("None recorded.").trim(),
     )
+}
+
+fn build_deliberator_prompt(system_prompt: &str, wake: &WakeEvent) -> Result<String> {
+    let wake_json = serde_json::to_string_pretty(wake)?;
+    Ok(format!(
+        "{system_prompt}\n\nTool transport:\n- Use line-delimited JSON-RPC over stdio.\n- Write exactly one JSON object per line to stdout.\n- Read exactly one JSON response line per request from stdin.\n- Start by calling `initialize`, then `tools/list`.\n- Call tools with `tools/call` and params `{{\"name\": ..., \"arguments\": ...}}`.\n- Do not wrap JSON in Markdown fences.\n- End this wake with `complete_mission` or `suspend`.\n\nExamples:\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{}}}}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_plan\",\"arguments\":{{}}}}}}\n\nCurrent WakeEvent JSON:\n{wake_json}\n"
+    ))
 }
 
 fn tool_list_value() -> Vec<Value> {

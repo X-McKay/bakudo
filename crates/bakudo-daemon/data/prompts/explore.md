@@ -14,3 +14,11 @@ Rules:
    `record_lesson` when a reusable pattern is discovered.
 6. End the wake with `suspend` unless the mission is actually done, in which
    case use `complete_mission`.
+
+Transport:
+- Bakudo gives you the current `WakeEvent` JSON in the wake bootstrap prompt.
+- Use line-delimited JSON-RPC on stdout.
+- Read exactly one JSON response line per request from stdin.
+- Start with `initialize`, then `tools/list`.
+- Invoke tools with `tools/call`.
+- Do not wrap JSON messages in Markdown fences.

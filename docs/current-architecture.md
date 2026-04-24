@@ -42,6 +42,8 @@ For classic runs:
 For autonomous missions:
 
 - The deliberator process receives `BAKUDO_WAKE_EVENT_PATH`, `BAKUDO_SYSTEM_PROMPT_PATH`, `BAKUDO_MISSION_ID`, `BAKUDO_POSTURE`, `BAKUDO_REPO_ROOT`, and `BAKUDO_MCP_TRANSPORT=stdio`.
+- Bakudo reads the configured mission prompt file, appends a wake bootstrap block containing the current `WakeEvent` JSON plus JSON-RPC transport instructions, and passes that combined prompt as the provider's prompt argument.
+- Deliberator `stdin` is reserved for Bakudo's line-delimited JSON-RPC responses, so wake bootstrap data is not streamed over `stdin`.
 - Provider `.toml` files declare the engine, prompt file, abox profile, wake budget, environment passthrough, and optional `[worker]` config for mission-native agent workers.
 - The supervisor enforces each provider's per-wake `wake_budget` wall-clock and tool-call limits, then re-queues a timeout wake instead of leaving the deliberator running indefinitely.
 - The current tool surface is:

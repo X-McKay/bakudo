@@ -1684,6 +1684,117 @@ call("complete_mission", {"summary": "wallet rejected oversized wave"})
 }
 
 #[tokio::test]
+async fn mission_runtime_bootstraps_prompt_as_argument_and_keeps_stdio_for_tools() {
+    let dir = TempDir::new("bakudo-prompt-bootstrap");
+    let repo = TempRepo::new();
+    let prompt_log = dir.path.join("deliberator-prompt.txt");
+    let script = write_mock_deliberator_script(
+        &dir,
+        &format!(
+            r#"
+with open({prompt_log:?}, "w", encoding="utf-8") as handle:
+    handle.write(sys.argv[1] if len(sys.argv) > 1 else "")
+
+plan, _meta = call("read_plan")
+assert "Mission Plan" in plan["markdown"]
+call("complete_mission", {{"summary": "prompt bootstrap completed"}})
+"#,
+            prompt_log = prompt_log.display().to_string(),
+        ),
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-prompt-bootstrap".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Bootstrap the wake prompt".to_string(),
+            done_contract: Some("Verify prompt transport and tool IO".to_string()),
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(3), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let prompt = fs::read_to_string(&prompt_log).unwrap();
+    assert!(prompt.contains("You are the Bakudo mission conductor operating in MISSION posture."));
+    assert!(prompt.contains("Tool transport:"));
+    assert!(prompt.contains("Bootstrap the wake prompt"));
+    assert!(prompt.contains("\"reason\": \"manual_resume\""));
+    assert!(prompt.contains("\"method\":\"tools/call\""));
+
+    let provider_trace_path = config
+        .resolved_repo_data_dir(Some(repo.path()))
+        .join("traces")
+        .join("missions")
+        .join(mission.id.to_string())
+        .join("wakes");
+    assert!(provider_trace_path.exists());
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mission_runtime_requests_host_approval_for_host_exec() {
     let dir = TempDir::new("bakudo-host-approval");
     let repo = TempRepo::new();
