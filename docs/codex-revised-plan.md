@@ -23,6 +23,10 @@ This plan keeps the parts of the current architecture that are already correct,
 removes the host-side over-planning that is fighting the model, and only adds
 new infrastructure where the current runtime is genuinely blocking the product.
 
+This plan assumes a direct cutover to the new mission runtime contract. Old
+tool names, old prompt semantics, and previous mission-store row shapes do not
+need compatibility shims unless the final architecture explicitly requires one.
+
 ## Why This Is The Right Direction
 
 Bakudo already has the beginnings of the right shape:
@@ -453,19 +457,15 @@ pub enum ExperimentWorkload {
 }
 ```
 
-### Backward Compatibility
+### Cutover
 
-Do not add a SQL migration for this.
+Do not add a SQL migration framework for this.
 
-Instead:
-
-1. add `workload` to the Rust type
-2. implement custom deserialization so older JSON with top-level `script`
-   still loads as `ExperimentWorkload::Script`
-3. serialize new experiments with the new shape only
-
-This keeps the existing `experiments.spec_json` column useful without creating
-database churn for a type evolution that already fits the current storage model.
+Because repo-local mission-store state is explicitly allowed to break during
+this architecture reset, we can move `experiments.spec_json` directly to the
+new `workload` shape and keep the runtime code simple. Any persistence
+adaptation should exist only when it materially improves the final design, not
+just to preserve obsolete rows.
 
 ## Scheduling Model
 
@@ -492,11 +492,13 @@ min(concurrency_hint, wallet.concurrent_max, wallet.abox_workers_remaining)
 
 ### Persistence
 
-Avoid a SQL migration if possible.
+Avoid a SQL migration framework if possible.
 
-`active_waves.experiment_ids_json` can evolve from a raw list into a richer JSON
-payload that also stores `concurrency_limit`. Implement deserialization that
-accepts either shape.
+`active_waves.experiment_ids_json` should move to a richer JSON payload that
+stores both `experiment_ids` and `concurrency_limit`. Since restart-safe wave
+state is part of the target runtime and old mission-store state is not
+load-bearing, prefer a direct cutover to the new payload over dual-format
+compatibility code.
 
 Recommended internal wave payload:
 
@@ -911,8 +913,8 @@ The test strategy must focus on runtime behavior, not just helper functions.
 ### Unit tests to add
 
 - prompt contract manifest parsing and sync decisions
-- `ExperimentSpec` legacy deserialization
-- active-wave payload legacy deserialization
+- `ExperimentSpec` workload serialization/deserialization
+- active-wave payload serialization/deserialization
 - mission activity rendering
 
 ### Manual smoke tests
