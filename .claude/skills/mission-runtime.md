@@ -38,6 +38,15 @@ The mission runtime lives primarily in:
    `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`,
    `update_mission_state`, `record_lesson`, and `suspend`.
 
+   `dispatch_swarm` experiment items stay typed: use top-level
+   `{"kind":"script","script":...}` for script workers and
+   `{"kind":"agent_task","prompt":"..."}` for provider-backed workers.
+   Do not wrap those fields inside a nested `workload` object and do not
+   JSON-encode experiment objects as strings.
+
+   `abox_exec` and `abox_apply_patch` are simpler on purpose: pass plain
+   shell strings for `script` and `verify`, not tagged script objects.
+
 4. `MissionState` remains the compact durable execution state, but
    `mission_plan.md` is the conductor-facing planning artifact. Do not
    reintroduce older state aliases or migration paths.

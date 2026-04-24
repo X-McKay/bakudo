@@ -241,7 +241,8 @@ At the end of this plan, the runtime should look like this:
 - `mission_plan.md` is stored under the repo-scoped data directory and exposed
   through dedicated tools.
 - `dispatch_swarm` can launch either script workloads or provider-backed agent
-  workloads inside `abox`.
+  workloads inside `abox`, with a strict typed payload on each experiment item:
+  `{"kind":"script","script":...}` or `{"kind":"agent_task","prompt":"..."}`.
 - `concurrency_hint` actually limits concurrent experiment start, rather than
   being accepted and ignored.
 - the TUI receives typed mission activity events instead of flattening
@@ -354,6 +355,9 @@ This plan keeps the tool surface small and explicit.
 - `suspend` should mean "yield this wake and sleep", not "complete mission"
 - `ask_user` remains the blocking question tool
 - `notify_user` is non-blocking and transcript-facing
+- `abox_exec` and `abox_apply_patch` should take plain shell strings for
+  quick conductor-side verification, while `dispatch_swarm` keeps the stricter
+  typed experiment payloads
 
 ### Do Not Add In Phase 1
 

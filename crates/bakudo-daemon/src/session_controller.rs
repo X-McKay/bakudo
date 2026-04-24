@@ -415,37 +415,37 @@ struct DispatchExperimentSpec {
     skill: Option<String>,
     #[serde(default)]
     base_branch: Option<String>,
-    workload: DispatchExperimentWorkload,
+    kind: DispatchExperimentKind,
+    #[serde(default)]
+    script: Option<ExperimentScript>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    sandbox_lifecycle: Option<SandboxLifecycle>,
+    #[serde(default)]
+    candidate_policy: Option<CandidatePolicy>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    allow_all_tools: Option<bool>,
     #[serde(default)]
     metric_keys: Vec<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum DispatchExperimentWorkload {
-    Script {
-        script: ExperimentScript,
-    },
-    AgentTask {
-        prompt: String,
-        #[serde(default)]
-        provider: Option<String>,
-        #[serde(default)]
-        model: Option<String>,
-        #[serde(default)]
-        sandbox_lifecycle: Option<SandboxLifecycle>,
-        #[serde(default)]
-        candidate_policy: Option<CandidatePolicy>,
-        #[serde(default)]
-        timeout_secs: Option<u64>,
-        #[serde(default)]
-        allow_all_tools: Option<bool>,
-    },
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DispatchExperimentKind {
+    Script,
+    AgentTask,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct AboxExecArgs {
-    script: ExperimentScript,
+    script: String,
     #[serde(default)]
     abox_profile: Option<String>,
     #[serde(default)]
@@ -455,7 +455,7 @@ struct AboxExecArgs {
 #[derive(Debug, serde::Deserialize)]
 struct AboxApplyPatchArgs {
     patch: String,
-    verify: ExperimentScript,
+    verify: String,
     #[serde(default)]
     abox_profile: Option<String>,
 }
@@ -2220,6 +2220,8 @@ impl MissionCore {
                 args.push("--ignore-user-config".to_string());
                 args.push("-c".to_string());
                 args.push(format!("mcp_servers.bakudo.url={mcp_endpoint_url:?}"));
+                args.push("-c".to_string());
+                args.push("mcp_servers.bakudo.default_tools_approval_mode=\"approve\"".to_string());
                 if provider.allow_all_tools {
                     if let Some(flag) = provider.engine.allow_all_flag() {
                         args.push(flag.to_string());
@@ -2233,6 +2235,7 @@ impl MissionCore {
                         "transport": "streamable_http",
                         "endpoint": mcp_endpoint_url,
                         "config_override": format!("mcp_servers.bakudo.url={mcp_endpoint_url:?}"),
+                        "tool_approval_mode": "approve",
                         "ignore_user_config": true,
                     }),
                 ))
@@ -2356,19 +2359,51 @@ impl MissionCore {
             .experiments
             .into_iter()
             .map(|spec| -> Result<Experiment> {
-                let workload = match spec.workload {
-                    DispatchExperimentWorkload::Script { script } => {
-                        ExperimentWorkload::Script { script }
+                let DispatchExperimentSpec {
+                    label,
+                    hypothesis,
+                    skill,
+                    base_branch,
+                    kind,
+                    script,
+                    prompt,
+                    provider,
+                    model,
+                    sandbox_lifecycle,
+                    candidate_policy,
+                    timeout_secs,
+                    allow_all_tools,
+                    metric_keys,
+                } = spec;
+                let workload = match kind {
+                    DispatchExperimentKind::Script => {
+                        if prompt.is_some()
+                            || provider.is_some()
+                            || model.is_some()
+                            || sandbox_lifecycle.is_some()
+                            || candidate_policy.is_some()
+                            || timeout_secs.is_some()
+                            || allow_all_tools.is_some()
+                        {
+                            anyhow::bail!(
+                                "script experiments only accept kind, script, label, hypothesis, base_branch, skill, and metric_keys"
+                            );
+                        }
+                        ExperimentWorkload::Script {
+                            script: script.ok_or_else(|| {
+                                anyhow!("script experiments require a script payload")
+                            })?,
+                        }
                     }
-                    DispatchExperimentWorkload::AgentTask {
-                        prompt,
-                        provider,
-                        model,
-                        sandbox_lifecycle,
-                        candidate_policy,
-                        timeout_secs,
-                        allow_all_tools,
-                    } => {
+                    DispatchExperimentKind::AgentTask => {
+                        if script.is_some() {
+                            anyhow::bail!(
+                                "agent_task experiments do not accept a script payload"
+                            );
+                        }
+                        let prompt = prompt.ok_or_else(|| {
+                            anyhow!("agent_task experiments require a prompt field")
+                        })?;
                         let provider_id = provider
                             .clone()
                             .unwrap_or_else(|| stored_mission.provider_name.clone());
@@ -2408,15 +2443,13 @@ impl MissionCore {
                 let experiment = Experiment {
                     id: ExperimentId::new(),
                     mission_id: mission.id,
-                    label: spec.label,
+                    label,
                     spec: bakudo_core::mission::ExperimentSpec {
-                        base_branch: spec
-                            .base_branch
-                            .unwrap_or_else(|| self.config.base_branch.clone()),
+                        base_branch: base_branch.unwrap_or_else(|| self.config.base_branch.clone()),
                         workload,
-                        skill: spec.skill,
-                        hypothesis: spec.hypothesis,
-                        metric_keys: spec.metric_keys,
+                        skill,
+                        hypothesis,
+                        metric_keys,
                     },
                     status: ExperimentStatus::Queued,
                     started_at: None,
@@ -2529,7 +2562,9 @@ impl MissionCore {
             .run_inline_script(
                 mission,
                 "abox_exec",
-                args.script,
+                ExperimentScript::Inline {
+                    source: args.script,
+                },
                 args.abox_profile.as_deref(),
                 args.timeout_secs.unwrap_or(120),
             )
@@ -2561,15 +2596,12 @@ impl MissionCore {
         arguments: Value,
     ) -> Result<ToolCallOutcome> {
         let args: AboxApplyPatchArgs = serde_json::from_value(arguments)?;
-        let script = ExperimentScript::Inline {
-            source: patch_apply_script(&args.patch, &args.verify),
-        };
         let inner = self
             .tool_abox_exec(
                 mission,
                 wake,
                 serde_json::to_value(AboxExecArgs {
-                    script,
+                    script: patch_apply_script(&args.patch, &args.verify),
                     abox_profile: args.abox_profile,
                     timeout_secs: Some(120),
                 })?,
@@ -4026,7 +4058,7 @@ fn tool_definitions() -> Vec<McpToolDefinition> {
         },
         McpToolDefinition {
             name: "dispatch_swarm",
-            description: "Dispatch a batch of abox experiments.",
+            description: "Dispatch a batch of abox experiments. Each experiment item must declare kind:\"script\" with script:{...} or kind:\"agent_task\" with prompt:\"...\".",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4049,11 +4081,14 @@ fn tool_definitions() -> Vec<McpToolDefinition> {
         },
         McpToolDefinition {
             name: "abox_exec",
-            description: "Run a one-off command inside an abox.",
+            description: "Run a one-off shell snippet inside an abox. Pass script as a plain string, not a tagged object.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "script": experiment_script_schema(),
+                    "script": {
+                        "type": "string",
+                        "description": "Shell snippet run with bash -lc inside the abox workspace.",
+                    },
                     "abox_profile": { "type": "string" },
                     "timeout_secs": { "type": "integer", "minimum": 1 },
                 },
@@ -4063,12 +4098,15 @@ fn tool_definitions() -> Vec<McpToolDefinition> {
         },
         McpToolDefinition {
             name: "abox_apply_patch",
-            description: "Apply a patch in an abox and verify it.",
+            description: "Apply a patch in an abox and verify it with a plain shell snippet.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "patch": { "type": "string" },
-                    "verify": experiment_script_schema(),
+                    "verify": {
+                        "type": "string",
+                        "description": "Shell snippet run with bash -lc after the patch is applied.",
+                    },
                     "abox_profile": { "type": "string" },
                 },
                 "required": ["patch", "verify"],
@@ -4179,53 +4217,59 @@ fn experiment_script_schema() -> Value {
 
 fn dispatch_experiment_schema() -> Value {
     json!({
-        "type": "object",
-        "properties": {
-            "label": { "type": "string" },
-            "hypothesis": { "type": "string" },
-            "skill": { "type": "string" },
-            "base_branch": { "type": "string" },
-            "metric_keys": {
-                "type": "array",
-                "items": { "type": "string" },
-            },
-            "workload": {
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "kind": { "type": "string", "const": "script" },
-                            "script": experiment_script_schema(),
-                        },
-                        "required": ["kind", "script"],
-                        "additionalProperties": false,
+        "oneOf": [
+            {
+                "type": "object",
+                "description": "Script experiment. The script field must be an object, not a JSON-encoded string.",
+                "properties": {
+                    "label": { "type": "string" },
+                    "hypothesis": { "type": "string" },
+                    "skill": { "type": "string" },
+                    "base_branch": { "type": "string" },
+                    "metric_keys": {
+                        "type": "array",
+                        "items": { "type": "string" },
                     },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "kind": { "type": "string", "const": "agent_task" },
-                            "prompt": { "type": "string" },
-                            "provider": { "type": "string" },
-                            "model": { "type": "string" },
-                            "sandbox_lifecycle": {
-                                "type": "string",
-                                "enum": ["ephemeral", "preserved"],
-                            },
-                            "candidate_policy": {
-                                "type": "string",
-                                "enum": ["auto_apply", "discard", "review"],
-                            },
-                            "timeout_secs": { "type": "integer", "minimum": 1 },
-                            "allow_all_tools": { "type": "boolean" },
-                        },
-                        "required": ["kind", "prompt"],
-                        "additionalProperties": false,
-                    }
-                ]
+                    "kind": { "type": "string", "const": "script" },
+                    "script": experiment_script_schema(),
+                },
+                "required": ["label", "hypothesis", "kind", "script"],
+                "additionalProperties": false,
+            },
+            {
+                "type": "object",
+                "description": "Provider-backed agent worker. Put prompt and policy fields directly on the experiment item. Do not nest them under workload or agent_task, and do not JSON-encode this object as a string.",
+                "properties": {
+                    "label": { "type": "string" },
+                    "hypothesis": { "type": "string" },
+                    "skill": { "type": "string" },
+                    "base_branch": { "type": "string" },
+                    "metric_keys": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                    },
+                    "kind": { "type": "string", "const": "agent_task" },
+                    "prompt": {
+                        "type": "string",
+                        "description": "The worker task instruction. This field is named prompt, not task."
+                    },
+                    "provider": { "type": "string" },
+                    "model": { "type": "string" },
+                    "sandbox_lifecycle": {
+                        "type": "string",
+                        "enum": ["ephemeral", "preserved"],
+                    },
+                    "candidate_policy": {
+                        "type": "string",
+                        "enum": ["auto_apply", "discard", "review"],
+                    },
+                    "timeout_secs": { "type": "integer", "minimum": 1 },
+                    "allow_all_tools": { "type": "boolean" },
+                },
+                "required": ["label", "hypothesis", "kind", "prompt"],
+                "additionalProperties": false,
             }
-        },
-        "required": ["label", "hypothesis", "workload"],
-        "additionalProperties": false,
+        ]
     })
 }
 
@@ -4400,18 +4444,10 @@ fn extract_metrics(stdout: &str, metric_keys: &[String]) -> serde_json::Map<Stri
     metrics
 }
 
-fn patch_apply_script(patch: &str, verify: &ExperimentScript) -> String {
-    let verify_cmd = match verify {
-        ExperimentScript::Inline { source } => source.clone(),
-        ExperimentScript::File { path } => format!("bash {}", shell_escape(path)),
-    };
+fn patch_apply_script(patch: &str, verify: &str) -> String {
     format!(
-        "set -euo pipefail\ncat > /tmp/bakudo.patch <<'PATCH'\n{patch}\nPATCH\ngit apply /tmp/bakudo.patch\n{verify_cmd}\n"
+        "set -euo pipefail\ncat > /tmp/bakudo.patch <<'PATCH'\n{patch}\nPATCH\ngit apply /tmp/bakudo.patch\n{verify}\n"
     )
-}
-
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn slugify(value: &str) -> String {
@@ -4452,5 +4488,170 @@ fn merge_patch(target: &mut Value, patch: Value) {
             }
         }
         other => *target = other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use bakudo_core::abox::AboxAdapter;
+    use bakudo_core::config::BakudoConfig;
+    use bakudo_core::mission::{Posture, WakeId};
+    use bakudo_core::protocol::SessionId;
+    use bakudo_core::provider::ProviderRegistry;
+    use bakudo_core::session::SessionRecord;
+    use bakudo_core::state::SandboxLedger;
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_deliberator_command_preapproves_bakudo_mcp_tools_for_codex() {
+        let dir = TempDir::new("bakudo-session-controller-codex");
+        let config = Arc::new(BakudoConfig {
+            data_dir: Some(dir.path.join("data")),
+            ..Default::default()
+        });
+        let ledger = Arc::new(SandboxLedger::new());
+        let abox = Arc::new(AboxAdapter::new("/bin/true"));
+        let registry = Arc::new(ProviderRegistry::with_defaults());
+        let (self_tx, cmd_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let controller = SessionController::with_session(
+            config,
+            abox,
+            ledger,
+            registry,
+            SessionBootstrap {
+                session: SessionRecord::with_id(
+                    SessionId("session-codex".to_string()),
+                    "codex",
+                    None,
+                    Some(dir.path.display().to_string()),
+                ),
+                resume_only: false,
+            },
+            self_tx,
+            cmd_rx,
+            event_tx,
+        );
+        let provider = crate::provider_runtime::ProviderRuntimeConfig {
+            name: "codex-mission".to_string(),
+            engine: ProviderEngine::Codex,
+            posture: Posture::Mission,
+            engine_args: vec!["exec".to_string()],
+            allow_all_tools: true,
+            abox_profile: "dev-broad".to_string(),
+            system_prompt_file: dir.path.join("mission.md"),
+            wake_budget: crate::provider_runtime::WakeBudget::default(),
+            env: Default::default(),
+            worker: None,
+        };
+
+        let (_binary, args, mcp_launch) = controller
+            .mission_core()
+            .build_deliberator_command(
+                &provider,
+                MissionId(Uuid::new_v4()),
+                WakeId(Uuid::new_v4()),
+                "mission prompt",
+                "http://127.0.0.1:7777/mcp",
+            )
+            .await
+            .unwrap();
+
+        assert!(args.iter().any(|arg| arg == "--ignore-user-config"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "mcp_servers.bakudo.url=\"http://127.0.0.1:7777/mcp\""));
+        assert!(args
+            .iter()
+            .any(|arg| { arg == "mcp_servers.bakudo.default_tools_approval_mode=\"approve\"" }));
+        assert_eq!(mcp_launch["tool_approval_mode"], "approve");
+    }
+
+    #[test]
+    fn dispatch_swarm_schema_documents_agent_task_shape() {
+        let schema = dispatch_experiment_schema();
+        let agent_task = &schema["oneOf"][1];
+        let description = agent_task["description"]
+            .as_str()
+            .expect("dispatch_swarm agent_task description");
+        assert!(description.contains("Do not nest"));
+        assert!(description.contains("JSON-encode this object as a string"));
+        assert_eq!(agent_task["properties"]["kind"]["const"], "agent_task");
+        assert_eq!(agent_task["properties"]["prompt"]["type"], "string");
+        assert!(agent_task["properties"]["prompt"]["description"]
+            .as_str()
+            .expect("prompt description")
+            .contains("named prompt, not task"));
+    }
+
+    #[test]
+    fn dispatch_swarm_args_accept_flat_agent_task_shape() {
+        let args: DispatchSwarmArgs = serde_json::from_value(json!({
+            "experiments": [{
+                "label": "fix",
+                "hypothesis": "one worker can fix it",
+                "kind": "agent_task",
+                "prompt": "Fix the daemon",
+                "candidate_policy": "auto_apply",
+                "allow_all_tools": true
+            }]
+        }))
+        .expect("flat dispatch_swarm args should parse");
+
+        assert_eq!(args.experiments.len(), 1);
+        let experiment = &args.experiments[0];
+        assert!(matches!(experiment.kind, DispatchExperimentKind::AgentTask));
+        assert_eq!(experiment.prompt.as_deref(), Some("Fix the daemon"));
+        assert_eq!(
+            experiment.candidate_policy,
+            Some(CandidatePolicy::AutoApply)
+        );
+        assert_eq!(experiment.allow_all_tools, Some(true));
+    }
+
+    #[test]
+    fn abox_exec_args_accept_plain_script_string() {
+        let args: AboxExecArgs = serde_json::from_value(json!({
+            "script": "printf OK",
+            "timeout_secs": 30,
+        }))
+        .expect("abox_exec string args should parse");
+
+        assert_eq!(args.script, "printf OK");
+        assert_eq!(args.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn abox_apply_patch_args_accept_plain_verify_string() {
+        let args: AboxApplyPatchArgs = serde_json::from_value(json!({
+            "patch": "--- a/x\n+++ b/x\n@@\n-old\n+new\n",
+            "verify": "test -f x",
+        }))
+        .expect("abox_apply_patch string args should parse");
+
+        assert_eq!(args.verify, "test -f x");
     }
 }

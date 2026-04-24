@@ -211,6 +211,13 @@ async fn run_attempt_inner(
                     exit_code: run.exit_code,
                 },
             };
+            if let Some(path) =
+                extract_worktree_path(&run.stdout).or_else(|| default_worktree_path(&task_id))
+            {
+                cfg.ledger
+                    .set_worktree(&task_id, path, sandbox_branch_name(&task_id))
+                    .await;
+            }
             cfg.ledger.update_state(&task_id, new_state).await;
 
             let mut result = structured_result
@@ -357,6 +364,40 @@ fn attempt_trace_bundle(spec: &AttemptSpec, result: &WorkerResult) -> String {
     )
 }
 
+fn sandbox_branch_name(task_id: &str) -> String {
+    format!("agent/{task_id}")
+}
+
+fn extract_worktree_path(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(extract_worktree_path_from_line)
+}
+
+fn extract_worktree_path_from_line(line: &str) -> Option<String> {
+    for marker in ["worktree=", "path="] {
+        let Some((_, tail)) = line.split_once(marker) else {
+            continue;
+        };
+        let candidate = tail
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"');
+        if candidate.starts_with('/') {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+fn default_worktree_path(task_id: &str) -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home)
+        .join(".abox")
+        .join("worktrees")
+        .join(task_id);
+    path.exists().then(|| path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +482,14 @@ mod tests {
     fn extract_summary_falls_back_to_stderr() {
         let summary = extract_summary("", "first\n\nfatal: provider exploded\n");
         assert_eq!(summary, "fatal: provider exploded");
+    }
+
+    #[test]
+    fn extract_worktree_path_parses_abox_logs() {
+        let line = "2026-04-24T11:49:56Z INFO Created worktree sandbox_id=\"bakudo-task\" branch=agent/bakudo-task path=/tmp/abox/worktrees/bakudo-task";
+        assert_eq!(
+            extract_worktree_path_from_line(line).as_deref(),
+            Some("/tmp/abox/worktrees/bakudo-task")
+        );
     }
 }

@@ -683,6 +683,62 @@ EOF
 }
 
 #[tokio::test]
+async fn task_runner_records_worktree_path_from_abox_output() {
+    let dir = TempDir::new("bakudo-task-runner-worktree-path");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    task_id=""
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == "--task" ]]; then
+        task_id="$2"
+        shift 2
+        continue
+      fi
+      shift
+    done
+    echo "2026-04-24T11:49:56Z INFO Created worktree sandbox_id=\"$task_id\" branch=agent/$task_id path=/tmp/fake-worktrees/$task_id"
+    echo "worker finished"
+    ;;
+"#,
+    );
+
+    let ledger = Arc::new(SandboxLedger::new());
+    let data_dir = dir.path.join("data");
+    let adapter = Arc::new(AboxAdapter::new(&script));
+    let cfg = Arc::new(TaskRunnerConfig {
+        abox: adapter,
+        ledger: ledger.clone(),
+        data_dir: data_dir.clone(),
+        trace_recorder: bakudo_daemon::trace::TraceRecorder::new(data_dir),
+        worker_command: vec!["fake-worker".to_string()],
+        memory_mib: None,
+        cpus: None,
+    });
+
+    let mut spec = AttemptSpec::new("capture worktree path", "codex");
+    spec.attempt_id = AttemptId("attempt-runner-worktree-path".to_string());
+    let sandbox_id = sandbox_task_id(&spec.attempt_id.0);
+
+    let (mut rx, handle) = run_attempt(spec, cfg).await;
+    while let Some(event) = rx.recv().await {
+        if let RunnerEvent::Finished(_) = event {
+            break;
+        }
+    }
+    handle.await.unwrap().unwrap();
+
+    let record = ledger.get(&sandbox_id).await.unwrap();
+    let expected_path = format!("/tmp/fake-worktrees/{sandbox_id}");
+    let expected_branch = format!("agent/{sandbox_id}");
+    assert_eq!(
+        record.worktree_path.as_deref(),
+        Some(expected_path.as_str())
+    );
+    assert_eq!(record.branch.as_deref(), Some(expected_branch.as_str()));
+}
+
+#[tokio::test]
 async fn task_runner_maps_exit_124_to_timed_out_state() {
     let dir = TempDir::new("bakudo-task-runner-timeout");
     let (script, _log) = write_fake_abox_script(
@@ -821,6 +877,73 @@ EOF
     let record = ledger.get("task-conflicts").await.unwrap();
     assert_eq!(record.state, SandboxState::MergeConflicts);
     assert!(record.finished_at.is_some());
+}
+
+#[tokio::test]
+async fn apply_candidate_policy_snapshots_dirty_preserved_worktree_before_auto_apply() {
+    let dir = TempDir::new("bakudo-worktree-snapshot");
+    let repo = TempRepo::new();
+    let task_id = "task-snapshot";
+    let branch = format!("agent/{task_id}");
+    let worktree_dir = dir.path.join("sandbox");
+    run_host(
+        repo.path(),
+        "git",
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            worktree_dir.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(worktree_dir.join("smoke.txt"), "OK\n").unwrap();
+
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        &format!(
+            r#"  merge)
+    task_id="$1"
+    git -C {:?} merge --ff-only "agent/$task_id" >/dev/null
+    ;;
+"#,
+            repo.path().display().to_string(),
+        ),
+    );
+    let adapter = AboxAdapter::new(&script);
+    let ledger = Arc::new(SandboxLedger::new());
+    let mut record = make_record(task_id, SandboxState::Preserved);
+    record.worktree_path = Some(worktree_dir.display().to_string());
+    record.branch = Some(branch.clone());
+    ledger.insert(record).await;
+
+    let action = apply_candidate_policy(
+        task_id,
+        &CandidatePolicy::AutoApply,
+        "main",
+        Some(repo.path()),
+        &adapter,
+        &ledger,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(action, WorktreeAction::Merged));
+    assert_eq!(
+        fs::read_to_string(repo.path().join("smoke.txt")).unwrap(),
+        "OK\n"
+    );
+    assert!(host_output(&worktree_dir, "git", &["status", "--short"])
+        .trim()
+        .is_empty());
+    assert_eq!(
+        host_output(repo.path(), "git", &["rev-parse", "main"]).trim(),
+        host_output(repo.path(), "git", &["rev-parse", &branch]).trim()
+    );
+
+    let record = ledger.get(task_id).await.unwrap();
+    assert_eq!(record.state, SandboxState::Merged);
 }
 
 #[tokio::test]
@@ -1367,10 +1490,8 @@ if wake["reason"] in ("manual_resume", "user_message"):
             "label": "wave-1",
             "hypothesis": "measure baseline",
             "base_branch": "main",
-            "workload": {
-                "kind": "script",
-                "script": {"kind": "inline", "source": "echo '{\"score\": 42}'"}
-            },
+            "kind": "script",
+            "script": {"kind": "inline", "source": "echo '{\"score\": 42}'"},
             "metric_keys": ["score"]
         }],
         "wake_when": "all_complete"
@@ -1500,10 +1621,8 @@ if wake["reason"] == "manual_resume":
             "label": "wave-1",
             "hypothesis": "first pass",
             "base_branch": "main",
-            "workload": {
-                "kind": "script",
-                "script": {"kind": "inline", "source": "echo '{\"score\": 21}'"}
-            },
+            "kind": "script",
+            "script": {"kind": "inline", "source": "echo '{\"score\": 21}'"},
             "metric_keys": ["score"]
         }],
         "wake_when": "all_complete"
@@ -1518,10 +1637,8 @@ elif wake["reason"] == "experiments_complete":
                 "label": "wave-2",
                 "hypothesis": "second pass",
                 "base_branch": "main",
-                "workload": {
-                    "kind": "script",
-                    "script": {"kind": "inline", "source": "echo '{\"score\": 84}'"}
-                },
+                "kind": "script",
+                "script": {"kind": "inline", "source": "echo '{\"score\": 84}'"},
                 "metric_keys": ["score"]
             }],
             "wake_when": "all_complete"
@@ -1658,10 +1775,8 @@ experiments = [{
     "label": f"exp-{idx}",
     "hypothesis": "overflow wallet",
     "base_branch": "main",
-    "workload": {
-        "kind": "script",
-        "script": {"kind": "inline", "source": "echo wallet"}
-    },
+    "kind": "script",
+    "script": {"kind": "inline", "source": "echo wallet"},
     "metric_keys": []
 } for idx in range(13)]
 response = call_error("dispatch_swarm", {"experiments": experiments, "wake_when": "all_complete"})
@@ -1746,6 +1861,138 @@ call("complete_mission", {"summary": "wallet rejected oversized wave"})
         .await
         .unwrap()
         .is_empty());
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_accepts_plain_string_abox_exec_after_worker_summary() {
+    let dir = TempDir::new("bakudo-abox-exec-runtime");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+if wake["reason"] == "manual_resume":
+    call("dispatch_swarm", {
+        "experiments": [{
+            "label": "worker-1",
+            "hypothesis": "prepare a value to verify",
+            "base_branch": "main",
+            "kind": "script",
+            "script": {"kind": "inline", "source": "echo '{\"score\": 7}'"},
+            "metric_keys": ["score"]
+        }],
+        "wake_when": "all_complete"
+    })
+    call("suspend", {"reason": "wait_for_worker"})
+elif wake["reason"] == "experiments_complete":
+    experiment = wake["payload"]["experiments"][0]
+    call("read_experiment_summary", {"experiment_id": experiment["id"]})
+    verify, _meta = call("abox_exec", {"script": "printf verified", "timeout_secs": 30})
+    assert verify["exit_code"] == 0, verify
+    assert "verified" in verify["stdout_tail"], verify
+    call("complete_mission", {"summary": "abox_exec verification succeeded"})
+else:
+    call("complete_mission", {"summary": "mission ended without extra work"})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-abox-exec".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Verify abox_exec strings".to_string(),
+            done_contract: Some("the wake should verify with abox_exec".to_string()),
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mut observed_events = Vec::new();
+    let mission_wait = timeout(Duration::from_secs(5), async {
+        loop {
+            while let Ok(event) = event_rx.try_recv() {
+                observed_events.push(format!("{event:?}"));
+            }
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    let mission = match mission_wait {
+        Ok(mission) => mission,
+        Err(_) => {
+            let missions = store.list_missions().await.unwrap();
+            let experiments = if let Some(mission) = missions.first() {
+                store.experiments_for_mission(mission.id).await.unwrap()
+            } else {
+                Vec::new()
+            };
+            panic!(
+                "missions after timeout: {:?}\nexperiments: {:?}\nobserved events: {:?}",
+                missions, experiments, observed_events,
+            );
+        }
+    };
+
+    let experiments = store.experiments_for_mission(mission.id).await.unwrap();
+    assert_eq!(experiments.len(), 1);
+    assert_eq!(experiments[0].status, ExperimentStatus::Succeeded);
 
     cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
     handle.await.unwrap();

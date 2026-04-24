@@ -143,8 +143,8 @@ impl SandboxLedger {
         {
             let mut map = self.inner.write().await;
             if let Some(record) = map.get_mut(task_id) {
-                record.worktree_path = Some(path);
-                record.branch = Some(branch);
+                record.worktree_path = (!path.trim().is_empty()).then_some(path);
+                record.branch = (!branch.trim().is_empty()).then_some(branch);
             }
         }
         self.flush().await;
