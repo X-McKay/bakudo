@@ -45,6 +45,7 @@ For autonomous missions:
 - Bakudo reads the configured mission prompt file, appends a wake bootstrap block containing the current `WakeEvent` JSON plus JSON-RPC transport instructions, and passes that combined prompt as the provider's prompt argument.
 - Deliberator `stdin` is reserved for Bakudo's line-delimited JSON-RPC responses, so wake bootstrap data is not streamed over `stdin`.
 - Provider `.toml` files declare the engine, prompt file, abox profile, wake budget, environment passthrough, and optional `[worker]` config for mission-native agent workers.
+- Mission-native agent workers default to the provider's low-friction execution flag inside `abox` when the dispatch does not override `allow_all_tools`; the host execution policy can still forbid or downgrade a provider entirely.
 - The supervisor enforces each provider's per-wake `wake_budget` wall-clock and tool-call limits, then re-queues a timeout wake instead of leaving the deliberator running indefinitely.
 - The current tool surface is:
   `read_plan`, `update_plan`, `notify_user`, `ask_user`, `complete_mission`, `read_experiment_summary`, `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`, `update_mission_state`, `record_lesson`, and `suspend`.

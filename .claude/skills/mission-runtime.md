@@ -59,6 +59,10 @@ The mission runtime lives primarily in:
    preserved worktrees, but merge/apply/discard decisions still happen on the
    host side.
 
+   Mission-native agent workers now default to the provider's low-friction
+   execution mode inside `abox`. A dispatch can still opt out by setting
+   `allow_all_tools = false`.
+
 ## Process
 
 1. Read the current mission flow in `docs/current-architecture.md`.

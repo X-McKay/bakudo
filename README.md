@@ -173,6 +173,7 @@ Autonomous missions use a durable wake/supervisor model:
 - Each wake is bootstrapped by passing the provider a prompt argument built from the shipped mission prompt plus the current `WakeEvent` JSON; stdin stays reserved for line-delimited JSON-RPC tool responses.
 - `dispatch_swarm` launches `abox` experiments, enforces the mission wallet, reserves worker capacity up front, and schedules waves according to `concurrency_hint` instead of starting the entire wave at once.
 - Mission waves can use script workloads or provider-backed agent workloads through the mission-native worker config in `ProviderCatalog`.
+- Provider-backed agent workers default to the provider's "allow all" mode inside `abox` (`claude --dangerously-skip-permissions`, `codex --full-auto`, `gemini --yolo`) unless a dispatch explicitly opts out with `allow_all_tools = false`.
 - Each provider wake also respects its configured `wake_budget`; if the deliberator exceeds its per-wake wall-clock or tool-call budget, Bakudo ends that wake and queues a timeout wake.
 - Wake traces are recorded under `<repo-data>/traces/missions/<mission-id>/wakes/<wake-id>/`.
 - Attempt traces and experiment `trace_bundle.md` summaries are recorded under `<repo-data>/traces/attempts/<task-id>/`.

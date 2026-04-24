@@ -785,7 +785,7 @@ debounce = "1500ms"
 engine = "codex"
 engine_args = ["exec"]
 abox_profile = "worker"
-allow_all_tools = false
+allow_all_tools = true
 timeout_secs = 1800
 max_output_bytes = 1048576
 ```
