@@ -29,21 +29,23 @@ use bakudo_core::config::BakudoConfig;
 use bakudo_core::control::{save_run_summary, update_run_summary_outcome, RunSummary};
 use bakudo_core::hook::{HookWorktreeAction, PostRunHookPayload};
 use bakudo_core::mission::{
-    Experiment, ExperimentId, ExperimentScript, ExperimentStatus, ExperimentSummary, LedgerEntry,
-    LedgerKind, Mission, MissionId, MissionState, MissionStatus, Posture, UserMessage, WakeEvent,
-    WakeId, WakeReason, WakeWhen, Wallet,
+    Experiment, ExperimentId, ExperimentScript, ExperimentStatus, ExperimentSummary,
+    ExperimentWorkload, LedgerEntry, LedgerKind, Mission, MissionId, MissionState, MissionStatus,
+    Posture, UserMessage, WakeEvent, WakeId, WakeReason, WakeWhen, Wallet,
 };
 use bakudo_core::policy::PolicyDecision;
-use bakudo_core::protocol::WorkerStatus;
+use bakudo_core::protocol::{CandidatePolicy, SandboxLifecycle, WorkerStatus};
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::session::SessionRecord;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 
 use crate::hooks::run_post_run_hook;
-use crate::host::{DispatchedMissionTask, HostAction, HostRuntime, HostSnapshot, PlannedMission};
+use crate::host::{HostAction, HostRuntime, HostSnapshot};
 use crate::mission_store::{ActiveWaveRecord, MissionStore};
 use crate::provider_runtime::{ProviderCatalog, ProviderEngine};
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
+use crate::trace::TraceRecorder;
+use crate::worker::{build_agent_worker_command, build_script_worker_command};
 use crate::worktree::{apply_candidate_policy, WorktreeAction};
 
 /// Commands sent from the TUI to the session controller.
@@ -119,6 +121,85 @@ pub struct MissionBanner {
     pub fleet: FleetCounts,
 }
 
+#[derive(Debug, Clone)]
+pub enum MissionActivity {
+    PlanUpdated {
+        mission_id: String,
+        reason: String,
+        path: String,
+    },
+    UserNotified {
+        mission_id: String,
+        message: String,
+    },
+    QuestionAsked {
+        mission_id: String,
+        question: String,
+    },
+    WaveDispatched {
+        mission_id: String,
+        experiment_ids: Vec<String>,
+        concurrency_limit: u32,
+    },
+    WorkerFinished {
+        mission_id: String,
+        experiment_id: String,
+        label: String,
+        status: ExperimentStatus,
+        trace_bundle_path: Option<String>,
+    },
+    ApprovalBlocked {
+        mission_id: String,
+        reason: String,
+    },
+    MissionCompleted {
+        mission_id: String,
+        summary: String,
+    },
+}
+
+impl MissionActivity {
+    pub fn render_text(&self) -> String {
+        match self {
+            Self::PlanUpdated {
+                mission_id,
+                reason,
+                path,
+            } => format!("Mission {mission_id}: plan updated ({reason}). Artifact: {path}"),
+            Self::UserNotified {
+                mission_id,
+                message,
+            } => format!("Mission {mission_id}: {message}"),
+            Self::QuestionAsked {
+                mission_id,
+                question,
+            } => format!("Mission {mission_id}: question asked: {question}"),
+            Self::WaveDispatched {
+                mission_id,
+                experiment_ids,
+                concurrency_limit,
+            } => format!(
+                "Mission {mission_id}: dispatched {} worker(s) with concurrency {}.",
+                experiment_ids.len(),
+                concurrency_limit
+            ),
+            Self::WorkerFinished {
+                mission_id,
+                label,
+                status,
+                ..
+            } => format!("Mission {mission_id}: worker '{label}' finished with {status:?}."),
+            Self::ApprovalBlocked { mission_id, reason } => {
+                format!("Mission {mission_id}: agent wave blocked: {reason}")
+            }
+            Self::MissionCompleted {
+                mission_id,
+                summary,
+            } => format!("Mission {mission_id}: completed. {summary}"),
+        }
+    }
+}
+
 /// Events emitted by the session controller to the TUI.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -157,6 +238,8 @@ pub enum SessionEvent {
         question: String,
         choices: Vec<String>,
     },
+    /// Typed mission progress activity for the transcript.
+    MissionActivity { activity: MissionActivity },
     /// Informational message for the transcript.
     Info(String),
     /// An error occurred.
@@ -175,6 +258,7 @@ pub struct SessionController {
     provider_catalog: ProviderCatalog,
     runtime_state: Arc<Mutex<MissionRuntimeState>>,
     host: HostRuntime,
+    trace_recorder: TraceRecorder,
     current_provider: String,
     current_model: Option<String>,
     next_execution_approved: bool,
@@ -191,6 +275,7 @@ struct MissionRuntimeState {
     pending_questions: HashMap<String, oneshot::Sender<String>>,
     deliberating: HashSet<MissionId>,
     wake_user_message_ids: HashMap<WakeId, Vec<i64>>,
+    next_agent_wave_approved: bool,
 }
 
 struct HostExecResolution {
@@ -209,6 +294,8 @@ struct MissionCore {
     event_tx: mpsc::Sender<SessionEvent>,
     self_tx: mpsc::Sender<SessionCommand>,
     session: SessionRecord,
+    host: HostRuntime,
+    trace_recorder: TraceRecorder,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -267,9 +354,32 @@ struct DispatchExperimentSpec {
     skill: Option<String>,
     #[serde(default)]
     base_branch: Option<String>,
-    script: ExperimentScript,
+    workload: DispatchExperimentWorkload,
     #[serde(default)]
     metric_keys: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DispatchExperimentWorkload {
+    Script {
+        script: ExperimentScript,
+    },
+    AgentTask {
+        prompt: String,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        sandbox_lifecycle: Option<SandboxLifecycle>,
+        #[serde(default)]
+        candidate_policy: Option<CandidatePolicy>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        allow_all_tools: Option<bool>,
+    },
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -314,6 +424,27 @@ struct AskUserArgs {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct NotifyUserArgs {
+    message: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CompleteMissionArgs {
+    summary: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ReadExperimentSummaryArgs {
+    experiment_id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct UpdatePlanArgs {
+    markdown: String,
+    reason: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct CancelExperimentsArgs {
     experiment_ids: Vec<String>,
     #[serde(default)]
@@ -326,8 +457,6 @@ struct SuspendArgs {
     reason: Option<String>,
     #[serde(default)]
     expected_wake: Option<String>,
-    #[serde(default)]
-    complete: bool,
 }
 
 pub struct SessionBootstrap {
@@ -401,6 +530,8 @@ impl SessionController {
                 .expect("mission store should initialize"),
         );
         let provider_catalog = ProviderCatalog::new(repo_root);
+        let host = HostRuntime::new();
+        let trace_recorder = TraceRecorder::new(repo_data_dir);
         Self {
             session,
             config,
@@ -410,7 +541,8 @@ impl SessionController {
             mission_store,
             provider_catalog,
             runtime_state: Arc::new(Mutex::new(MissionRuntimeState::default())),
-            host: HostRuntime::new(),
+            host,
+            trace_recorder,
             current_provider,
             current_model,
             next_execution_approved: false,
@@ -444,6 +576,8 @@ impl SessionController {
                 }
                 SessionCommand::ApproveExecution => {
                     self.next_execution_approved = true;
+                    let mut state = self.runtime_state.lock().await;
+                    state.next_agent_wave_approved = true;
                 }
                 SessionCommand::SetProvider { provider_id } => {
                     self.set_provider(provider_id).await;
@@ -561,34 +695,20 @@ impl SessionController {
             HostAction::Reply(message) => {
                 let _ = self.event_tx.send(SessionEvent::Info(message)).await;
             }
+            HostAction::StartMission {
+                posture,
+                objective,
+                done_contract,
+                constraints,
+                announcement,
+            } => {
+                let _ = self.event_tx.send(SessionEvent::Info(announcement)).await;
+                self.start_mission(posture, objective, done_contract, constraints);
+            }
             HostAction::SteerMission { text, urgent } => {
                 self.enqueue_active_mission_message(text, urgent);
             }
-            HostAction::LaunchPlan { plan, announcement } => {
-                let _ = self.event_tx.send(SessionEvent::Info(announcement)).await;
-                self.launch_plan(plan).await;
-            }
         }
-    }
-
-    async fn launch_plan(&mut self, plan: PlannedMission) {
-        let posture = match plan.mode {
-            crate::host::MissionMode::Discovery => Posture::Explore,
-            crate::host::MissionMode::Implementation => Posture::Mission,
-        };
-        self.start_mission(
-            posture,
-            plan.objective.clone(),
-            Some(plan.done_contract.clone()),
-            Some(plan.constraints.clone()),
-        );
-        self.host.mark_plan_dispatched(
-            &plan,
-            vec![DispatchedMissionTask {
-                task_id: plan.mission_id.clone(),
-                label: plan.objective.clone(),
-            }],
-        );
     }
 
     async fn dispatch_task(&mut self, prompt: String, approved: bool) -> Option<String> {
@@ -683,6 +803,7 @@ impl SessionController {
                 .config
                 .resolved_repo_data_dir_from_str(self.session.repo_root.as_deref())
                 .join("runs"),
+            trace_recorder: self.trace_recorder.clone(),
             worker_command: provider.build_worker_command(
                 self.current_model.as_deref(),
                 execution_decision.allow_all_tools,
@@ -1102,6 +1223,8 @@ impl SessionController {
             event_tx: self.event_tx.clone(),
             self_tx: self.self_tx.clone(),
             session: self.session.clone(),
+            host: self.host.clone(),
+            trace_recorder: self.trace_recorder.clone(),
         }
     }
 
@@ -1259,6 +1382,10 @@ impl MissionCore {
             }
             mission.status = MissionStatus::AwaitingDeliberator;
             self.mission_store.upsert_mission(&mission).await?;
+            self.host
+                .mark_mission_started(&mission.id.to_string(), &mission.goal, mission.posture);
+            self.evaluate_active_wave(mission.id).await?;
+            self.schedule_active_wave(mission.id).await?;
             self.queue_wake(
                 mission.id,
                 WakeReason::ManualResume,
@@ -1341,6 +1468,13 @@ impl MissionCore {
             .await;
     }
 
+    async fn emit_mission_activity(&self, activity: MissionActivity) {
+        let _ = self
+            .event_tx
+            .send(SessionEvent::MissionActivity { activity })
+            .await;
+    }
+
     async fn start_mission(
         &self,
         provider_base: String,
@@ -1354,7 +1488,7 @@ impl MissionCore {
             id: MissionId::new(),
             goal: goal.clone(),
             posture,
-            provider_name: provider.name.clone(),
+            provider_name: provider_base,
             abox_profile: provider.abox_profile.clone(),
             wallet: Wallet::default(),
             status: MissionStatus::AwaitingDeliberator,
@@ -1362,11 +1496,16 @@ impl MissionCore {
             completed_at: None,
         };
         let mission_state =
-            initial_mission_state(&goal, posture, done_contract.clone(), constraints.clone());
+            initial_mission_state(&goal, done_contract.clone(), constraints.clone());
         self.mission_store.upsert_mission(&mission).await?;
         self.mission_store
             .save_mission_state(mission.id, &mission_state)
             .await?;
+        let plan = initial_mission_plan(&goal, done_contract.as_deref(), constraints.as_deref());
+        self.mission_store
+            .seed_mission_plan(mission.id, &plan)
+            .await?;
+        let plan_path = self.mission_store.mission_plan_path(mission.id);
         self.mission_store
             .append_ledger(&LedgerEntry {
                 at: Utc::now(),
@@ -1380,12 +1519,20 @@ impl MissionCore {
             let mut state = self.runtime_state.lock().await;
             state.active_mission_id = Some(mission.id);
         }
+        self.host
+            .mark_mission_started(&mission.id.to_string(), &mission.goal, posture);
         self.emit_banner().await;
+        self.emit_mission_activity(MissionActivity::PlanUpdated {
+            mission_id: mission.id.to_string(),
+            reason: "seeded mission plan".to_string(),
+            path: plan_path.display().to_string(),
+        })
+        .await;
         let _ = self
             .event_tx
             .send(SessionEvent::Info(format!(
                 "Started {} mission '{}' using provider '{}'.",
-                posture, mission.goal, mission.provider_name
+                posture, mission.goal, provider.name
             )))
             .await;
         self.queue_wake(
@@ -1639,6 +1786,7 @@ impl MissionCore {
                 MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed
             ) {
                 mission.completed_at = Some(Utc::now());
+                self.host.mark_mission_completed(&mission.id.to_string());
             }
             self.mission_store.upsert_mission(&mission).await?;
             self.emit_banner().await;
@@ -1661,6 +1809,18 @@ impl MissionCore {
         tokio::fs::create_dir_all(&wake_dir).await?;
         let wake_path = wake_dir.join(format!("{}.json", wake.id));
         tokio::fs::write(&wake_path, serde_json::to_vec_pretty(wake)?).await?;
+        self.trace_recorder
+            .record_wake_start(
+                mission.id,
+                wake,
+                &json!({
+                    "provider": provider.name.clone(),
+                    "engine": format!("{:?}", provider.engine),
+                    "engine_args": provider.engine_args.clone(),
+                    "system_prompt_file": provider.system_prompt_file.clone(),
+                }),
+            )
+            .await;
         self.append_provenance(
             mission.id,
             json!({
@@ -1720,6 +1880,9 @@ impl MissionCore {
             .ok_or_else(|| anyhow!("missing deliberator stderr"))?;
         let event_tx = self.event_tx.clone();
         let mission_label = mission.id.to_string();
+        let trace_recorder = self.trace_recorder.clone();
+        let trace_mission_id = mission.id;
+        let trace_wake_id = wake.id;
         tokio::spawn(async move {
             let mut stderr_lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = stderr_lines.next_line().await {
@@ -1727,6 +1890,9 @@ impl MissionCore {
                 if trimmed.is_empty() {
                     continue;
                 }
+                trace_recorder
+                    .append_wake_stderr(trace_mission_id, trace_wake_id, trimmed)
+                    .await;
                 let _ = event_tx
                     .send(SessionEvent::Info(format!(
                         "[mission {}] stderr: {}",
@@ -1870,6 +2036,9 @@ impl MissionCore {
                     }
                 }
                 Err(_) => {
+                    self.trace_recorder
+                        .append_wake_stdout(mission.id, wake.id, trimmed)
+                        .await;
                     let _ = self
                         .event_tx
                         .send(SessionEvent::Info(format!(
@@ -1921,6 +2090,17 @@ impl MissionCore {
             }),
         )
         .await?;
+        self.trace_recorder
+            .record_wake_finish(
+                mission.id,
+                wake.id,
+                &json!({
+                    "mission_status": desired_status,
+                    "saw_suspend": saw_suspend,
+                    "forced_stop": forced_stop,
+                }),
+            )
+            .await;
 
         Ok(desired_status)
     }
@@ -1982,6 +2162,14 @@ impl MissionCore {
         let tool_name = call.name.clone();
         let tool_arguments = call.arguments.clone();
         let raw = match tool_name.as_str() {
+            "read_plan" => self.tool_read_plan(mission).await?,
+            "update_plan" => self.tool_update_plan(mission, call.arguments).await?,
+            "notify_user" => self.tool_notify_user(mission, call.arguments).await?,
+            "complete_mission" => self.tool_complete_mission(mission, call.arguments).await?,
+            "read_experiment_summary" => {
+                self.tool_read_experiment_summary(mission, call.arguments)
+                    .await?
+            }
             "dispatch_swarm" => {
                 self.tool_dispatch_swarm(mission, wake, call.arguments)
                     .await?
@@ -2028,6 +2216,20 @@ impl MissionCore {
             }),
         )
         .await?;
+        self.trace_recorder
+            .append_wake_tool_call(
+                mission.id,
+                wake.id,
+                &json!({
+                    "at": Utc::now(),
+                    "tool": tool_name,
+                    "arguments": tool_arguments,
+                    "response": payload.clone(),
+                    "suspend": raw.suspend,
+                    "mission_status": raw.mission_status,
+                }),
+            )
+            .await;
         Ok(ToolCallOutcome {
             payload,
             suspend: raw.suspend,
@@ -2043,26 +2245,75 @@ impl MissionCore {
     ) -> Result<ToolCallOutcome> {
         let args: DispatchSwarmArgs = serde_json::from_value(arguments)?;
         let count = u32::try_from(args.experiments.len()).unwrap_or(u32::MAX);
-        let concurrency_hint = args.concurrency_hint.unwrap_or(count);
+        if count == 0 {
+            anyhow::bail!("dispatch_swarm requires at least one experiment");
+        }
+        let concurrency_limit = args.concurrency_hint.unwrap_or(count).max(1);
         let Some(mut stored_mission) = self.mission_store.mission(mission.id).await? else {
             anyhow::bail!("mission '{}' not found", mission.id);
         };
-        if !stored_mission.wallet.can_dispatch(count) {
+        if !stored_mission.wallet.can_reserve_workers(count) {
             anyhow::bail!(
                 "wallet would be exceeded by dispatching {} experiments",
                 count
             );
         }
-        stored_mission.wallet.debit_workers(count);
-        stored_mission.status = MissionStatus::Sleeping;
-        self.mission_store.upsert_mission(&stored_mission).await?;
-
         let wake_when = args.wake_when.unwrap_or_default();
         let mut experiment_ids = Vec::new();
+        let mut approval_required = false;
         let experiments: Vec<Experiment> = args
             .experiments
             .into_iter()
-            .map(|spec| {
+            .map(|spec| -> Result<Experiment> {
+                let workload = match spec.workload {
+                    DispatchExperimentWorkload::Script { script } => {
+                        ExperimentWorkload::Script { script }
+                    }
+                    DispatchExperimentWorkload::AgentTask {
+                        prompt,
+                        provider,
+                        model,
+                        sandbox_lifecycle,
+                        candidate_policy,
+                        timeout_secs,
+                        allow_all_tools,
+                    } => {
+                        let provider_id = provider
+                            .clone()
+                            .unwrap_or_else(|| stored_mission.provider_name.clone());
+                        let policy = self.config.execution_policy.evaluate(&provider_id);
+                        if policy.decision == PolicyDecision::Forbid {
+                            anyhow::bail!(
+                                "execution policy forbids mission-native provider '{}'",
+                                provider_id
+                            );
+                        }
+                        if policy.decision == PolicyDecision::Prompt {
+                            approval_required = true;
+                        }
+                        let worker_cfg = self
+                            .provider_catalog
+                            .load_for(&provider_id, mission.posture)?
+                            .worker
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "provider '{}' does not declare a mission worker configuration",
+                                    provider_id
+                                )
+                            })?;
+                        ExperimentWorkload::AgentTask {
+                            prompt,
+                            provider: Some(provider_id),
+                            model,
+                            sandbox_lifecycle: sandbox_lifecycle
+                                .unwrap_or(SandboxLifecycle::Preserved),
+                            candidate_policy: candidate_policy.unwrap_or(CandidatePolicy::Review),
+                            timeout_secs: timeout_secs.or(Some(worker_cfg.timeout_secs)),
+                            allow_all_tools: allow_all_tools
+                                .unwrap_or(policy.allow_all_tools && worker_cfg.allow_all_tools),
+                        }
+                    }
+                };
                 let experiment = Experiment {
                     id: ExperimentId::new(),
                     mission_id: mission.id,
@@ -2071,7 +2322,7 @@ impl MissionCore {
                         base_branch: spec
                             .base_branch
                             .unwrap_or_else(|| self.config.base_branch.clone()),
-                        script: spec.script,
+                        workload,
                         skill: spec.skill,
                         hypothesis: spec.hypothesis,
                         metric_keys: spec.metric_keys,
@@ -2082,9 +2333,41 @@ impl MissionCore {
                     summary: None,
                 };
                 experiment_ids.push(experiment.id);
-                experiment
+                Ok(experiment)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
+
+        if approval_required {
+            let approved = {
+                let mut state = self.runtime_state.lock().await;
+                std::mem::take(&mut state.next_agent_wave_approved)
+            };
+            if !approved {
+                let reason =
+                    "approval is required before launching agent workloads for this provider"
+                        .to_string();
+                self.emit_mission_activity(MissionActivity::ApprovalBlocked {
+                    mission_id: mission.id.to_string(),
+                    reason: reason.clone(),
+                })
+                .await;
+                return Ok(ToolCallOutcome {
+                    payload: json!({
+                        "accepted": false,
+                        "blocked": {
+                            "kind": "approval_required",
+                            "reason": reason,
+                        },
+                    }),
+                    suspend: false,
+                    mission_status: None,
+                });
+            }
+        }
+
+        stored_mission.wallet.reserve_workers(count);
+        stored_mission.status = MissionStatus::Sleeping;
+        self.mission_store.upsert_mission(&stored_mission).await?;
 
         for experiment in &experiments {
             self.mission_store.upsert_experiment(experiment).await?;
@@ -2102,32 +2385,26 @@ impl MissionCore {
             .save_active_wave(&ActiveWaveRecord {
                 mission_id: mission.id,
                 experiment_ids: experiment_ids.clone(),
+                concurrency_limit,
                 wake_when,
                 wake_sent: false,
                 updated_at: Utc::now(),
             })
             .await?;
         self.emit_banner().await;
-        for experiment in experiments {
-            let core = self.clone();
-            tokio::spawn(async move {
-                if let Err(err) = core.run_experiment(experiment).await {
-                    let _ = core
-                        .event_tx
-                        .send(SessionEvent::Error(format!(
-                            "Experiment failed to run: {err}"
-                        )))
-                        .await;
-                }
-            });
-        }
+        self.emit_mission_activity(MissionActivity::WaveDispatched {
+            mission_id: mission.id.to_string(),
+            experiment_ids: experiment_ids.iter().map(ToString::to_string).collect(),
+            concurrency_limit,
+        })
+        .await;
+        self.schedule_active_wave(mission.id).await?;
 
         Ok(ToolCallOutcome {
             payload: json!({
+                "accepted": true,
                 "experiment_ids": experiment_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                "suspended": true,
-                "reason": "experiments_dispatched",
-                "concurrency_hint": concurrency_hint,
+                "concurrency_limit": concurrency_limit,
                 "wake_when": match wake_when {
                     WakeWhen::AllComplete => "all_complete",
                     WakeWhen::FirstComplete => "first_complete",
@@ -2307,6 +2584,161 @@ impl MissionCore {
         })
     }
 
+    async fn tool_read_plan(&self, mission: &Mission) -> Result<ToolCallOutcome> {
+        let (path, markdown) = self.mission_store.read_mission_plan(mission.id).await?;
+        let updated_at = self
+            .mission_store
+            .mission_plan_updated_at(mission.id)
+            .await?
+            .map(|at| at.to_rfc3339());
+        Ok(ToolCallOutcome {
+            payload: json!({
+                "path": path.display().to_string(),
+                "markdown": markdown,
+                "updated_at": updated_at,
+            }),
+            suspend: false,
+            mission_status: None,
+        })
+    }
+
+    async fn tool_update_plan(
+        &self,
+        mission: &Mission,
+        arguments: Value,
+    ) -> Result<ToolCallOutcome> {
+        let args: UpdatePlanArgs = serde_json::from_value(arguments)?;
+        let path = self
+            .mission_store
+            .write_mission_plan(mission.id, &args.markdown)
+            .await?;
+        self.mission_store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::Decision,
+                summary: format!("plan updated: {}", truncate(&args.reason)),
+                mission_id: mission.id,
+                experiment_id: None,
+            })
+            .await?;
+        self.emit_mission_activity(MissionActivity::PlanUpdated {
+            mission_id: mission.id.to_string(),
+            reason: args.reason,
+            path: path.display().to_string(),
+        })
+        .await;
+        let updated_at = self
+            .mission_store
+            .mission_plan_updated_at(mission.id)
+            .await?
+            .map(|at| at.to_rfc3339());
+        Ok(ToolCallOutcome {
+            payload: json!({
+                "path": path.display().to_string(),
+                "updated_at": updated_at,
+            }),
+            suspend: false,
+            mission_status: None,
+        })
+    }
+
+    async fn tool_notify_user(
+        &self,
+        mission: &Mission,
+        arguments: Value,
+    ) -> Result<ToolCallOutcome> {
+        let args: NotifyUserArgs = serde_json::from_value(arguments)?;
+        self.mission_store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::Decision,
+                summary: format!("notify_user: {}", truncate(&args.message)),
+                mission_id: mission.id,
+                experiment_id: None,
+            })
+            .await?;
+        self.emit_mission_activity(MissionActivity::UserNotified {
+            mission_id: mission.id.to_string(),
+            message: args.message.clone(),
+        })
+        .await;
+        Ok(ToolCallOutcome {
+            payload: json!({ "delivered": true }),
+            suspend: false,
+            mission_status: None,
+        })
+    }
+
+    async fn tool_complete_mission(
+        &self,
+        mission: &Mission,
+        arguments: Value,
+    ) -> Result<ToolCallOutcome> {
+        let args: CompleteMissionArgs = serde_json::from_value(arguments)?;
+        let mut mission_state = self.mission_store.mission_state(mission.id).await?;
+        merge_patch(
+            &mut mission_state.0,
+            json!({ "completion_summary": args.summary.clone(), "active_wave": null }),
+        );
+        self.mission_store
+            .save_mission_state(mission.id, &mission_state)
+            .await?;
+        let Some(mut stored_mission) = self.mission_store.mission(mission.id).await? else {
+            anyhow::bail!("mission '{}' not found", mission.id);
+        };
+        stored_mission.status = MissionStatus::Completed;
+        stored_mission.completed_at = Some(Utc::now());
+        self.mission_store.upsert_mission(&stored_mission).await?;
+        self.mission_store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::Decision,
+                summary: format!("mission completed: {}", truncate(&args.summary)),
+                mission_id: mission.id,
+                experiment_id: None,
+            })
+            .await?;
+        self.host.mark_mission_completed(&mission.id.to_string());
+        self.emit_mission_activity(MissionActivity::MissionCompleted {
+            mission_id: mission.id.to_string(),
+            summary: args.summary.clone(),
+        })
+        .await;
+        Ok(ToolCallOutcome {
+            payload: json!({ "completed": true }),
+            suspend: true,
+            mission_status: Some(MissionStatus::Completed),
+        })
+    }
+
+    async fn tool_read_experiment_summary(
+        &self,
+        mission: &Mission,
+        arguments: Value,
+    ) -> Result<ToolCallOutcome> {
+        let args: ReadExperimentSummaryArgs = serde_json::from_value(arguments)?;
+        let experiment = self
+            .mission_store
+            .experiments_for_mission(mission.id)
+            .await?
+            .into_iter()
+            .find(|experiment| experiment.id.to_string() == args.experiment_id)
+            .ok_or_else(|| anyhow!("experiment '{}' not found", args.experiment_id))?;
+        let trace_bundle_path = self
+            .trace_recorder
+            .attempt_trace_bundle_path(&experiment_task_id(experiment.id));
+        Ok(ToolCallOutcome {
+            payload: json!({
+                "summary": experiment.summary,
+                "trace_bundle_path": trace_bundle_path
+                    .exists()
+                    .then(|| trace_bundle_path.display().to_string()),
+            }),
+            suspend: false,
+            mission_status: None,
+        })
+    }
+
     async fn tool_record_lesson(
         &self,
         mission: &Mission,
@@ -2355,6 +2787,11 @@ impl MissionCore {
             let mut state = self.runtime_state.lock().await;
             state.pending_questions.insert(request_id.clone(), tx);
         }
+        self.emit_mission_activity(MissionActivity::QuestionAsked {
+            mission_id: mission.id.to_string(),
+            question: args.question.clone(),
+        })
+        .await;
         let _ = self
             .event_tx
             .send(SessionEvent::UserQuestionRequested {
@@ -2388,12 +2825,14 @@ impl MissionCore {
     ) -> Result<ToolCallOutcome> {
         let args: CancelExperimentsArgs = serde_json::from_value(arguments)?;
         let mut cancelled = Vec::new();
+        let mut cancelled_running = 0_u32;
         for experiment_id in args.experiment_ids {
+            let task_id = experiment_task_id(parse_experiment_id(&experiment_id)?);
             let _ = self
                 .abox
                 .stop(
                     self.session.repo_root.as_deref().map(Path::new),
-                    &experiment_id,
+                    &task_id,
                     true,
                 )
                 .await;
@@ -2405,10 +2844,19 @@ impl MissionCore {
                 .iter_mut()
                 .find(|experiment| experiment.id.to_string() == experiment_id)
             {
+                if experiment.status == ExperimentStatus::Running {
+                    cancelled_running = cancelled_running.saturating_add(1);
+                }
                 experiment.status = ExperimentStatus::Cancelled;
                 experiment.finished_at = Some(Utc::now());
                 self.mission_store.upsert_experiment(experiment).await?;
                 cancelled.push(experiment_id);
+            }
+        }
+        if cancelled_running > 0 {
+            if let Some(mut stored_mission) = self.mission_store.mission(mission.id).await? {
+                stored_mission.wallet.mark_finished(cancelled_running);
+                self.mission_store.upsert_mission(&stored_mission).await?;
             }
         }
         if let Some(reason) = args.reason {
@@ -2421,6 +2869,23 @@ impl MissionCore {
                     experiment_id: None,
                 })
                 .await?;
+        }
+        match self
+            .self_tx
+            .send(SessionCommand::RefreshMissionWakes {
+                mission_id: mission.id,
+            })
+            .await
+        {
+            Ok(()) => {}
+            Err(err) => {
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Error(format!(
+                        "Failed to queue mission wake refresh: {err}"
+                    )))
+                    .await;
+            }
         }
         Ok(ToolCallOutcome {
             payload: json!({ "cancelled": cancelled }),
@@ -2443,11 +2908,7 @@ impl MissionCore {
                 "suspended": true,
             }),
             suspend: true,
-            mission_status: if args.complete {
-                Some(MissionStatus::Completed)
-            } else {
-                None
-            },
+            mission_status: None,
         })
     }
 
@@ -2486,82 +2947,191 @@ impl MissionCore {
             .mission(experiment.mission_id)
             .await?
             .ok_or_else(|| anyhow!("mission '{}' not found", experiment.mission_id))?;
-        let task_id = experiment.id.to_string();
-        self.ledger
-            .insert(SandboxRecord {
-                attempt_id: bakudo_core::protocol::AttemptId(format!("attempt-{task_id}")),
-                session_id: self.session.session_id.clone(),
-                task_id: task_id.clone(),
-                repo_root: self.session.repo_root.clone(),
-                provider_id: mission.provider_name.clone(),
-                model: None,
-                prompt_summary: experiment.label.clone(),
-                state: SandboxState::Starting,
-                lifecycle: bakudo_core::protocol::SandboxLifecycle::Ephemeral,
-                candidate_policy: bakudo_core::protocol::CandidatePolicy::Discard,
-                started_at: Utc::now(),
-                finished_at: None,
-                worktree_path: None,
-                branch: None,
-            })
-            .await;
+        let task_id = experiment_task_id(experiment.id);
+        let (
+            prompt,
+            provider_id,
+            model,
+            worker_command,
+            timeout_secs,
+            max_output_bytes,
+            memory_mib,
+            cpus,
+            sandbox_lifecycle,
+            candidate_policy,
+            allow_all_tools,
+        ) = match experiment.spec.workload.clone() {
+            ExperimentWorkload::Script { script } => (
+                experiment.spec.hypothesis.clone(),
+                mission.provider_name.clone(),
+                None,
+                build_script_worker_command(&script),
+                300,
+                512 * 1024,
+                None,
+                None,
+                SandboxLifecycle::Ephemeral,
+                CandidatePolicy::Discard,
+                false,
+            ),
+            ExperimentWorkload::AgentTask {
+                prompt,
+                provider,
+                model,
+                sandbox_lifecycle,
+                candidate_policy,
+                timeout_secs,
+                allow_all_tools,
+            } => {
+                let provider_id = provider.unwrap_or_else(|| mission.provider_name.clone());
+                let runtime = self
+                    .provider_catalog
+                    .load_for(&provider_id, mission.posture)?;
+                let worker = runtime.worker.ok_or_else(|| {
+                    anyhow!(
+                        "provider '{}' does not declare a mission worker configuration",
+                        provider_id
+                    )
+                })?;
+                let worker_command =
+                    build_agent_worker_command(&worker, model.as_deref(), allow_all_tools)?;
+                (
+                    prompt,
+                    provider_id,
+                    model,
+                    worker_command,
+                    timeout_secs.unwrap_or(worker.timeout_secs),
+                    worker.max_output_bytes,
+                    worker.memory_mib,
+                    worker.cpus,
+                    sandbox_lifecycle,
+                    candidate_policy,
+                    allow_all_tools,
+                )
+            }
+        };
+        let mut spec = bakudo_core::protocol::AttemptSpec::new(prompt, provider_id.clone());
+        spec.attempt_id = bakudo_core::protocol::AttemptId(experiment.id.to_string());
+        spec.task_id = bakudo_core::protocol::TaskId(task_id.clone());
+        spec.session_id = self.session.session_id.clone();
+        spec.model = model.clone();
+        spec.repo_root = self.session.repo_root.clone();
+        spec.budget.timeout_secs = timeout_secs;
+        spec.budget.max_output_bytes = max_output_bytes;
+        spec.permissions.allow_all_tools = allow_all_tools;
+        spec.sandbox_lifecycle = sandbox_lifecycle;
+        spec.candidate_policy = candidate_policy;
+
+        self.host
+            .note_task_started_with_label(&task_id, Some(experiment.label.clone()));
         let _ = self
             .event_tx
             .send(SessionEvent::TaskStarted {
                 task_id: task_id.clone(),
-                provider_id: mission.provider_name.clone(),
-                model: None,
+                provider_id: provider_id.clone(),
+                model: model.clone(),
                 prompt_summary: experiment.label.clone(),
             })
             .await;
         experiment.status = ExperimentStatus::Running;
         experiment.started_at = Some(Utc::now());
         self.mission_store.upsert_experiment(&experiment).await?;
-        self.ledger
-            .update_state(&task_id, SandboxState::Running)
-            .await;
+        let cfg = Arc::new(TaskRunnerConfig {
+            abox: self.abox.clone(),
+            ledger: self.ledger.clone(),
+            data_dir: self.repo_data_dir().join("runs"),
+            trace_recorder: self.trace_recorder.clone(),
+            worker_command,
+            memory_mib,
+            cpus,
+        });
+        let (mut rx, handle) = run_attempt(spec.clone(), cfg).await;
+        while let Some(event) = rx.recv().await {
+            self.host.note_runner_event(&task_id, &event);
+            let _ = self
+                .event_tx
+                .send(SessionEvent::TaskProgress {
+                    task_id: task_id.clone(),
+                    event,
+                })
+                .await;
+        }
 
-        let command = script_to_command(&experiment.spec.script);
-        let mut params = bakudo_core::abox::RunParams::new(task_id.clone(), command);
-        params.repo = self.session.repo_root.as_ref().map(PathBuf::from);
-        params.ephemeral = true;
-        params.timeout_secs = Some(300);
-        params.max_output_bytes = 512 * 1024;
-        let event_tx = self.event_tx.clone();
-        let task_id_for_cb = task_id.clone();
-        let start = std::time::Instant::now();
-        let run = self
-            .abox
-            .run(&params, move |line| {
-                let event_tx = event_tx.clone();
-                let task_id = task_id_for_cb.clone();
-                let line = line.to_string();
-                tokio::spawn(async move {
-                    let _ = event_tx
-                        .send(SessionEvent::TaskProgress {
-                            task_id,
-                            event: RunnerEvent::RawLine(line),
-                        })
-                        .await;
-                });
-            })
-            .await?;
-        let duration = start.elapsed();
-        let status = if run.timed_out {
-            ExperimentStatus::Timeout
-        } else if run.exit_code == 0 {
-            ExperimentStatus::Succeeded
-        } else {
-            ExperimentStatus::Failed
+        let (status, summary, final_state) = match handle.await {
+            Ok(Ok(result)) => {
+                let mut final_state = state_from_worker_status(&result.status, result.exit_code);
+                if result.status == WorkerStatus::Succeeded {
+                    match apply_candidate_policy(
+                        &task_id,
+                        &candidate_policy,
+                        &experiment.spec.base_branch,
+                        self.session.repo_root.as_deref().map(Path::new),
+                        &self.abox,
+                        &self.ledger,
+                    )
+                    .await
+                    {
+                        Ok(action) => {
+                            final_state = state_from_worktree_action(action);
+                        }
+                        Err(err) => {
+                            let _ = self
+                                .event_tx
+                                .send(SessionEvent::Error(format!(
+                                    "Candidate policy error for {task_id}: {err}"
+                                )))
+                                .await;
+                        }
+                    }
+                }
+                let status = worker_status_to_experiment_status(&result.status);
+                let patch_path = self
+                    .ledger
+                    .get(&task_id)
+                    .await
+                    .and_then(|record| record.worktree_path);
+                let summary = ExperimentSummary {
+                    exit_code: result.exit_code,
+                    duration: Duration::from_millis(result.duration_ms),
+                    stdout_tail: trim_tail(&result.stdout, 4096),
+                    stderr_tail: trim_tail(&result.stderr, 4096),
+                    metrics: extract_metrics(&result.stdout, &experiment.spec.metric_keys),
+                    patch_path,
+                };
+                (status, summary, final_state)
+            }
+            Ok(Err(err)) => {
+                let summary = ExperimentSummary {
+                    exit_code: -1,
+                    duration: Duration::from_secs(0),
+                    stdout_tail: String::new(),
+                    stderr_tail: err.to_string(),
+                    metrics: serde_json::Map::new(),
+                    patch_path: None,
+                };
+                (
+                    ExperimentStatus::Failed,
+                    summary,
+                    SandboxState::Failed { exit_code: -1 },
+                )
+            }
+            Err(err) => {
+                let summary = ExperimentSummary {
+                    exit_code: -1,
+                    duration: Duration::from_secs(0),
+                    stdout_tail: String::new(),
+                    stderr_tail: err.to_string(),
+                    metrics: serde_json::Map::new(),
+                    patch_path: None,
+                };
+                (
+                    ExperimentStatus::Failed,
+                    summary,
+                    SandboxState::Failed { exit_code: -1 },
+                )
+            }
         };
-        let summary = ExperimentSummary {
-            exit_code: run.exit_code,
-            duration,
-            stdout_tail: trim_tail(&run.stdout, 4096),
-            stderr_tail: trim_tail(&run.stderr, 4096),
-            metrics: extract_metrics(&run.stdout, &experiment.spec.metric_keys),
-            patch_path: None,
-        };
+
         experiment.status = status;
         experiment.finished_at = Some(Utc::now());
         experiment.summary = Some(summary.clone());
@@ -2592,10 +3162,21 @@ impl MissionCore {
         };
         mission.wallet.mark_finished(1);
         self.mission_store.upsert_mission(&mission).await?;
-        let final_state = experiment_status_to_state(experiment.status, run.exit_code);
         self.ledger
             .update_state(&task_id, final_state.clone())
             .await;
+        self.host.note_task_finished(&task_id, &final_state);
+        let trace_bundle_path = self.trace_recorder.attempt_trace_bundle_path(&task_id);
+        self.emit_mission_activity(MissionActivity::WorkerFinished {
+            mission_id: experiment.mission_id.to_string(),
+            experiment_id: experiment.id.to_string(),
+            label: experiment.label.clone(),
+            status: experiment.status,
+            trace_bundle_path: trace_bundle_path
+                .exists()
+                .then(|| trace_bundle_path.display().to_string()),
+        })
+        .await;
         let _ = self
             .event_tx
             .send(SessionEvent::TaskFinished {
@@ -2625,58 +3206,135 @@ impl MissionCore {
     }
 
     async fn handle_experiment_finished(&self, mission_id: MissionId) -> Result<()> {
+        self.evaluate_active_wave(mission_id).await?;
+        self.schedule_active_wave(mission_id).await?;
+        Ok(())
+    }
+
+    async fn schedule_active_wave(&self, mission_id: MissionId) -> Result<()> {
         let Some(wave) = self.mission_store.active_wave(mission_id).await? else {
             return Ok(());
         };
-        let wave_experiment_ids = wave.experiment_ids;
-        let wake_when = wave.wake_when;
-        let wake_sent = wave.wake_sent;
-
+        let Some(mut mission) = self.mission_store.mission(mission_id).await? else {
+            return Ok(());
+        };
         let experiments = self
             .mission_store
             .experiments_for_mission(mission_id)
             .await?;
-        let relevant: Vec<_> = experiments
-            .into_iter()
-            .filter(|experiment| wave_experiment_ids.contains(&experiment.id))
+        let running = experiments
+            .iter()
+            .filter(|experiment| {
+                wave.experiment_ids.contains(&experiment.id)
+                    && experiment.status == ExperimentStatus::Running
+            })
+            .count() as u32;
+        mission.wallet.abox_workers_in_flight = running;
+        let effective_limit = wave
+            .concurrency_limit
+            .min(mission.wallet.concurrent_max)
+            .max(1);
+        let available_slots = effective_limit.saturating_sub(running);
+        let queued: Vec<_> = wave
+            .experiment_ids
+            .iter()
+            .filter_map(|experiment_id| {
+                experiments
+                    .iter()
+                    .find(|experiment| &experiment.id == experiment_id)
+                    .filter(|experiment| experiment.status == ExperimentStatus::Queued)
+                    .cloned()
+            })
+            .take(available_slots as usize)
+            .collect();
+        if queued.is_empty() {
+            self.mission_store.upsert_mission(&mission).await?;
+            self.emit_banner().await;
+            return Ok(());
+        }
+
+        mission.wallet.start_workers(queued.len() as u32);
+        self.mission_store.upsert_mission(&mission).await?;
+        self.emit_banner().await;
+        for experiment in queued {
+            let core = self.clone();
+            tokio::spawn(async move {
+                if let Err(err) = core.run_experiment(experiment).await {
+                    let _ = core
+                        .event_tx
+                        .send(SessionEvent::Error(format!(
+                            "Experiment failed to run: {err}"
+                        )))
+                        .await;
+                }
+            });
+        }
+        Ok(())
+    }
+
+    async fn evaluate_active_wave(&self, mission_id: MissionId) -> Result<()> {
+        let Some(mut wave) = self.mission_store.active_wave(mission_id).await? else {
+            return Ok(());
+        };
+        let experiments = self
+            .mission_store
+            .experiments_for_mission(mission_id)
+            .await?;
+        let relevant: Vec<_> = wave
+            .experiment_ids
+            .iter()
+            .filter_map(|experiment_id| {
+                experiments
+                    .iter()
+                    .find(|experiment| &experiment.id == experiment_id)
+                    .cloned()
+            })
             .collect();
         let completed: Vec<_> = relevant
             .iter()
             .filter(|experiment| experiment_is_terminal(experiment.status))
             .cloned()
             .collect();
-        let all_complete = completed.len() == wave_experiment_ids.len();
+        let all_complete = completed.len() == wave.experiment_ids.len();
         let any_failed = completed.iter().any(|experiment| {
             matches!(
                 experiment.status,
                 ExperimentStatus::Failed | ExperimentStatus::Cancelled | ExperimentStatus::Timeout
             )
         });
-        let should_wake = !wake_sent
-            && match wake_when {
+        let should_wake = !wave.wake_sent
+            && match wave.wake_when {
                 WakeWhen::AllComplete => all_complete,
                 WakeWhen::FirstComplete => !completed.is_empty(),
                 WakeWhen::AnyFailure => any_failed || all_complete,
             };
-        if !should_wake {
+        if should_wake {
+            let reason = if any_failed {
+                WakeReason::ExperimentFailed
+            } else {
+                WakeReason::ExperimentsComplete
+            };
+            if all_complete {
+                self.mission_store.clear_active_wave(mission_id).await?;
+            } else {
+                wave.wake_sent = true;
+                wave.updated_at = Utc::now();
+                self.mission_store.save_active_wave(&wave).await?;
+            }
+            self.queue_wake(
+                mission_id,
+                reason,
+                json!({
+                    "experiments": completed.iter().map(experiment_payload).collect::<Vec<_>>(),
+                }),
+                true,
+            )
+            .await?;
             return Ok(());
         }
-
-        let reason = if any_failed {
-            WakeReason::ExperimentFailed
-        } else {
-            WakeReason::ExperimentsComplete
-        };
-        self.mission_store.clear_active_wave(mission_id).await?;
-        self.queue_wake(
-            mission_id,
-            reason,
-            json!({
-                "experiments": completed.iter().map(experiment_payload).collect::<Vec<_>>(),
-            }),
-            true,
-        )
-        .await?;
+        if all_complete {
+            self.mission_store.clear_active_wave(mission_id).await?;
+        }
         Ok(())
     }
 
@@ -2780,38 +3438,50 @@ fn hook_action_from_worktree_action(action: &WorktreeAction) -> (HookWorktreeAct
 
 fn initial_mission_state(
     goal: &str,
-    posture: Posture,
     done_contract: Option<String>,
     constraints: Option<String>,
 ) -> MissionState {
     let mut mission_state = MissionState::default_layout();
     if let Some(obj) = mission_state.0.as_object_mut() {
         obj.insert("objective".to_string(), json!(goal));
-        obj.insert("posture".to_string(), json!(posture.to_string()));
         if let Some(done_contract) = done_contract {
-            obj.insert(
-                "done_contract".to_string(),
-                json!({
-                    "summary": done_contract,
-                    "constraints": constraints.into_iter().collect::<Vec<_>>(),
-                    "metrics": [],
-                    "stop_conditions": [],
-                }),
-            );
+            obj.insert("done_contract".to_string(), json!(done_contract));
         }
+        obj.insert(
+            "constraints".to_string(),
+            json!(constraints.into_iter().collect::<Vec<_>>()),
+        );
     }
     mission_state
 }
 
+fn initial_mission_plan(
+    goal: &str,
+    done_contract: Option<&str>,
+    constraints: Option<&str>,
+) -> String {
+    format!(
+        "# Mission Plan\n\n## Objective\n{}\n\n## Done Contract\n{}\n\n## Constraints\n{}\n\n## Current Assessment\n- Waiting for the first wake.\n\n## Plan\n- [ ] Read the wake, inspect the mission state, and decide the next step.\n\n## Active Wave\n- None.\n\n## Risks And Unknowns\n- None recorded yet.\n\n## Questions For User\n- None.\n\n## Completion Summary\n- Pending.\n",
+        goal.trim(),
+        done_contract.unwrap_or("Not yet specified.").trim(),
+        constraints.unwrap_or("None recorded.").trim(),
+    )
+}
+
 fn tool_list_value() -> Vec<Value> {
     vec![
+        json!({"name": "read_plan", "description": "Read mission_plan.md from durable mission storage."}),
+        json!({"name": "update_plan", "description": "Replace mission_plan.md and record why it changed."}),
+        json!({"name": "notify_user", "description": "Send a non-blocking mission update to the user transcript."}),
+        json!({"name": "ask_user", "description": "Prompt the user for a blocking decision."}),
+        json!({"name": "complete_mission", "description": "Record the completion summary and finish the mission."}),
+        json!({"name": "read_experiment_summary", "description": "Read the stored summary and trace bundle path for an experiment."}),
         json!({"name": "dispatch_swarm", "description": "Dispatch a batch of abox experiments."}),
         json!({"name": "abox_exec", "description": "Run a one-off command inside an abox."}),
         json!({"name": "abox_apply_patch", "description": "Apply a patch in an abox and verify it."}),
         json!({"name": "host_exec", "description": "Run an approved command on the host."}),
         json!({"name": "update_mission_state", "description": "Apply a JSON merge patch to the Mission State."}),
         json!({"name": "record_lesson", "description": "Persist a durable lesson."}),
-        json!({"name": "ask_user", "description": "Prompt the user for a decision."}),
         json!({"name": "cancel_experiments", "description": "Cancel running experiments."}),
         json!({"name": "suspend", "description": "Suspend the current wake."}),
     ]
@@ -2826,13 +3496,11 @@ fn script_to_command(script: &ExperimentScript) -> Vec<String> {
     }
 }
 
-fn experiment_status_to_state(status: ExperimentStatus, exit_code: i32) -> SandboxState {
+fn worker_status_to_experiment_status(status: &WorkerStatus) -> ExperimentStatus {
     match status {
-        ExperimentStatus::Succeeded => SandboxState::Discarded,
-        ExperimentStatus::Timeout => SandboxState::TimedOut,
-        ExperimentStatus::Cancelled => SandboxState::Discarded,
-        ExperimentStatus::Failed => SandboxState::Failed { exit_code },
-        ExperimentStatus::Queued | ExperimentStatus::Running => SandboxState::Running,
+        WorkerStatus::Succeeded => ExperimentStatus::Succeeded,
+        WorkerStatus::TimedOut => ExperimentStatus::Timeout,
+        WorkerStatus::Failed | WorkerStatus::Cancelled => ExperimentStatus::Failed,
     }
 }
 
@@ -2855,11 +3523,23 @@ fn experiment_payload(experiment: &Experiment) -> Value {
     })
 }
 
+fn experiment_task_id(experiment_id: ExperimentId) -> String {
+    bakudo_core::abox::sandbox_task_id(&experiment_id.to_string())
+}
+
+fn parse_experiment_id(value: &str) -> Result<ExperimentId> {
+    Ok(ExperimentId(uuid::Uuid::parse_str(value)?))
+}
+
 fn trim_tail(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
     text[text.len().saturating_sub(max_bytes)..].to_string()
+}
+
+fn truncate(text: &str) -> String {
+    text.chars().take(160).collect()
 }
 
 fn extract_metrics(stdout: &str, metric_keys: &[String]) -> serde_json::Map<String, Value> {

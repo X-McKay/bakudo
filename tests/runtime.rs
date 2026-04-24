@@ -569,6 +569,7 @@ EOF
         abox: adapter,
         ledger: ledger.clone(),
         data_dir: data_dir.clone(),
+        trace_recorder: bakudo_daemon::trace::TraceRecorder::new(data_dir.clone()),
         worker_command: vec!["fake-worker".to_string(), "--headless".to_string()],
         memory_mib: None,
         cpus: None,
@@ -633,6 +634,7 @@ async fn task_runner_maps_exit_124_to_timed_out_state() {
         abox: adapter,
         ledger: ledger.clone(),
         data_dir: dir.path.join("data"),
+        trace_recorder: bakudo_daemon::trace::TraceRecorder::new(dir.path.join("data")),
         worker_command: vec!["fake-worker".to_string()],
         memory_mib: None,
         cpus: None,
@@ -681,6 +683,7 @@ async fn task_runner_marks_nonzero_exit_as_failed() {
         abox: adapter,
         ledger: ledger.clone(),
         data_dir: dir.path.join("data"),
+        trace_recorder: bakudo_daemon::trace::TraceRecorder::new(dir.path.join("data")),
         worker_command: vec!["fake-worker".to_string()],
         memory_mib: None,
         cpus: None,
@@ -1127,7 +1130,7 @@ async fn session_controller_requires_approval_when_policy_prompts() {
 }
 
 #[tokio::test]
-async fn session_controller_routes_host_objectives_into_staged_plan_dispatch() {
+async fn session_controller_routes_host_objectives_into_direct_mission_start() {
     let dir = TempDir::new("bakudo-session-host-plan");
     let script = write_fake_abox_script(
         &dir,
@@ -1178,52 +1181,7 @@ async fn session_controller_routes_host_objectives_into_staged_plan_dispatch() {
     })
     .await
     .unwrap();
-    assert!(first_reply.contains("what does success look like"));
-
-    cmd_tx
-        .send(SessionCommand::HostInput {
-            text: "Interactive chat, progress queries, and planning before dispatch".to_string(),
-        })
-        .await
-        .unwrap();
-    let second_reply = timeout(Duration::from_secs(1), async {
-        loop {
-            match event_rx.recv().await {
-                Some(SessionEvent::Info(msg)) => break msg,
-                Some(_) => continue,
-                None => panic!("event channel closed"),
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(second_reply.contains("What constraints should I respect"));
-
-    cmd_tx
-        .send(SessionCommand::HostInput {
-            text: "Keep the existing Rust execution core and avoid a rewrite".to_string(),
-        })
-        .await
-        .unwrap();
-    let plan_reply = timeout(Duration::from_secs(1), async {
-        loop {
-            match event_rx.recv().await {
-                Some(SessionEvent::Info(msg)) if msg.contains("Plan ready") => break msg,
-                Some(_) => continue,
-                None => panic!("event channel closed"),
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(plan_reply.contains("Reply 'yes'"));
-
-    cmd_tx
-        .send(SessionCommand::HostInput {
-            text: "yes".to_string(),
-        })
-        .await
-        .unwrap();
+    assert!(first_reply.contains("Starting mission"));
 
     let mut saw_banner = false;
     timeout(Duration::from_secs(2), async {
@@ -1341,7 +1299,10 @@ if wake["reason"] in ("manual_resume", "user_message"):
             "label": "wave-1",
             "hypothesis": "measure baseline",
             "base_branch": "main",
-            "script": {"kind": "inline", "source": "echo '{\"score\": 42}'"},
+            "workload": {
+                "kind": "script",
+                "script": {"kind": "inline", "source": "echo '{\"score\": 42}'"}
+            },
             "metric_keys": ["score"]
         }],
         "wake_when": "all_complete"
@@ -1349,9 +1310,9 @@ if wake["reason"] in ("manual_resume", "user_message"):
     call("suspend", {"reason": "experiments_dispatched"})
 elif wake["reason"] == "experiments_complete":
     call("update_mission_state", {"patch": {"best_known": {"label": "wave-1", "score": 42}, "next_steps": []}})
-    call("suspend", {"reason": "complete", "complete": True})
+    call("complete_mission", {"summary": "wave-1 finished with score 42"})
 else:
-    call("suspend", {"reason": "noop", "complete": True})
+    call("complete_mission", {"summary": "mission ended without extra work"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -1471,7 +1432,10 @@ if wake["reason"] == "manual_resume":
             "label": "wave-1",
             "hypothesis": "first pass",
             "base_branch": "main",
-            "script": {"kind": "inline", "source": "echo '{\"score\": 21}'"},
+            "workload": {
+                "kind": "script",
+                "script": {"kind": "inline", "source": "echo '{\"score\": 21}'"}
+            },
             "metric_keys": ["score"]
         }],
         "wake_when": "all_complete"
@@ -1486,7 +1450,10 @@ elif wake["reason"] == "experiments_complete":
                 "label": "wave-2",
                 "hypothesis": "second pass",
                 "base_branch": "main",
-                "script": {"kind": "inline", "source": "echo '{\"score\": 84}'"},
+                "workload": {
+                    "kind": "script",
+                    "script": {"kind": "inline", "source": "echo '{\"score\": 84}'"}
+                },
                 "metric_keys": ["score"]
             }],
             "wake_when": "all_complete"
@@ -1497,9 +1464,9 @@ elif wake["reason"] == "experiments_complete":
             "best_known": {"label": "wave-2", "score": 84},
             "next_steps": []
         }})
-        call("suspend", {"reason": "complete", "complete": True})
+        call("complete_mission", {"summary": "wave-2 finished with score 84"})
 else:
-    call("suspend", {"reason": "noop", "complete": True})
+    call("complete_mission", {"summary": "mission ended without extra work"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -1623,12 +1590,15 @@ experiments = [{
     "label": f"exp-{idx}",
     "hypothesis": "overflow wallet",
     "base_branch": "main",
-    "script": {"kind": "inline", "source": "echo wallet"},
+    "workload": {
+        "kind": "script",
+        "script": {"kind": "inline", "source": "echo wallet"}
+    },
     "metric_keys": []
 } for idx in range(13)]
 response = call_error("dispatch_swarm", {"experiments": experiments, "wake_when": "all_complete"})
 assert response.get("error"), response
-call("suspend", {"reason": "wallet_rejected", "complete": True})
+call("complete_mission", {"summary": "wallet rejected oversized wave"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -1723,7 +1693,7 @@ async fn mission_runtime_requests_host_approval_for_host_exec() {
 result, _meta = call("host_exec", {"command": "echo host-ok", "reason": "verify approval"})
 assert result["approved"] is True
 assert "host-ok" in result["stdout_tail"]
-call("suspend", {"reason": "complete", "complete": True})
+call("complete_mission", {"summary": "host exec approval path completed"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -1842,7 +1812,7 @@ result, _meta = call("ask_user", {
     "choices": ["wave-1", "wave-2"]
 })
 assert result["answer"] == "wave-2"
-call("suspend", {"reason": "complete", "complete": True})
+call("complete_mission", {"summary": "user answered the blocking question"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -1956,7 +1926,7 @@ result, _meta = call("record_lesson", {
     "body": "Measure the baseline before dispatching a second wave."
 })
 assert result["path"].endswith(".md")
-call("suspend", {"reason": "complete", "complete": True})
+call("complete_mission", {"summary": "lesson recorded"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -2056,7 +2026,7 @@ async fn mission_runtime_writes_append_only_provenance_log() {
         &dir,
         r#"
 call("update_mission_state", {"patch": {"next_steps": ["done"]}})
-call("suspend", {"reason": "complete", "complete": True})
+call("complete_mission", {"summary": "provenance mission completed"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -2166,9 +2136,9 @@ if wake["reason"] == "manual_resume":
     assert response["error"]["message"].startswith("wake tool-call budget exhausted")
 elif wake["reason"] == "timeout":
     assert wake["payload"]["kind"] == "wake_budget_tool_calls"
-    call("suspend", {"reason": "complete", "complete": True})
+    call("complete_mission", {"summary": "wake budget exhaustion handled"})
 else:
-    call("suspend", {"reason": "noop", "complete": True})
+    call("complete_mission", {"summary": "wake budget mission completed"})
 "#,
     );
     write_exec_provider_files_with_budget(&repo, &script, 1, "5m");
@@ -2266,7 +2236,7 @@ async fn mission_runtime_recovers_running_experiment_on_restart() {
     let script = write_mock_deliberator_script(
         &dir,
         r#"
-call("suspend", {"reason": "complete", "complete": True})
+call("complete_mission", {"summary": "restart recovery completed"})
 "#,
     );
     write_exec_provider_files(&repo, &script);
@@ -2315,8 +2285,10 @@ call("suspend", {"reason": "complete", "complete": True})
             label: "stale-running".to_string(),
             spec: bakudo_core::mission::ExperimentSpec {
                 base_branch: "main".to_string(),
-                script: bakudo_core::mission::ExperimentScript::Inline {
-                    source: "echo stale".to_string(),
+                workload: bakudo_core::mission::ExperimentWorkload::Script {
+                    script: bakudo_core::mission::ExperimentScript::Inline {
+                        source: "echo stale".to_string(),
+                    },
                 },
                 skill: None,
                 hypothesis: "stale".to_string(),

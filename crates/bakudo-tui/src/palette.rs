@@ -83,6 +83,9 @@ pub fn role_user_fg() -> Color {
 pub fn role_system_fg() -> Color {
     AMBER_400
 }
+pub fn role_mission_fg() -> Color {
+    FUCHSIA_500
+}
 pub fn role_agent_fg() -> Color {
     GRAY_200
 }

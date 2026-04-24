@@ -15,6 +15,7 @@ use std::sync::{Arc as StdArc, Mutex};
 use std::time::Instant;
 
 use chrono::Utc;
+use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -25,6 +26,8 @@ use bakudo_core::protocol::{
     WORKER_ERROR_PREFIX, WORKER_EVENT_PREFIX, WORKER_RESULT_PREFIX,
 };
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
+
+use crate::trace::TraceRecorder;
 
 /// Events emitted by the task runner to the TUI / session controller.
 #[derive(Debug, Clone)]
@@ -44,6 +47,7 @@ pub struct TaskRunnerConfig {
     pub abox: Arc<AboxAdapter>,
     pub ledger: Arc<SandboxLedger>,
     pub data_dir: PathBuf,
+    pub trace_recorder: TraceRecorder,
     /// The bootstrap command to run inside the VM.
     /// Typically: ["python3", "-c", <wrapper>, <provider-binary>, ...].
     pub worker_command: Vec<String>,
@@ -73,6 +77,19 @@ async fn run_attempt_inner(
 ) -> Result<WorkerResult, BakudoError> {
     let task_id = sandbox_task_id(&spec.attempt_id.0);
     let start = Instant::now();
+    let spec_for_trace = spec.clone();
+    cfg.trace_recorder
+        .record_attempt_start(
+            &task_id,
+            &json!({
+                "captured_at": Utc::now(),
+                "attempt_spec": spec.clone(),
+                "worker_command": cfg.worker_command.clone(),
+                "memory_mib": cfg.memory_mib,
+                "cpus": cfg.cpus,
+            }),
+        )
+        .await;
 
     // Write the spec to a temp file so the worker can read it.
     let spec_path = cfg.data_dir.join(format!("{}.spec.json", task_id));
@@ -144,10 +161,20 @@ async fn run_attempt_inner(
     let tx_clone = tx.clone();
     let structured_result: StdArc<Mutex<Option<WorkerResult>>> = StdArc::new(Mutex::new(None));
     let structured_result_cb = structured_result.clone();
+    let trace_recorder = cfg.trace_recorder.clone();
+    let task_id_for_trace = task_id.clone();
     let run_result = cfg
         .abox
         .run(&params, move |line| {
             let line = line.to_string();
+            let trace_line = line.clone();
+            let trace_recorder = trace_recorder.clone();
+            let task_id = task_id_for_trace.clone();
+            tokio::spawn(async move {
+                trace_recorder
+                    .append_attempt_stream(&task_id, "stdout", &trace_line)
+                    .await;
+            });
             match parse_worker_line(&line) {
                 RunnerEvent::Finished(result) => {
                     *structured_result_cb
@@ -223,6 +250,18 @@ async fn run_attempt_inner(
             result.stderr = run.stderr.clone();
             result.stdout_truncated = run.stdout_truncated;
             result.stderr_truncated = run.stderr_truncated;
+            if !run.stderr.is_empty() {
+                cfg.trace_recorder
+                    .append_attempt_stream(&task_id, "stderr", &run.stderr)
+                    .await;
+            }
+            cfg.trace_recorder
+                .record_attempt_finish(
+                    &task_id,
+                    &result,
+                    &attempt_trace_bundle(&spec_for_trace, &result),
+                )
+                .await;
 
             let _ = tx.send(RunnerEvent::Finished(result.clone())).await;
             Ok(result)
@@ -232,6 +271,21 @@ async fn run_attempt_inner(
                 .update_state(&task_id, SandboxState::Failed { exit_code: -1 })
                 .await;
             let msg = e.to_string();
+            cfg.trace_recorder
+                .record_attempt_finish(
+                    &task_id,
+                    &json!({
+                        "status": "infra_error",
+                        "error": msg.clone(),
+                    }),
+                    &format!(
+                        "# Attempt Trace\n\n- task_id: `{}`\n- provider: `{}`\n- status: `infra_error`\n\n## Error\n{}\n",
+                        task_id,
+                        spec.provider_id,
+                        msg
+                    ),
+                )
+                .await;
             let _ = tx.send(RunnerEvent::InfraError(msg.clone())).await;
             Err(e.into())
         }
@@ -286,6 +340,21 @@ fn extract_summary(stdout: &str, stderr: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+fn attempt_trace_bundle(spec: &AttemptSpec, result: &WorkerResult) -> String {
+    format!(
+        "# Attempt Trace\n\n- task_id: `{}`\n- provider: `{}`\n- model: `{}`\n- status: `{:?}`\n- exit_code: `{}`\n- duration_ms: `{}`\n- lifecycle: `{}`\n- candidate_policy: `{}`\n\n## Prompt Summary\n{}\n\n## Files\n- `start.json`\n- `stdout.log`\n- `stderr.log`\n- `result.json`\n",
+        result.task_id.0,
+        spec.provider_id,
+        spec.model.as_deref().unwrap_or("default"),
+        result.status,
+        result.exit_code,
+        result.duration_ms,
+        spec.sandbox_lifecycle,
+        spec.candidate_policy,
+        spec.prompt.chars().take(200).collect::<String>(),
+    )
 }
 
 #[cfg(test)]

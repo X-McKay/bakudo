@@ -51,6 +51,7 @@ pub struct ChatMessage {
 pub enum MessageRole {
     User,
     System,
+    Mission,
     AgentOutput,
     Error,
     Info,
@@ -74,6 +75,13 @@ impl ChatMessage {
     pub fn agent(content: impl Into<String>) -> Self {
         Self {
             role: MessageRole::AgentOutput,
+            content: content.into(),
+            timestamp: Local::now(),
+        }
+    }
+    pub fn mission(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Mission,
             content: content.into(),
             timestamp: Local::now(),
         }
@@ -981,6 +989,9 @@ impl App {
                     selected: 0,
                     choices,
                 });
+            }
+            SessionEvent::MissionActivity { activity } => {
+                self.push_message(ChatMessage::mission(activity.render_text()));
             }
             SessionEvent::Info(message) => {
                 self.push_message(ChatMessage::info(message));

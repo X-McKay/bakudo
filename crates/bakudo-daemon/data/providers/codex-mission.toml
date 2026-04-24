@@ -13,3 +13,13 @@ debounce = "1.5s"
 [resume]
 flag = "--resume"
 session_id_file = ".bakudo/sessions/{mission_id}.id"
+
+[worker]
+engine = "codex"
+engine_args = ["exec"]
+abox_profile = "worker"
+allow_all_tools = false
+timeout_secs = 1800
+max_output_bytes = 1048576
+memory_mib = 4096
+cpus = 2

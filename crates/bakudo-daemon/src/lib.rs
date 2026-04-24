@@ -6,4 +6,6 @@ pub mod mission_store;
 pub mod provider_runtime;
 pub mod session_controller;
 pub mod task_runner;
+pub mod trace;
+pub mod worker;
 pub mod worktree;

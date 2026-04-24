@@ -29,9 +29,16 @@ pub struct StoredWakeEvent {
 pub struct ActiveWaveRecord {
     pub mission_id: MissionId,
     pub experiment_ids: Vec<ExperimentId>,
+    pub concurrency_limit: u32,
     pub wake_when: WakeWhen,
     pub wake_sent: bool,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ActiveWavePayload {
+    experiment_ids: Vec<ExperimentId>,
+    concurrency_limit: u32,
 }
 
 impl MissionStore {
@@ -43,6 +50,72 @@ impl MissionStore {
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    pub fn repo_data_dir(&self) -> &Path {
+        self.db_path
+            .parent()
+            .expect("mission store db path should live under repo data dir")
+    }
+
+    pub fn missions_dir(&self) -> PathBuf {
+        self.repo_data_dir().join("missions")
+    }
+
+    pub fn mission_dir(&self, mission_id: MissionId) -> PathBuf {
+        self.missions_dir().join(mission_id.to_string())
+    }
+
+    pub fn mission_plan_path(&self, mission_id: MissionId) -> PathBuf {
+        self.mission_dir(mission_id).join("mission_plan.md")
+    }
+
+    pub async fn seed_mission_plan(&self, mission_id: MissionId, markdown: &str) -> Result<()> {
+        self.write_mission_plan(mission_id, markdown)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn read_mission_plan(&self, mission_id: MissionId) -> Result<(PathBuf, String)> {
+        let path = self.mission_plan_path(mission_id);
+        let markdown = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("failed to read '{}'", path.display()))?;
+        Ok((path, markdown))
+    }
+
+    pub async fn write_mission_plan(
+        &self,
+        mission_id: MissionId,
+        markdown: &str,
+    ) -> Result<PathBuf> {
+        let path = self.mission_plan_path(mission_id);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("failed to create '{}'", parent.display()))?;
+        }
+        tokio::fs::write(&path, markdown)
+            .await
+            .with_context(|| format!("failed to write '{}'", path.display()))?;
+        Ok(path)
+    }
+
+    pub async fn mission_plan_updated_at(
+        &self,
+        mission_id: MissionId,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let path = self.mission_plan_path(mission_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .with_context(|| format!("failed to stat '{}'", path.display()))?;
+        let modified = metadata
+            .modified()
+            .with_context(|| format!("failed to read modified time for '{}'", path.display()))?;
+        Ok(Some(DateTime::<Utc>::from(modified)))
     }
 
     pub async fn upsert_mission(&self, mission: &Mission) -> Result<()> {
@@ -419,7 +492,10 @@ impl MissionStore {
                     updated_at = excluded.updated_at",
                 params![
                     wave.mission_id.to_string(),
-                    serde_json::to_string(&wave.experiment_ids)?,
+                    serde_json::to_string(&ActiveWavePayload {
+                        experiment_ids: wave.experiment_ids.clone(),
+                        concurrency_limit: wave.concurrency_limit,
+                    })?,
                     wake_when_str(wave.wake_when),
                     if wave.wake_sent { 1 } else { 0 },
                     wave.updated_at.to_rfc3339(),
@@ -670,9 +746,12 @@ fn experiment_from_row(row: &Row<'_>) -> rusqlite::Result<Experiment> {
 }
 
 fn active_wave_from_row(row: &Row<'_>) -> rusqlite::Result<ActiveWaveRecord> {
+    let payload: ActiveWavePayload =
+        serde_json::from_str(&row.get::<_, String>(1)?).map_err(to_sql_error)?;
     Ok(ActiveWaveRecord {
         mission_id: parse_mission_id(&row.get::<_, String>(0)?).map_err(to_sql_error)?,
-        experiment_ids: serde_json::from_str(&row.get::<_, String>(1)?).map_err(to_sql_error)?,
+        experiment_ids: payload.experiment_ids,
+        concurrency_limit: payload.concurrency_limit,
         wake_when: parse_wake_when(&row.get::<_, String>(2)?).map_err(to_sql_error)?,
         wake_sent: row.get::<_, i64>(3)? != 0,
         updated_at: parse_datetime(&row.get::<_, String>(4)?).map_err(to_sql_error)?,
@@ -796,7 +875,6 @@ fn ledger_kind_str(kind: LedgerKind) -> &'static str {
     match kind {
         LedgerKind::Decision => "decision",
         LedgerKind::ExperimentSummary => "experiment_summary",
-        LedgerKind::SkillUsed => "skill_used",
         LedgerKind::UserSteering => "user_steering",
         LedgerKind::Lesson => "lesson",
     }
@@ -806,7 +884,6 @@ fn parse_ledger_kind(value: &str) -> Result<LedgerKind> {
     match value {
         "decision" => Ok(LedgerKind::Decision),
         "experiment_summary" => Ok(LedgerKind::ExperimentSummary),
-        "skill_used" => Ok(LedgerKind::SkillUsed),
         "user_steering" => Ok(LedgerKind::UserSteering),
         "lesson" => Ok(LedgerKind::Lesson),
         other => Err(anyhow!("unknown ledger kind '{other}'")),
@@ -909,6 +986,52 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn mission_store_reads_and_writes_plan_markdown() {
+        let path = temp_db_path();
+        let store = MissionStore::open(&path).unwrap();
+        let mission = sample_mission();
+        store.upsert_mission(&mission).await.unwrap();
+
+        let plan = "# Mission Plan\n\n## Objective\nShip it.\n";
+        store.seed_mission_plan(mission.id, plan).await.unwrap();
+        let (plan_path, markdown) = store.read_mission_plan(mission.id).await.unwrap();
+        assert!(plan_path.ends_with("mission_plan.md"));
+        assert_eq!(markdown, plan);
+        assert!(store
+            .mission_plan_updated_at(mission.id)
+            .await
+            .unwrap()
+            .is_some());
+
+        let _ = std::fs::remove_dir_all(store.repo_data_dir());
+    }
+
+    #[tokio::test]
+    async fn mission_store_roundtrips_active_wave_payload() {
+        let path = temp_db_path();
+        let store = MissionStore::open(&path).unwrap();
+        let mission = sample_mission();
+        store.upsert_mission(&mission).await.unwrap();
+
+        let wave = ActiveWaveRecord {
+            mission_id: mission.id,
+            experiment_ids: vec![ExperimentId::new(), ExperimentId::new()],
+            concurrency_limit: 2,
+            wake_when: WakeWhen::FirstComplete,
+            wake_sent: false,
+            updated_at: Utc::now(),
+        };
+        store.save_active_wave(&wave).await.unwrap();
+
+        let loaded = store.active_wave(mission.id).await.unwrap().unwrap();
+        assert_eq!(loaded.experiment_ids, wave.experiment_ids);
+        assert_eq!(loaded.concurrency_limit, 2);
+        assert_eq!(loaded.wake_when, WakeWhen::FirstComplete);
 
         let _ = std::fs::remove_file(path);
     }

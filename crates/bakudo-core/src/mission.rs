@@ -277,18 +277,41 @@ pub struct Wallet {
 }
 
 impl Wallet {
-    pub fn can_dispatch(&self, n: u32) -> bool {
-        n <= self.abox_workers_remaining
-            && self.abox_workers_in_flight.saturating_add(n) <= self.concurrent_max
+    pub fn can_reserve_workers(&self, n: u32) -> bool {
+        n <= self.abox_workers_remaining && !self.wall_clock_remaining.is_zero()
+    }
+
+    pub fn reserve_workers(&mut self, n: u32) -> bool {
+        if !self.can_reserve_workers(n) {
+            return false;
+        }
+        self.abox_workers_remaining = self.abox_workers_remaining.saturating_sub(n);
+        true
+    }
+
+    pub fn can_start_workers(&self, n: u32) -> bool {
+        self.abox_workers_in_flight.saturating_add(n) <= self.concurrent_max
             && !self.wall_clock_remaining.is_zero()
+    }
+
+    pub fn start_workers(&mut self, n: u32) -> bool {
+        if !self.can_start_workers(n) {
+            return false;
+        }
+        self.abox_workers_in_flight = self.abox_workers_in_flight.saturating_add(n);
+        true
+    }
+
+    pub fn can_dispatch(&self, n: u32) -> bool {
+        self.can_reserve_workers(n) && self.can_start_workers(n)
     }
 
     pub fn debit_workers(&mut self, n: u32) -> bool {
         if !self.can_dispatch(n) {
             return false;
         }
-        self.abox_workers_remaining = self.abox_workers_remaining.saturating_sub(n);
-        self.abox_workers_in_flight = self.abox_workers_in_flight.saturating_add(n);
+        self.reserve_workers(n);
+        self.start_workers(n);
         true
     }
 
@@ -348,11 +371,32 @@ pub struct Experiment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentSpec {
     pub base_branch: String,
-    pub script: ExperimentScript,
+    pub workload: ExperimentWorkload,
     pub skill: Option<String>,
     pub hypothesis: String,
     #[serde(default)]
     pub metric_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExperimentWorkload {
+    Script {
+        script: ExperimentScript,
+    },
+    AgentTask {
+        prompt: String,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        sandbox_lifecycle: SandboxLifecycle,
+        candidate_policy: CandidatePolicy,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        #[serde(default)]
+        allow_all_tools: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,17 +471,14 @@ impl MissionState {
         Self(serde_json::json!({
             "version": 1,
             "objective": null,
-            "posture": "mission",
-            "done_contract": {
-                "metrics": [],
-                "constraints": [],
-                "stop_conditions": []
-            },
-            "hypotheses": [],
-            "active_experiments": [],
-            "best_known": null,
+            "done_contract": null,
+            "constraints": [],
+            "best_known": [],
             "things_tried": [],
-            "next_steps": []
+            "open_questions": [],
+            "next_steps": [],
+            "active_wave": null,
+            "completion_summary": null
         }))
     }
 }
@@ -456,7 +497,6 @@ pub struct LedgerEntry {
 pub enum LedgerKind {
     Decision,
     ExperimentSummary,
-    SkillUsed,
     UserSteering,
     Lesson,
 }
@@ -568,6 +608,56 @@ mod tests {
     }
 
     #[test]
+    fn wallet_can_reserve_without_starting() {
+        let mut wallet = Wallet {
+            wall_clock_remaining: Duration::from_secs(60),
+            abox_workers_remaining: 3,
+            abox_workers_in_flight: 1,
+            concurrent_max: 2,
+        };
+
+        assert!(wallet.reserve_workers(2));
+        assert_eq!(wallet.abox_workers_remaining, 1);
+        assert_eq!(wallet.abox_workers_in_flight, 1);
+        assert!(wallet.start_workers(1));
+        assert_eq!(wallet.abox_workers_in_flight, 2);
+        assert!(!wallet.start_workers(1));
+    }
+
+    #[test]
+    fn experiment_workload_round_trips_agent_tasks() {
+        let spec = ExperimentSpec {
+            base_branch: "main".to_string(),
+            workload: ExperimentWorkload::AgentTask {
+                prompt: "Fix the daemon".to_string(),
+                provider: Some("codex".to_string()),
+                model: Some("gpt-5".to_string()),
+                sandbox_lifecycle: SandboxLifecycle::Preserved,
+                candidate_policy: CandidatePolicy::Review,
+                timeout_secs: Some(1200),
+                allow_all_tools: false,
+            },
+            skill: Some("rust".to_string()),
+            hypothesis: "The host loop should be thinner".to_string(),
+            metric_keys: vec!["tests".to_string()],
+        };
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: ExperimentSpec = serde_json::from_str(&json).unwrap();
+        match parsed.workload {
+            ExperimentWorkload::AgentTask {
+                provider,
+                sandbox_lifecycle,
+                ..
+            } => {
+                assert_eq!(provider.as_deref(), Some("codex"));
+                assert_eq!(sandbox_lifecycle, SandboxLifecycle::Preserved);
+            }
+            other => panic!("expected agent task workload, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mission_state_default_layout_contains_required_keys() {
         let mission_state = MissionState::default_layout();
         let obj = mission_state.0.as_object().unwrap();
@@ -575,5 +665,8 @@ mod tests {
         assert!(obj.contains_key("done_contract"));
         assert!(obj.contains_key("best_known"));
         assert!(obj.contains_key("things_tried"));
+        assert!(obj.contains_key("open_questions"));
+        assert!(obj.contains_key("active_wave"));
+        assert!(obj.contains_key("completion_summary"));
     }
 }

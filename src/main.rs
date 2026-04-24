@@ -180,7 +180,11 @@ enum Commands {
         base: String,
     },
     /// Run health checks on abox and all registered provider binaries.
-    Doctor,
+    Doctor {
+        /// Overwrite repo-local mission prompts/providers with the current shipped contract.
+        #[arg(long)]
+        sync_mission_contract: bool,
+    },
     /// Run the Bakudo supervisor without the TUI.
     Daemon,
     /// Show mission status from the durable mission store.
@@ -232,7 +236,7 @@ async fn main() -> Result<()> {
 
     // `doctor` runs its own richer version check; skip the preflight warning
     // there to avoid duplicating output.
-    if !matches!(cli.command, Some(Commands::Doctor)) {
+    if !matches!(cli.command, Some(Commands::Doctor { .. })) {
         warn_if_abox_outdated(&abox, &config.abox_bin).await;
     }
 
@@ -313,7 +317,33 @@ async fn main() -> Result<()> {
         Some(Commands::Apply { task_id }) => cmd_apply(&abox, &config, &task_id).await,
         Some(Commands::Discard { task_id }) => cmd_discard(&abox, &config, &task_id).await,
         Some(Commands::Divergence { task_id, base }) => cmd_divergence(&task_id, &base).await,
-        Some(Commands::Doctor) => {
+        Some(Commands::Doctor {
+            sync_mission_contract,
+        }) => {
+            if sync_mission_contract {
+                let repo_root = current_repo_root_path().or_else(|| std::env::current_dir().ok());
+                let Some(repo_root) = repo_root else {
+                    anyhow::bail!("mission contract sync requires a repository root");
+                };
+                let report = bakudo_daemon::provider_runtime::ProviderCatalog::new(repo_root)
+                    .sync_mission_contract()?;
+                if report.updated_files.is_empty() {
+                    println!(
+                        "Mission contract v{} already matches the shipped defaults.",
+                        report.version
+                    );
+                } else {
+                    println!(
+                        "Synced mission contract v{} ({} file(s) updated).",
+                        report.version,
+                        report.updated_files.len()
+                    );
+                    for file in report.updated_files {
+                        println!("  - {file}");
+                    }
+                }
+                return Ok(());
+            }
             let report = bakudo_daemon::doctor::run(&config, &abox, &registry).await;
             println!("{report}");
             Ok(())
@@ -1364,6 +1394,7 @@ async fn execute_headless_attempt(
         abox: abox.clone(),
         ledger: ledger.clone(),
         data_dir: repo_data_dir.join("runs"),
+        trace_recorder: bakudo_daemon::trace::TraceRecorder::new(repo_data_dir.clone()),
         worker_command: provider
             .build_worker_command(model.as_deref(), execution_decision.allow_all_tools),
         memory_mib: provider.memory_mib,

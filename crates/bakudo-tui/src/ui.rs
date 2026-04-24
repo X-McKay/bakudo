@@ -332,6 +332,7 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         let (icon, role_label, fg) = match msg.role {
             MessageRole::User => ("▶", "you  ", palette::role_user_fg()),
             MessageRole::System => ("·", "sys  ", palette::role_system_fg()),
+            MessageRole::Mission => ("◆", "plan ", palette::role_mission_fg()),
             MessageRole::AgentOutput => (" ", "     ", palette::role_agent_fg()),
             MessageRole::Error => ("✗", "err  ", palette::role_error_fg()),
             MessageRole::Info => ("·", "info ", palette::role_info_fg()),
