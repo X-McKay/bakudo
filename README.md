@@ -11,12 +11,15 @@ Version 2 now ships two complementary execution paths:
 
 - **Wake-based mission runtime**: A supervisor loop persists `Mission`, `Experiment`, `WakeEvent`, `MissionState`, `Wallet`, `UserMessage`, and ledger state in a repo-scoped SQLite store so missions can resume after restarts.
 - **Provider agnostic**: Run Claude Code, Codex, OpenCode, Gemini, or repo-local `exec` deliberators headlessly. Classic runs still use the provider registry; autonomous missions load `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
-- **Deliberator MCP tool surface**: Autonomous missions speak to Bakudo over stdio and can call `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `update_mission_state`, `record_lesson`, `ask_user`, `cancel_experiments`, and `suspend`, each with a shared `meta` sidecar.
+- **Small mission tool contract**: Autonomous missions speak to Bakudo over stdio and use a fixed mission-native tool surface centered on `read_plan`, `update_plan`, `notify_user`, `ask_user`, `complete_mission`, `read_experiment_summary`, `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`, `update_mission_state`, `record_lesson`, and `suspend`.
 - **Execution policy**: A native Bakudo policy can allow, prompt, or forbid provider execution per provider, and can independently decide whether Bakudo passes the provider's "allow all tools" flag.
 - **Host-owned worktree lifecycle**: Bakudo decides whether to preserve, merge, or discard the sandbox worktree after the provider exits.
-- **Polished TUI**: A responsive `ratatui` interface with a persisted chat transcript, observability shelf, wallet/fleet status, slash commands, approval and ask-user modals, and keyboard-driven worktree actions.
+- **Thin host router**: Freeform user input is handled by a lightweight host layer that answers obvious status questions locally, starts clear objectives immediately, and otherwise routes steering into the durable mission runtime.
+- **Polished TUI**: A responsive `ratatui` interface with a persisted chat transcript, observability shelf, wallet/fleet status, slash commands, approval and ask-user modals, mission activity events, and keyboard-driven worktree actions.
 - **Crash recovery**: Uses `abox list` plus a `SandboxLedger` to reconcile sandbox state after host restarts.
-- **Durable lessons and wake provenance**: Lessons are written to `<repo>/.bakudo/lessons/`, per-mission provenance is appended to `<repo>/.bakudo/provenance/<mission-id>.ndjson`, and wake payloads plus mission state are stored under Bakudo's repo-scoped data root.
+- **Mission-native worker execution**: `dispatch_swarm` can launch inline/script workers or provider-backed agent workers using the mission `ProviderCatalog` path, with real `concurrency_hint` enforcement and restart-safe wave bookkeeping.
+- **Observability baseline**: Bakudo records wake traces, attempt traces, per-mission provenance, and per-experiment `trace_bundle.md` summaries under the repo-scoped data root.
+- **Durable lessons and mission artifacts**: Lessons are written to `<repo>/.bakudo/lessons/`, provider prompts/configs live under `.bakudo/`, and mission planning state is stored as `mission_plan.md` plus compact `MissionState`.
 - **Machine-readable headless runs**: `bakudo run --json` streams newline-delimited JSON events, `--output-schema` validates the final summary, and `post_run_hook` can hand completed run payloads to external tooling.
 - **Headless swarm execution**: `bakudo swarm --plan plan.json` executes dependency-aware task graphs with bounded concurrency, per-task artifacts, and the same JSON/schema integration surface as single runs.
 - **Repo-scoped control plane**: Persisted run summaries, mission state, candidate listings, and swarm artifacts can be queried later with `bakudo result`, `bakudo wait`, `bakudo candidates`, `bakudo artifact`, and `bakudo status`.
@@ -76,7 +79,7 @@ bakudo
 - `/help`: show the command catalog.
 - `/quit`: exit the application.
 
-When a mission is active, freeform chat is routed through the restored host layer first. Status questions are answered locally; steering messages are persisted as `UserMessage`s and wake the mission supervisor; `host_exec` and `ask_user` tool calls surface as approval/question modals in the TUI.
+When a mission is active, freeform chat is routed through the host layer first. Status questions are answered locally; clear new objectives start a mission immediately; steering messages are persisted as `UserMessage`s and wake the mission supervisor; `host_exec` and `ask_user` tool calls surface as approval/question modals in the TUI; mission activity events such as plan updates and completed workers are rendered into the transcript.
 
 ### Headless CLI
 
@@ -97,6 +100,7 @@ bakudo apply <task-id>
 bakudo discard <task-id>
 bakudo divergence <task-id>
 bakudo doctor
+bakudo doctor --sync-mission-contract
 bakudo sessions
 bakudo resume <session-id>
 ```
@@ -157,17 +161,20 @@ Useful keys:
 - `execution_policy.default_allow_all_tools = true | false`
 - `post_run_hook = ["/absolute/path/to/script"]`
 
-Repo-scoped runtime state such as the sandbox ledger, run specs, and persisted TUI transcript now lives under a per-repo subdirectory of Bakudo's data root.
+Repo-scoped runtime state such as the sandbox ledger, run specs, persisted TUI transcript, mission plans, and trace bundles lives under a per-repo subdirectory of Bakudo's data root.
 
 ## Mission Runtime
 
 Autonomous missions use a durable wake/supervisor model:
 
 - Bakudo persists mission state to a repo-scoped SQLite store under the Bakudo data root.
-- Each wake writes a JSON snapshot to `<repo-data>/wakes/<wake-id>.json`.
-- Deliberators are loaded from `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
-- `dispatch_swarm` launches `abox` experiments, enforces the mission wallet, and schedules the next wake when the selected completion condition is reached.
+- Each mission starts with a durable `mission_plan.md` artifact plus a compact `MissionState` JSON layout for execution-relevant state.
+- Deliberators are loaded from `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`; `bakudo doctor --sync-mission-contract` overwrites repo-local defaults with the currently shipped contract when needed.
+- `dispatch_swarm` launches `abox` experiments, enforces the mission wallet, reserves worker capacity up front, and schedules waves according to `concurrency_hint` instead of starting the entire wave at once.
+- Mission waves can use script workloads or provider-backed agent workloads through the mission-native worker config in `ProviderCatalog`.
 - Each provider wake also respects its configured `wake_budget`; if the deliberator exceeds its per-wake wall-clock or tool-call budget, Bakudo ends that wake and queues a timeout wake.
+- Wake traces are recorded under `<repo-data>/traces/missions/<mission-id>/wakes/<wake-id>/`.
+- Attempt traces and experiment `trace_bundle.md` summaries are recorded under `<repo-data>/traces/attempts/<task-id>/`.
 - `record_lesson` writes Markdown lessons to `<repo>/.bakudo/lessons/`.
 
 Classic `bakudo run` and `bakudo swarm` remain available and still use the provider registry plus the host-owned worktree lifecycle.
@@ -177,7 +184,7 @@ Classic `bakudo run` and `bakudo swarm` remain available and still use the provi
 Bakudo is a Cargo workspace with three main crates plus a thin root binary:
 
 1. `bakudo-core`: Protocol types, config loading, provider registry, state models, and the `abox` adapter.
-2. `bakudo-daemon`: Session orchestration, task execution, divergence queries, doctor probes, and worktree lifecycle decisions.
+2. `bakudo-daemon`: Session orchestration, mission supervision, task execution, trace capture, divergence queries, doctor probes, and worktree lifecycle decisions.
 3. `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
 4. `src/main.rs`: CLI entrypoint and TUI bootstrap.
 
