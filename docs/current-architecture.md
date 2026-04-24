@@ -14,7 +14,7 @@ The interactive mission path is explicitly layered:
 1. `src/main.rs` loads config, constructs shared services, and starts either the TUI loop, a headless one-shot command, the headless daemon, or the repo mission status view.
 2. `SessionController` is the typed command/event boundary for the TUI and host CLI. Its host layer is now a thin router: it answers obvious status/progress questions locally, starts clear objectives immediately, and routes active-mission steering into the durable mission runtime.
 3. `MissionCore` inside `SessionController` acts as the supervisor. It persists mission state, `mission_plan.md`, active-wave bookkeeping, wake traces, and resumes active missions after restart.
-4. `run_deliberator()` launches the active mission provider as a deliberator process over stdio and answers the mission tool contract through a JSON-RPC-like MCP transport.
+4. `run_deliberator()` launches the active mission provider with a wake-local streamable HTTP MCP server and routes the mission tool contract through provider-native MCP integration instead of a custom stdio loop.
 5. `TaskRunner` and `run_experiment()` still launch `abox run`, stream progress, update the `SandboxLedger`, and now also emit attempt traces and `trace_bundle.md` summaries for classic runs and mission experiments alike.
 6. `worktree.rs` still applies the host-side candidate policy after successful one-shot runs.
 
@@ -41,11 +41,11 @@ For classic runs:
 
 For autonomous missions:
 
-- The deliberator process receives `BAKUDO_WAKE_EVENT_PATH`, `BAKUDO_SYSTEM_PROMPT_PATH`, `BAKUDO_MISSION_ID`, `BAKUDO_POSTURE`, `BAKUDO_REPO_ROOT`, and `BAKUDO_MCP_TRANSPORT=stdio`.
-- Bakudo reads the configured mission prompt file, appends a wake bootstrap block containing the current `WakeEvent` JSON plus JSON-RPC transport instructions, and passes that combined prompt as the provider's prompt argument.
-- Deliberator `stdin` is reserved for Bakudo's line-delimited JSON-RPC responses, so wake bootstrap data is not streamed over `stdin`.
-- Provider `.toml` files declare the engine, prompt file, abox profile, wake budget, environment passthrough, and optional `[worker]` config for mission-native agent workers.
-- Mission-native agent workers default to the provider's low-friction execution flag inside `abox` when the dispatch does not override `allow_all_tools`; the host execution policy can still forbid or downgrade a provider entirely.
+- The deliberator process receives `BAKUDO_WAKE_EVENT_PATH`, `BAKUDO_SYSTEM_PROMPT_PATH`, `BAKUDO_MISSION_ID`, `BAKUDO_POSTURE`, `BAKUDO_REPO_ROOT`, `BAKUDO_MCP_SERVER_URL`, and `BAKUDO_MCP_PROTOCOL_VERSION`.
+- Bakudo reads the configured mission prompt file, appends the current `WakeEvent` JSON, and passes that combined prompt as the provider's prompt argument.
+- Bakudo starts a wake-local MCP endpoint on `127.0.0.1` and wires the provider to it with provider-native config: Claude Code gets a strict temporary `--mcp-config`, Codex gets a per-run `mcp_servers.bakudo.url=...` override, and repo-local `exec` deliberators read the endpoint from env.
+- Provider `.toml` files declare the engine, prompt file, `allow_all_tools` policy for the deliberator, abox profile, wake budget, environment passthrough, and optional `[worker]` config for mission-native agent workers. The current built-in per-wake launchers cover Claude Code, Codex, and repo-local `exec`.
+- Mission deliberators and mission-native agent workers default to the provider's low-friction execution flag when the provider config enables it; worker dispatches can still override that default with `allow_all_tools = false`, and the host execution policy can still forbid or downgrade a provider entirely.
 - The supervisor enforces each provider's per-wake `wake_budget` wall-clock and tool-call limits, then re-queues a timeout wake instead of leaving the deliberator running indefinitely.
 - The current tool surface is:
   `read_plan`, `update_plan`, `notify_user`, `ask_user`, `complete_mission`, `read_experiment_summary`, `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`, `update_mission_state`, `record_lesson`, and `suspend`.

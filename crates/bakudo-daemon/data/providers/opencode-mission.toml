@@ -2,6 +2,7 @@ name = "opencode-mission"
 engine = "opencode"
 posture = "mission"
 engine_args = ["run"]
+allow_all_tools = true
 abox_profile = "dev-strict"
 system_prompt_file = "prompts/mission.md"
 
@@ -9,10 +10,6 @@ system_prompt_file = "prompts/mission.md"
 tool_calls = 60
 wall_clock = "10m"
 debounce = "1.5s"
-
-[resume]
-flag = "--resume"
-session_id_file = ".bakudo/sessions/{mission_id}.id"
 
 [worker]
 engine = "opencode"

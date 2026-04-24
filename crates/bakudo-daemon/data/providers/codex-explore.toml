@@ -2,6 +2,7 @@ name = "codex-explore"
 engine = "codex"
 posture = "explore"
 engine_args = ["exec"]
+allow_all_tools = true
 abox_profile = "dev-broad"
 system_prompt_file = "prompts/explore.md"
 
@@ -9,10 +10,6 @@ system_prompt_file = "prompts/explore.md"
 tool_calls = 30
 wall_clock = "5m"
 debounce = "1.5s"
-
-[resume]
-flag = "--resume"
-session_id_file = ".bakudo/sessions/{mission_id}.id"
 
 [worker]
 engine = "codex"

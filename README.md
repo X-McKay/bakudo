@@ -10,8 +10,8 @@ Version 2 now ships two complementary execution paths:
 ## Features
 
 - **Wake-based mission runtime**: A supervisor loop persists `Mission`, `Experiment`, `WakeEvent`, `MissionState`, `Wallet`, `UserMessage`, and ledger state in a repo-scoped SQLite store so missions can resume after restarts.
-- **Provider agnostic**: Run Claude Code, Codex, OpenCode, Gemini, or repo-local `exec` deliberators headlessly. Classic runs still use the provider registry; autonomous missions load `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`.
-- **Small mission tool contract**: Autonomous missions speak to Bakudo over stdio and use a fixed mission-native tool surface centered on `read_plan`, `update_plan`, `notify_user`, `ask_user`, `complete_mission`, `read_experiment_summary`, `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`, `update_mission_state`, `record_lesson`, and `suspend`.
+- **Provider agnostic**: Classic runs still use the provider registry for Claude Code, Codex, OpenCode, Gemini, or repo-local `exec`; autonomous missions load `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`, and the shipped per-wake deliberator launchers currently cover Claude Code, Codex, and repo-local `exec`.
+- **Small mission tool contract**: Autonomous missions use a fixed mission-native MCP tool surface centered on `read_plan`, `update_plan`, `notify_user`, `ask_user`, `complete_mission`, `read_experiment_summary`, `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`, `update_mission_state`, `record_lesson`, and `suspend`.
 - **Execution policy**: A native Bakudo policy can allow, prompt, or forbid provider execution per provider, and can independently decide whether Bakudo passes the provider's "allow all tools" flag.
 - **Host-owned worktree lifecycle**: Bakudo decides whether to preserve, merge, or discard the sandbox worktree after the provider exits.
 - **Thin host router**: Freeform user input is handled by a lightweight host layer that answers obvious status questions locally, starts clear objectives immediately, and otherwise routes steering into the durable mission runtime.
@@ -170,10 +170,10 @@ Autonomous missions use a durable wake/supervisor model:
 - Bakudo persists mission state to a repo-scoped SQLite store under the Bakudo data root.
 - Each mission starts with a durable `mission_plan.md` artifact plus a compact `MissionState` JSON layout for execution-relevant state.
 - Deliberators are loaded from `.bakudo/providers/*.toml` and `.bakudo/prompts/*.md`; `bakudo doctor --sync-mission-contract` overwrites repo-local defaults with the currently shipped contract when needed.
-- Each wake is bootstrapped by passing the provider a prompt argument built from the shipped mission prompt plus the current `WakeEvent` JSON; stdin stays reserved for line-delimited JSON-RPC tool responses.
+- Each wake is bootstrapped by passing the provider a prompt argument built from the shipped mission prompt plus the current `WakeEvent` JSON, then attaching a wake-local streamable HTTP MCP server. Claude Code receives a strict temporary MCP config, Codex receives a per-run MCP override, and repo-local `exec` deliberators read `BAKUDO_MCP_SERVER_URL`.
 - `dispatch_swarm` launches `abox` experiments, enforces the mission wallet, reserves worker capacity up front, and schedules waves according to `concurrency_hint` instead of starting the entire wave at once.
 - Mission waves can use script workloads or provider-backed agent workloads through the mission-native worker config in `ProviderCatalog`.
-- Provider-backed agent workers default to the provider's "allow all" mode inside `abox` (`claude --dangerously-skip-permissions`, `codex --full-auto`, `gemini --yolo`) unless a dispatch explicitly opts out with `allow_all_tools = false`.
+- Mission deliberators and provider-backed agent workers default to the provider's low-friction mode when the provider config enables it (`claude --dangerously-skip-permissions`, `codex --full-auto`, `gemini --yolo`). Agent dispatches can still opt out per experiment with `allow_all_tools = false`.
 - Each provider wake also respects its configured `wake_budget`; if the deliberator exceeds its per-wake wall-clock or tool-call budget, Bakudo ends that wake and queues a timeout wake.
 - Wake traces are recorded under `<repo-data>/traces/missions/<mission-id>/wakes/<wake-id>/`.
 - Attempt traces and experiment `trace_bundle.md` summaries are recorded under `<repo-data>/traces/attempts/<task-id>/`.

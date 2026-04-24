@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use bakudo_core::mission::Posture;
 use serde::{Deserialize, Serialize};
 
-pub const MISSION_CONTRACT_VERSION: u32 = 2;
+pub const MISSION_CONTRACT_VERSION: u32 = 4;
 
 const CONTRACT_MANIFEST_FILE: &str = "mission-contract.json";
 
@@ -16,11 +16,11 @@ pub struct ProviderRuntimeConfig {
     pub engine: ProviderEngine,
     pub posture: Posture,
     pub engine_args: Vec<String>,
+    pub allow_all_tools: bool,
     pub abox_profile: String,
     pub system_prompt_file: PathBuf,
     pub wake_budget: WakeBudget,
     pub env: BTreeMap<String, String>,
-    pub resume: ResumeConfig,
     pub worker: Option<WorkerRuntimeConfig>,
 }
 
@@ -58,21 +58,6 @@ impl Default for WakeBudget {
             tool_calls: 30,
             wall_clock: Duration::from_secs(5 * 60),
             debounce: Duration::from_millis(1500),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ResumeConfig {
-    pub flag: Option<String>,
-    pub session_id_file: Option<String>,
-}
-
-impl Default for ResumeConfig {
-    fn default() -> Self {
-        Self {
-            flag: Some("--resume".to_string()),
-            session_id_file: Some(".bakudo/sessions/{mission_id}.id".to_string()),
         }
     }
 }
@@ -240,6 +225,7 @@ run `bakudo doctor --sync-mission-contract` to overwrite the shipped mission pro
             engine: raw.engine.parse()?,
             posture: parse_posture(&raw.posture)?,
             engine_args: raw.engine_args,
+            allow_all_tools: raw.allow_all_tools,
             abox_profile: raw.abox_profile,
             system_prompt_file,
             wake_budget: WakeBudget {
@@ -260,10 +246,6 @@ run `bakudo doctor --sync-mission-contract` to overwrite the shipped mission pro
                     .unwrap_or(Duration::from_millis(1500)),
             },
             env: raw.env,
-            resume: ResumeConfig {
-                flag: raw.resume.flag,
-                session_id_file: raw.resume.session_id_file,
-            },
             worker: match raw.worker {
                 Some(worker) => Some(WorkerRuntimeConfig {
                     engine: worker.engine.parse()?,
@@ -287,14 +269,14 @@ struct ProviderConfigFile {
     engine: String,
     posture: String,
     engine_args: Vec<String>,
+    #[serde(default)]
+    allow_all_tools: bool,
     abox_profile: String,
     system_prompt_file: String,
     #[serde(default)]
     wake_budget: WakeBudgetFile,
     #[serde(default)]
     env: BTreeMap<String, String>,
-    #[serde(default)]
-    resume: ResumeConfigFile,
     #[serde(default)]
     worker: Option<WorkerRuntimeFile>,
 }
@@ -304,12 +286,6 @@ struct WakeBudgetFile {
     tool_calls: Option<u32>,
     wall_clock: Option<String>,
     debounce: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct ResumeConfigFile {
-    flag: Option<String>,
-    session_id_file: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -339,6 +315,15 @@ impl ProviderEngine {
             Self::OpenCode => "opencode",
             Self::Gemini => "gemini",
             Self::Exec => "",
+        }
+    }
+
+    pub fn allow_all_flag(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("--dangerously-skip-permissions"),
+            Self::Codex => Some("--full-auto"),
+            Self::Gemini => Some("--yolo"),
+            Self::OpenCode | Self::Exec => None,
         }
     }
 }
@@ -500,6 +485,7 @@ mod tests {
         let cfg = catalog.load_for("codex", Posture::Mission).unwrap();
         assert_eq!(cfg.name, "codex-mission");
         assert_eq!(cfg.posture, Posture::Mission);
+        assert!(cfg.allow_all_tools);
         assert!(cfg.system_prompt_file.ends_with("mission.md"));
         assert!(cfg.worker.is_some());
         assert!(root.join(".bakudo/providers/codex-mission.toml").exists());

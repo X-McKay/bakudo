@@ -92,7 +92,6 @@ const WORKER_WRAPPER_PY: &str = concat!(
 struct ProviderCli {
     binary: &'static str,
     model_flag: &'static str,
-    allow_all_flag: Option<&'static str>,
 }
 
 pub fn build_script_worker_command(script: &ExperimentScript) -> Vec<String> {
@@ -127,7 +126,7 @@ pub fn build_agent_worker_command(
                 }
             }
             if allow_all_tools && config.allow_all_tools {
-                if let Some(flag) = cli.allow_all_flag {
+                if let Some(flag) = config.engine.allow_all_flag() {
                     args.push(flag.to_string());
                 }
             }
@@ -150,27 +149,22 @@ fn provider_cli(engine: ProviderEngine) -> ProviderCli {
         ProviderEngine::ClaudeCode => ProviderCli {
             binary: "claude",
             model_flag: "--model",
-            allow_all_flag: Some("--dangerously-skip-permissions"),
         },
         ProviderEngine::Codex => ProviderCli {
             binary: "codex",
             model_flag: "--model",
-            allow_all_flag: Some("--full-auto"),
         },
         ProviderEngine::OpenCode => ProviderCli {
             binary: "opencode",
             model_flag: "--model",
-            allow_all_flag: None,
         },
         ProviderEngine::Gemini => ProviderCli {
             binary: "gemini",
             model_flag: "--model",
-            allow_all_flag: Some("--yolo"),
         },
         ProviderEngine::Exec => ProviderCli {
             binary: "",
             model_flag: "",
-            allow_all_flag: None,
         },
     }
 }

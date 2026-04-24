@@ -48,8 +48,8 @@ The mission runtime lives primarily in:
 
    The wake bootstrap prompt is passed as the provider's prompt argument. It
    includes the shipped mission prompt plus the current `WakeEvent` JSON.
-   Deliberator `stdin` stays reserved for Bakudo's line-delimited JSON-RPC
-   tool responses.
+   Mission tools are exposed through a wake-local HTTP MCP server, not a
+   custom stdio JSON-RPC loop.
 
 6. `wake_budget`, `concurrency_hint`, and active-wave refill behavior are part
    of the runtime contract. Per-wake limits and restart-safe wave scheduling
@@ -59,9 +59,9 @@ The mission runtime lives primarily in:
    preserved worktrees, but merge/apply/discard decisions still happen on the
    host side.
 
-   Mission-native agent workers now default to the provider's low-friction
-   execution mode inside `abox`. A dispatch can still opt out by setting
-   `allow_all_tools = false`.
+   Mission deliberators and mission-native agent workers now default to the
+   provider's low-friction execution mode when the provider config enables it.
+   A dispatched worker can still opt out by setting `allow_all_tools = false`.
 
 ## Process
 

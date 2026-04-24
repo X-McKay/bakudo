@@ -772,6 +772,7 @@ Recommended shape:
 name = "codex"
 engine = "codex"
 posture = "mission"
+allow_all_tools = true
 abox_profile = "mission"
 system_prompt_file = "prompts/mission.md"
 engine_args = []
@@ -795,6 +796,9 @@ Implementation rules:
 - if `[worker]` is absent, agent workloads are rejected with a clear tool error
 - do not silently fall back to the classic path
 - keep provider selection declarative
+- top-level `allow_all_tools` controls the deliberator's low-friction launch
+  mode; worker `allow_all_tools` controls the default for dispatched agent
+  workers
 
 ### Worker Envelope
 

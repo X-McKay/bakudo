@@ -165,50 +165,116 @@ fn write_mock_deliberator_script(dir: &TempDir, body: &str) -> PathBuf {
     let script_path = dir.path.join("mock-deliberator.py");
     let script = format!(
         r#"#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, urllib.error, urllib.request
 
 with open(os.environ["BAKUDO_WAKE_EVENT_PATH"], "r", encoding="utf-8") as handle:
     wake = json.load(handle)
 
+SERVER_URL = os.environ["BAKUDO_MCP_SERVER_URL"]
+PROTOCOL_VERSION = os.environ.get("BAKUDO_MCP_PROTOCOL_VERSION", "2025-06-18")
+SESSION_ID = None
 _next_id = 0
 
-def _send(payload):
-    print(json.dumps(payload), flush=True)
+def _post(payload, *, name=None):
+    headers = {{
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "Mcp-Method": payload["method"],
+    }}
+    if name is not None:
+        headers["Mcp-Name"] = name
+    if SESSION_ID is not None:
+        headers["Mcp-Session-Id"] = SESSION_ID
+    if PROTOCOL_VERSION:
+        headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(SERVER_URL, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            text = response.read().decode("utf-8")
+            response_headers = {{key.lower(): value for key, value in response.headers.items()}}
+            return text, response_headers
+    except urllib.error.HTTPError as err:
+        text = err.read().decode("utf-8")
+        response_headers = {{key.lower(): value for key, value in err.headers.items()}}
+        return text, response_headers
 
-def _read():
-    line = sys.stdin.readline()
-    if not line:
-        raise SystemExit("no response from bakudo")
-    return json.loads(line)
+def notify(method, params=None):
+    payload = {{
+        "jsonrpc": "2.0",
+        "method": method,
+    }}
+    if params is not None:
+        payload["params"] = params
+    _post(payload)
+
+def initialize():
+    global SESSION_ID, PROTOCOL_VERSION, _next_id
+    _next_id += 1
+    text, headers = _post({{
+        "jsonrpc": "2.0",
+        "id": _next_id,
+        "method": "initialize",
+        "params": {{
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {{}},
+            "clientInfo": {{
+                "name": "bakudo-runtime-test",
+                "version": "1.0.0",
+            }},
+        }},
+    }})
+    response = json.loads(text)
+    SESSION_ID = headers.get("mcp-session-id")
+    PROTOCOL_VERSION = headers.get("mcp-protocol-version", PROTOCOL_VERSION)
+    notify("notifications/initialized")
+    return response
 
 def call(name, arguments=None):
     global _next_id
     _next_id += 1
-    _send({{
+    text, _headers = _post({{
+        "jsonrpc": "2.0",
         "id": _next_id,
         "method": "tools/call",
         "params": {{
             "name": name,
             "arguments": arguments or {{}}
         }}
-    }})
-    response = _read()
+    }}, name=name)
+    response = json.loads(text)
     if "error" in response and response["error"] is not None:
         raise RuntimeError(response["error"]["message"])
-    return response["result"]["result"], response["result"]["meta"]
+    structured = response["result"]["structuredContent"]
+    return structured["result"], structured["meta"]
 
 def call_error(name, arguments=None):
     global _next_id
     _next_id += 1
-    _send({{
+    text, _headers = _post({{
+        "jsonrpc": "2.0",
         "id": _next_id,
         "method": "tools/call",
         "params": {{
             "name": name,
             "arguments": arguments or {{}}
         }}
+    }}, name=name)
+    return json.loads(text)
+
+def list_tools():
+    global _next_id
+    _next_id += 1
+    text, _headers = _post({{
+        "jsonrpc": "2.0",
+        "id": _next_id,
+        "method": "tools/list",
+        "params": {{}},
     }})
-    return _read()
+    return json.loads(text)
+
+initialize()
+list_tools()
 
 {body}
 "#
@@ -1132,6 +1198,7 @@ async fn session_controller_requires_approval_when_policy_prompts() {
 #[tokio::test]
 async fn session_controller_routes_host_objectives_into_direct_mission_start() {
     let dir = TempDir::new("bakudo-session-host-plan");
+    let repo = TempRepo::new();
     let script = write_fake_abox_script(
         &dir,
         r#"  list)
@@ -1149,14 +1216,29 @@ async fn session_controller_routes_host_objectives_into_direct_mission_start() {
         data_dir: Some(dir.path.join("data")),
         ..Default::default()
     };
+    let mission_store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
 
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let controller = SessionController::new(
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
         Arc::new(config),
         Arc::new(AboxAdapter::new(&script)),
         Arc::new(SandboxLedger::new()),
         Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-host-plan".to_string()),
+                "claude",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
         cmd_tx.clone(),
         cmd_rx,
         event_tx,
@@ -1166,40 +1248,26 @@ async fn session_controller_routes_host_objectives_into_direct_mission_start() {
 
     cmd_tx
         .send(SessionCommand::HostInput {
-            text: "Restore the missing host layer".to_string(),
+            text: "Implement the revised mission conductor and remove the staged host planner"
+                .to_string(),
         })
         .await
         .unwrap();
-    let first_reply = timeout(Duration::from_secs(1), async {
-        loop {
-            match event_rx.recv().await {
-                Some(SessionEvent::Info(msg)) => break msg,
-                Some(_) => continue,
-                None => panic!("event channel closed"),
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(first_reply.contains("Starting mission"));
 
-    let mut saw_banner = false;
     timeout(Duration::from_secs(2), async {
-        while !saw_banner {
-            match event_rx.recv().await {
-                Some(SessionEvent::MissionUpdated { banner }) => {
-                    if let Some(banner) = banner {
-                        saw_banner = banner.goal.contains("Restore the missing host layer");
-                    }
-                }
-                Some(_) => continue,
-                None => panic!("event channel closed"),
+        loop {
+            let missions = mission_store.list_missions().await.unwrap();
+            if missions.into_iter().any(|mission| {
+                mission.goal
+                    == "Implement the revised mission conductor and remove the staged host planner"
+            }) {
+                break;
             }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .unwrap();
-    assert!(saw_banner);
 
     cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
@@ -1684,22 +1752,26 @@ call("complete_mission", {"summary": "wallet rejected oversized wave"})
 }
 
 #[tokio::test]
-async fn mission_runtime_bootstraps_prompt_as_argument_and_keeps_stdio_for_tools() {
+async fn mission_runtime_bootstraps_prompt_as_argument_and_exposes_mcp_http_tools() {
     let dir = TempDir::new("bakudo-prompt-bootstrap");
     let repo = TempRepo::new();
     let prompt_log = dir.path.join("deliberator-prompt.txt");
+    let mcp_url_log = dir.path.join("deliberator-mcp-url.txt");
     let script = write_mock_deliberator_script(
         &dir,
         &format!(
             r#"
 with open({prompt_log:?}, "w", encoding="utf-8") as handle:
     handle.write(sys.argv[1] if len(sys.argv) > 1 else "")
+with open({mcp_url_log:?}, "w", encoding="utf-8") as handle:
+    handle.write(os.environ.get("BAKUDO_MCP_SERVER_URL", ""))
 
 plan, _meta = call("read_plan")
 assert "Mission Plan" in plan["markdown"]
 call("complete_mission", {{"summary": "prompt bootstrap completed"}})
 "#,
             prompt_log = prompt_log.display().to_string(),
+            mcp_url_log = mcp_url_log.display().to_string(),
         ),
     );
     write_exec_provider_files(&repo, &script);
@@ -1776,11 +1848,13 @@ call("complete_mission", {{"summary": "prompt bootstrap completed"}})
     .unwrap();
 
     let prompt = fs::read_to_string(&prompt_log).unwrap();
+    let mcp_url = fs::read_to_string(&mcp_url_log).unwrap();
     assert!(prompt.contains("You are the Bakudo mission conductor operating in MISSION posture."));
-    assert!(prompt.contains("Tool transport:"));
+    assert!(prompt.contains("Bakudo has already attached the mission MCP server for this wake."));
     assert!(prompt.contains("Bootstrap the wake prompt"));
     assert!(prompt.contains("\"reason\": \"manual_resume\""));
-    assert!(prompt.contains("\"method\":\"tools/call\""));
+    assert!(mcp_url.starts_with("http://127.0.0.1:"));
+    assert!(mcp_url.ends_with("/mcp"));
 
     let provider_trace_path = config
         .resolved_repo_data_dir(Some(repo.path()))
@@ -2010,7 +2084,10 @@ call("complete_mission", {"summary": "user answered the blocking question"})
                 .into_iter()
                 .find(|mission| mission.status == MissionStatus::Completed)
             {
-                break mission;
+                let wakes = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+                if wakes.is_empty() {
+                    break mission;
+                }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -2218,11 +2295,21 @@ call("complete_mission", {"summary": "provenance mission completed"})
         .join(".bakudo")
         .join("provenance")
         .join(format!("{}.ndjson", mission.id));
-    let provenance = fs::read_to_string(&provenance_path).unwrap();
-    let events: Vec<serde_json::Value> = provenance
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let events: Vec<serde_json::Value> = timeout(Duration::from_secs(3), async {
+        loop {
+            let provenance = fs::read_to_string(&provenance_path).unwrap();
+            let events: Vec<serde_json::Value> = provenance
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            if events.iter().any(|entry| entry["event"] == "wake_finished") {
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(events.iter().any(|entry| entry["event"] == "wake_queued"));
     assert!(events.iter().any(|entry| entry["event"] == "wake_started"));
     assert!(events

@@ -12,16 +12,26 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::header::{ALLOW, CONTENT_TYPE, ORIGIN};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::Router;
 use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use bakudo_core::abox::AboxAdapter;
@@ -298,8 +308,45 @@ struct MissionCore {
     trace_recorder: TraceRecorder,
 }
 
+const MCP_ENDPOINT_PATH: &str = "/mcp";
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+#[derive(Clone, Debug, Default)]
+struct WakeStopState {
+    desired_status: Option<MissionStatus>,
+    saw_suspend: bool,
+    forced_stop: bool,
+}
+
+struct WakeMcpServer {
+    endpoint_url: String,
+    stop_rx: watch::Receiver<WakeStopState>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    join_handle: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct WakeMcpServerState {
+    core: MissionCore,
+    mission: Mission,
+    wake: WakeEvent,
+    tool_call_limit: u32,
+    tool_calls_used: Arc<AtomicU32>,
+    session: Arc<Mutex<Option<McpSessionState>>>,
+    stop_tx: watch::Sender<WakeStopState>,
+}
+
+#[derive(Clone, Debug)]
+struct McpSessionState {
+    id: String,
+    protocol_version: String,
+    initialized: bool,
+}
+
 #[derive(Debug, serde::Deserialize)]
-struct RpcRequest {
+struct McpRequest {
+    #[serde(default)]
+    jsonrpc: Option<String>,
     #[serde(default)]
     id: Option<Value>,
     method: String,
@@ -307,8 +354,14 @@ struct RpcRequest {
     params: Value,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct McpInitializeParams {
+    #[serde(default, rename = "protocolVersion")]
+    protocol_version: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize)]
-struct RpcResponse {
+struct McpResponse {
     jsonrpc: &'static str,
     id: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +374,14 @@ struct RpcResponse {
 struct RpcError {
     code: i64,
     message: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct McpToolDefinition {
+    name: &'static str,
+    description: &'static str,
+    #[serde(rename = "inputSchema")]
+    input_schema: Value,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1818,16 +1879,18 @@ impl MissionCore {
         tokio::fs::create_dir_all(&wake_dir).await?;
         let wake_path = wake_dir.join(format!("{}.json", wake.id));
         tokio::fs::write(&wake_path, serde_json::to_vec_pretty(wake)?).await?;
-        let (binary, mut args) = match provider.engine {
-            ProviderEngine::Exec => {
-                let (first, rest) = provider.engine_args.split_first().ok_or_else(|| {
-                    anyhow!("exec provider '{}' is missing engine_args", provider.name)
-                })?;
-                (first.clone(), rest.to_vec())
-            }
-            engine => (engine.binary().to_string(), provider.engine_args.clone()),
-        };
-        args.push(deliberator_prompt.clone());
+        let mcp_server = self
+            .start_wake_mcp_server(mission, wake, provider.wake_budget.tool_calls)
+            .await?;
+        let (binary, args, mcp_launch) = self
+            .build_deliberator_command(
+                &provider,
+                mission.id,
+                wake.id,
+                &deliberator_prompt,
+                &mcp_server.endpoint_url,
+            )
+            .await?;
 
         self.trace_recorder
             .record_wake_start(
@@ -1840,6 +1903,7 @@ impl MissionCore {
                     "launch_binary": binary.clone(),
                     "launch_args": args.clone(),
                     "prompt_preview": deliberator_prompt.chars().take(2000).collect::<String>(),
+                    "mcp": mcp_launch,
                 }),
             )
             .await;
@@ -1857,14 +1921,15 @@ impl MissionCore {
 
         let mut cmd = Command::new(&binary);
         cmd.args(&args)
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("BAKUDO_WAKE_EVENT_PATH", &wake_path)
             .env("BAKUDO_SYSTEM_PROMPT_PATH", &provider.system_prompt_file)
             .env("BAKUDO_MISSION_ID", mission.id.to_string())
             .env("BAKUDO_POSTURE", mission.posture.to_string())
-            .env("BAKUDO_MCP_TRANSPORT", "stdio");
+            .env("BAKUDO_MCP_SERVER_URL", &mcp_server.endpoint_url)
+            .env("BAKUDO_MCP_PROTOCOL_VERSION", MCP_PROTOCOL_VERSION);
         if let Some(repo_root) = self.session.repo_root.as_ref() {
             cmd.current_dir(repo_root)
                 .env("BAKUDO_REPO_ROOT", repo_root);
@@ -1878,10 +1943,6 @@ impl MissionCore {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn deliberator '{}'", binary))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("missing deliberator stdin"))?;
         let stdout = child
             .stdout
             .take()
@@ -1914,17 +1975,43 @@ impl MissionCore {
             }
         });
 
-        let mut stdout_lines = BufReader::new(stdout).lines();
+        let event_tx = self.event_tx.clone();
+        let trace_recorder = self.trace_recorder.clone();
+        let trace_mission_id = mission.id;
+        let trace_wake_id = wake.id;
+        tokio::spawn(async move {
+            let mut stdout_lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = stdout_lines.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                trace_recorder
+                    .append_wake_stdout(trace_mission_id, trace_wake_id, trimmed)
+                    .await;
+                let _ = event_tx
+                    .send(SessionEvent::Info(format!(
+                        "[mission {}] {}",
+                        trace_mission_id, trimmed
+                    )))
+                    .await;
+            }
+        });
+
         let mut desired_status = None;
         let mut saw_suspend = false;
-        let deadline = tokio::time::Instant::now() + provider.wake_budget.wall_clock;
-        let mut tool_calls_used = 0_u32;
         let mut forced_stop = false;
+        let mut child_status = None;
+        let mut stop_rx = mcp_server.stop_rx.clone();
+        let deadline = tokio::time::sleep(provider.wake_budget.wall_clock);
+        tokio::pin!(deadline);
         loop {
-            let next_line = match tokio::time::timeout_at(deadline, stdout_lines.next_line()).await
-            {
-                Ok(result) => result?,
-                Err(_) => {
+            tokio::select! {
+                status = child.wait(), if child_status.is_none() => {
+                    child_status = Some(status?);
+                    break;
+                }
+                _ = &mut deadline => {
                     self.append_provenance(
                         mission.id,
                         json!({
@@ -1949,120 +2036,33 @@ impl MissionCore {
                     forced_stop = true;
                     break;
                 }
-            };
-            let Some(line) = next_line else {
-                break;
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<RpcRequest>(trimmed) {
-                Ok(request) => {
-                    let id = request.id.clone().unwrap_or(json!(null));
-                    if request.method == "tools/call"
-                        && tool_calls_used >= provider.wake_budget.tool_calls
-                    {
-                        let message = format!(
-                            "wake tool-call budget exhausted after {} calls",
-                            provider.wake_budget.tool_calls
-                        );
-                        let response = RpcResponse {
-                            jsonrpc: "2.0",
-                            id,
-                            result: None,
-                            error: Some(RpcError {
-                                code: -32001,
-                                message: message.clone(),
-                            }),
-                        };
-                        stdin
-                            .write_all(serde_json::to_string(&response)?.as_bytes())
-                            .await?;
-                        stdin.write_all(b"\n").await?;
-                        stdin.flush().await?;
-                        self.append_provenance(
-                            mission.id,
-                            json!({
-                                "event": "wake_budget_exhausted",
-                                "at": Utc::now(),
-                                "wake_id": wake.id,
-                                "kind": "tool_calls",
-                                "limit": provider.wake_budget.tool_calls,
-                            }),
-                        )
-                        .await?;
-                        self.enqueue_wake(
-                            mission.id,
-                            WakeReason::Timeout,
-                            json!({
-                                "kind": "wake_budget_tool_calls",
-                                "limit": provider.wake_budget.tool_calls,
-                            }),
-                        )
-                        .await?;
-                        desired_status = Some(MissionStatus::Sleeping);
-                        forced_stop = true;
+                changed = stop_rx.changed() => {
+                    if changed.is_err() {
                         break;
                     }
-                    if request.method == "tools/call" {
-                        tool_calls_used = tool_calls_used.saturating_add(1);
+                    let state = mcp_server.current_state();
+                    desired_status = desired_status.or(state.desired_status);
+                    saw_suspend |= state.saw_suspend;
+                    forced_stop |= state.forced_stop;
+                    if saw_suspend || forced_stop {
+                        break;
                     }
-                    match self.handle_rpc_request(mission, wake, request).await {
-                        Ok(outcome) => {
-                            let response = RpcResponse {
-                                jsonrpc: "2.0",
-                                id,
-                                result: Some(outcome.payload),
-                                error: None,
-                            };
-                            stdin
-                                .write_all(serde_json::to_string(&response)?.as_bytes())
-                                .await?;
-                            stdin.write_all(b"\n").await?;
-                            stdin.flush().await?;
-                            if let Some(status) = outcome.mission_status {
-                                desired_status = Some(status);
-                            }
-                            if outcome.suspend {
-                                saw_suspend = true;
-                                break;
-                            }
-                        }
-                        Err(err) => {
-                            let response = RpcResponse {
-                                jsonrpc: "2.0",
-                                id,
-                                result: None,
-                                error: Some(RpcError {
-                                    code: -32000,
-                                    message: err.to_string(),
-                                }),
-                            };
-                            stdin
-                                .write_all(serde_json::to_string(&response)?.as_bytes())
-                                .await?;
-                            stdin.write_all(b"\n").await?;
-                            stdin.flush().await?;
-                        }
-                    }
-                }
-                Err(_) => {
-                    self.trace_recorder
-                        .append_wake_stdout(mission.id, wake.id, trimmed)
-                        .await;
-                    let _ = self
-                        .event_tx
-                        .send(SessionEvent::Info(format!(
-                            "[mission {}] {}",
-                            mission.id, trimmed
-                        )))
-                        .await;
                 }
             }
         }
 
-        if forced_stop {
+        let final_state = mcp_server.current_state();
+        desired_status = desired_status.or(final_state.desired_status);
+        saw_suspend |= final_state.saw_suspend;
+        forced_stop |= final_state.forced_stop;
+
+        mcp_server.shutdown().await;
+
+        if let Some(status) = child_status {
+            if !status.success() && desired_status.is_none() {
+                desired_status = Some(MissionStatus::Failed);
+            }
+        } else if forced_stop {
             match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => return Err(err.into()),
@@ -2083,11 +2083,6 @@ impl MissionCore {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                 }
-            }
-        } else {
-            let status = child.wait().await?;
-            if !status.success() {
-                desired_status = Some(MissionStatus::Failed);
             }
         }
 
@@ -2117,51 +2112,135 @@ impl MissionCore {
         Ok(desired_status)
     }
 
-    async fn handle_rpc_request(
+    async fn start_wake_mcp_server(
         &self,
         mission: &Mission,
         wake: &WakeEvent,
-        request: RpcRequest,
-    ) -> Result<ToolCallOutcome> {
-        match request.method.as_str() {
-            "initialize" => Ok(ToolCallOutcome {
-                payload: json!({
-                    "server_info": { "name": "bakudo", "version": env!("CARGO_PKG_VERSION") },
-                    "capabilities": { "tools": true }
-                }),
-                suspend: false,
-                mission_status: None,
-            }),
-            "tools/list" => Ok(ToolCallOutcome {
-                payload: json!({ "tools": tool_list_value() }),
-                suspend: false,
-                mission_status: None,
-            }),
-            "tools/call" => {
-                let call: ToolCallParams = serde_json::from_value(request.params)?;
-                let tool_name = call.name.clone();
-                let tool_args = call.arguments.clone();
-                match self.handle_tool_call(mission, wake, call).await {
-                    Ok(outcome) => Ok(outcome),
-                    Err(err) => {
-                        let _ = self
-                            .append_provenance(
-                                mission.id,
-                                json!({
-                                    "event": "tool_call_error",
-                                    "at": Utc::now(),
-                                    "wake_id": wake.id,
-                                    "tool": tool_name,
-                                    "arguments": tool_args,
-                                    "error": err.to_string(),
-                                }),
-                            )
-                            .await;
-                        Err(err)
+        tool_call_limit: u32,
+    ) -> Result<WakeMcpServer> {
+        let (stop_tx, stop_rx) = watch::channel(WakeStopState::default());
+        let state = Arc::new(WakeMcpServerState {
+            core: self.clone(),
+            mission: mission.clone(),
+            wake: wake.clone(),
+            tool_call_limit,
+            tool_calls_used: Arc::new(AtomicU32::new(0)),
+            session: Arc::new(Mutex::new(None)),
+            stop_tx,
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("failed to bind wake MCP listener")?;
+        let addr = listener.local_addr()?;
+        let router = Router::new()
+            .route(
+                MCP_ENDPOINT_PATH,
+                post(wake_mcp_post)
+                    .get(wake_mcp_get)
+                    .delete(wake_mcp_delete),
+            )
+            .with_state(state);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let join_handle = tokio::spawn(async move {
+            let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+            if let Err(err) = server.await {
+                warn!("wake MCP server failed: {err}");
+            }
+        });
+        Ok(WakeMcpServer {
+            endpoint_url: format!("http://127.0.0.1:{}{}", addr.port(), MCP_ENDPOINT_PATH),
+            stop_rx,
+            shutdown_tx: Some(shutdown_tx),
+            join_handle,
+        })
+    }
+
+    async fn build_deliberator_command(
+        &self,
+        provider: &crate::provider_runtime::ProviderRuntimeConfig,
+        mission_id: MissionId,
+        wake_id: WakeId,
+        deliberator_prompt: &str,
+        mcp_endpoint_url: &str,
+    ) -> Result<(String, Vec<String>, Value)> {
+        let wake_trace_dir = self.trace_recorder.wake_dir(mission_id, wake_id);
+        tokio::fs::create_dir_all(&wake_trace_dir).await?;
+        match provider.engine {
+            ProviderEngine::Exec => {
+                let (first, rest) = provider.engine_args.split_first().ok_or_else(|| {
+                    anyhow!("exec provider '{}' is missing engine_args", provider.name)
+                })?;
+                let mut args = rest.to_vec();
+                args.push(deliberator_prompt.to_string());
+                Ok((
+                    first.clone(),
+                    args,
+                    json!({
+                        "transport": "streamable_http",
+                        "endpoint": mcp_endpoint_url,
+                        "delivery": "env",
+                    }),
+                ))
+            }
+            ProviderEngine::ClaudeCode => {
+                let config_path = wake_trace_dir.join("claude-mcp.json");
+                let config = json!({
+                    "mcpServers": {
+                        "bakudo": {
+                            "type": "http",
+                            "url": mcp_endpoint_url,
+                        }
+                    }
+                });
+                tokio::fs::write(&config_path, serde_json::to_vec_pretty(&config)?).await?;
+                let mut args = provider.engine_args.clone();
+                if provider.allow_all_tools {
+                    if let Some(flag) = provider.engine.allow_all_flag() {
+                        args.push(flag.to_string());
                     }
                 }
+                args.push("--mcp-config".to_string());
+                args.push(config_path.display().to_string());
+                args.push("--strict-mcp-config".to_string());
+                args.push(deliberator_prompt.to_string());
+                Ok((
+                    provider.engine.binary().to_string(),
+                    args,
+                    json!({
+                        "transport": "streamable_http",
+                        "endpoint": mcp_endpoint_url,
+                        "config_path": config_path,
+                    }),
+                ))
             }
-            other => anyhow::bail!("unsupported rpc method '{}'", other),
+            ProviderEngine::Codex => {
+                let mut args = provider.engine_args.clone();
+                args.push("--ignore-user-config".to_string());
+                args.push("-c".to_string());
+                args.push(format!("mcp_servers.bakudo.url={mcp_endpoint_url:?}"));
+                if provider.allow_all_tools {
+                    if let Some(flag) = provider.engine.allow_all_flag() {
+                        args.push(flag.to_string());
+                    }
+                }
+                args.push(deliberator_prompt.to_string());
+                Ok((
+                    provider.engine.binary().to_string(),
+                    args,
+                    json!({
+                        "transport": "streamable_http",
+                        "endpoint": mcp_endpoint_url,
+                        "config_override": format!("mcp_servers.bakudo.url={mcp_endpoint_url:?}"),
+                        "ignore_user_config": true,
+                    }),
+                ))
+            }
+            ProviderEngine::Gemini | ProviderEngine::OpenCode => Err(anyhow!(
+                "provider engine '{}' does not yet have a non-interactive per-wake MCP launch path",
+                provider.engine.binary()
+            )),
         }
     }
 
@@ -3480,30 +3559,770 @@ fn initial_mission_plan(
     )
 }
 
+impl WakeMcpServer {
+    fn current_state(&self) -> WakeStopState {
+        self.stop_rx.borrow().clone()
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = self.join_handle.await;
+    }
+}
+
+impl WakeMcpServerState {
+    async fn handle_post(&self, headers: HeaderMap, body: Bytes) -> Response {
+        if !origin_is_allowed(&headers) {
+            return empty_response(StatusCode::FORBIDDEN, None);
+        }
+
+        let request = match serde_json::from_slice::<McpRequest>(&body) {
+            Ok(request) => request,
+            Err(err) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    None,
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id: json!(null),
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32700,
+                            message: format!("invalid JSON-RPC payload: {err}"),
+                        }),
+                    },
+                );
+            }
+        };
+
+        if let Err(err) = validate_mcp_headers(&headers, &request) {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                None,
+                &McpResponse {
+                    jsonrpc: "2.0",
+                    id: request.id.clone().unwrap_or(json!(null)),
+                    result: None,
+                    error: Some(err),
+                },
+            );
+        }
+
+        if let Some(version) = request.jsonrpc.as_deref() {
+            if version != "2.0" {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    None,
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id: request.id.clone().unwrap_or(json!(null)),
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32600,
+                            message: format!("unsupported jsonrpc version '{version}'"),
+                        }),
+                    },
+                );
+            }
+        }
+
+        if request.id.is_none() {
+            return self.handle_notification(headers, request).await;
+        }
+
+        self.handle_request(headers, request).await
+    }
+
+    async fn handle_notification(&self, headers: HeaderMap, request: McpRequest) -> Response {
+        if request.method == "notifications/initialized" {
+            if let Some(mut session) = self.session_from_headers(&headers).await {
+                session.initialized = true;
+                *self.session.lock().await = Some(session.clone());
+                return empty_response(StatusCode::ACCEPTED, Some(&session));
+            }
+            return empty_response(StatusCode::BAD_REQUEST, None);
+        }
+
+        let session = self.session_from_headers(&headers).await;
+        empty_response(StatusCode::ACCEPTED, session.as_ref())
+    }
+
+    async fn handle_request(&self, headers: HeaderMap, request: McpRequest) -> Response {
+        let id = request.id.clone().unwrap_or(json!(null));
+        match request.method.as_str() {
+            "initialize" => {
+                let params: McpInitializeParams =
+                    serde_json::from_value(request.params).unwrap_or(McpInitializeParams {
+                        protocol_version: None,
+                    });
+                let protocol_version = params
+                    .protocol_version
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| MCP_PROTOCOL_VERSION.to_string());
+                let session = McpSessionState {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    protocol_version,
+                    initialized: false,
+                };
+                *self.session.lock().await = Some(session.clone());
+                json_response(
+                    StatusCode::OK,
+                    Some(&session),
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: Some(json!({
+                            "protocolVersion": session.protocol_version,
+                            "capabilities": {
+                                "tools": {
+                                    "listChanged": false,
+                                }
+                            },
+                            "serverInfo": {
+                                "name": "bakudo",
+                                "version": env!("CARGO_PKG_VERSION"),
+                            },
+                            "instructions": "Bakudo exposes mission tools for planning, abox work dispatch, host-approved actions, and mission completion. End each wake with `complete_mission` or `suspend`."
+                        })),
+                        error: None,
+                    },
+                )
+            }
+            "ping" => {
+                let Some(session) = self.session_from_headers(&headers).await else {
+                    return empty_response(StatusCode::BAD_REQUEST, None);
+                };
+                json_response(
+                    StatusCode::OK,
+                    Some(&session),
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: Some(json!({})),
+                        error: None,
+                    },
+                )
+            }
+            "tools/list" => {
+                let Some(session) = self.session_from_headers(&headers).await else {
+                    return empty_response(StatusCode::BAD_REQUEST, None);
+                };
+                json_response(
+                    StatusCode::OK,
+                    Some(&session),
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: Some(json!({
+                            "tools": tool_definitions(),
+                        })),
+                        error: None,
+                    },
+                )
+            }
+            "tools/call" => {
+                let Some(session) = self.session_from_headers(&headers).await else {
+                    return empty_response(StatusCode::BAD_REQUEST, None);
+                };
+                self.handle_tool_call_request(&session, id, request.params)
+                    .await
+            }
+            other => {
+                let session = self.session_from_headers(&headers).await;
+                json_response(
+                    StatusCode::OK,
+                    session.as_ref(),
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32601,
+                            message: format!("unsupported MCP method '{other}'"),
+                        }),
+                    },
+                )
+            }
+        }
+    }
+
+    async fn handle_tool_call_request(
+        &self,
+        session: &McpSessionState,
+        id: Value,
+        params: Value,
+    ) -> Response {
+        if self
+            .tool_calls_used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count < self.tool_call_limit).then_some(count + 1)
+            })
+            .is_err()
+        {
+            let message = format!(
+                "wake tool-call budget exhausted after {} calls",
+                self.tool_call_limit
+            );
+            let _ = self
+                .core
+                .append_provenance(
+                    self.mission.id,
+                    json!({
+                        "event": "wake_budget_exhausted",
+                        "at": Utc::now(),
+                        "wake_id": self.wake.id,
+                        "kind": "tool_calls",
+                        "limit": self.tool_call_limit,
+                    }),
+                )
+                .await;
+            let _ = self
+                .core
+                .enqueue_wake(
+                    self.mission.id,
+                    WakeReason::Timeout,
+                    json!({
+                        "kind": "wake_budget_tool_calls",
+                        "limit": self.tool_call_limit,
+                    }),
+                )
+                .await;
+            self.update_stop_state(Some(MissionStatus::Sleeping), false, true)
+                .await;
+            return json_response(
+                StatusCode::OK,
+                Some(session),
+                &McpResponse {
+                    jsonrpc: "2.0",
+                    id,
+                    result: None,
+                    error: Some(RpcError {
+                        code: -32001,
+                        message,
+                    }),
+                },
+            );
+        }
+
+        let call: ToolCallParams = match serde_json::from_value(params) {
+            Ok(call) => call,
+            Err(err) => {
+                return json_response(
+                    StatusCode::OK,
+                    Some(session),
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32602,
+                            message: format!("invalid tool call arguments: {err}"),
+                        }),
+                    },
+                );
+            }
+        };
+
+        let tool_name = call.name.clone();
+        let tool_args = call.arguments.clone();
+        match self
+            .core
+            .handle_tool_call(&self.mission, &self.wake, call)
+            .await
+        {
+            Ok(outcome) => {
+                if outcome.suspend || outcome.mission_status.is_some() {
+                    self.update_stop_state(outcome.mission_status, outcome.suspend, false)
+                        .await;
+                }
+                json_response(
+                    StatusCode::OK,
+                    Some(session),
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: Some(json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string_pretty(&outcome.payload).unwrap_or_else(|_| "{}".to_string()),
+                            }],
+                            "structuredContent": outcome.payload,
+                            "isError": false,
+                        })),
+                        error: None,
+                    },
+                )
+            }
+            Err(err) => {
+                let _ = self
+                    .core
+                    .append_provenance(
+                        self.mission.id,
+                        json!({
+                            "event": "tool_call_error",
+                            "at": Utc::now(),
+                            "wake_id": self.wake.id,
+                            "tool": tool_name,
+                            "arguments": tool_args,
+                            "error": err.to_string(),
+                        }),
+                    )
+                    .await;
+                json_response(
+                    StatusCode::OK,
+                    Some(session),
+                    &McpResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32000,
+                            message: err.to_string(),
+                        }),
+                    },
+                )
+            }
+        }
+    }
+
+    async fn session_from_headers(&self, headers: &HeaderMap) -> Option<McpSessionState> {
+        let session_id = headers.get("mcp-session-id")?.to_str().ok()?;
+        let session = self.session.lock().await.clone()?;
+        if session.id == session_id {
+            Some(session)
+        } else {
+            None
+        }
+    }
+
+    async fn update_stop_state(
+        &self,
+        desired_status: Option<MissionStatus>,
+        saw_suspend: bool,
+        forced_stop: bool,
+    ) {
+        let mut next = self.stop_tx.borrow().clone();
+        next.desired_status = desired_status.or(next.desired_status);
+        next.saw_suspend |= saw_suspend;
+        next.forced_stop |= forced_stop;
+        let _ = self.stop_tx.send(next);
+    }
+}
+
+async fn wake_mcp_post(
+    State(state): State<Arc<WakeMcpServerState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    state.handle_post(headers, body).await
+}
+
+async fn wake_mcp_get(
+    State(_state): State<Arc<WakeMcpServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if !origin_is_allowed(&headers) {
+        return empty_response(StatusCode::FORBIDDEN, None);
+    }
+    let mut response = empty_response(StatusCode::METHOD_NOT_ALLOWED, None);
+    response
+        .headers_mut()
+        .insert(ALLOW, HeaderValue::from_static("POST, DELETE"));
+    response
+}
+
+async fn wake_mcp_delete(
+    State(state): State<Arc<WakeMcpServerState>>,
+    headers: HeaderMap,
+) -> Response {
+    if !origin_is_allowed(&headers) {
+        return empty_response(StatusCode::FORBIDDEN, None);
+    }
+    let session = state.session_from_headers(&headers).await;
+    *state.session.lock().await = None;
+    empty_response(StatusCode::NO_CONTENT, session.as_ref())
+}
+
 fn build_deliberator_prompt(system_prompt: &str, wake: &WakeEvent) -> Result<String> {
     let wake_json = serde_json::to_string_pretty(wake)?;
     Ok(format!(
-        "{system_prompt}\n\nTool transport:\n- Use line-delimited JSON-RPC over stdio.\n- Write exactly one JSON object per line to stdout.\n- Read exactly one JSON response line per request from stdin.\n- Start by calling `initialize`, then `tools/list`.\n- Call tools with `tools/call` and params `{{\"name\": ..., \"arguments\": ...}}`.\n- Do not wrap JSON in Markdown fences.\n- End this wake with `complete_mission` or `suspend`.\n\nExamples:\n{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{}}}}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"read_plan\",\"arguments\":{{}}}}}}\n\nCurrent WakeEvent JSON:\n{wake_json}\n"
+        "{system_prompt}\n\nBakudo has already attached the mission MCP server for this wake. Use the available Bakudo tools directly; do not invent a custom transport or print JSON-RPC by hand.\n\nCurrent WakeEvent JSON:\n{wake_json}\n"
     ))
 }
 
-fn tool_list_value() -> Vec<Value> {
+fn tool_definitions() -> Vec<McpToolDefinition> {
     vec![
-        json!({"name": "read_plan", "description": "Read mission_plan.md from durable mission storage."}),
-        json!({"name": "update_plan", "description": "Replace mission_plan.md and record why it changed."}),
-        json!({"name": "notify_user", "description": "Send a non-blocking mission update to the user transcript."}),
-        json!({"name": "ask_user", "description": "Prompt the user for a blocking decision."}),
-        json!({"name": "complete_mission", "description": "Record the completion summary and finish the mission."}),
-        json!({"name": "read_experiment_summary", "description": "Read the stored summary and trace bundle path for an experiment."}),
-        json!({"name": "dispatch_swarm", "description": "Dispatch a batch of abox experiments."}),
-        json!({"name": "abox_exec", "description": "Run a one-off command inside an abox."}),
-        json!({"name": "abox_apply_patch", "description": "Apply a patch in an abox and verify it."}),
-        json!({"name": "host_exec", "description": "Run an approved command on the host."}),
-        json!({"name": "update_mission_state", "description": "Apply a JSON merge patch to the Mission State."}),
-        json!({"name": "record_lesson", "description": "Persist a durable lesson."}),
-        json!({"name": "cancel_experiments", "description": "Cancel running experiments."}),
-        json!({"name": "suspend", "description": "Suspend the current wake."}),
+        McpToolDefinition {
+            name: "read_plan",
+            description: "Read mission_plan.md from durable mission storage.",
+            input_schema: empty_object_schema(),
+        },
+        McpToolDefinition {
+            name: "update_plan",
+            description: "Replace mission_plan.md and record why it changed.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "markdown": { "type": "string" },
+                    "reason": { "type": "string" },
+                },
+                "required": ["markdown", "reason"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "notify_user",
+            description: "Send a non-blocking mission update to the user transcript.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" },
+                },
+                "required": ["message"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "ask_user",
+            description: "Prompt the user for a blocking decision.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "choices": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                    },
+                },
+                "required": ["question"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "complete_mission",
+            description: "Record the completion summary and finish the mission.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "summary": { "type": "string" },
+                },
+                "required": ["summary"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "read_experiment_summary",
+            description: "Read the stored summary and trace bundle path for an experiment.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "experiment_id": { "type": "string" },
+                },
+                "required": ["experiment_id"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "dispatch_swarm",
+            description: "Dispatch a batch of abox experiments.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "experiments": {
+                        "type": "array",
+                        "items": dispatch_experiment_schema(),
+                    },
+                    "concurrency_hint": {
+                        "type": "integer",
+                        "minimum": 1,
+                    },
+                    "wake_when": {
+                        "type": "string",
+                        "enum": ["all_complete", "first_complete", "any_failure"],
+                    },
+                },
+                "required": ["experiments"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "abox_exec",
+            description: "Run a one-off command inside an abox.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "script": experiment_script_schema(),
+                    "abox_profile": { "type": "string" },
+                    "timeout_secs": { "type": "integer", "minimum": 1 },
+                },
+                "required": ["script"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "abox_apply_patch",
+            description: "Apply a patch in an abox and verify it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "patch": { "type": "string" },
+                    "verify": experiment_script_schema(),
+                    "abox_profile": { "type": "string" },
+                },
+                "required": ["patch", "verify"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "host_exec",
+            description: "Run an approval-gated command on the host.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "reason": { "type": "string" },
+                },
+                "required": ["command", "reason"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "cancel_experiments",
+            description: "Cancel running experiments.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "experiment_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                    },
+                    "reason": { "type": "string" },
+                },
+                "required": ["experiment_ids"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "update_mission_state",
+            description: "Apply a JSON merge patch to the Mission State.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "patch": {},
+                },
+                "required": ["patch"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "record_lesson",
+            description: "Persist a durable lesson.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "body": { "type": "string" },
+                },
+                "required": ["title", "body"],
+                "additionalProperties": false,
+            }),
+        },
+        McpToolDefinition {
+            name: "suspend",
+            description: "Suspend the current wake.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "reason": { "type": "string" },
+                    "expected_wake": { "type": "string" },
+                },
+                "additionalProperties": false,
+            }),
+        },
     ]
+}
+
+fn empty_object_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false,
+    })
+}
+
+fn experiment_script_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "const": "inline" },
+                    "source": { "type": "string" },
+                },
+                "required": ["kind", "source"],
+                "additionalProperties": false,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "const": "file" },
+                    "path": { "type": "string" },
+                },
+                "required": ["kind", "path"],
+                "additionalProperties": false,
+            }
+        ]
+    })
+}
+
+fn dispatch_experiment_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "label": { "type": "string" },
+            "hypothesis": { "type": "string" },
+            "skill": { "type": "string" },
+            "base_branch": { "type": "string" },
+            "metric_keys": {
+                "type": "array",
+                "items": { "type": "string" },
+            },
+            "workload": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "const": "script" },
+                            "script": experiment_script_schema(),
+                        },
+                        "required": ["kind", "script"],
+                        "additionalProperties": false,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "const": "agent_task" },
+                            "prompt": { "type": "string" },
+                            "provider": { "type": "string" },
+                            "model": { "type": "string" },
+                            "sandbox_lifecycle": {
+                                "type": "string",
+                                "enum": ["ephemeral", "preserved"],
+                            },
+                            "candidate_policy": {
+                                "type": "string",
+                                "enum": ["auto_apply", "discard", "review"],
+                            },
+                            "timeout_secs": { "type": "integer", "minimum": 1 },
+                            "allow_all_tools": { "type": "boolean" },
+                        },
+                        "required": ["kind", "prompt"],
+                        "additionalProperties": false,
+                    }
+                ]
+            }
+        },
+        "required": ["label", "hypothesis", "workload"],
+        "additionalProperties": false,
+    })
+}
+
+fn validate_mcp_headers(
+    headers: &HeaderMap,
+    request: &McpRequest,
+) -> std::result::Result<(), RpcError> {
+    if let Some(method_header) = headers
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok())
+    {
+        if method_header != request.method {
+            return Err(RpcError {
+                code: -32001,
+                message: format!(
+                    "Header mismatch: Mcp-Method header value '{method_header}' does not match body value '{}'",
+                    request.method
+                ),
+            });
+        }
+    }
+
+    if request.method == "tools/call" {
+        if let Some(name_header) = headers
+            .get("mcp-name")
+            .and_then(|value| value.to_str().ok())
+        {
+            let body_name = request
+                .params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if name_header != body_name {
+                return Err(RpcError {
+                    code: -32001,
+                    message: format!(
+                        "Header mismatch: Mcp-Name header value '{name_header}' does not match body value '{body_name}'"
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn origin_is_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(ORIGIN).and_then(|value| value.to_str().ok()) else {
+        return true;
+    };
+    origin == "null"
+        || origin.starts_with("http://127.0.0.1")
+        || origin.starts_with("http://localhost")
+        || origin.starts_with("https://127.0.0.1")
+        || origin.starts_with("https://localhost")
+}
+
+fn empty_response(status: StatusCode, session: Option<&McpSessionState>) -> Response {
+    let mut response = status.into_response();
+    attach_mcp_headers(response.headers_mut(), session);
+    response
+}
+
+fn json_response(
+    status: StatusCode,
+    session: Option<&McpSessionState>,
+    body: &McpResponse,
+) -> Response {
+    match serde_json::to_vec(body) {
+        Ok(payload) => {
+            let mut response = (status, payload).into_response();
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            attach_mcp_headers(response.headers_mut(), session);
+            response
+        }
+        Err(err) => {
+            warn!("failed to serialize MCP response: {err}");
+            empty_response(StatusCode::INTERNAL_SERVER_ERROR, session)
+        }
+    }
+}
+
+fn attach_mcp_headers(headers: &mut HeaderMap, session: Option<&McpSessionState>) {
+    headers.insert(
+        HeaderName::from_static("mcp-protocol-version"),
+        HeaderValue::from_static(MCP_PROTOCOL_VERSION),
+    );
+    if let Some(session) = session {
+        if let Ok(value) = HeaderValue::from_str(&session.id) {
+            headers.insert(HeaderName::from_static("mcp-session-id"), value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&session.protocol_version) {
+            headers.insert(HeaderName::from_static("mcp-protocol-version"), value);
+        }
+    }
 }
 
 fn script_to_command(script: &ExperimentScript) -> Vec<String> {
