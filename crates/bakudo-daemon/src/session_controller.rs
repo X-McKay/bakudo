@@ -1824,6 +1824,20 @@ impl MissionCore {
             let Some(mut mission) = self.mission_store.mission(mission_id).await? else {
                 break;
             };
+            if mission_status_is_terminal(mission.status) {
+                self.mission_store.mark_wake_processed(wake.id).await?;
+                let delivered = {
+                    let mut state = self.runtime_state.lock().await;
+                    state
+                        .wake_user_message_ids
+                        .remove(&wake.id)
+                        .unwrap_or_default()
+                };
+                self.mission_store
+                    .mark_user_messages_delivered(&delivered)
+                    .await?;
+                continue;
+            }
             mission.status = MissionStatus::Deliberating;
             self.mission_store.upsert_mission(&mission).await?;
             self.emit_banner().await;
@@ -4393,6 +4407,13 @@ fn experiment_is_terminal(status: ExperimentStatus) -> bool {
             | ExperimentStatus::Failed
             | ExperimentStatus::Cancelled
             | ExperimentStatus::Timeout
+    )
+}
+
+fn mission_status_is_terminal(status: MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed
     )
 }
 

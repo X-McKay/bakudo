@@ -1999,6 +1999,126 @@ else:
 }
 
 #[tokio::test]
+async fn mission_runtime_ignores_queued_wakes_after_completion() {
+    let dir = TempDir::new("bakudo-ignore-terminal-wakes");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+import time
+
+if wake["reason"] == "manual_resume":
+    call("dispatch_swarm", {
+        "experiments": [{
+            "label": "fast-worker",
+            "hypothesis": "complete before the wake ends",
+            "base_branch": "main",
+            "kind": "script",
+            "script": {"kind": "inline", "source": "echo ready"},
+            "metric_keys": []
+        }],
+        "wake_when": "all_complete"
+    })
+    time.sleep(0.4)
+    call("complete_mission", {"summary": "completed in the same wake"})
+elif wake["reason"] == "experiments_complete":
+    call("update_mission_state", {"patch": {"unexpected_second_wake": True}})
+    call("complete_mission", {"summary": "unexpected second wake"})
+else:
+    call("complete_mission", {"summary": "mission ended without extra work"})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-terminal-wakes".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Ignore wakes after completion".to_string(),
+            done_contract: Some("mission should stay completed".to_string()),
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(5), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let refreshed = store.mission(mission.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.status, MissionStatus::Completed);
+    let mission_state = store.mission_state(mission.id).await.unwrap();
+    assert!(
+        mission_state.0.get("unexpected_second_wake").is_none(),
+        "queued wake should have been discarded after completion: {}",
+        mission_state.0
+    );
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mission_runtime_bootstraps_prompt_as_argument_and_exposes_mcp_http_tools() {
     let dir = TempDir::new("bakudo-prompt-bootstrap");
     let repo = TempRepo::new();
