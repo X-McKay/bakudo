@@ -243,6 +243,8 @@ At the end of this plan, the runtime should look like this:
 - `dispatch_swarm` can launch either script workloads or provider-backed agent
   workloads inside `abox`, with a strict typed payload on each experiment item:
   `{"kind":"script","script":...}` or `{"kind":"agent_task","prompt":"..."}`.
+  Script workloads default to ephemeral/discard, but can request preserved and
+  host-owned auto-apply policy when later wake steps need repo-visible changes.
 - `concurrency_hint` actually limits concurrent experiment start, rather than
   being accepted and ignored.
 - the TUI receives typed mission activity events instead of flattening

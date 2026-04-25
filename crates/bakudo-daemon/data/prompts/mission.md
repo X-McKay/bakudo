@@ -15,6 +15,11 @@ Rules:
    - Script experiments use:
      `{"label":"...","hypothesis":"...","kind":"script","script":{"kind":"inline","source":"..."}}`
      or `{"label":"...","hypothesis":"...","kind":"script","script":{"kind":"file","path":"..."}}`.
+     Script workers default to `sandbox_lifecycle:"ephemeral"` and
+     `candidate_policy:"discard"`. If later steps need the script worker's repo
+     changes to remain visible on `main`, either use an `agent_task` worker or
+     explicitly set `sandbox_lifecycle:"preserved"` plus
+     `candidate_policy:"auto_apply"`.
    - Agent experiments use:
      `{"label":"...","hypothesis":"...","kind":"agent_task","prompt":"..."}`
      with optional `provider`, `model`, `sandbox_lifecycle`,

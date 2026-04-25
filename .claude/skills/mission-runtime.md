@@ -44,6 +44,12 @@ The mission runtime lives primarily in:
    Do not wrap those fields inside a nested `workload` object and do not
    JSON-encode experiment objects as strings.
 
+   Script workers default to `sandbox_lifecycle = "ephemeral"` and
+   `candidate_policy = "discard"`. If later mission steps must see the
+   resulting repo changes on `main`, either use an agent worker or explicitly
+   set `sandbox_lifecycle = "preserved"` plus
+   `candidate_policy = "auto_apply"` on the script experiment.
+
    `abox_exec` and `abox_apply_patch` are simpler on purpose: pass plain
    shell strings for `script` and `verify`, not tagged script objects.
 

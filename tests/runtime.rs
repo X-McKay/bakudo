@@ -1999,6 +1999,191 @@ else:
 }
 
 #[tokio::test]
+async fn mission_runtime_script_worker_can_auto_apply_before_abox_exec_verification() {
+    let dir = TempDir::new("bakudo-script-auto-apply-runtime");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+if wake["reason"] == "manual_resume":
+    call("dispatch_swarm", {
+        "experiments": [{
+            "label": "worker-1",
+            "hypothesis": "create smoke.txt and auto-apply it before verification",
+            "base_branch": "main",
+            "kind": "script",
+            "script": {
+                "kind": "inline",
+                "source": "printf 'OK\n' > smoke.txt"
+            },
+            "sandbox_lifecycle": "preserved",
+            "candidate_policy": "auto_apply"
+        }],
+        "concurrency_hint": 1,
+        "wake_when": "all_complete"
+    })
+    call("suspend", {"reason": "wait_for_worker"})
+elif wake["reason"] == "experiments_complete":
+    experiment = wake["payload"]["experiments"][0]
+    call("read_experiment_summary", {"experiment_id": experiment["id"]})
+    verify, _meta = call("abox_exec", {
+        "script": "test -f smoke.txt && printf 'OK\\n' | cmp -s smoke.txt -",
+        "timeout_secs": 30
+    })
+    assert verify["exit_code"] == 0, verify
+    call("complete_mission", {"summary": "script worker auto-apply verification succeeded"})
+else:
+    call("complete_mission", {"summary": "mission ended without extra work"})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let worktrees_dir = dir.path.join("fake-worktrees");
+    let repo_path = repo.path().display().to_string();
+    let worktrees_path = worktrees_dir.display().to_string();
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        &format!(
+            r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    task_id=""
+    ephemeral=0
+    envs=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --task)
+          task_id="$2"
+          shift 2
+          ;;
+        --ephemeral)
+          ephemeral=1
+          shift
+          ;;
+        -e)
+          envs+=("$2")
+          shift 2
+          ;;
+        --memory|--cpus|--timeout)
+          shift 2
+          ;;
+        --)
+          shift
+          break
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    worktree_root={worktrees_path:?}
+    worktree_dir="$worktree_root/$task_id"
+    branch="agent/$task_id"
+    mkdir -p "$worktree_root"
+    git -C {repo_path:?} worktree add -b "$branch" "$worktree_dir" main >/dev/null
+    for env_kv in "${{envs[@]}}"; do
+      export "$env_kv"
+    done
+    echo "2026-04-24T11:49:56Z INFO Created worktree sandbox_id=\"$task_id\" branch=$branch path=$worktree_dir"
+    (
+      cd "$worktree_dir"
+      "$@"
+    )
+    rc=$?
+    if [[ "$ephemeral" == "1" ]]; then
+      git -C {repo_path:?} worktree remove --force "$worktree_dir" >/dev/null
+      git -C {repo_path:?} branch -D "$branch" >/dev/null
+    fi
+    exit "$rc"
+    ;;
+  merge)
+    task_id="$1"
+    shift
+    if [[ "${{1:-}}" == "--base" ]]; then
+      shift 2
+    fi
+    git -C {repo_path:?} merge --ff-only "agent/$task_id" >/dev/null
+    git -C {repo_path:?} worktree remove --force {worktrees_path:?}/"$task_id" >/dev/null
+    git -C {repo_path:?} branch -D "agent/$task_id" >/dev/null
+    ;;
+  stop)
+    task_id="$1"
+    git -C {repo_path:?} worktree remove --force {worktrees_path:?}/"$task_id" >/dev/null 2>&1 || true
+    git -C {repo_path:?} branch -D "agent/$task_id" >/dev/null 2>&1 || true
+    ;;
+"#,
+        ),
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-script-auto-apply".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Use a script worker and verify on main".to_string(),
+            done_contract: Some("smoke.txt should exist on main".to_string()),
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if missions
+                .iter()
+                .any(|mission| mission.status == MissionStatus::Completed)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("smoke.txt")).unwrap(),
+        "OK\n"
+    );
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mission_runtime_ignores_queued_wakes_after_completion() {
     let dir = TempDir::new("bakudo-ignore-terminal-wakes");
     let repo = TempRepo::new();
@@ -2857,6 +3042,8 @@ call("complete_mission", {"summary": "restart recovery completed"})
                     script: bakudo_core::mission::ExperimentScript::Inline {
                         source: "echo stale".to_string(),
                     },
+                    sandbox_lifecycle: bakudo_core::protocol::SandboxLifecycle::Ephemeral,
+                    candidate_policy: bakudo_core::protocol::CandidatePolicy::Discard,
                 },
                 skill: None,
                 hypothesis: "stale".to_string(),

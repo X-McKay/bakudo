@@ -2394,19 +2394,20 @@ impl MissionCore {
                         if prompt.is_some()
                             || provider.is_some()
                             || model.is_some()
-                            || sandbox_lifecycle.is_some()
-                            || candidate_policy.is_some()
                             || timeout_secs.is_some()
                             || allow_all_tools.is_some()
                         {
                             anyhow::bail!(
-                                "script experiments only accept kind, script, label, hypothesis, base_branch, skill, and metric_keys"
+                                "script experiments only accept kind, script, label, hypothesis, base_branch, skill, metric_keys, sandbox_lifecycle, and candidate_policy"
                             );
                         }
                         ExperimentWorkload::Script {
                             script: script.ok_or_else(|| {
                                 anyhow!("script experiments require a script payload")
                             })?,
+                            sandbox_lifecycle: sandbox_lifecycle
+                                .unwrap_or(SandboxLifecycle::Ephemeral),
+                            candidate_policy: candidate_policy.unwrap_or(CandidatePolicy::Discard),
                         }
                     }
                     DispatchExperimentKind::AgentTask => {
@@ -3098,7 +3099,11 @@ impl MissionCore {
             candidate_policy,
             allow_all_tools,
         ) = match experiment.spec.workload.clone() {
-            ExperimentWorkload::Script { script } => (
+            ExperimentWorkload::Script {
+                script,
+                sandbox_lifecycle,
+                candidate_policy,
+            } => (
                 experiment.spec.hypothesis.clone(),
                 mission.provider_name.clone(),
                 None,
@@ -3107,8 +3112,8 @@ impl MissionCore {
                 512 * 1024,
                 None,
                 None,
-                SandboxLifecycle::Ephemeral,
-                CandidatePolicy::Discard,
+                sandbox_lifecycle,
+                candidate_policy,
                 false,
             ),
             ExperimentWorkload::AgentTask {
@@ -4072,7 +4077,7 @@ fn tool_definitions() -> Vec<McpToolDefinition> {
         },
         McpToolDefinition {
             name: "dispatch_swarm",
-            description: "Dispatch a batch of abox experiments. Each experiment item must declare kind:\"script\" with script:{...} or kind:\"agent_task\" with prompt:\"...\".",
+            description: "Dispatch a batch of abox experiments. Each experiment item must declare kind:\"script\" with script:{...} or kind:\"agent_task\" with prompt:\"...\". Script workers default to ephemeral/discard unless you request a preserved worktree policy.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4234,7 +4239,7 @@ fn dispatch_experiment_schema() -> Value {
         "oneOf": [
             {
                 "type": "object",
-                "description": "Script experiment. The script field must be an object, not a JSON-encoded string.",
+                "description": "Script experiment. The script field must be an object, not a JSON-encoded string. Script workers default to ephemeral/discard unless you explicitly request a preserved worktree policy.",
                 "properties": {
                     "label": { "type": "string" },
                     "hypothesis": { "type": "string" },
@@ -4246,6 +4251,14 @@ fn dispatch_experiment_schema() -> Value {
                     },
                     "kind": { "type": "string", "const": "script" },
                     "script": experiment_script_schema(),
+                    "sandbox_lifecycle": {
+                        "type": "string",
+                        "enum": ["ephemeral", "preserved"],
+                    },
+                    "candidate_policy": {
+                        "type": "string",
+                        "enum": ["auto_apply", "discard", "review"],
+                    },
                 },
                 "required": ["label", "hypothesis", "kind", "script"],
                 "additionalProperties": false,
@@ -4629,6 +4642,21 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_swarm_schema_documents_script_policy_shape() {
+        let schema = dispatch_experiment_schema();
+        let script = &schema["oneOf"][0];
+        let description = script["description"]
+            .as_str()
+            .expect("dispatch_swarm script description");
+        assert!(description.contains("ephemeral/discard"));
+        assert_eq!(script["properties"]["kind"]["const"], "script");
+        assert_eq!(
+            script["properties"]["candidate_policy"]["enum"][0],
+            "auto_apply"
+        );
+    }
+
+    #[test]
     fn dispatch_swarm_args_accept_flat_agent_task_shape() {
         let args: DispatchSwarmArgs = serde_json::from_value(json!({
             "experiments": [{
@@ -4651,6 +4679,33 @@ mod tests {
             Some(CandidatePolicy::AutoApply)
         );
         assert_eq!(experiment.allow_all_tools, Some(true));
+    }
+
+    #[test]
+    fn dispatch_swarm_args_accept_script_policy_shape() {
+        let args: DispatchSwarmArgs = serde_json::from_value(json!({
+            "experiments": [{
+                "label": "script-fix",
+                "hypothesis": "one script worker can land a deterministic patch",
+                "kind": "script",
+                "script": {"kind": "inline", "source": "printf OK\\n > smoke.txt"},
+                "sandbox_lifecycle": "preserved",
+                "candidate_policy": "auto_apply"
+            }]
+        }))
+        .expect("script dispatch_swarm args should parse");
+
+        assert_eq!(args.experiments.len(), 1);
+        let experiment = &args.experiments[0];
+        assert!(matches!(experiment.kind, DispatchExperimentKind::Script));
+        assert_eq!(
+            experiment.sandbox_lifecycle,
+            Some(SandboxLifecycle::Preserved)
+        );
+        assert_eq!(
+            experiment.candidate_policy,
+            Some(CandidatePolicy::AutoApply)
+        );
     }
 
     #[test]

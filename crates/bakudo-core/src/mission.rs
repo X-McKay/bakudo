@@ -378,11 +378,23 @@ pub struct ExperimentSpec {
     pub metric_keys: Vec<String>,
 }
 
+fn default_script_sandbox_lifecycle() -> SandboxLifecycle {
+    SandboxLifecycle::Ephemeral
+}
+
+fn default_script_candidate_policy() -> CandidatePolicy {
+    CandidatePolicy::Discard
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExperimentWorkload {
     Script {
         script: ExperimentScript,
+        #[serde(default = "default_script_sandbox_lifecycle")]
+        sandbox_lifecycle: SandboxLifecycle,
+        #[serde(default = "default_script_candidate_policy")]
+        candidate_policy: CandidatePolicy,
     },
     AgentTask {
         prompt: String,
@@ -654,6 +666,37 @@ mod tests {
                 assert_eq!(sandbox_lifecycle, SandboxLifecycle::Preserved);
             }
             other => panic!("expected agent task workload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn experiment_workload_round_trips_script_policy() {
+        let spec = ExperimentSpec {
+            base_branch: "main".to_string(),
+            workload: ExperimentWorkload::Script {
+                script: ExperimentScript::Inline {
+                    source: "printf OK\\n > smoke.txt".to_string(),
+                },
+                sandbox_lifecycle: SandboxLifecycle::Preserved,
+                candidate_policy: CandidatePolicy::AutoApply,
+            },
+            skill: None,
+            hypothesis: "one script worker can land a deterministic change".to_string(),
+            metric_keys: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: ExperimentSpec = serde_json::from_str(&json).unwrap();
+        match parsed.workload {
+            ExperimentWorkload::Script {
+                sandbox_lifecycle,
+                candidate_policy,
+                ..
+            } => {
+                assert_eq!(sandbox_lifecycle, SandboxLifecycle::Preserved);
+                assert_eq!(candidate_policy, CandidatePolicy::AutoApply);
+            }
+            other => panic!("expected script workload, got {other:?}"),
         }
     }
 

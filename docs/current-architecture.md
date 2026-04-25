@@ -49,7 +49,7 @@ For autonomous missions:
 - The supervisor enforces each provider's per-wake `wake_budget` wall-clock and tool-call limits, then re-queues a timeout wake instead of leaving the deliberator running indefinitely.
 - The current tool surface is:
   `read_plan`, `update_plan`, `notify_user`, `ask_user`, `complete_mission`, `read_experiment_summary`, `dispatch_swarm`, `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`, `update_mission_state`, `record_lesson`, and `suspend`.
-- `dispatch_swarm` stays strict and typed: each experiment item carries a top-level `kind` and either `script` or `prompt`. Bakudo does not accept nested `workload` wrapper objects or JSON-encoded experiment strings.
+- `dispatch_swarm` stays strict and typed: each experiment item carries a top-level `kind` and either `script` or `prompt`. Script workers default to `sandbox_lifecycle = ephemeral` plus `candidate_policy = discard`, but can opt into preserved/auto-apply host policy when a later wake step needs repo-visible changes. Bakudo does not accept nested `workload` wrapper objects or JSON-encoded experiment strings.
 - `abox_exec` and `abox_apply_patch` are intentionally simpler: they take plain shell strings for `script` and `verify` rather than tagged script objects.
 - Repo-local prompt/config defaults are treated as a versioned mission contract; `bakudo doctor --sync-mission-contract` overwrites them with the currently shipped defaults when the contract changes.
 
