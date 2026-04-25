@@ -34,6 +34,7 @@ use crate::palette::{
     self, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH,
     composer_height_for,
 };
+use crate::status_indicator;
 use crate::style::user_message_style;
 use strum::IntoEnumIterator;
 
@@ -72,11 +73,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     let main_area = h_chunks[0];
 
     // ── Vertical split of main: transcript | status | composer | footer ──
-    // The status strip appears only when at least one task is running; it
-    // shows a spinner, the running count, and the latest phase of the most
-    // recently-started running task. Composer grows with multi-line input.
+    // The status strip appears only when at least one task is running. It
+    // renders a codex-style single-line running indicator. Composer grows with
+    // multi-line input.
     let composer_h = composer_height_for(app.input.split('\n').count());
-    let status_h: u16 = if app.active_task_count > 0 || has_running_entry(app) {
+    let status_h: u16 = if app.active_task_count > 0
+        || app
+            .shelf
+            .iter()
+            .any(|entry| entry.state_color == ShelfColor::Running)
+    {
         1
     } else {
         0
@@ -634,68 +640,11 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
 
 // ─── Live status strip ─────────────────────────────────────────────────────
 
-/// Whether the shelf has at least one entry currently in the Running state.
-fn has_running_entry(app: &App) -> bool {
-    app.shelf
-        .iter()
-        .any(|entry| entry.state_color == ShelfColor::Running)
-}
-
-/// A single-row status line shown above the composer when at least one
-/// sandbox task is running. Format:
-///
-///    ⠋  1 running · [02bf30c1] Booting sandbox…
 fn render_status_strip(frame: &mut Frame, app: &App, area: Rect) {
-    let running = app
-        .shelf
-        .iter()
-        .filter(|e| e.state_color == ShelfColor::Running)
-        .count();
-
-    // Prefer the `active_task_count` if it disagrees with the shelf — that's
-    // the dispatcher's authoritative view and the shelf may lag briefly.
-    let count = app.active_task_count.max(running);
-    if count == 0 {
-        return;
+    if let Some(line) = status_indicator::render_status_line(app, area.width) {
+        let strip = Paragraph::new(line);
+        frame.render_widget(strip, area);
     }
-
-    let latest = app
-        .shelf
-        .iter()
-        .find(|e| e.state_color == ShelfColor::Running);
-
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled(
-            palette::spinner_frame(app.tick),
-            Style::default().fg(palette::shelf_running()).bold(),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            count.to_string(),
-            Style::default().fg(palette::shelf_running()).bold(),
-        ),
-        Span::styled(" running", palette::dim_style()),
-    ];
-
-    if let Some(entry) = latest {
-        spans.push(Span::styled("  ·  ", palette::dim_style()));
-        spans.push(Span::styled(
-            format!("[{}]", short_task_id(&entry.task_id)),
-            Style::default().fg(palette::role_info_fg()).bold(),
-        ));
-        spans.push(Span::raw(" "));
-        // Phase: latest note, truncated to fit within the remaining width.
-        let used: usize = spans.iter().map(|s| s.content.width()).sum();
-        let remaining = (area.width as usize).saturating_sub(used + 2);
-        spans.push(Span::styled(
-            word_truncate(&entry.last_note, remaining.max(10)),
-            Style::default().fg(Color::White),
-        ));
-    }
-
-    let strip = Paragraph::new(Line::from(spans));
-    frame.render_widget(strip, area);
 }
 
 // ─── Help overlay ──────────────────────────────────────────────────────────
@@ -1407,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn status_strip_shows_spinner_and_count_when_tasks_running() {
+    fn status_strip_renders_codex_style_running_row() {
         let mut app = fresh_app();
         app.active_task_count = 2;
         app.shelf.push_back(ShelfEntry {
@@ -1418,14 +1367,39 @@ mod tests {
             last_note: "Booting sandbox".to_string(),
             state_label: "running".to_string(),
             state_color: crate::app::ShelfColor::Running,
-            started_at: Local::now(),
+            started_at: Local::now() - chrono::Duration::seconds(7),
             updated_at: Local::now(),
             pending_action: None,
         });
         let rendered = render_to_string(&app, 140, 30);
-        assert!(rendered.contains("running"));
+        assert!(rendered.contains("• Running (7s • esc to interrupt)"));
+        assert!(rendered.contains("2 sandboxes active"));
         assert!(rendered.contains("[02bf30c1]"));
         assert!(rendered.contains("Booting sandbox"));
+    }
+
+    #[test]
+    fn status_strip_truncates_at_narrow_width() {
+        let mut app = fresh_app();
+        app.active_task_count = 1;
+        app.shelf.push_back(ShelfEntry {
+            task_id: "bakudo-attempt-02bf30c1-abcd".to_string(),
+            provider: "claude".to_string(),
+            model: None,
+            prompt_summary: "fix the readme".to_string(),
+            last_note: "Booting sandbox for a much longer status note".to_string(),
+            state_label: "running".to_string(),
+            state_color: crate::app::ShelfColor::Running,
+            started_at: Local::now() - chrono::Duration::seconds(7),
+            updated_at: Local::now(),
+            pending_action: None,
+        });
+        let rendered = render_to_string(&app, 60, 20);
+        assert!(rendered.contains("…"), "expected ellipsis in: {rendered}");
+        assert!(
+            rendered.contains("Running"),
+            "expected status row in: {rendered}"
+        );
     }
 
     #[test]
