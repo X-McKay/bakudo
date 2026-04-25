@@ -28,7 +28,6 @@ struct FooterItem {
 const CHAT_SLASH_ITEMS: &[FooterItem] = &[
     FooterItem::new("Enter", "send", None),
     FooterItem::new("Tab", "complete", None),
-    FooterItem::new("PgUp/Dn", "scroll", None),
     FooterItem::new("Ctrl+C", "quit", None),
     FooterItem::new("/help", "commands", Some("help")),
 ];
@@ -36,14 +35,12 @@ const CHAT_SLASH_ITEMS: &[FooterItem] = &[
 const CHAT_SHELF_ITEMS: &[FooterItem] = &[
     FooterItem::new("Enter", "send", None),
     FooterItem::new("Tab", "inspect shelf", Some("shelf")),
-    FooterItem::new("PgUp/Dn", "scroll", None),
     FooterItem::new("Ctrl+C", "quit", None),
     FooterItem::new("/help", "commands", Some("help")),
 ];
 
 const CHAT_PLAIN_ITEMS: &[FooterItem] = &[
     FooterItem::new("Enter", "send", None),
-    FooterItem::new("PgUp/Dn", "scroll", None),
     FooterItem::new("Ctrl+C", "quit", None),
     FooterItem::new("/help", "commands", Some("help")),
 ];
@@ -154,15 +151,15 @@ mod tests {
     fn chat_shelf_full_snapshot() {
         assert_eq!(
             render_footer_row(FooterVariant::ChatShelf, 90),
-            "Enter: send  Tab: inspect shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
+            "Enter: send  Tab: inspect shelf  Ctrl+C: quit  /help: commands"
         );
     }
 
     #[test]
     fn chat_shelf_shortens_low_priority_help_before_dropping() {
         assert_eq!(
-            render_footer_row(FooterVariant::ChatShelf, 75),
-            "Enter: send  Tab: inspect shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: help"
+            render_footer_row(FooterVariant::ChatShelf, 60),
+            "Enter: send  Tab: inspect shelf  Ctrl+C: quit  /help: help"
         );
     }
 
@@ -170,7 +167,7 @@ mod tests {
     fn chat_plain_narrow_snapshot() {
         assert_eq!(
             render_footer_row(FooterVariant::ChatPlain, 28),
-            "Enter: send  PgUp/Dn: scroll"
+            "Enter: send  Ctrl+C: quit"
         );
     }
 
@@ -178,7 +175,7 @@ mod tests {
     fn slash_footer_full_snapshot() {
         assert_eq!(
             render_footer_row(FooterVariant::ChatSlash, 90),
-            "Enter: send  Tab: complete  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
+            "Enter: send  Tab: complete  Ctrl+C: quit  /help: commands"
         );
     }
 

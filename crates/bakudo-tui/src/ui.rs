@@ -6,15 +6,15 @@
 //!  │  bakudo v2  ·  provider: claude  ·  model: opus-4-5  │                          │
 //!  ├──────────────────────────────────────────────────────┤   ╔═ Sandboxes (2) ════╗  │
 //!  │                                                      │   ║ ⠙ running          ║  │
-//!  │   HH:MM:SS  you   hello world                        │   ║   task-abc         ║  │
-//!  │             ─────────────────────────────────────    │   ║   "fix the bug"    ║  │
-//!  │   HH:MM:SS        agent output line 1               │   ║                    ║  │
-//!  │                   agent output line 2               │   ║ ✓ preserved        ║  │
+//!  │  History appears above this prompt.                 │   ║   task-abc         ║  │
+//!  │  Describe a task below to start a sandbox.          │   ║   "fix the bug"    ║  │
+//!  │                                                     │   ║                    ║  │
+//!  │                                                     │   ║ ✓ preserved        ║  │
 //!  │                                                      │   ║   task-xyz         ║  │
 //!  ├──────────────────────────────────────────────────────┤   ╚════════════════════╝  │
 //!  │  [C] > input with cursor█                            │                          │
 //!  └──────────────────────────────────────────────────────┴──────────────────────────┘
-//!   Enter: send  Tab: complete/shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands
+//!   Enter: send  Tab: complete/shelf  Ctrl+C: quit  /help: commands
 //!
 //! When the terminal is narrower than SHELF_MIN_TERM_WIDTH the shelf is hidden.
 
@@ -28,15 +28,13 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, FocusedPanel, MessageRole, ShelfColor, short_task_id};
+use crate::app::{App, FocusedPanel, ShelfColor, short_task_id};
 use crate::commands::SlashCommand;
 use crate::footer::{self, FooterVariant};
 use crate::palette::{
-    self, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH,
-    composer_height_for,
+    self, FOOTER_HEIGHT, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH, composer_height_for,
 };
 use crate::status_indicator;
-use crate::style::user_message_style;
 use strum::IntoEnumIterator;
 
 // ─── Top-level render ──────────────────────────────────────────────────────
@@ -73,10 +71,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let main_area = h_chunks[0];
 
-    // ── Vertical split of main: transcript | status | composer | footer ──
-    // The status strip appears only when at least one task is running. It
-    // renders a codex-style single-line running indicator. Composer grows with
-    // multi-line input.
+    // ── Vertical split of main: context | status | composer | footer ─────
     let composer_h = composer_height_for(app.input.split('\n').count());
     let status_h: u16 = if app.active_task_count > 0
         || app
@@ -99,7 +94,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .split(main_area);
 
     render_header(frame, app, header_area);
-    render_transcript(frame, app, v_chunks[0]);
+    render_inline_context(frame, app, v_chunks[0]);
     if status_h > 0 {
         render_status_strip(frame, app, v_chunks[1]);
     }
@@ -315,107 +310,50 @@ fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
 
 // ─── Transcript ────────────────────────────────────────────────────────────
 
-fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let focused = app.focus == FocusedPanel::Chat && app.terminal_focused;
-    let border_style = if focused {
-        palette::focused_border_style()
-    } else {
-        palette::unfocused_border_style()
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border_style)
-        .title(Span::styled(" Chat ", panel_title_style(focused)));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let gutter = GUTTER as usize;
-    let mut lines: Vec<Line> = Vec::new();
-
-    for msg in &app.transcript {
-        let (icon, role_label, fg) = match msg.role {
-            MessageRole::User => ("▶", "you  ", palette::role_user_fg()),
-            MessageRole::System => ("·", "sys  ", palette::role_system_fg()),
-            MessageRole::Mission => ("◆", "plan ", palette::role_mission_fg()),
-            MessageRole::AgentOutput => (" ", "     ", palette::role_agent_fg()),
-            MessageRole::Error => ("✗", "err  ", palette::role_error_fg()),
-            MessageRole::Info => ("·", "info ", palette::role_info_fg()),
-        };
-
-        let ts = msg.timestamp.format("%H:%M:%S").to_string();
-        let role_style = Style::default().fg(fg).bold();
-        let body_style = Style::default().fg(fg);
-
-        let prefix_width = gutter + ts.len() + 1 + 1 + 1 + role_label.len();
-        let body_width = (inner.width as usize).saturating_sub(prefix_width).max(1);
-        let cont_indent = " ".repeat(prefix_width);
-
-        let row_style = if matches!(msg.role, MessageRole::User) {
-            user_message_style()
-        } else {
-            Style::default()
-        };
-
-        let mut first_segment_of_msg = true;
-        for content_line in msg.content.lines() {
-            let wrapped = wrap_to_width(content_line, body_width);
-            for segment in wrapped {
-                let body_span = render_diff_aware_span(&segment, body_style);
-                if first_segment_of_msg {
-                    lines.push(
-                        Line::from(vec![
-                            Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
-                            Span::styled(format!("{ts} "), palette::dim_style()),
-                            Span::styled(icon, role_style),
-                            Span::raw(" "),
-                            Span::styled(role_label, role_style),
-                            body_span,
-                        ])
-                        .style(row_style),
-                    );
-                    first_segment_of_msg = false;
-                } else {
-                    lines.push(
-                        Line::from(vec![Span::raw(cont_indent.clone()), body_span])
-                            .style(row_style),
-                    );
-                }
-            }
-        }
+fn render_inline_context(frame: &mut Frame, app: &App, area: Rect) {
+    if area.is_empty() {
+        return;
     }
 
-    // Apply scroll offset (from bottom).
-    let total = lines.len();
-    let visible = inner.height as usize;
-    let start = if total > visible + app.scroll_offset {
-        total - visible - app.scroll_offset
+    let lines = if app.active_task_count > 0 {
+        vec![
+            Line::from(Span::styled(
+                "Live output is rendered above this prompt.",
+                Style::default().fg(Color::White).bold(),
+            )),
+            Line::from(Span::styled(
+                "The running row and shelf below stay interactive while work streams.",
+                palette::dim_style(),
+            )),
+        ]
+    } else if app.shelf.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "History appears above this prompt.",
+                Style::default().fg(Color::White).bold(),
+            )),
+            Line::from(Span::styled(
+                "Describe a task below to start a sandbox.",
+                palette::dim_style(),
+            )),
+        ]
     } else {
-        0
+        vec![
+            Line::from(Span::styled(
+                "History appears above this prompt.",
+                Style::default().fg(Color::White).bold(),
+            )),
+            Line::from(Span::styled(
+                "Use the shelf to inspect, apply, or discard finished sandboxes.",
+                palette::dim_style(),
+            )),
+        ]
     };
-    let visible_lines: Vec<Line> = lines.into_iter().skip(start).collect();
 
-    let para = Paragraph::new(Text::from(visible_lines));
-    frame.render_widget(para, inner);
-
-    // Scroll indicator in top-right corner of transcript.
-    if app.scroll_offset > 0 {
-        let indicator = format!(" ↑ {} ", app.scroll_offset);
-        let ind_width = indicator.width() as u16;
-        if inner.width > ind_width + 2 {
-            let ind_rect = Rect {
-                x: inner.x + inner.width - ind_width - 1,
-                y: inner.y,
-                width: ind_width,
-                height: 1,
-            };
-            let ind_para =
-                Paragraph::new(indicator).style(Style::default().fg(palette::role_info_fg()));
-            frame.render_widget(ind_para, ind_rect);
-        }
-    }
+    let paragraph = Paragraph::new(Text::from(lines))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 // ─── Composer ──────────────────────────────────────────────────────────────
@@ -763,7 +701,6 @@ fn build_help_lines(width: usize) -> Vec<Line<'static>> {
             "autocomplete /slash commands · cycle focus to the shelf",
         ),
         ("↑ / ↓", "move between rows of multi-line input"),
-        ("PgUp / PgDn", "scroll the transcript"),
         ("Ctrl+W", "delete the previous word"),
         ("Ctrl+U", "delete from cursor to start of line"),
         ("Ctrl+C", "quit"),
@@ -1152,27 +1089,6 @@ fn human_elapsed(started_at: chrono::DateTime<chrono::Local>) -> String {
     }
 }
 
-/// Colorise a single line from a unified-diff-ish payload.
-/// Lines starting with `+`/`-` (but not `+++`/`---` file headers) and `@@`
-/// hunk headers get diff-flavoured colors; everything else inherits
-/// `fallback`.
-fn render_diff_aware_span(line: &str, fallback: Style) -> Span<'static> {
-    if line.starts_with("@@") {
-        Span::styled(line.to_string(), Style::default().fg(palette::diff_hunk()))
-    } else if line.starts_with("+++") || line.starts_with("---") {
-        Span::styled(line.to_string(), fallback.fg(palette::diff_hunk()))
-    } else if line.starts_with('+') {
-        Span::styled(line.to_string(), Style::default().fg(palette::diff_added()))
-    } else if line.starts_with('-') && !line.starts_with("--") {
-        Span::styled(
-            line.to_string(),
-            Style::default().fg(palette::diff_removed()),
-        )
-    } else {
-        Span::styled(line.to_string(), fallback)
-    }
-}
-
 fn state_color(color: ShelfColor) -> Color {
     match color {
         ShelfColor::Running => palette::shelf_running(),
@@ -1316,7 +1232,7 @@ mod tests {
         assert!(rendered.contains("line two"));
         assert!(rendered.contains("line three"));
         // Placeholder must not show once input has content.
-        assert!(!rendered.contains("Describe a task"));
+        assert!(!rendered.contains("Shift+Enter for newline"));
     }
 
     #[test]
@@ -1418,7 +1334,7 @@ mod tests {
 
         assert_eq!(
             render_row(&app, 80, 20, 19),
-            "Enter: send  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
+            "Enter: send  Ctrl+C: quit  /help: commands"
         );
     }
 
@@ -1440,7 +1356,7 @@ mod tests {
 
         assert_eq!(
             render_row(&app, 140, 20, 19),
-            "Enter: send  Tab: inspect shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
+            "Enter: send  Tab: inspect shelf  Ctrl+C: quit  /help: commands"
         );
     }
 
@@ -1463,7 +1379,7 @@ mod tests {
 
         assert_eq!(
             render_row(&app, 140, 20, 19),
-            "Enter: send  Tab: complete  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
+            "Enter: send  Tab: complete  Ctrl+C: quit  /help: commands"
         );
 
         app.focus = FocusedPanel::Shelf;

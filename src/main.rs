@@ -24,9 +24,9 @@ use clap::{Parser, Subcommand};
 use crossterm::{
     event::{DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, Terminal, TerminalOptions, Viewport};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -56,9 +56,15 @@ use bakudo_daemon::session_controller::{
 use bakudo_tui::{
     app::App,
     events::{poll_event, TermEvent},
+    insert_history,
+    palette::{COMPOSER_MAX_HEIGHT, FOOTER_HEIGHT, HEADER_HEIGHT},
     transcript_store::TranscriptStore,
     ui::render,
 };
+
+const INLINE_VIEWPORT_PADDING: u16 = 3;
+const INLINE_VIEWPORT_HEIGHT: u16 =
+    HEADER_HEIGHT + COMPOSER_MAX_HEIGHT + FOOTER_HEIGHT + INLINE_VIEWPORT_PADDING;
 
 #[derive(Parser)]
 #[command(
@@ -723,12 +729,7 @@ impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableFocusChange
-        )?;
+        execute!(stdout, EnableBracketedPaste, EnableFocusChange)?;
         Ok(Self)
     }
 }
@@ -736,12 +737,7 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
-        let _ = execute!(
-            stdout,
-            DisableFocusChange,
-            DisableBracketedPaste,
-            LeaveAlternateScreen
-        );
+        let _ = execute!(stdout, DisableFocusChange, DisableBracketedPaste);
         let _ = disable_raw_mode();
     }
 }
@@ -798,7 +794,12 @@ async fn run_tui(
 
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+        },
+    )?;
 
     let transcript_store = TranscriptStore::new(
         config
@@ -885,6 +886,8 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
 ) -> Result<()> {
     loop {
         app.drain_session_events();
+        let pending_history = app.take_pending_history();
+        insert_history::insert_messages(terminal, &pending_history)?;
         terminal.draw(|f| render(f, app))?;
         if app.should_quit {
             break;

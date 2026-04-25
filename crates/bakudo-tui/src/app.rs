@@ -187,14 +187,13 @@ pub struct App {
 
     /// Chat transcript (newest at the end).
     pub transcript: VecDeque<ChatMessage>,
+    /// Transcript messages not yet emitted into terminal scrollback.
+    pub pending_history: VecDeque<ChatMessage>,
 
     /// Current text in the composer input.
     pub input: String,
     /// Cursor position within `input` (byte offset).
     pub cursor: usize,
-
-    /// Scroll offset for the transcript (lines from the bottom).
-    pub scroll_offset: usize,
 
     /// Sandbox shelf entries.
     pub shelf: VecDeque<ShelfEntry>,
@@ -270,9 +269,9 @@ impl App {
             workspace_label,
             session_id: String::new(),
             transcript: VecDeque::new(),
+            pending_history: VecDeque::new(),
             input: String::new(),
             cursor: 0,
-            scroll_offset: 0,
             shelf: VecDeque::new(),
             shelf_selected: 0,
             focus: FocusedPanel::Chat,
@@ -306,21 +305,16 @@ impl App {
 
     // ── Transcript ─────────────────────────────────────────────────────────
 
-    /// Push a message to the transcript, trimming if over limit.
-    ///
-    /// If the user is scrolled up, we keep their absolute position anchored
-    /// by incrementing `scroll_offset` by the number of newly-added lines.
+    /// Push a message to the transcript, trimming if over limit, and queue it
+    /// for inline scrollback emission.
     pub fn push_message(&mut self, msg: ChatMessage) {
-        let added_lines = msg.content.lines().count().max(1);
         if let Some(store) = &self.transcript_store {
             let _ = store.append(&msg);
         }
+        self.pending_history.push_back(msg.clone());
         self.transcript.push_back(msg);
         while self.transcript.len() > MAX_TRANSCRIPT_LINES {
             self.transcript.pop_front();
-        }
-        if self.scroll_offset > 0 {
-            self.scroll_offset = self.scroll_offset.saturating_add(added_lines);
         }
     }
 
@@ -334,7 +328,17 @@ impl App {
         if messages.is_empty() {
             return;
         }
+        self.pending_history = messages.clone();
         self.transcript = messages.into_iter().collect();
+    }
+
+    pub fn take_pending_history(&mut self) -> Vec<ChatMessage> {
+        self.pending_history.drain(..).collect()
+    }
+
+    fn clear_transcript_buffer(&mut self) {
+        self.transcript.clear();
+        self.pending_history.clear();
     }
 
     pub fn running_shelf_count(&self) -> usize {
@@ -438,18 +442,7 @@ impl App {
             self.handle_help_key(key);
             return true;
         }
-        match key.code {
-            // PageUp / PageDown — scroll transcript.
-            KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
-                true
-            }
-            KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
-                true
-            }
-            _ => false,
-        }
+        false
     }
 
     /// Dispatch a key press while the `/help` overlay is visible.
@@ -1336,18 +1329,20 @@ impl App {
     }
 
     fn cmd_new(&mut self) {
-        self.transcript.clear();
+        self.clear_transcript_buffer();
         self.shelf.clear();
         self.shelf_selected = 0;
         self.push_message(ChatMessage::system(
-            "Transcript and shelf view cleared. Running tasks continue in the background and will \
-             reappear on the next event.",
+            "Local history and shelf view cleared. Existing terminal scrollback remains, and \
+             running tasks continue in the background.",
         ));
     }
 
     fn cmd_clear(&mut self) {
-        self.transcript.clear();
-        self.push_message(ChatMessage::system("Transcript cleared."));
+        self.clear_transcript_buffer();
+        self.push_message(ChatMessage::system(
+            "Local history cleared. Existing terminal scrollback remains above the prompt.",
+        ));
     }
 
     fn cmd_config(&mut self) {

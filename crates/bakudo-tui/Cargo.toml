@@ -19,7 +19,3 @@ unicode-segmentation = "1"
 unicode-width = "0.2.2"
 strum = { version = "0.26", features = ["derive"] }
 supports-color = { workspace = true }
-textwrap = { workspace = true }
-
-[dev-dependencies]
-vt100 = "0.16.2"

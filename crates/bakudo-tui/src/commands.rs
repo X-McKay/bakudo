@@ -77,9 +77,9 @@ impl SlashCommand {
             SlashCommand::Diverge => "show divergence summary for a preserved worktree",
             SlashCommand::Diff => "show a colorised unified diff for a preserved worktree",
             SlashCommand::New => {
-                "clear transcript and local shelf view (does not abort running tasks)"
+                "clear local history and shelf state (does not erase terminal scrollback)"
             }
-            SlashCommand::Clear => "clear the transcript display",
+            SlashCommand::Clear => "clear local history state (terminal scrollback remains)",
             SlashCommand::Config => "show current configuration",
             SlashCommand::Status => "show session, provider, model, and active sandbox count",
             SlashCommand::Doctor => "probe abox and provider binaries for health issues",

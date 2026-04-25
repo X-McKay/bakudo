@@ -1,7 +1,6 @@
 pub mod app;
 pub mod color;
 pub mod commands;
-pub mod custom_terminal;
 pub mod events;
 pub mod footer;
 pub mod history_render;
@@ -12,8 +11,5 @@ pub mod shimmer;
 pub mod status_indicator;
 pub mod style;
 pub mod terminal_palette;
-#[cfg(test)]
-pub mod test_backend;
 pub mod transcript_store;
 pub mod ui;
-pub mod wrapping;
