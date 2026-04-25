@@ -30,6 +30,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, FocusedPanel, MessageRole, ShelfColor, short_task_id};
 use crate::commands::SlashCommand;
+use crate::footer::{self, FooterVariant};
 use crate::palette::{
     self, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH,
     composer_height_for,
@@ -103,7 +104,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_status_strip(frame, app, v_chunks[1]);
     }
     render_composer(frame, app, v_chunks[2]);
-    render_footer(frame, app, v_chunks[3]);
+    render_footer(frame, app, v_chunks[3], show_shelf);
 
     if show_shelf {
         render_shelf(frame, app, h_chunks[1]);
@@ -783,43 +784,20 @@ fn build_help_lines(width: usize) -> Vec<Line<'static>> {
 
 // ─── Footer ────────────────────────────────────────────────────────────────
 
-fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let hints: Line = if app.focus == FocusedPanel::Chat {
-        let shelf_visible = area.width >= SHELF_MIN_TERM_WIDTH && !app.shelf.is_empty();
-        let mut spans = vec![
-            hint_key("Enter"),
-            Span::styled(": send  ", palette::footer_fg()),
-        ];
+fn render_footer(frame: &mut Frame, app: &App, area: Rect, show_shelf: bool) {
+    let variant = if app.focus == FocusedPanel::Chat {
         if app.input.starts_with('/') {
-            spans.push(hint_key("Tab"));
-            spans.push(Span::styled(": complete  ", palette::footer_fg()));
-        } else if shelf_visible {
-            spans.push(hint_key("Tab"));
-            spans.push(Span::styled(": inspect shelf  ", palette::footer_fg()));
+            FooterVariant::ChatSlash
+        } else if show_shelf {
+            FooterVariant::ChatShelf
+        } else {
+            FooterVariant::ChatPlain
         }
-        spans.extend([
-            hint_key("PgUp/Dn"),
-            Span::styled(": scroll  ", palette::footer_fg()),
-            hint_key("Ctrl+C"),
-            Span::styled(": quit  ", palette::footer_fg()),
-            hint_key("/help"),
-            Span::styled(": commands", palette::footer_fg()),
-        ]);
-        Line::from(spans)
     } else {
-        Line::from(vec![
-            hint_key("Tab/Esc"),
-            Span::styled(": back to chat  ", palette::footer_fg()),
-            hint_key("j/k"),
-            Span::styled(": navigate  ", palette::footer_fg()),
-            hint_key("a"),
-            Span::styled(": apply  ", palette::footer_fg()),
-            hint_key("d"),
-            Span::styled(": discard", palette::footer_fg()),
-        ])
+        FooterVariant::Shelf
     };
 
-    let footer = Paragraph::new(hints).style(Style::default().bg(Color::Black));
+    let footer = Paragraph::new(footer::line_for(variant, area.width));
     frame.render_widget(footer, area);
 }
 
@@ -1296,6 +1274,14 @@ mod tests {
         buffer_to_string(terminal.backend().buffer())
     }
 
+    fn render_row(app: &App, cols: u16, rows: u16, row: usize) -> String {
+        render_to_string(app, cols, rows)
+            .lines()
+            .nth(row)
+            .unwrap_or_default()
+            .to_string()
+    }
+
     #[test]
     fn composer_shows_placeholder_when_input_is_empty() {
         let app = fresh_app();
@@ -1399,6 +1385,52 @@ mod tests {
         assert!(
             rendered.contains("Running"),
             "expected status row in: {rendered}"
+        );
+    }
+
+    #[test]
+    fn footer_hides_shelf_hint_when_terminal_is_narrow() {
+        let mut app = fresh_app();
+        app.shelf.push_back(ShelfEntry {
+            task_id: "bakudo-attempt-02bf30c1-abcd".to_string(),
+            provider: "claude".to_string(),
+            model: None,
+            prompt_summary: "fix the readme".to_string(),
+            last_note: "Booting sandbox".to_string(),
+            state_label: "running".to_string(),
+            state_color: crate::app::ShelfColor::Running,
+            started_at: Local::now(),
+            updated_at: Local::now(),
+            pending_action: None,
+        });
+
+        let footer = render_row(&app, 80, 20, 19);
+        assert!(
+            !footer.contains("inspect shelf"),
+            "footer should not mention hidden shelf: {footer}"
+        );
+    }
+
+    #[test]
+    fn footer_shows_shelf_hint_when_shelf_is_visible() {
+        let mut app = fresh_app();
+        app.shelf.push_back(ShelfEntry {
+            task_id: "bakudo-attempt-02bf30c1-abcd".to_string(),
+            provider: "claude".to_string(),
+            model: None,
+            prompt_summary: "fix the readme".to_string(),
+            last_note: "Booting sandbox".to_string(),
+            state_label: "running".to_string(),
+            state_color: crate::app::ShelfColor::Running,
+            started_at: Local::now(),
+            updated_at: Local::now(),
+            pending_action: None,
+        });
+
+        let footer = render_row(&app, 140, 20, 19);
+        assert!(
+            footer.contains("inspect shelf"),
+            "footer should mention visible shelf: {footer}"
         );
     }
 

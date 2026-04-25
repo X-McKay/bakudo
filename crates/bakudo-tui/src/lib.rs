@@ -2,6 +2,7 @@ pub mod app;
 pub mod color;
 pub mod commands;
 pub mod events;
+pub mod footer;
 pub mod key_hint;
 pub mod palette;
 pub mod shimmer;
