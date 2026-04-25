@@ -186,7 +186,7 @@ The current test suite is layered:
 - Unit tests for protocol/config/provider/state logic.
 - Deterministic fake-`abox` integration tests in `tests/runtime.rs`, including wake flow, `mission_plan.md` updates, mission activity events, wallet enforcement, host approvals, ask-user flow, multi-wave dispatch, lesson persistence, and restart recovery.
 - TUI state and render tests.
-- Optional live smoke tests against installed `abox 0.3.1` when available locally.
+- Optional live smoke tests against installed `abox 0.3.2` when available locally.
 
 The expected verification commands are:
 

@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- Bakudo now requires `abox 0.3.2` or newer; the runtime minimum-version gate, installer checks, test fixtures, and live documentation now all target that baseline.
 - `model` fields (`AttemptSpec`, `SandboxRecord`, `SessionRecord`, `BakudoConfig::default_model`, TUI app state) are now `Option<String>`; the empty-string sentinel is still accepted by the deserializer but normalised to `None`.
 - `ProviderRegistry` uses `BTreeMap` for deterministic iteration.
 - `parse_list_output` now uses header-derived fixed-width column offsets, tolerating multi-word `vm_state` values like `"merge conflicts"`.

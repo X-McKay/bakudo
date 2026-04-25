@@ -24,12 +24,12 @@ Version 2 now ships two complementary execution paths:
 - **Machine-readable headless runs**: `bakudo run --json` streams newline-delimited JSON events, `--output-schema` validates the final summary, and `post_run_hook` can hand completed run payloads to external tooling.
 - **Headless swarm execution**: `bakudo swarm --plan plan.json` executes dependency-aware task graphs with bounded concurrency, per-task artifacts, and the same JSON/schema integration surface as single runs.
 - **Repo-scoped control plane**: Persisted run summaries, mission state, candidate listings, and swarm artifacts can be queried later with `bakudo result`, `bakudo wait`, `bakudo candidates`, `bakudo artifact`, and `bakudo status`.
-- **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.1`.
+- **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.2`.
 
 ## Prerequisites
 
 - **Rust**: Stable toolchain (install via `rustup`).
-- **abox**: Version `0.3.1` or later.
+- **abox**: Version `0.3.2` or later.
 - **just**: Command runner (install via `cargo install just` or `mise`).
 
 ## Installation

@@ -6,7 +6,9 @@ use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
+use bakudo_core::abox::{
+    check_abox_version, sandbox_task_id, AboxAdapter, AboxVersionStatus, RunParams,
+};
 use bakudo_core::config::BakudoConfig;
 use bakudo_core::control::swarm_artifact_root;
 use bakudo_core::error::AboxError;
@@ -124,7 +126,7 @@ set -euo pipefail
 # version. Answer with a version that satisfies the check without logging the
 # invocation, so tests that assert on invocation counts stay stable.
 if [[ "${{1:-}}" == "--version" ]]; then
-  echo "abox 0.3.1"
+  echo "abox 0.3.2"
   exit 0
 fi
 {{
@@ -388,7 +390,7 @@ async fn lock_real_abox() -> Option<tokio::sync::MutexGuard<'static, ()>> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&version.stdout);
-    if !stdout.contains("abox 0.3.1") {
+    if !matches!(check_abox_version(&stdout), AboxVersionStatus::Ok { .. }) {
         return None;
     }
     Some(
@@ -4339,7 +4341,7 @@ fn app_rebuilds_shelf_from_recovered_ledger_snapshot() {
 #[tokio::test]
 async fn real_abox_ephemeral_run_smoke() {
     let Some(_guard) = lock_real_abox().await else {
-        eprintln!("skipping real abox smoke: abox 0.3.1 not available");
+        eprintln!("skipping real abox smoke: abox >= 0.3.2 not available");
         return;
     };
 
@@ -4383,7 +4385,7 @@ async fn real_abox_ephemeral_run_smoke() {
 #[tokio::test]
 async fn real_abox_preserved_stop_cleans_agent_branch() {
     let Some(_guard) = lock_real_abox().await else {
-        eprintln!("skipping real abox smoke: abox 0.3.1 not available");
+        eprintln!("skipping real abox smoke: abox >= 0.3.2 not available");
         return;
     };
 

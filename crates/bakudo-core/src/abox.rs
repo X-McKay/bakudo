@@ -1,4 +1,4 @@
-//! abox v0.3.1 adapter.
+//! abox v0.3.2 adapter.
 //!
 //! All abox invocations follow the pattern:
 //!   abox [--repo <path>] <subcommand> [args...]
@@ -450,7 +450,7 @@ fn parse_by_offsets(line: &str, offsets: &[usize; 5]) -> Option<SandboxEntry> {
 
 /// Minimum abox version bakudo is known to work with. Keep in sync with the
 /// `//! abox v<X.Y.Z> adapter.` doc-comment at the top of this file.
-pub const MIN_ABOX_VERSION: (u32, u32, u32) = (0, 3, 1);
+pub const MIN_ABOX_VERSION: (u32, u32, u32) = (0, 3, 2);
 
 /// Result of cross-checking `abox --version` output against [`MIN_ABOX_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,7 +467,7 @@ pub enum AboxVersionStatus {
     Unparseable(String),
 }
 
-/// Parse `"abox 0.3.1"` (or a line containing that phrase) into `(0, 3, 1)`.
+/// Parse `"abox 0.3.2"` (or a line containing that phrase) into `(0, 3, 2)`.
 pub fn parse_abox_version(output: &str) -> Option<(u32, u32, u32)> {
     let trimmed = output.trim();
     let after_prefix = trimmed
@@ -475,7 +475,7 @@ pub fn parse_abox_version(output: &str) -> Option<(u32, u32, u32)> {
         .find_map(|line| line.trim().strip_prefix("abox "))?
         .trim();
     // Take everything up to the first whitespace/plus/dash-followed-by-letter so
-    // a build-metadata suffix like "0.3.1-dev" or "0.3.1 (abcdef)" doesn't break us.
+    // a build-metadata suffix like "0.3.2-dev" or "0.3.2 (abcdef)" doesn't break us.
     let core = after_prefix
         .split(|c: char| c.is_whitespace() || c == '+')
         .next()?
@@ -519,15 +519,15 @@ mod tests {
 
     #[test]
     fn parse_abox_version_plain() {
-        assert_eq!(parse_abox_version("abox 0.3.1"), Some((0, 3, 1)));
+        assert_eq!(parse_abox_version("abox 0.3.2"), Some((0, 3, 2)));
         assert_eq!(parse_abox_version("abox 1.2.3\n"), Some((1, 2, 3)));
     }
 
     #[test]
     fn parse_abox_version_tolerates_suffixes_and_build_metadata() {
-        assert_eq!(parse_abox_version("abox 0.3.1-dev"), Some((0, 3, 1)));
-        assert_eq!(parse_abox_version("abox 0.3.1+gabcdef"), Some((0, 3, 1)));
-        assert_eq!(parse_abox_version("abox 0.3.1 (abcdef)"), Some((0, 3, 1)));
+        assert_eq!(parse_abox_version("abox 0.3.2-dev"), Some((0, 3, 2)));
+        assert_eq!(parse_abox_version("abox 0.3.2+gabcdef"), Some((0, 3, 2)));
+        assert_eq!(parse_abox_version("abox 0.3.2 (abcdef)"), Some((0, 3, 2)));
     }
 
     #[test]
@@ -545,8 +545,8 @@ mod tests {
     #[test]
     fn check_abox_version_ok_when_meets_minimum() {
         assert!(matches!(
-            check_abox_version("abox 0.3.1"),
-            AboxVersionStatus::Ok { current: (0, 3, 1) }
+            check_abox_version("abox 0.3.2"),
+            AboxVersionStatus::Ok { current: (0, 3, 2) }
         ));
         assert!(matches!(
             check_abox_version("abox 1.0.0"),
@@ -567,6 +567,13 @@ mod tests {
             check_abox_version("abox 0.3.0"),
             AboxVersionStatus::TooOld {
                 current: (0, 3, 0),
+                min: MIN_ABOX_VERSION,
+            }
+        );
+        assert_eq!(
+            check_abox_version("abox 0.3.1"),
+            AboxVersionStatus::TooOld {
+                current: (0, 3, 1),
                 min: MIN_ABOX_VERSION,
             }
         );

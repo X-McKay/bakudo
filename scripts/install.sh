@@ -59,13 +59,26 @@ ok "cargo: $(cargo --version)"
 # ─── Prereq: abox on PATH ───────────────────────────────────────────────────
 # Hard prereq — bakudo cannot dispatch without it. Check BEFORE installing
 # bakudo so a missing abox doesn't leave the user with a half-working setup.
+MIN_ABOX_VERSION="0.3.2"
 if ! command -v abox >/dev/null 2>&1; then
     err "abox is not on PATH. bakudo cannot dispatch tasks without it."
     err "Install abox from the bakudo-abox workspace root:  just install-abox"
     err "(or see https://github.com/X-McKay/abox)"
     exit 1
 fi
-ok "abox: $(abox --version 2>&1 | head -1) at $(command -v abox)"
+ABOX_VERSION_RAW="$(abox --version 2>&1 | head -1)"
+ABOX_VERSION="$(printf '%s' "$ABOX_VERSION_RAW" | sed -nE 's/.*abox ([0-9]+(\.[0-9]+){1,2}).*/\1/p')"
+if [[ -z "$ABOX_VERSION" ]]; then
+    err "could not parse 'abox --version' output: $ABOX_VERSION_RAW"
+    err "bakudo requires abox $MIN_ABOX_VERSION or newer."
+    exit 1
+fi
+if [[ "$(printf '%s\n%s\n' "$MIN_ABOX_VERSION" "$ABOX_VERSION" | sort -V | head -n1)" != "$MIN_ABOX_VERSION" ]]; then
+    err "abox $ABOX_VERSION is too old. bakudo requires $MIN_ABOX_VERSION or newer."
+    err "Install abox from the bakudo-abox workspace root:  just install-abox"
+    exit 1
+fi
+ok "abox: $ABOX_VERSION_RAW at $(command -v abox)"
 
 # ─── Soft prereq: at least one provider CLI ─────────────────────────────────
 # Warn but don't block — the user may install a provider later.
