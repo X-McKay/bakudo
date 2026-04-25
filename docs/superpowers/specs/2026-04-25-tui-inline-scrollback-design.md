@@ -5,13 +5,18 @@
 **Phase:** 4 of the bakudo-vs-codex polish plan  
 **Estimated size:** ~900-1300 LOC added/rewritten across `custom_terminal.rs`, `insert_history.rs`, transcript formatting reuse, `ui.rs`, `app.rs`, and `src/main.rs`
 
-**Compatibility note:** Phase 4 is not a straight file copy. Codex's `custom_terminal.rs` targets a newer `ratatui` backend API than bakudo's pinned `ratatui = "0.26"`:
+**Compatibility note:** Phase 4 is not a straight file copy. Codex's `custom_terminal.rs` targets a newer `ratatui` backend API than bakudo's current `ratatui = "0.26"`:
 
 - codex uses `Backend::get_cursor_position` / `set_cursor_position`; bakudo has `get_cursor` / `set_cursor`
 - codex uses `Backend::size() -> Size`; bakudo has `Backend::size() -> Rect`
 - codex's surrounding `tui.rs` relies on backend `scroll_region_up/down` helpers that do not exist in ratatui 0.26
 
-Bakudo should adapt the port locally instead of bumping ratatui or pulling in codex's full TUI stack. `crossterm = "0.27"` is sufficient for the raw ANSI work (`DECSTBM`, reverse index, clears, cursor saves/restores).
+Phase 4 may either:
+
+- adapt the port locally on top of `ratatui 0.26`, or
+- bump `ratatui` if that materially reduces adapter code and does not force a broader TUI rewrite.
+
+The choice should be made up front during implementation and recorded in the first implementation commit. `crossterm = "0.27"` is still sufficient for the raw ANSI work (`DECSTBM`, reverse index, clears, cursor saves/restores).
 
 **Transitive codex surface area note:** `insert_history.rs` also depends on `wrapping.rs`, and its tests depend on `test_backend.rs`. Bakudo does not have those modules today, so Phase 4 needs a reduced URL-aware wrapping helper plus a VT100-backed test backend. This is the main hidden scope beyond the two reference files named in the original phase list.
 
@@ -98,7 +103,7 @@ Terminal-native scrollback remains the terminal emulator's job, not bakudo's.
 
 | File | Status | Purpose |
 |---|---|---|
-| `crates/bakudo-tui/src/custom_terminal.rs` | CREATE | ratatui-0.26-adapted terminal wrapper derived from codex's `custom_terminal.rs`; owns inline viewport area, diff invalidation, cursor tracking, and clear helpers |
+| `crates/bakudo-tui/src/custom_terminal.rs` | CREATE | terminal wrapper derived from codex's `custom_terminal.rs`; owns inline viewport area, diff invalidation, cursor tracking, and clear helpers |
 | `crates/bakudo-tui/src/insert_history.rs` | CREATE | scrollback insertion port derived from codex's `insert_history.rs`; owns `DECSTBM`/reverse-index path, Zellij fallback, and styled line emission |
 | `crates/bakudo-tui/src/history_render.rs` | CREATE | bakudo-specific formatter that converts `ChatMessage` values into `Line<'static>` history rows for inline scrollback |
 | `crates/bakudo-tui/src/wrapping.rs` | CREATE | reduced URL-aware wrapping helper extracted from codex; only the pieces `insert_history.rs` needs |
@@ -157,7 +162,7 @@ Bakudo should use `bakudo_tui::custom_terminal::Terminal<CrosstermBackend<Stdout
 The adapted wrapper provides:
 
 - a tracked `viewport_area`
-- cursor-position tracking without relying on newer ratatui APIs
+- cursor-position tracking appropriate to the chosen ratatui baseline
 - diff-buffer invalidation after raw terminal mutations
 - scrollback and visible-screen clear helpers
 - a `draw` API compatible with bakudo's existing render loop
@@ -212,10 +217,10 @@ This is one of the reasons Phase 4 belongs partly in `src/main.rs`.
 
 ### Inline history insertion
 
-`insert_history.rs` should be ported nearly verbatim in behavior, but adapted for bakudo's stack:
+`insert_history.rs` should be ported nearly verbatim in behavior, but adapted for bakudo's chosen stack:
 
 - use the custom terminal wrapper instead of codex's
-- convert ratatui-0.26 backend size/cursor APIs
+- convert size/cursor/backend APIs as needed for the selected ratatui version
 - keep `SetScrollRegion` / `ResetScrollRegion`
 - keep the Zellij fallback mode
 
@@ -335,7 +340,7 @@ Under `tui-use`, verify at `140x40` and `80x30`:
 
 ## Risks
 
-- **Ratatui 0.26 API mismatch is real scope, not noise.** The codex port cannot be pasted in whole. Mitigation: adapt locally and avoid a ratatui version bump in this phase.
+- **The ratatui compatibility choice can create hidden scope either way.** Staying on `0.26` means more adapter code; bumping ratatui may create compile fallout elsewhere. Mitigation: decide once at the start, prefer the smaller net diff, and keep the bump limited to what Phase 4 actually needs.
 - **Overlay height can force the viewport to expand mid-session.** If that resize path is wrong, the diff buffer will desync or stale rows will remain on screen. Mitigation: centralize viewport-height computation in one helper and invalidate after raw scroll operations.
 - **Resume replay can flood the terminal with many historical lines.** Mitigation: replay only the existing transcript ring, not unbounded history; keep inserts batched.
 - **Terminal compatibility varies across tmux, Zellij, Warp, and Terminal.app.** Mitigation: keep codex's Zellij fallback and preserve the ANSI clear helpers from `custom_terminal.rs`.
