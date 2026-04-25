@@ -3702,6 +3702,91 @@ async fn bakudo_candidates_cli_lists_actionable_candidates() {
     assert!(!ids.contains(&"task-merged"));
 }
 
+#[tokio::test]
+async fn bakudo_apply_cli_snapshots_dirty_preserved_worktree_before_merge() {
+    let dir = TempDir::new("bakudo-cli-apply");
+    let repo = TempRepo::new();
+    let task_id = "task-cli-apply";
+    let branch = format!("agent/{task_id}");
+    let worktree_dir = dir.path.join("sandbox");
+    run_host(
+        repo.path(),
+        "git",
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            worktree_dir.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(worktree_dir.join("smoke.txt"), "OK\n").unwrap();
+
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        &format!(
+            r#"  merge)
+    task_id="$1"
+    git -C {:?} merge --ff-only "agent/$task_id" >/dev/null
+    ;;
+"#,
+            repo.path().display().to_string(),
+        ),
+    );
+    let config = write_config_file(&dir, &script);
+    let loaded_config = BakudoConfig::load(&config).unwrap();
+    let ledger_path = loaded_config
+        .resolved_repo_data_dir(Some(repo.path()))
+        .join("ledger.jsonl");
+    let ledger = SandboxLedger::with_persistence(&ledger_path);
+    let mut record = make_record(task_id, SandboxState::Preserved);
+    record.repo_root = Some(repo.path().display().to_string());
+    record.worktree_path = Some(worktree_dir.display().to_string());
+    record.branch = Some(branch.clone());
+    ledger.insert(record).await;
+
+    let output = StdCommand::new(bakudo_bin())
+        .args(["-c", config.to_str().unwrap(), "apply", task_id])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "bakudo apply failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&format!("Merged {task_id} into main"))
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("smoke.txt")).unwrap(),
+        "OK\n"
+    );
+    assert!(host_output(&worktree_dir, "git", &["status", "--short"])
+        .trim()
+        .is_empty());
+    assert_eq!(
+        host_output(repo.path(), "git", &["rev-parse", "main"]).trim(),
+        host_output(repo.path(), "git", &["rev-parse", &branch]).trim()
+    );
+
+    let reloaded_ledger = SandboxLedger::with_persistence(&ledger_path);
+    let record = reloaded_ledger.get(task_id).await.unwrap();
+    assert_eq!(record.state, SandboxState::Merged);
+
+    let invocations = read_invocations(&log);
+    assert_eq!(invocations.len(), 1, "expected a single merge invocation");
+    let merge_invocation = &invocations[0];
+    assert!(merge_invocation.iter().any(|arg| arg == "merge"));
+    assert!(merge_invocation.iter().any(|arg| arg == task_id));
+    assert!(merge_invocation
+        .windows(2)
+        .any(|window| window[0] == "--base" && window[1] == "main"));
+}
+
 #[test]
 fn bakudo_artifact_cli_reads_swarm_artifact() {
     let dir = TempDir::new("bakudo-cli-artifact");

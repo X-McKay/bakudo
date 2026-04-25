@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
         }) => cmd_wait(&config, &ledger, &task_id, timeout_secs, json).await,
         Some(Commands::Artifact { mission, path }) => cmd_artifact(&config, &mission, &path),
         Some(Commands::List) => cmd_list(&abox, &config).await,
-        Some(Commands::Apply { task_id }) => cmd_apply(&abox, &config, &task_id).await,
+        Some(Commands::Apply { task_id }) => cmd_apply(&abox, &config, &ledger, &task_id).await,
         Some(Commands::Discard { task_id }) => cmd_discard(&abox, &config, &task_id).await,
         Some(Commands::Divergence { task_id, base }) => cmd_divergence(&task_id, &base).await,
         Some(Commands::Doctor {
@@ -409,39 +409,40 @@ async fn cmd_list(abox: &Arc<AboxAdapter>, _config: &Arc<BakudoConfig>) -> Resul
 async fn cmd_apply(
     abox: &Arc<AboxAdapter>,
     config: &Arc<BakudoConfig>,
+    ledger: &Arc<SandboxLedger>,
     task_id: &str,
 ) -> Result<()> {
-    let conflicts = abox
-        .merge(
-            std::env::current_dir().ok().as_deref(),
-            task_id,
-            &config.base_branch,
-        )
-        .await?;
-    if conflicts.is_empty() {
-        let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
-        let _ = update_run_summary_outcome(
-            &repo_data_dir,
-            task_id,
-            SandboxState::Merged,
-            HookWorktreeAction::Merged,
-            Vec::new(),
-        )?;
-        println!("Merged {} into {}", task_id, config.base_branch);
-    } else {
-        let repo_data_dir = config.resolved_repo_data_dir(std::env::current_dir().ok().as_deref());
-        let _ = update_run_summary_outcome(
-            &repo_data_dir,
-            task_id,
-            SandboxState::MergeConflicts,
-            HookWorktreeAction::MergeConflicts,
-            conflicts.clone(),
-        )?;
-        eprintln!("Merge conflicts:");
-        for c in conflicts {
-            eprintln!("  {c}");
+    use bakudo_daemon::worktree::{manual_apply, WorktreeAction};
+
+    let repo = std::env::current_dir().ok();
+    match manual_apply(task_id, &config.base_branch, repo.as_deref(), abox, ledger).await? {
+        WorktreeAction::Merged => {
+            let repo_data_dir = config.resolved_repo_data_dir(repo.as_deref());
+            let _ = update_run_summary_outcome(
+                &repo_data_dir,
+                task_id,
+                SandboxState::Merged,
+                HookWorktreeAction::Merged,
+                Vec::new(),
+            )?;
+            println!("Merged {} into {}", task_id, config.base_branch);
         }
-        std::process::exit(1);
+        WorktreeAction::MergeConflicts(conflicts) => {
+            let repo_data_dir = config.resolved_repo_data_dir(repo.as_deref());
+            let _ = update_run_summary_outcome(
+                &repo_data_dir,
+                task_id,
+                SandboxState::MergeConflicts,
+                HookWorktreeAction::MergeConflicts,
+                conflicts.clone(),
+            )?;
+            eprintln!("Merge conflicts:");
+            for c in conflicts {
+                eprintln!("  {c}");
+            }
+            std::process::exit(1);
+        }
+        WorktreeAction::Discarded | WorktreeAction::Preserved => unreachable!(),
     }
     Ok(())
 }
