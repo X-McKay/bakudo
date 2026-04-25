@@ -88,8 +88,7 @@ pub fn default_bg() -> Option<(u8, u8, u8)> {
 fn parse_osc_color_reply(bytes: &[u8]) -> Option<(u8, u8, u8)> {
     let s = std::str::from_utf8(bytes).ok()?;
     let body = s.split_once("rgb:").map(|(_, rest)| rest)?;
-    let body = body
-        .trim_end_matches(|c: char| c == 0x07 as char || c == '\\' || c == 0x1b as char);
+    let body = body.trim_end_matches([0x07 as char, '\\', 0x1b as char]);
     let mut parts = body.split('/');
     let r = parts.next().and_then(parse_hex_component)?;
     let g = parts.next().and_then(parse_hex_component)?;

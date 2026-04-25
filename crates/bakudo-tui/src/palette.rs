@@ -238,6 +238,10 @@ mod tests {
     #[test]
     fn dim_helpers_carry_dim_modifier() {
         assert!(dim_style().add_modifier.contains(Modifier::DIM));
-        assert!(unfocused_border_style().add_modifier.contains(Modifier::DIM));
+        assert!(
+            unfocused_border_style()
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
     }
 }

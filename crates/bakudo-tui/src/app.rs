@@ -28,7 +28,7 @@ use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 use bakudo_daemon::session_controller::{MissionBanner, SessionCommand, SessionEvent};
 
-use crate::commands::{completions_for, parse_slash, ParsedCommand, SlashCommand};
+use crate::commands::{ParsedCommand, SlashCommand, completions_for, parse_slash};
 use crate::transcript_store::TranscriptStore;
 
 /// Maximum number of chat messages to keep in the transcript ring buffer.
@@ -1361,7 +1361,11 @@ impl App {
             cfg.candidate_policy,
             cfg.sandbox_lifecycle,
             cfg.execution_policy.default_decision,
-            if cfg.post_run_hook.is_some() { "configured" } else { "none" },
+            if cfg.post_run_hook.is_some() {
+                "configured"
+            } else {
+                "none"
+            },
         );
         self.push_message(ChatMessage::info(info));
     }

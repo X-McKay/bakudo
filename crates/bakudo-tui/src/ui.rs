@@ -19,20 +19,20 @@
 //! When the terminal is narrower than SHELF_MIN_TERM_WIDTH the shelf is hidden.
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
-    Frame,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{short_task_id, App, FocusedPanel, MessageRole, ShelfColor};
+use crate::app::{App, FocusedPanel, MessageRole, ShelfColor, short_task_id};
 use crate::commands::SlashCommand;
 use crate::palette::{
-    self, composer_height_for, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH,
-    SHELF_WIDTH,
+    self, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH,
+    composer_height_for,
 };
 use crate::style::user_message_style;
 use strum::IntoEnumIterator;
@@ -358,17 +358,23 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
             for segment in wrapped {
                 let body_span = render_diff_aware_span(&segment, body_style);
                 if first_segment_of_msg {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
-                        Span::styled(format!("{ts} "), palette::dim_style()),
-                        Span::styled(icon, role_style),
-                        Span::raw(" "),
-                        Span::styled(role_label, role_style),
-                        body_span,
-                    ]).style(row_style));
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled(format!("{:>gutter$}", ""), palette::dim_style()),
+                            Span::styled(format!("{ts} "), palette::dim_style()),
+                            Span::styled(icon, role_style),
+                            Span::raw(" "),
+                            Span::styled(role_label, role_style),
+                            body_span,
+                        ])
+                        .style(row_style),
+                    );
                     first_segment_of_msg = false;
                 } else {
-                    lines.push(Line::from(vec![Span::raw(cont_indent.clone()), body_span]).style(row_style));
+                    lines.push(
+                        Line::from(vec![Span::raw(cont_indent.clone()), body_span])
+                            .style(row_style),
+                    );
                 }
             }
         }
@@ -398,8 +404,8 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
                 width: ind_width,
                 height: 1,
             };
-            let ind_para = Paragraph::new(indicator)
-                .style(Style::default().fg(palette::role_info_fg()));
+            let ind_para =
+                Paragraph::new(indicator).style(Style::default().fg(palette::role_info_fg()));
             frame.render_widget(ind_para, ind_rect);
         }
     }
@@ -447,10 +453,7 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let prompt_lines: Vec<Line> = (0..inner.height)
         .map(|i| {
             if i == 0 {
-                Line::from(Span::styled(
-                    "> ",
-                    palette::dim_style(),
-                ))
+                Line::from(Span::styled("> ", palette::dim_style()))
             } else {
                 Line::from(Span::raw("  "))
             }
@@ -992,10 +995,7 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                     format!("{:<9}", entry.state_label),
                     Style::default().fg(state_color),
                 ),
-                Span::styled(
-                    human_elapsed(entry.started_at),
-                    palette::dim_style(),
-                ),
+                Span::styled(human_elapsed(entry.started_at), palette::dim_style()),
             ];
             if let Some(action) = entry.pending_action {
                 status_spans.push(Span::styled("  → ", palette::dim_style()));
@@ -1263,7 +1263,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Local;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
     use tokio::sync::mpsc;
 
     use bakudo_core::{config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger};
