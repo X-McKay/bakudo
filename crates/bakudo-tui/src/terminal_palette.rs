@@ -83,6 +83,30 @@ pub fn default_bg() -> Option<(u8, u8, u8)> {
     default_colors().map(|c| c.bg)
 }
 
+/// Parse a reply of shape `ESC ] N ; rgb:RRRR/GGGG/BBBB ST` (or with BEL).
+/// Components may be 1-4 hex digits; we use the high byte as the 0-255 value.
+fn parse_osc_color_reply(bytes: &[u8]) -> Option<(u8, u8, u8)> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    let body = s.split_once("rgb:").map(|(_, rest)| rest)?;
+    let body = body
+        .trim_end_matches(|c: char| c == 0x07 as char || c == '\\' || c == 0x1b as char);
+    let mut parts = body.split('/');
+    let r = parts.next().and_then(parse_hex_component)?;
+    let g = parts.next().and_then(parse_hex_component)?;
+    let b = parts.next().and_then(parse_hex_component)?;
+    Some((r, g, b))
+}
+
+fn parse_hex_component(s: &str) -> Option<u8> {
+    if s.is_empty() || s.len() > 4 {
+        return None;
+    }
+    // Pad to 4 hex digits on the right (low nibbles), then take the high byte.
+    let padded = format!("{:0<4}", s);
+    let full = u16::from_str_radix(&padded, 16).ok()?;
+    Some((full >> 8) as u8)
+}
+
 #[cfg(all(unix, not(test)))]
 mod imp {
     use super::DefaultColors;
@@ -238,69 +262,7 @@ mod imp {
             }
         }
 
-        parse_osc_color_reply(&buf)
-    }
-
-    /// Parse a reply of shape `ESC ] N ; rgb:RRRR/GGGG/BBBB ST` (or with BEL).
-    /// Components may be 1-4 hex digits; we use the high byte as the 0-255 value.
-    fn parse_osc_color_reply(bytes: &[u8]) -> Option<(u8, u8, u8)> {
-        let s = std::str::from_utf8(bytes).ok()?;
-        let body = s.split_once("rgb:").map(|(_, rest)| rest)?;
-        let body = body
-            .trim_end_matches(|c: char| c == 0x07 as char || c == '\\' || c == 0x1b as char);
-        let mut parts = body.split('/');
-        let r = parts.next().and_then(parse_hex_component)?;
-        let g = parts.next().and_then(parse_hex_component)?;
-        let b = parts.next().and_then(parse_hex_component)?;
-        Some((r, g, b))
-    }
-
-    fn parse_hex_component(s: &str) -> Option<u8> {
-        if s.is_empty() || s.len() > 4 {
-            return None;
-        }
-        // Pad to 4 hex digits on the right (low nibbles), then take the high byte.
-        let padded = format!("{:0<4}", s);
-        let full = u16::from_str_radix(&padded, 16).ok()?;
-        Some((full >> 8) as u8)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::parse_hex_component;
-        use super::parse_osc_color_reply;
-
-        #[test]
-        fn parses_4_digit_components() {
-            // ESC ] 11 ; rgb:1e1e/2e2e/3e3e ESC \
-            let reply = b"\x1b]11;rgb:1e1e/2e2e/3e3e\x1b\\";
-            assert_eq!(parse_osc_color_reply(reply), Some((0x1e, 0x2e, 0x3e)));
-        }
-
-        #[test]
-        fn parses_2_digit_components_with_bel_terminator() {
-            let reply = b"\x1b]11;rgb:1e/2e/3e\x07";
-            assert_eq!(parse_osc_color_reply(reply), Some((0x1e, 0x2e, 0x3e)));
-        }
-
-        #[test]
-        fn rejects_garbage() {
-            assert_eq!(parse_osc_color_reply(b"hello world"), None);
-        }
-
-        #[test]
-        fn parse_hex_component_widths() {
-            // Right-pads with zeros; takes high byte.
-            assert_eq!(parse_hex_component("f"), Some(0xf0));
-            assert_eq!(parse_hex_component("ff"), Some(0xff));
-            assert_eq!(parse_hex_component("fff"), Some(0xff));
-            assert_eq!(parse_hex_component("abcd"), Some(0xab));
-            // Empty and overlong rejected.
-            assert_eq!(parse_hex_component(""), None);
-            assert_eq!(parse_hex_component("12345"), None);
-            // Non-hex rejected.
-            assert_eq!(parse_hex_component("xz"), None);
-        }
+        super::parse_osc_color_reply(&buf)
     }
 }
 
@@ -582,3 +544,41 @@ pub const XTERM_COLORS: [(u8, u8, u8); 256] = [
     (228, 228, 228), // 254 Grey89
     (238, 238, 238), // 255 Grey93
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex_component;
+    use super::parse_osc_color_reply;
+
+    #[test]
+    fn parses_4_digit_components() {
+        // ESC ] 11 ; rgb:1e1e/2e2e/3e3e ESC \
+        let reply = b"\x1b]11;rgb:1e1e/2e2e/3e3e\x1b\\";
+        assert_eq!(parse_osc_color_reply(reply), Some((0x1e, 0x2e, 0x3e)));
+    }
+
+    #[test]
+    fn parses_2_digit_components_with_bel_terminator() {
+        let reply = b"\x1b]11;rgb:1e/2e/3e\x07";
+        assert_eq!(parse_osc_color_reply(reply), Some((0x1e, 0x2e, 0x3e)));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(parse_osc_color_reply(b"hello world"), None);
+    }
+
+    #[test]
+    fn parse_hex_component_widths() {
+        // Right-pads with zeros; takes high byte.
+        assert_eq!(parse_hex_component("f"), Some(0xf0));
+        assert_eq!(parse_hex_component("ff"), Some(0xff));
+        assert_eq!(parse_hex_component("fff"), Some(0xff));
+        assert_eq!(parse_hex_component("abcd"), Some(0xab));
+        // Empty and overlong rejected.
+        assert_eq!(parse_hex_component(""), None);
+        assert_eq!(parse_hex_component("12345"), None);
+        // Non-hex rejected.
+        assert_eq!(parse_hex_component("xz"), None);
+    }
+}
