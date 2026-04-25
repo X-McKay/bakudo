@@ -1196,6 +1196,7 @@ mod tests {
     use bakudo_core::{config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger};
 
     use crate::app::{App, FocusedPanel, ShelfEntry};
+    use crate::palette::{SHELF_MIN_TERM_WIDTH, SHELF_WIDTH};
 
     use super::render;
 
@@ -1275,10 +1276,21 @@ mod tests {
     }
 
     fn render_row(app: &App, cols: u16, rows: u16, row: usize) -> String {
-        render_to_string(app, cols, rows)
+        let rendered = render_to_string(app, cols, rows)
             .lines()
             .nth(row)
             .unwrap_or_default()
+            .to_string();
+        let main_width = if cols >= SHELF_MIN_TERM_WIDTH && !app.shelf.is_empty() {
+            usize::from(cols.saturating_sub(SHELF_WIDTH))
+        } else {
+            usize::from(cols)
+        };
+        rendered
+            .chars()
+            .take(main_width)
+            .collect::<String>()
+            .trim_end()
             .to_string()
     }
 
@@ -1404,10 +1416,9 @@ mod tests {
             pending_action: None,
         });
 
-        let footer = render_row(&app, 80, 20, 19);
-        assert!(
-            !footer.contains("inspect shelf"),
-            "footer should not mention hidden shelf: {footer}"
+        assert_eq!(
+            render_row(&app, 80, 20, 19),
+            "Enter: send  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
         );
     }
 
@@ -1427,10 +1438,38 @@ mod tests {
             pending_action: None,
         });
 
-        let footer = render_row(&app, 140, 20, 19);
-        assert!(
-            footer.contains("inspect shelf"),
-            "footer should mention visible shelf: {footer}"
+        assert_eq!(
+            render_row(&app, 140, 20, 19),
+            "Enter: send  Tab: inspect shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
+        );
+    }
+
+    #[test]
+    fn footer_switches_for_slash_input_and_shelf_focus() {
+        let mut app = fresh_app();
+        app.shelf.push_back(ShelfEntry {
+            task_id: "bakudo-attempt-02bf30c1-abcd".to_string(),
+            provider: "claude".to_string(),
+            model: None,
+            prompt_summary: "fix the readme".to_string(),
+            last_note: "Booting sandbox".to_string(),
+            state_label: "running".to_string(),
+            state_color: crate::app::ShelfColor::Running,
+            started_at: Local::now(),
+            updated_at: Local::now(),
+            pending_action: None,
+        });
+        app.input = "/help".to_string();
+
+        assert_eq!(
+            render_row(&app, 140, 20, 19),
+            "Enter: send  Tab: complete  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
+        );
+
+        app.focus = FocusedPanel::Shelf;
+        assert_eq!(
+            render_row(&app, 140, 20, 19),
+            "Tab/Esc: back to chat  j/k: navigate  a: apply  d: discard"
         );
     }
 

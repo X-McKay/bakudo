@@ -26,127 +26,69 @@ struct FooterItem {
 }
 
 const CHAT_SLASH_ITEMS: &[FooterItem] = &[
-    FooterItem {
-        key: "Enter",
-        label: "send",
-        short_label: None,
-    },
-    FooterItem {
-        key: "Tab",
-        label: "complete",
-        short_label: None,
-    },
-    FooterItem {
-        key: "PgUp/Dn",
-        label: "scroll",
-        short_label: None,
-    },
-    FooterItem {
-        key: "Ctrl+C",
-        label: "quit",
-        short_label: None,
-    },
-    FooterItem {
-        key: "/help",
-        label: "commands",
-        short_label: Some("help"),
-    },
+    FooterItem::new("Enter", "send", None),
+    FooterItem::new("Tab", "complete", None),
+    FooterItem::new("PgUp/Dn", "scroll", None),
+    FooterItem::new("Ctrl+C", "quit", None),
+    FooterItem::new("/help", "commands", Some("help")),
 ];
 
 const CHAT_SHELF_ITEMS: &[FooterItem] = &[
-    FooterItem {
-        key: "Enter",
-        label: "send",
-        short_label: None,
-    },
-    FooterItem {
-        key: "Tab",
-        label: "inspect shelf",
-        short_label: Some("shelf"),
-    },
-    FooterItem {
-        key: "PgUp/Dn",
-        label: "scroll",
-        short_label: None,
-    },
-    FooterItem {
-        key: "Ctrl+C",
-        label: "quit",
-        short_label: None,
-    },
-    FooterItem {
-        key: "/help",
-        label: "commands",
-        short_label: Some("help"),
-    },
+    FooterItem::new("Enter", "send", None),
+    FooterItem::new("Tab", "inspect shelf", Some("shelf")),
+    FooterItem::new("PgUp/Dn", "scroll", None),
+    FooterItem::new("Ctrl+C", "quit", None),
+    FooterItem::new("/help", "commands", Some("help")),
 ];
 
 const CHAT_PLAIN_ITEMS: &[FooterItem] = &[
-    FooterItem {
-        key: "Enter",
-        label: "send",
-        short_label: None,
-    },
-    FooterItem {
-        key: "PgUp/Dn",
-        label: "scroll",
-        short_label: None,
-    },
-    FooterItem {
-        key: "Ctrl+C",
-        label: "quit",
-        short_label: None,
-    },
-    FooterItem {
-        key: "/help",
-        label: "commands",
-        short_label: Some("help"),
-    },
+    FooterItem::new("Enter", "send", None),
+    FooterItem::new("PgUp/Dn", "scroll", None),
+    FooterItem::new("Ctrl+C", "quit", None),
+    FooterItem::new("/help", "commands", Some("help")),
 ];
 
 const SHELF_ITEMS: &[FooterItem] = &[
-    FooterItem {
-        key: "Tab/Esc",
-        label: "back to chat",
-        short_label: Some("chat"),
-    },
-    FooterItem {
-        key: "j/k",
-        label: "navigate",
-        short_label: None,
-    },
-    FooterItem {
-        key: "a",
-        label: "apply",
-        short_label: None,
-    },
-    FooterItem {
-        key: "d",
-        label: "discard",
-        short_label: None,
-    },
+    FooterItem::new("Tab/Esc", "back to chat", Some("chat")),
+    FooterItem::new("j/k", "navigate", None),
+    FooterItem::new("a", "apply", None),
+    FooterItem::new("d", "discard", None),
 ];
 
-pub(crate) fn line_for(variant: FooterVariant, width: u16) -> Line<'static> {
-    let mut items = items_for_variant(variant).to_vec();
-
-    loop {
-        let full = build_line(&items, false);
-        if fits(&full, width) {
-            return full;
+impl FooterItem {
+    const fn new(
+        key: &'static str,
+        label: &'static str,
+        short_label: Option<&'static str>,
+    ) -> Self {
+        Self {
+            key,
+            label,
+            short_label,
         }
-
-        let shortened = build_line(&items, true);
-        if fits(&shortened, width) {
-            return shortened;
-        }
-
-        if items.len() == 1 {
-            return shortened;
-        }
-
-        items.pop();
     }
+}
+
+pub(crate) fn line_for(variant: FooterVariant, width: u16) -> Line<'static> {
+    if width == 0 {
+        return Line::default();
+    }
+
+    let items = items_for_variant(variant);
+    for visible_count in (1..=items.len()).rev() {
+        let visible = &items[..visible_count];
+        let shortenable = shortenable_positions(visible);
+
+        for shortened_count in 0..=shortenable.len() {
+            let line = build_line(visible, &shortenable[..shortened_count]);
+            if fits(&line, width) {
+                return line;
+            }
+        }
+    }
+
+    let fallback = &items[..1];
+    build_line(fallback, &shortenable_positions(fallback))
 }
 
 fn items_for_variant(variant: FooterVariant) -> &'static [FooterItem] {
@@ -158,14 +100,23 @@ fn items_for_variant(variant: FooterVariant) -> &'static [FooterItem] {
     }
 }
 
-fn build_line(items: &[FooterItem], use_short_labels: bool) -> Line<'static> {
+fn shortenable_positions(items: &[FooterItem]) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(idx, item)| item.short_label.map(|_| idx))
+        .collect()
+}
+
+fn build_line(items: &[FooterItem], shortened_positions: &[usize]) -> Line<'static> {
     let mut spans = Vec::with_capacity(items.len() * 3);
     for (idx, item) in items.iter().enumerate() {
         spans.push(key_span(item.key));
         spans.push(Span::styled(
             format!(
                 ": {}",
-                if use_short_labels {
+                if shortened_positions.contains(&idx) {
                     item.short_label.unwrap_or(item.label)
                 } else {
                     item.label
@@ -202,49 +153,46 @@ mod tests {
     #[test]
     fn chat_shelf_full_snapshot() {
         assert_eq!(
-            render_footer_row(FooterVariant::ChatShelf, 80),
-            "Enter: send  Tab: inspect shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands "
+            render_footer_row(FooterVariant::ChatShelf, 90),
+            "Enter: send  Tab: inspect shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
         );
     }
 
     #[test]
-    fn chat_slash_full_snapshot() {
+    fn chat_shelf_shortens_low_priority_help_before_dropping() {
         assert_eq!(
-            render_footer_row(FooterVariant::ChatSlash, 74),
-            "Enter: send  Tab: complete  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
-        );
-    }
-
-    #[test]
-    fn chat_shelf_shortens_before_dropping_more_items() {
-        assert_eq!(
-            render_footer_row(FooterVariant::ChatShelf, 54),
-            "Enter: send  Tab: shelf  PgUp/Dn: scroll  Ctrl+C: quit"
+            render_footer_row(FooterVariant::ChatShelf, 75),
+            "Enter: send  Tab: inspect shelf  PgUp/Dn: scroll  Ctrl+C: quit  /help: help"
         );
     }
 
     #[test]
     fn chat_plain_narrow_snapshot() {
         assert_eq!(
-            render_footer_row(FooterVariant::ChatPlain, 40),
-            "Enter: send  PgUp/Dn: scroll            "
+            render_footer_row(FooterVariant::ChatPlain, 28),
+            "Enter: send  PgUp/Dn: scroll"
         );
     }
 
     #[test]
-    fn shelf_snapshot_uses_short_chat_label() {
+    fn slash_footer_full_snapshot() {
         assert_eq!(
-            render_footer_row(FooterVariant::Shelf, 40),
-            "Tab/Esc: chat  j/k: navigate  a: apply  "
+            render_footer_row(FooterVariant::ChatSlash, 90),
+            "Enter: send  Tab: complete  PgUp/Dn: scroll  Ctrl+C: quit  /help: commands"
         );
     }
 
     #[test]
-    fn slash_footer_falls_back_to_primary_action() {
+    fn shelf_footer_full_snapshot() {
         assert_eq!(
-            render_footer_row(FooterVariant::ChatSlash, 11),
-            "Enter: send"
+            render_footer_row(FooterVariant::Shelf, 80),
+            "Tab/Esc: back to chat  j/k: navigate  a: apply  d: discard"
         );
+    }
+
+    #[test]
+    fn shelf_footer_very_narrow_falls_back_to_chat_hint() {
+        assert_eq!(render_footer_row(FooterVariant::Shelf, 13), "Tab/Esc: chat");
     }
 
     fn render_footer_row(variant: FooterVariant, width: u16) -> String {
@@ -261,6 +209,6 @@ mod tests {
         for x in 0..width {
             rendered.push_str(terminal.backend().buffer().get(x, 0).symbol());
         }
-        rendered
+        rendered.trim_end().to_string()
     }
 }
