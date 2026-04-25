@@ -34,6 +34,7 @@ use crate::palette::{
     self, composer_height_for, FOOTER_HEIGHT, GUTTER, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH,
     SHELF_WIDTH,
 };
+use crate::style::user_message_style;
 use strum::IntoEnumIterator;
 
 // ─── Top-level render ──────────────────────────────────────────────────────
@@ -128,16 +129,16 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let line_1 = Line::from(vec![
         Span::raw("  "),
         Span::styled("bakudo", Style::default().fg(Color::White).bold()),
-        Span::styled(" v2", Style::default().fg(palette::dim_border())),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+        Span::styled(" v2", palette::dim_style()),
+        Span::styled("  ·  ", palette::dim_style()),
         Span::styled(&app.workspace_label, Style::default().fg(Color::White)),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+        Span::styled("  ·  ", palette::dim_style()),
         Span::styled("provider: ", Style::default().fg(palette::header_fg())),
         Span::styled(
             &app.provider_id,
             Style::default().fg(palette::provider_accent()).bold(),
         ),
-        Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+        Span::styled("  ·  ", palette::dim_style()),
         Span::styled("model: ", Style::default().fg(palette::header_fg())),
         Span::styled(model_str, Style::default().fg(palette::model_accent())),
     ]);
@@ -146,13 +147,13 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw("  "),
             Span::styled("mission ", palette::dim_style()),
             Span::styled(&banner.goal, Style::default().fg(Color::White).bold()),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("posture ", palette::dim_style()),
             Span::styled(
                 banner.posture.to_string(),
                 Style::default().fg(palette::provider_accent()).bold(),
             ),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("wallet ", palette::dim_style()),
             Span::styled(
                 format!(
@@ -176,19 +177,19 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw("  "),
             Span::styled("base ", palette::dim_style()),
             Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("policy ", palette::dim_style()),
             Span::styled(
                 app.config.candidate_policy.to_string(),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("lc ", palette::dim_style()),
             Span::styled(
                 app.config.sandbox_lifecycle.to_string(),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled(counts, Style::default().fg(Color::White).bold()),
         ])
     } else {
@@ -196,31 +197,31 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw("  "),
             Span::styled("base ", palette::dim_style()),
             Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("policy ", palette::dim_style()),
             Span::styled(
                 app.config.candidate_policy.to_string(),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("lifecycle ", palette::dim_style()),
             Span::styled(
                 app.config.sandbox_lifecycle.to_string(),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("running ", palette::dim_style()),
             Span::styled(
                 app.running_shelf_count().to_string(),
                 Style::default().fg(palette::shelf_running()).bold(),
             ),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("preserved ", palette::dim_style()),
             Span::styled(
                 app.preserved_shelf_count().to_string(),
                 Style::default().fg(palette::shelf_preserved()).bold(),
             ),
-            Span::styled("  ·  ", Style::default().fg(palette::dim_border())),
+            Span::styled("  ·  ", palette::dim_style()),
             Span::styled("conflicts ", palette::dim_style()),
             Span::styled(
                 app.conflict_shelf_count().to_string(),
@@ -229,8 +230,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         ])
     };
 
-    let header = Paragraph::new(Text::from(vec![line_1, line_2]))
-        .style(Style::default().bg(palette::header_bg()));
+    let header = Paragraph::new(Text::from(vec![line_1, line_2]));
     frame.render_widget(header, area);
 }
 
@@ -346,6 +346,12 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         let body_width = (inner.width as usize).saturating_sub(prefix_width).max(1);
         let cont_indent = " ".repeat(prefix_width);
 
+        let row_style = if matches!(msg.role, MessageRole::User) {
+            user_message_style()
+        } else {
+            Style::default()
+        };
+
         let mut first_segment_of_msg = true;
         for content_line in msg.content.lines() {
             let wrapped = wrap_to_width(content_line, body_width);
@@ -359,10 +365,10 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
                         Span::raw(" "),
                         Span::styled(role_label, role_style),
                         body_span,
-                    ]));
+                    ]).style(row_style));
                     first_segment_of_msg = false;
                 } else {
-                    lines.push(Line::from(vec![Span::raw(cont_indent.clone()), body_span]));
+                    lines.push(Line::from(vec![Span::raw(cont_indent.clone()), body_span]).style(row_style));
                 }
             }
         }
@@ -392,11 +398,8 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
                 width: ind_width,
                 height: 1,
             };
-            let ind_para = Paragraph::new(indicator).style(
-                Style::default()
-                    .fg(palette::role_info_fg())
-                    .bg(palette::header_bg()),
-            );
+            let ind_para = Paragraph::new(indicator)
+                .style(Style::default().fg(palette::role_info_fg()));
             frame.render_widget(ind_para, ind_rect);
         }
     }
@@ -446,7 +449,7 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
             if i == 0 {
                 Line::from(Span::styled(
                     "> ",
-                    Style::default().fg(palette::dim_border()),
+                    palette::dim_style(),
                 ))
             } else {
                 Line::from(Span::raw("  "))
@@ -991,7 +994,7 @@ fn render_shelf(frame: &mut Frame, app: &App, area: Rect) {
                 ),
                 Span::styled(
                     human_elapsed(entry.started_at),
-                    Style::default().fg(palette::dim_border()),
+                    palette::dim_style(),
                 ),
             ];
             if let Some(action) = entry.pending_action {
