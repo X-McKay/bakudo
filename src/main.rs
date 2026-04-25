@@ -790,6 +790,12 @@ async fn run_tui(
         let _ = shutdown_tx.send(SessionCommand::Shutdown).await;
     });
 
+    // Query the terminal's default fg/bg colors once at startup, BEFORE we enter
+    // raw mode for event reading. The query writes an OSC 11/10 sequence and
+    // reads the reply byte-for-byte; doing it here keeps the reply out of the
+    // TUI's own key-event stream. Result is cached for the rest of the process.
+    bakudo_tui::terminal_palette::initialize_default_colors();
+
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
