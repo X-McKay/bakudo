@@ -339,6 +339,9 @@ impl App {
     fn clear_transcript_buffer(&mut self) {
         self.transcript.clear();
         self.pending_history.clear();
+        if let Some(store) = &self.transcript_store {
+            let _ = store.clear();
+        }
     }
 
     pub fn running_shelf_count(&self) -> usize {

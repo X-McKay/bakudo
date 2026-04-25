@@ -26,7 +26,11 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal, TerminalOptions, Viewport};
+use ratatui::{
+    backend::{Backend, ClearType, CrosstermBackend, WindowSize},
+    buffer::Cell,
+    Terminal, TerminalOptions, Viewport,
+};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -65,6 +69,78 @@ use bakudo_tui::{
 const INLINE_VIEWPORT_PADDING: u16 = 3;
 const INLINE_VIEWPORT_HEIGHT: u16 =
     HEADER_HEIGHT + COMPOSER_MAX_HEIGHT + FOOTER_HEIGHT + INLINE_VIEWPORT_PADDING;
+
+struct FallbackCursorBackend<B> {
+    inner: B,
+}
+
+impl<B> FallbackCursorBackend<B> {
+    fn new(inner: B) -> Self {
+        Self { inner }
+    }
+}
+
+impl<B> Backend for FallbackCursorBackend<B>
+where
+    B: Backend,
+{
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.inner.append_lines(n)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
+        self.inner.get_cursor().or_else(|err| {
+            if err
+                .to_string()
+                .contains("The cursor position could not be read within a normal duration")
+            {
+                let size = self.inner.size()?;
+                Ok((0, size.height.saturating_sub(1)))
+            } else {
+                Err(err)
+            }
+        })
+    }
+
+    fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
+        self.inner.set_cursor(x, y)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> io::Result<ratatui::prelude::Rect> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -792,14 +868,14 @@ async fn run_tui(
     // TUI's own key-event stream. Result is cached for the rest of the process.
     bakudo_tui::terminal_palette::initialize_default_colors();
 
-    let _guard = TerminalGuard::enter()?;
-    let backend = CrosstermBackend::new(io::stdout());
+    let backend = FallbackCursorBackend::new(CrosstermBackend::new(io::stdout()));
     let mut terminal = Terminal::with_options(
         backend,
         TerminalOptions {
             viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
         },
     )?;
+    let _guard = TerminalGuard::enter()?;
 
     let transcript_store = TranscriptStore::new(
         config
@@ -831,8 +907,8 @@ async fn run_tui(
 
     let result = run_event_loop(&mut terminal, &mut app).await;
 
-    // _guard Drops here — terminal restored regardless of panic/result.
-    let _ = terminal.show_cursor();
+    // Clear the live viewport and leave the shell prompt below it on exit.
+    let _ = restore_inline_terminal(&mut terminal);
     result
 }
 
@@ -910,6 +986,15 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
         }
     }
     Ok(())
+}
+
+fn restore_inline_terminal<B: Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
+    terminal.clear()?;
+    let blank_lines = INLINE_VIEWPORT_HEIGHT.saturating_sub(1);
+    if blank_lines > 0 {
+        terminal.backend_mut().append_lines(blank_lines)?;
+    }
+    terminal.show_cursor()
 }
 
 /// Run a single task headlessly (no TUI).

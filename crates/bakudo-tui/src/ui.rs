@@ -240,7 +240,13 @@ fn render_approval_modal(frame: &mut Frame, app: &App) {
     let Some(prompt) = &app.approval_prompt else {
         return;
     };
-    let area = centered_rect(frame.size(), 70, if prompt.editing { 40 } else { 34 });
+    let area = centered_rect_with_min(
+        frame.size(),
+        76,
+        if prompt.editing { 72 } else { 62 },
+        54,
+        if prompt.editing { 12 } else { 10 },
+    );
     frame.render_widget(Clear, area);
     let body = if prompt.editing {
         format!(
@@ -267,7 +273,7 @@ fn render_question_modal(frame: &mut Frame, app: &App) {
     let Some(prompt) = &app.user_question_prompt else {
         return;
     };
-    let area = centered_rect(frame.size(), 70, 34);
+    let area = centered_rect_with_min(frame.size(), 72, 56, 52, 9);
     frame.render_widget(Clear, area);
     let mut lines = vec![Line::from(prompt.question.as_str()), Line::from("")];
     for (idx, choice) in prompt.choices.iter().enumerate() {
@@ -288,24 +294,26 @@ fn render_question_modal(frame: &mut Frame, app: &App) {
     );
 }
 
-fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - height_percent) / 2),
-            Constraint::Percentage(height_percent),
-            Constraint::Percentage((100 - height_percent) / 2),
-        ])
-        .split(area);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - width_percent) / 2),
-            Constraint::Percentage(width_percent),
-            Constraint::Percentage((100 - width_percent) / 2),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
+fn centered_rect_with_min(
+    area: Rect,
+    width_percent: u16,
+    height_percent: u16,
+    min_width: u16,
+    min_height: u16,
+) -> Rect {
+    let width = ((area.width as u32 * width_percent as u32) / 100)
+        .max(min_width as u32)
+        .min(area.width as u32) as u16;
+    let height = ((area.height as u32 * height_percent as u32) / 100)
+        .max(min_height as u32)
+        .min(area.height as u32) as u16;
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
 }
 
 // ─── Transcript ────────────────────────────────────────────────────────────

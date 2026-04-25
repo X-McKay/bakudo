@@ -43,4 +43,11 @@ impl TranscriptStore {
         use std::io::Write;
         file.write_all(b"\n")
     }
+
+    pub fn clear(&self) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.path, "")
+    }
 }
