@@ -897,8 +897,31 @@ mod tests {
     use std::time::Duration;
     use uuid::Uuid;
 
-    fn temp_db_path() -> PathBuf {
-        std::env::temp_dir().join(format!("bakudo-mission-store-{}.db", Uuid::new_v4()))
+    struct TempStoreDir {
+        path: PathBuf,
+    }
+
+    impl TempStoreDir {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("bakudo-mission-store-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn db_path(&self) -> PathBuf {
+            self.path.join("state.db")
+        }
+    }
+
+    impl Drop for TempStoreDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn temp_store_dir() -> TempStoreDir {
+        TempStoreDir::new()
     }
 
     fn sample_mission() -> Mission {
@@ -922,7 +945,8 @@ mod tests {
 
     #[tokio::test]
     async fn mission_store_roundtrips_mission_state_and_ledger() {
-        let path = temp_db_path();
+        let dir = temp_store_dir();
+        let path = dir.db_path();
         let store = MissionStore::open(&path).unwrap();
         let mission = sample_mission();
         let mission_state = MissionState::default_layout();
@@ -950,13 +974,12 @@ mod tests {
             mission_state.0
         );
         assert_eq!(store.recent_ledger(mission.id, 8).await.unwrap().len(), 1);
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
     async fn mission_store_tracks_undelivered_user_messages() {
-        let path = temp_db_path();
+        let dir = temp_store_dir();
+        let path = dir.db_path();
         let store = MissionStore::open(&path).unwrap();
         let mission = sample_mission();
         store.upsert_mission(&mission).await.unwrap();
@@ -986,13 +1009,12 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
     async fn mission_store_reads_and_writes_plan_markdown() {
-        let path = temp_db_path();
+        let dir = temp_store_dir();
+        let path = dir.db_path();
         let store = MissionStore::open(&path).unwrap();
         let mission = sample_mission();
         store.upsert_mission(&mission).await.unwrap();
@@ -1007,13 +1029,12 @@ mod tests {
             .await
             .unwrap()
             .is_some());
-
-        let _ = std::fs::remove_dir_all(store.repo_data_dir());
     }
 
     #[tokio::test]
     async fn mission_store_roundtrips_active_wave_payload() {
-        let path = temp_db_path();
+        let dir = temp_store_dir();
+        let path = dir.db_path();
         let store = MissionStore::open(&path).unwrap();
         let mission = sample_mission();
         store.upsert_mission(&mission).await.unwrap();
