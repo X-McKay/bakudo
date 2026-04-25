@@ -6,13 +6,18 @@
 
 **Architecture:** Port an adapted `custom_terminal.rs` and `insert_history.rs` into `crates/bakudo-tui/src/`, add a bakudo-specific `history_render.rs` and reduced `wrapping.rs`, queue new transcript messages for inline emission in `app.rs`, remove transcript-pane ownership from `ui.rs`, and switch `src/main.rs::run_tui` to the custom inline terminal path.
 
-**Tech stack:** Rust 2024 for `bakudo-tui`, workspace `ratatui 0.26`, `crossterm 0.27`, `textwrap` for reduced URL-aware wrapping, and likely `vt100` as a dev-dependency for terminal escape tests.
+**Tech stack:** Rust 2024 for `bakudo-tui`, `crossterm 0.27`, current workspace `ratatui 0.26` unless an early Phase 4 ratatui bump proves to be the lower-complexity path, `textwrap` for reduced URL-aware wrapping, and likely `vt100` as a dev-dependency for terminal escape tests.
 
 **Spec:** `docs/superpowers/specs/2026-04-25-tui-inline-scrollback-design.md`
 
 **Scope:** `crates/bakudo-tui/src/`, `src/main.rs`, and the workspace + crate `Cargo.toml` files. This is the first codex-port phase that intentionally reaches into `src/main.rs`.
 
-**Known compatibility constraint:** codex's terminal port assumes newer ratatui backend APIs (`get_cursor_position`, `set_cursor_position`, `Size`, scroll-region helpers). Bakudo must adapt the port to ratatui 0.26 instead of bumping ratatui.
+**Known compatibility constraint:** codex's terminal port assumes newer ratatui backend APIs (`get_cursor_position`, `set_cursor_position`, `Size`, scroll-region helpers). Phase 4 should explicitly choose between:
+
+- staying on `ratatui 0.26` and adapting the port locally, or
+- bumping ratatui first if that produces the smaller total change.
+
+That decision belongs at the start of implementation, not halfway through the port.
 
 ---
 
@@ -35,14 +40,23 @@
 
 ---
 
-## Task 1: Add dependency and module scaffolding
+## Task 1: Choose the dependency baseline and add scaffolding
 
 **Files:**
 - Modify: `Cargo.toml`
 - Modify: `crates/bakudo-tui/Cargo.toml`
 - Modify: `crates/bakudo-tui/src/lib.rs`
 
-- [ ] **Step 1.1: Add only the dependencies Phase 4 actually needs**
+- [ ] **Step 1.1: Decide whether to stay on `ratatui 0.26` or bump ratatui first**
+
+Make the choice up front based on the smaller total change:
+
+- if a bump removes most of the `custom_terminal.rs` compatibility shim without dragging in unrelated breakage, take the bump;
+- otherwise stay on `0.26` and adapt locally.
+
+Record the choice in the commit message and in any follow-on review notes.
+
+- [ ] **Step 1.2: Add only the dependencies Phase 4 actually needs**
 
 Expected additions:
 
@@ -51,7 +65,7 @@ Expected additions:
 
 Do **not** add `derive_more`; hand-roll the tiny helper methods codex uses it for.
 
-- [ ] **Step 1.2: Reserve module slots in `lib.rs`**
+- [ ] **Step 1.3: Reserve module slots in `lib.rs`**
 
 Add:
 
@@ -64,7 +78,7 @@ pub mod wrapping;
 
 If `test_backend.rs` is only test support, gate it with `#[cfg(test)]`.
 
-- [ ] **Step 1.3: Commit**
+- [ ] **Step 1.4: Commit**
 
 ```bash
 git add Cargo.toml crates/bakudo-tui/Cargo.toml crates/bakudo-tui/src/lib.rs
@@ -73,7 +87,7 @@ git commit -m "chore(tui): add inline scrollback module scaffolding"
 
 ---
 
-## Task 2: Port `custom_terminal.rs` for ratatui 0.26
+## Task 2: Port `custom_terminal.rs` for the chosen ratatui baseline
 
 **Files:**
 - Create: `crates/bakudo-tui/src/custom_terminal.rs`
@@ -96,9 +110,9 @@ Add a short provenance header comment.
 
 Required local changes:
 
-- translate `get_cursor_position` / `set_cursor_position` to ratatui 0.26's cursor APIs
-- convert backend `size()` from `Rect` to `Size`
-- remove assumptions about backend `scroll_region_up/down`
+- if staying on `0.26`, translate `get_cursor_position` / `set_cursor_position` to older cursor APIs and convert backend `size()` from `Rect` to `Size`
+- if bumping ratatui, keep the bump narrowly scoped and only carry the compatibility edits that still matter afterward
+- remove assumptions about backend `scroll_region_up/down` unless the chosen ratatui version now exposes what the port needs
 - keep all raw ANSI scroll-region work inside the port itself
 
 - [ ] **Step 2.3: Keep the port smaller than codex**
