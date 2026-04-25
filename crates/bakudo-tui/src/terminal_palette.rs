@@ -202,6 +202,7 @@ mod imp {
         let (tx, rx) = mpsc::channel::<u8>();
         thread::spawn(move || {
             let mut byte = [0u8; 1];
+            let mut prev: u8 = 0;
             let mut stdin = stdin().lock();
             // Read up to ~80 bytes; the reply is well under that.
             for _ in 0..80 {
@@ -212,9 +213,10 @@ mod imp {
                     return Some(()); // receiver dropped
                 }
                 // Stop after we see ST (`ESC \\`) or BEL.
-                if byte[0] == 0x07 {
+                if byte[0] == 0x07 || (prev == 0x1b && byte[0] == b'\\') {
                     return Some(());
                 }
+                prev = byte[0];
             }
             Some(())
         });
@@ -265,6 +267,7 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
+        use super::parse_hex_component;
         use super::parse_osc_color_reply;
 
         #[test]
@@ -283,6 +286,20 @@ mod imp {
         #[test]
         fn rejects_garbage() {
             assert_eq!(parse_osc_color_reply(b"hello world"), None);
+        }
+
+        #[test]
+        fn parse_hex_component_widths() {
+            // Right-pads with zeros; takes high byte.
+            assert_eq!(parse_hex_component("f"), Some(0xf0));
+            assert_eq!(parse_hex_component("ff"), Some(0xff));
+            assert_eq!(parse_hex_component("fff"), Some(0xff));
+            assert_eq!(parse_hex_component("abcd"), Some(0xab));
+            // Empty and overlong rejected.
+            assert_eq!(parse_hex_component(""), None);
+            assert_eq!(parse_hex_component("12345"), None);
+            // Non-hex rejected.
+            assert_eq!(parse_hex_component("xz"), None);
         }
     }
 }
