@@ -19,6 +19,8 @@ pub enum SlashCommand {
     // ── Mission control ───────────────────────────────────────────────────
     Mission,
     Explore,
+    Missions,
+    Focus,
     Budget,
     Wake,
     Lessons,
@@ -58,6 +60,8 @@ impl SlashCommand {
         match self {
             SlashCommand::Mission => "start a mission posture  e.g. /mission fix timeout handling",
             SlashCommand::Explore => "start an explore posture  e.g. /explore reduce build time",
+            SlashCommand::Missions => "list active and recent missions for this repo",
+            SlashCommand::Focus => "focus an active mission by number or id prefix  e.g. /focus 2",
             SlashCommand::Budget => "adjust mission wallet  e.g. /budget time=30m workers=12",
             SlashCommand::Wake => "force a manual wake for the active mission",
             SlashCommand::Lessons => "show the repo lessons directory",
@@ -92,7 +96,11 @@ impl SlashCommand {
     pub fn available_during_task(&self) -> bool {
         matches!(
             self,
-            SlashCommand::Budget
+            SlashCommand::Missions
+                | SlashCommand::Focus
+                | SlashCommand::Mission
+                | SlashCommand::Explore
+                | SlashCommand::Budget
                 | SlashCommand::Wake
                 | SlashCommand::Lessons
                 | SlashCommand::Providers
@@ -115,6 +123,7 @@ impl SlashCommand {
             self,
             SlashCommand::Mission
                 | SlashCommand::Explore
+                | SlashCommand::Focus
                 | SlashCommand::Budget
                 | SlashCommand::Provider
                 | SlashCommand::Model
@@ -179,6 +188,7 @@ pub fn parse_slash(input: &str) -> Option<Result<ParsedCommand, String>> {
         let usage = match command {
             SlashCommand::Mission => "Usage: /mission <goal>",
             SlashCommand::Explore => "Usage: /explore <goal>",
+            SlashCommand::Focus => "Usage: /focus <number-or-id-prefix>",
             SlashCommand::Budget => "Usage: /budget time=<minutes>m workers=<count>",
             SlashCommand::Provider => "Usage: /provider <id>  (e.g. /provider claude)",
             SlashCommand::Apply => "Usage: /apply <task_id>",
@@ -247,6 +257,15 @@ mod tests {
         assert_eq!(
             parse_slash("/provider claude"),
             ok(SlashCommand::Provider, "claude")
+        );
+    }
+
+    #[test]
+    fn parse_focus() {
+        assert_eq!(parse_slash("/focus 2"), ok(SlashCommand::Focus, "2"));
+        assert_eq!(
+            parse_slash("/focus mission-abcd"),
+            ok(SlashCommand::Focus, "mission-abcd")
         );
     }
 

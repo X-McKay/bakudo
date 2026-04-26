@@ -929,11 +929,13 @@ mod tests {
 
     use bakudo_core::{
         config::BakudoConfig,
-        mission::{MissionStatus, Posture},
+        mission::{MissionStatus, Posture, WakeReason},
         provider::ProviderRegistry,
         state::SandboxLedger,
     };
-    use bakudo_daemon::session_controller::{FleetCounts, MissionBanner};
+    use bakudo_daemon::session_controller::{
+        FleetCounts, MissionBanner, MissionWakeBanner, MissionWakeState,
+    };
 
     use crate::app::{App, FocusedPanel, ShelfEntry};
     use crate::palette::{SHELF_MIN_TERM_WIDTH, SHELF_WIDTH};
@@ -1104,13 +1106,21 @@ mod tests {
             goal: "Refine the inline viewport spacing".to_string(),
             posture: Posture::Mission,
             status: MissionStatus::Deliberating,
+            wake: MissionWakeBanner {
+                state: MissionWakeState::Running,
+                current_reason: Some(WakeReason::ManualResume),
+                queued_count: 0,
+            },
+            active_wave: None,
             wall_clock_remaining_secs: 1800,
             abox_workers_remaining: 12,
             abox_workers_in_flight: 0,
             concurrent_max: 4,
             pending_user_messages: 0,
             pending_questions: 0,
+            pending_approvals: 0,
             latest_issue: None,
+            latest_change: None,
             fleet: FleetCounts {
                 active: 0,
                 queued: 0,
@@ -1121,7 +1131,7 @@ mod tests {
 
         let rendered = render_to_string(&app, 100, 20);
         assert!(rendered.contains("• Working"));
-        assert!(rendered.contains("planning next wake"));
+        assert!(rendered.contains("wake running: manual resume"));
         assert!(rendered.contains("Refine the inline viewport spacing"));
     }
 

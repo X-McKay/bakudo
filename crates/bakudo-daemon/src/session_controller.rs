@@ -88,6 +88,10 @@ pub enum SessionCommand {
         done_contract: Option<String>,
         constraints: Option<String>,
     },
+    /// List active/recent missions for this repo.
+    ShowMissions,
+    /// Change the focused mission for the session.
+    FocusMission { selector: String },
     /// Adjust the active mission wallet.
     SetMissionBudget {
         wall_clock_minutes: Option<u64>,
@@ -123,14 +127,44 @@ pub struct MissionBanner {
     pub goal: String,
     pub posture: Posture,
     pub status: MissionStatus,
+    pub wake: MissionWakeBanner,
+    pub active_wave: Option<ActiveWaveSummary>,
     pub wall_clock_remaining_secs: u64,
     pub abox_workers_remaining: u32,
     pub abox_workers_in_flight: u32,
     pub concurrent_max: u32,
     pub pending_user_messages: usize,
     pub pending_questions: usize,
+    pub pending_approvals: usize,
     pub latest_issue: Option<String>,
+    pub latest_change: Option<String>,
     pub fleet: FleetCounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissionWakeState {
+    Idle,
+    Queued,
+    Running,
+}
+
+#[derive(Debug, Clone)]
+pub struct MissionWakeBanner {
+    pub state: MissionWakeState,
+    pub current_reason: Option<WakeReason>,
+    pub queued_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveWaveSummary {
+    pub total: usize,
+    pub running: usize,
+    pub queued: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub concurrency_limit: u32,
+    pub wake_when: WakeWhen,
+    pub wake_sent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -296,11 +330,16 @@ pub struct SessionController {
 #[derive(Default)]
 struct MissionRuntimeState {
     active_mission_id: Option<MissionId>,
-    pending_approvals: HashMap<String, oneshot::Sender<HostExecResolution>>,
+    pending_approvals: HashMap<String, PendingApproval>,
     pending_questions: HashMap<String, PendingQuestion>,
     deliberating: HashSet<MissionId>,
     wake_user_message_ids: HashMap<WakeId, Vec<i64>>,
     next_agent_wave_approved: bool,
+}
+
+struct PendingApproval {
+    mission_id: MissionId,
+    response_tx: oneshot::Sender<HostExecResolution>,
 }
 
 struct HostExecResolution {
@@ -715,6 +754,12 @@ impl SessionController {
                     constraints,
                 } => {
                     self.start_mission(posture, goal, done_contract, constraints);
+                }
+                SessionCommand::ShowMissions => {
+                    self.show_missions().await;
+                }
+                SessionCommand::FocusMission { selector } => {
+                    self.focus_mission(selector).await;
                 }
                 SessionCommand::SetMissionBudget {
                     wall_clock_minutes,
@@ -1353,6 +1398,24 @@ impl SessionController {
         });
     }
 
+    async fn show_missions(&self) {
+        if let Err(err) = self.mission_core().show_missions().await {
+            let _ = self
+                .event_tx
+                .send(SessionEvent::Error(err.to_string()))
+                .await;
+        }
+    }
+
+    async fn focus_mission(&self, selector: String) {
+        if let Err(err) = self.mission_core().focus_mission(selector).await {
+            let _ = self
+                .event_tx
+                .send(SessionEvent::Error(err.to_string()))
+                .await;
+        }
+    }
+
     fn enqueue_active_mission_message(&self, text: String, urgent: bool) {
         let core = self.mission_core();
         let event_tx = self.event_tx.clone();
@@ -1444,12 +1507,6 @@ impl SessionController {
 impl MissionCore {
     async fn recover_on_startup(&self) -> Result<()> {
         let missions = self.mission_store.list_active_missions().await?;
-        {
-            let mut state = self.runtime_state.lock().await;
-            if state.active_mission_id.is_none() {
-                state.active_mission_id = missions.first().map(|mission| mission.id);
-            }
-        }
 
         for mut mission in missions {
             let running = self.mission_store.running_experiments(mission.id).await?;
@@ -1500,8 +1557,6 @@ impl MissionCore {
                 MissionStatus::AwaitingDeliberator
             };
             self.mission_store.upsert_mission(&mission).await?;
-            self.host
-                .mark_mission_started(&mission.id.to_string(), &mission.goal, mission.posture);
             if awaiting_user {
                 self.emit_banner().await;
                 let _ = self
@@ -1540,6 +1595,7 @@ impl MissionCore {
                 .await?;
             }
         }
+        self.reconcile_active_mission_focus().await?;
         Ok(())
     }
 
@@ -1551,6 +1607,10 @@ impl MissionCore {
         let Some(mission_id) = mission_id else {
             return Ok(None);
         };
+        self.mission_banner_for(mission_id).await
+    }
+
+    async fn mission_banner_for(&self, mission_id: MissionId) -> Result<Option<MissionBanner>> {
         let Some(mission) = self.mission_store.mission(mission_id).await? else {
             return Ok(None);
         };
@@ -1568,11 +1628,41 @@ impl MissionCore {
             .open_pending_questions(mission.id)
             .await?
             .len();
+        let queued_wakes = self
+            .mission_store
+            .unprocessed_wakes(Some(mission.id))
+            .await?;
         let latest_issue = self
             .mission_store
             .latest_tool_call_error(mission.id)
             .await?
             .map(|summary| render_tool_issue_summary(&summary));
+        let latest_change = self
+            .mission_store
+            .recent_ledger(mission.id, 1)
+            .await?
+            .into_iter()
+            .last()
+            .map(|entry| compact_single_line(&entry.summary));
+        let active_wave = self
+            .mission_store
+            .active_wave(mission.id)
+            .await?
+            .map(|wave| summarize_active_wave(&wave, &experiments));
+        let (wake, pending_approvals) = {
+            let state = self.runtime_state.lock().await;
+            (
+                summarize_wake_banner(
+                    queued_wakes.as_slice(),
+                    state.deliberating.contains(&mission.id),
+                ),
+                state
+                    .pending_approvals
+                    .values()
+                    .filter(|pending| pending.mission_id == mission.id)
+                    .count(),
+            )
+        };
         let fleet = FleetCounts {
             active: experiments
                 .iter()
@@ -1603,15 +1693,205 @@ impl MissionCore {
             goal: mission.goal,
             posture: mission.posture,
             status: mission.status,
+            wake,
+            active_wave,
             wall_clock_remaining_secs: mission.wallet.wall_clock_remaining.as_secs(),
             abox_workers_remaining: mission.wallet.abox_workers_remaining,
             abox_workers_in_flight: mission.wallet.abox_workers_in_flight,
             concurrent_max: mission.wallet.concurrent_max,
             pending_user_messages,
             pending_questions,
+            pending_approvals,
             latest_issue,
+            latest_change,
             fleet,
         }))
+    }
+
+    async fn set_active_mission_focus(&self, mission: &Mission) {
+        {
+            let mut state = self.runtime_state.lock().await;
+            state.active_mission_id = Some(mission.id);
+        }
+        self.host
+            .focus_mission(&mission.id.to_string(), &mission.goal, mission.posture);
+        self.emit_banner().await;
+    }
+
+    async fn reconcile_active_mission_focus(&self) -> Result<Option<MissionId>> {
+        let active_missions = self.mission_store.list_active_missions().await?;
+        let current_focus = {
+            let state = self.runtime_state.lock().await;
+            state.active_mission_id
+        };
+        let next_focus = current_focus
+            .filter(|mission_id| {
+                active_missions
+                    .iter()
+                    .any(|mission| mission.id == *mission_id)
+            })
+            .or_else(|| active_missions.first().map(|mission| mission.id));
+        {
+            let mut state = self.runtime_state.lock().await;
+            state.active_mission_id = next_focus;
+        }
+        if let Some(mission) = active_missions
+            .iter()
+            .find(|mission| Some(mission.id) == next_focus)
+        {
+            self.host
+                .focus_mission(&mission.id.to_string(), &mission.goal, mission.posture);
+        } else {
+            self.host.clear_active_mission();
+        }
+        self.emit_banner().await;
+        Ok(next_focus)
+    }
+
+    async fn show_missions(&self) -> Result<()> {
+        let missions = self.mission_store.list_missions().await?;
+        if missions.is_empty() {
+            let _ = self
+                .event_tx
+                .send(SessionEvent::Info(
+                    "No missions recorded for this repo.".to_string(),
+                ))
+                .await;
+            return Ok(());
+        }
+
+        let focused_id = {
+            let state = self.runtime_state.lock().await;
+            state.active_mission_id
+        };
+        let mut lines = vec!["Missions:".to_string()];
+        let active: Vec<_> = missions
+            .iter()
+            .filter(|mission| mission_status_is_active(mission.status))
+            .cloned()
+            .collect();
+        if active.is_empty() {
+            lines.push("  No active missions.".to_string());
+        } else {
+            lines.push("  Active:".to_string());
+            for (index, mission) in active.iter().enumerate() {
+                let Some(banner) = self.mission_banner_for(mission.id).await? else {
+                    continue;
+                };
+                let focus_marker = if Some(mission.id) == focused_id {
+                    "*"
+                } else {
+                    " "
+                };
+                lines.push(format!(
+                    "  {}{}. [{}] {}  {}",
+                    focus_marker,
+                    index + 1,
+                    short_mission_id(&banner.mission_id),
+                    mission_operator_state_label(&banner),
+                    banner.goal
+                ));
+                if let Some(blocker) = mission_blocker_summary(&banner) {
+                    lines.push(format!("      blocker: {blocker}"));
+                }
+                if let Some(wake) = mission_wake_summary_line(&banner) {
+                    lines.push(format!("      wake:    {wake}"));
+                }
+                if let Some(wave) = mission_wave_summary_line(&banner) {
+                    lines.push(format!("      wave:    {wave}"));
+                }
+                if let Some(change) = banner.latest_change.as_deref() {
+                    lines.push(format!("      latest:  {change}"));
+                }
+            }
+            lines.push(
+                "  Use /focus <number-or-id-prefix> to switch the active mission.".to_string(),
+            );
+        }
+
+        let recent_terminal: Vec<_> = missions
+            .into_iter()
+            .filter(|mission| !mission_status_is_active(mission.status))
+            .take(5)
+            .collect();
+        if !recent_terminal.is_empty() {
+            lines.push("  Recent done:".to_string());
+            for mission in recent_terminal {
+                lines.push(format!(
+                    "    [{}] {}  {}",
+                    short_mission_id(&mission.id.to_string()),
+                    mission_terminal_label(mission.status),
+                    mission.goal
+                ));
+            }
+        }
+
+        let _ = self
+            .event_tx
+            .send(SessionEvent::Info(lines.join("\n")))
+            .await;
+        Ok(())
+    }
+
+    async fn focus_mission(&self, selector: String) -> Result<()> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            anyhow::bail!("usage: /focus <number-or-id-prefix>");
+        }
+        let missions = self.mission_store.list_active_missions().await?;
+        if missions.is_empty() {
+            anyhow::bail!("no active missions are available to focus");
+        }
+
+        let mission = if let Ok(index) = selector.parse::<usize>() {
+            missions
+                .get(index.saturating_sub(1))
+                .cloned()
+                .ok_or_else(|| anyhow!("no active mission at index {}", index))?
+        } else {
+            let matches: Vec<_> = missions
+                .iter()
+                .filter(|mission| mission.id.to_string().starts_with(selector))
+                .cloned()
+                .collect();
+            match matches.as_slice() {
+                [] => anyhow::bail!("no active mission matches '{}'", selector),
+                [mission] => mission.clone(),
+                _ => anyhow::bail!(
+                    "mission selector '{}' is ambiguous; use a longer id prefix",
+                    selector
+                ),
+            }
+        };
+
+        self.set_active_mission_focus(&mission).await;
+        let Some(banner) = self.mission_banner_for(mission.id).await? else {
+            anyhow::bail!(
+                "mission '{}' disappeared before focus could update",
+                mission.id
+            );
+        };
+        let mut lines = vec![format!(
+            "Focused mission [{}] {}  {}",
+            short_mission_id(&banner.mission_id),
+            mission_operator_state_label(&banner),
+            banner.goal
+        )];
+        if let Some(blocker) = mission_blocker_summary(&banner) {
+            lines.push(format!("blocker: {blocker}"));
+        }
+        if let Some(wake) = mission_wake_summary_line(&banner) {
+            lines.push(format!("wake:    {wake}"));
+        }
+        if let Some(wave) = mission_wave_summary_line(&banner) {
+            lines.push(format!("wave:    {wave}"));
+        }
+        lines.push(format!("next:    {}", mission_next_action_summary(&banner)));
+        let _ = self
+            .event_tx
+            .send(SessionEvent::Info(lines.join("\n")))
+            .await;
+        Ok(())
     }
 
     async fn emit_banner(&self) {
@@ -1670,13 +1950,7 @@ impl MissionCore {
                 experiment_id: None,
             })
             .await?;
-        {
-            let mut state = self.runtime_state.lock().await;
-            state.active_mission_id = Some(mission.id);
-        }
-        self.host
-            .mark_mission_started(&mission.id.to_string(), &mission.goal, posture);
-        self.emit_banner().await;
+        self.set_active_mission_focus(&mission).await;
         self.emit_mission_activity(MissionActivity::PlanUpdated {
             mission_id: mission.id.to_string(),
             reason: "seeded mission plan".to_string(),
@@ -1811,7 +2085,10 @@ impl MissionCore {
     ) -> Result<()> {
         let tx = {
             let mut state = self.runtime_state.lock().await;
-            state.pending_approvals.remove(&request_id)
+            state
+                .pending_approvals
+                .remove(&request_id)
+                .map(|pending| pending.response_tx)
         };
         let Some(tx) = tx else {
             anyhow::bail!("unknown approval request '{}'", request_id);
@@ -2113,10 +2390,9 @@ impl MissionCore {
                 MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed
             ) {
                 mission.completed_at = Some(Utc::now());
-                self.host.mark_mission_completed(&mission.id.to_string());
             }
             self.mission_store.upsert_mission(&mission).await?;
-            self.emit_banner().await;
+            self.reconcile_active_mission_focus().await?;
         }
 
         let mut state = self.runtime_state.lock().await;
@@ -2899,8 +3175,15 @@ impl MissionCore {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = self.runtime_state.lock().await;
-            state.pending_approvals.insert(request_id.clone(), tx);
+            state.pending_approvals.insert(
+                request_id.clone(),
+                PendingApproval {
+                    mission_id: mission.id,
+                    response_tx: tx,
+                },
+            );
         }
+        self.emit_banner().await;
         let _ = self
             .event_tx
             .send(SessionEvent::ApprovalRequested {
@@ -2931,6 +3214,7 @@ impl MissionCore {
                 experiment_id: None,
             })
             .await?;
+        self.emit_banner().await;
         if !resolution.approved {
             return Ok(ToolCallOutcome {
                 payload: json!({ "approved": false }),
@@ -3882,6 +4166,214 @@ struct InlineExecOutcome {
     duration_ms: u64,
     stdout_tail: String,
     stderr_tail: String,
+}
+
+fn mission_status_is_active(status: MissionStatus) -> bool {
+    matches!(
+        status,
+        MissionStatus::Pending
+            | MissionStatus::AwaitingDeliberator
+            | MissionStatus::Deliberating
+            | MissionStatus::Sleeping
+    )
+}
+
+fn mission_operator_state_label(banner: &MissionBanner) -> &'static str {
+    if mission_blocker_summary(banner).is_some() {
+        return "blocked";
+    }
+    match banner.status {
+        MissionStatus::Pending
+        | MissionStatus::AwaitingDeliberator
+        | MissionStatus::Deliberating => "working",
+        MissionStatus::Sleeping => {
+            if banner.fleet.active > 0
+                || banner.fleet.queued > 0
+                || !matches!(banner.wake.state, MissionWakeState::Idle)
+                || banner.pending_user_messages > 0
+            {
+                "working"
+            } else {
+                "waiting"
+            }
+        }
+        MissionStatus::Completed => "completed",
+        MissionStatus::Cancelled => "cancelled",
+        MissionStatus::Failed => "failed",
+    }
+}
+
+fn mission_blocker_summary(banner: &MissionBanner) -> Option<String> {
+    if banner.pending_approvals > 0 {
+        return Some(format!(
+            "{} approval{} pending",
+            banner.pending_approvals,
+            if banner.pending_approvals == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    if banner.pending_questions > 0 {
+        return Some(format!(
+            "{} question{} pending",
+            banner.pending_questions,
+            if banner.pending_questions == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    None
+}
+
+fn mission_wake_summary_line(banner: &MissionBanner) -> Option<String> {
+    match banner.wake.state {
+        MissionWakeState::Running => Some(match banner.wake.current_reason {
+            Some(reason) => format!("running: {}", wake_reason_label(reason)),
+            None => "running".to_string(),
+        }),
+        MissionWakeState::Queued => {
+            let prefix = format!(
+                "{} wake{} queued",
+                banner.wake.queued_count,
+                if banner.wake.queued_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            );
+            Some(match banner.wake.current_reason {
+                Some(reason) => format!("{prefix}: {}", wake_reason_label(reason)),
+                None => prefix,
+            })
+        }
+        MissionWakeState::Idle => None,
+    }
+}
+
+fn mission_wave_summary_line(banner: &MissionBanner) -> Option<String> {
+    let wave = banner.active_wave.as_ref()?;
+    let mut summary = format!(
+        "{} active, {} queued, {} done, {} failed",
+        wave.running, wave.queued, wave.completed, wave.failed
+    );
+    if wave.wake_sent {
+        summary.push_str(", follow-up wake queued");
+    } else {
+        summary.push_str(&format!(", wake on {}", wake_when_label(wave.wake_when)));
+    }
+    Some(summary)
+}
+
+fn mission_next_action_summary(banner: &MissionBanner) -> &'static str {
+    if banner.pending_approvals > 0 {
+        return "approve or deny the pending host command";
+    }
+    if banner.pending_questions > 0 {
+        return "answer the pending user question";
+    }
+    if matches!(banner.wake.state, MissionWakeState::Idle)
+        && banner.fleet.active == 0
+        && banner.fleet.queued == 0
+    {
+        return "send steering or /wake the mission";
+    }
+    "wait for the next mission event"
+}
+
+fn mission_terminal_label(status: MissionStatus) -> &'static str {
+    match status {
+        MissionStatus::Completed => "completed",
+        MissionStatus::Cancelled => "cancelled",
+        MissionStatus::Failed => "failed",
+        MissionStatus::Pending
+        | MissionStatus::AwaitingDeliberator
+        | MissionStatus::Deliberating
+        | MissionStatus::Sleeping => "active",
+    }
+}
+
+fn short_mission_id(mission_id: &str) -> String {
+    mission_id.chars().take(8).collect()
+}
+
+fn wake_reason_label(reason: WakeReason) -> &'static str {
+    match reason {
+        WakeReason::UserMessage => "user message",
+        WakeReason::ExperimentsComplete => "experiments complete",
+        WakeReason::ExperimentFailed => "experiment failure",
+        WakeReason::BudgetWarning => "budget warning",
+        WakeReason::BudgetExhausted => "budget exhausted",
+        WakeReason::SchedulerTick => "scheduler tick",
+        WakeReason::Timeout => "timeout",
+        WakeReason::ManualResume => "manual resume",
+    }
+}
+
+fn wake_when_label(wake_when: WakeWhen) -> &'static str {
+    match wake_when {
+        WakeWhen::AllComplete => "all complete",
+        WakeWhen::FirstComplete => "first complete",
+        WakeWhen::AnyFailure => "any failure",
+    }
+}
+
+fn summarize_wake_banner(
+    queued_wakes: &[crate::mission_store::StoredWakeEvent],
+    deliberating: bool,
+) -> MissionWakeBanner {
+    let current_reason = queued_wakes.first().map(|record| record.wake.reason);
+    if deliberating {
+        return MissionWakeBanner {
+            state: MissionWakeState::Running,
+            current_reason,
+            queued_count: queued_wakes.len().saturating_sub(1),
+        };
+    }
+    if queued_wakes.is_empty() {
+        return MissionWakeBanner {
+            state: MissionWakeState::Idle,
+            current_reason: None,
+            queued_count: 0,
+        };
+    }
+    MissionWakeBanner {
+        state: MissionWakeState::Queued,
+        current_reason,
+        queued_count: queued_wakes.len(),
+    }
+}
+
+fn summarize_active_wave(wave: &ActiveWaveRecord, experiments: &[Experiment]) -> ActiveWaveSummary {
+    let mut summary = ActiveWaveSummary {
+        total: wave.experiment_ids.len(),
+        running: 0,
+        queued: 0,
+        completed: 0,
+        failed: 0,
+        concurrency_limit: wave.concurrency_limit,
+        wake_when: wave.wake_when,
+        wake_sent: wave.wake_sent,
+    };
+
+    for experiment in experiments
+        .iter()
+        .filter(|experiment| wave.experiment_ids.contains(&experiment.id))
+    {
+        match experiment.status {
+            ExperimentStatus::Queued => summary.queued += 1,
+            ExperimentStatus::Running => summary.running += 1,
+            ExperimentStatus::Succeeded => summary.completed += 1,
+            ExperimentStatus::Failed | ExperimentStatus::Cancelled | ExperimentStatus::Timeout => {
+                summary.failed += 1;
+            }
+        }
+    }
+
+    summary
 }
 
 fn state_from_worker_status(status: &WorkerStatus, exit_code: i32) -> SandboxState {

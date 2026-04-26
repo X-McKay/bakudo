@@ -1211,6 +1211,8 @@ impl App {
         match command {
             SlashCommand::Mission => self.cmd_start_mission(Posture::Mission, arg),
             SlashCommand::Explore => self.cmd_start_mission(Posture::Explore, arg),
+            SlashCommand::Missions => self.cmd_missions(),
+            SlashCommand::Focus => self.cmd_focus(arg),
             SlashCommand::Budget => self.cmd_budget(arg),
             SlashCommand::Wake => self.cmd_wake(),
             SlashCommand::Lessons => self.cmd_lessons(),
@@ -1304,6 +1306,21 @@ impl App {
             self.begin_pending_runtime_work(PendingRuntimeWorkKind::UpdatingBudget, arg);
         }
         self.push_message(ChatMessage::info("Updating mission wallet…"));
+    }
+
+    fn cmd_missions(&mut self) {
+        let _ = self.cmd_tx.try_send(SessionCommand::ShowMissions);
+    }
+
+    fn cmd_focus(&mut self, arg: String) {
+        let selector = arg.trim();
+        if selector.is_empty() {
+            self.push_message(ChatMessage::error("Usage: /focus <number-or-id-prefix>"));
+            return;
+        }
+        let _ = self.cmd_tx.try_send(SessionCommand::FocusMission {
+            selector: selector.to_string(),
+        });
     }
 
     fn cmd_wake(&mut self) {
@@ -1475,6 +1492,10 @@ impl App {
             self.shelf.len(),
         )];
         if let Some(banner) = &self.mission_banner {
+            let wake_summary = crate::status_indicator::mission_wake_summary(banner)
+                .unwrap_or_else(|| "no wake queued".to_string());
+            let blockers = crate::status_indicator::mission_blocked_reason(banner)
+                .unwrap_or_else(|| "none".to_string());
             lines.push(format!(
                 "  mission:        {} [{} / {:?} / {:?}]\n  wallet:         {}s left, {} workers remaining, {} in flight, max {}\n  mission inbox:  {} pending message(s), {} pending question(s)",
                 banner.goal,
@@ -1488,8 +1509,18 @@ impl App {
                 banner.pending_user_messages,
                 banner.pending_questions,
             ));
+            lines.push(format!(
+                "  wake:           {wake_summary}\n  blockers:       {blockers}\n  next action:    {}",
+                crate::status_indicator::mission_next_action(banner)
+            ));
+            if let Some(wave_summary) = crate::status_indicator::mission_wave_summary(banner) {
+                lines.push(format!("  active wave:    {wave_summary}"));
+            }
             if let Some(issue) = banner.latest_issue.as_deref() {
                 lines.push(format!("  latest issue:   {issue}"));
+            }
+            if let Some(change) = banner.latest_change.as_deref() {
+                lines.push(format!("  latest change:  {change}"));
             }
         }
         let info = lines.join("\n");

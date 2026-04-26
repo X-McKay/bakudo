@@ -125,6 +125,10 @@ impl HostRuntime {
     }
 
     pub fn mark_mission_started(&self, mission_id: &str, objective: &str, posture: Posture) {
+        self.focus_mission(mission_id, objective, posture);
+    }
+
+    pub fn focus_mission(&self, mission_id: &str, objective: &str, posture: Posture) {
         let mut state = self.inner.lock().expect("host runtime mutex poisoned");
         state.pending_intake = None;
         state.active_mission = Some(ActiveMission {
@@ -145,6 +149,11 @@ impl HostRuntime {
         {
             state.active_mission = None;
         }
+    }
+
+    pub fn clear_active_mission(&self) {
+        let mut state = self.inner.lock().expect("host runtime mutex poisoned");
+        state.active_mission = None;
     }
 
     pub fn note_task_started(&self, task_id: &str) {

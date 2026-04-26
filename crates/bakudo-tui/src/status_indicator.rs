@@ -12,8 +12,8 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use bakudo_core::mission::MissionStatus;
-use bakudo_daemon::session_controller::MissionBanner;
+use bakudo_core::mission::{MissionStatus, WakeReason, WakeWhen};
+use bakudo_daemon::session_controller::{MissionBanner, MissionWakeState};
 
 use crate::{
     app::{App, ShelfColor, short_task_id},
@@ -192,6 +192,29 @@ fn render_pending_line(app: &App, width: u16) -> Option<Line<'static>> {
 }
 
 fn mission_label(status: MissionStatus, banner: &MissionBanner) -> (&'static str, bool, Style) {
+    if matches!(
+        status,
+        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed
+    ) {
+        return (
+            "Idle",
+            false,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+
+    if mission_blocked_reason(banner).is_some() {
+        return (
+            "Blocked",
+            false,
+            Style::default()
+                .fg(palette::role_error_fg())
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+
     match status {
         MissionStatus::Pending
         | MissionStatus::AwaitingDeliberator
@@ -204,9 +227,9 @@ fn mission_label(status: MissionStatus, banner: &MissionBanner) -> (&'static str
         ),
         MissionStatus::Sleeping => {
             let has_pending_work = banner.pending_user_messages > 0
-                || banner.pending_questions > 0
                 || banner.fleet.queued > 0
-                || banner.fleet.active > 0;
+                || banner.fleet.active > 0
+                || !matches!(banner.wake.state, MissionWakeState::Idle);
             if has_pending_work {
                 (
                     "Working",
@@ -225,67 +248,45 @@ fn mission_label(status: MissionStatus, banner: &MissionBanner) -> (&'static str
                 )
             }
         }
-        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed => (
-            "Idle",
-            false,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
+        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed => {
+            unreachable!()
+        }
     }
 }
 
-fn mission_details(banner: &MissionBanner) -> Vec<String> {
+pub(crate) fn mission_details(banner: &MissionBanner) -> Vec<String> {
     let mut details = Vec::new();
-    match banner.status {
-        MissionStatus::Pending => details.push("starting mission".to_string()),
-        MissionStatus::AwaitingDeliberator => details.push("wake queued".to_string()),
-        MissionStatus::Deliberating => details.push("planning next wake".to_string()),
-        MissionStatus::Sleeping => {
-            if banner.fleet.active > 0 {
-                details.push(format!(
-                    "{} worker{} active",
-                    banner.fleet.active,
-                    if banner.fleet.active == 1 { "" } else { "s" }
-                ));
+
+    if let Some(reason) = mission_blocked_reason(banner) {
+        details.push(reason);
+    }
+
+    if let Some(summary) = mission_wake_summary(banner) {
+        details.push(summary);
+    }
+
+    if let Some(summary) = mission_wave_summary(banner) {
+        details.push(summary);
+    }
+
+    if banner.pending_user_messages > 0 {
+        details.push(format!(
+            "{} message{} queued",
+            banner.pending_user_messages,
+            if banner.pending_user_messages == 1 {
+                ""
+            } else {
+                "s"
             }
-            if banner.fleet.queued > 0 {
-                details.push(format!(
-                    "{} worker{} queued",
-                    banner.fleet.queued,
-                    if banner.fleet.queued == 1 { "" } else { "s" }
-                ));
-            }
-            if banner.pending_user_messages > 0 {
-                details.push(format!(
-                    "{} message{} queued",
-                    banner.pending_user_messages,
-                    if banner.pending_user_messages == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ));
-            }
-            if banner.pending_questions > 0 {
-                details.push(format!(
-                    "{} question{} pending",
-                    banner.pending_questions,
-                    if banner.pending_questions == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ));
-            }
-            if let Some(issue) = banner.latest_issue.as_deref() {
-                details.push(format!("issue: {issue}"));
-            }
-            if details.is_empty() {
-                details.push("sleeping until next wake".to_string());
-            }
-        }
-        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed => {}
+        ));
+    }
+
+    if let Some(issue) = banner.latest_issue.as_deref() {
+        details.push(format!("issue: {issue}"));
+    }
+
+    if let Some(change) = banner.latest_change.as_deref() {
+        details.push(format!("latest: {change}"));
     }
 
     if banner.abox_workers_in_flight > 0 {
@@ -293,13 +294,146 @@ fn mission_details(banner: &MissionBanner) -> Vec<String> {
             "{} / {} workers in flight",
             banner.abox_workers_in_flight, banner.concurrent_max
         ));
-    } else if banner.abox_workers_remaining < banner.concurrent_max {
+    } else if banner.abox_workers_remaining < banner.concurrent_max || banner.active_wave.is_some()
+    {
         details.push(format!(
             "{} workers remaining",
             banner.abox_workers_remaining
         ));
     }
+
+    if details.is_empty() {
+        details.push(match banner.status {
+            MissionStatus::Pending => "starting mission".to_string(),
+            MissionStatus::AwaitingDeliberator => "wake queued".to_string(),
+            MissionStatus::Deliberating => "planning next wake".to_string(),
+            MissionStatus::Sleeping => "sleeping until next wake".to_string(),
+            MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed => {
+                "mission finished".to_string()
+            }
+        });
+    }
+
     details
+}
+
+pub(crate) fn mission_blocked_reason(banner: &MissionBanner) -> Option<String> {
+    if banner.pending_approvals > 0 {
+        return Some(format!(
+            "{} approval{} pending",
+            banner.pending_approvals,
+            if banner.pending_approvals == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    if banner.pending_questions > 0 {
+        return Some(format!(
+            "{} question{} pending",
+            banner.pending_questions,
+            if banner.pending_questions == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    None
+}
+
+pub(crate) fn mission_next_action(banner: &MissionBanner) -> &'static str {
+    if banner.pending_approvals > 0 {
+        return "approve or deny the pending host command";
+    }
+    if banner.pending_questions > 0 {
+        return "answer the pending user question";
+    }
+    if matches!(banner.wake.state, MissionWakeState::Idle)
+        && banner.fleet.active == 0
+        && banner.fleet.queued == 0
+    {
+        return "send steering or use /wake";
+    }
+    "wait for the next mission event"
+}
+
+pub(crate) fn mission_wake_summary(banner: &MissionBanner) -> Option<String> {
+    match banner.wake.state {
+        MissionWakeState::Running => Some(match banner.wake.current_reason {
+            Some(reason) => format!("wake running: {}", wake_reason_label(reason)),
+            None => "wake running".to_string(),
+        }),
+        MissionWakeState::Queued => {
+            let prefix = format!(
+                "{} wake{} queued",
+                banner.wake.queued_count,
+                if banner.wake.queued_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            );
+            Some(match banner.wake.current_reason {
+                Some(reason) => format!("{prefix}: {}", wake_reason_label(reason)),
+                None => prefix,
+            })
+        }
+        MissionWakeState::Idle => None,
+    }
+}
+
+pub(crate) fn mission_wave_summary(banner: &MissionBanner) -> Option<String> {
+    let wave = banner.active_wave.as_ref()?;
+    let mut parts = Vec::new();
+    if wave.running > 0 {
+        parts.push(format!("{} active", wave.running));
+    }
+    if wave.queued > 0 {
+        parts.push(format!("{} queued", wave.queued));
+    }
+    if wave.completed > 0 {
+        parts.push(format!("{} done", wave.completed));
+    }
+    if wave.failed > 0 {
+        parts.push(format!("{} failed", wave.failed));
+    }
+    if parts.is_empty() {
+        parts.push(format!(
+            "{} worker{}",
+            wave.total,
+            if wave.total == 1 { "" } else { "s" }
+        ));
+    }
+    let mut summary = format!("wave {}", parts.join(", "));
+    if wave.wake_sent {
+        summary.push_str(", follow-up wake queued");
+    } else {
+        summary.push_str(&format!(", wake on {}", wake_when_label(wave.wake_when)));
+    }
+    Some(summary)
+}
+
+fn wake_reason_label(reason: WakeReason) -> &'static str {
+    match reason {
+        WakeReason::UserMessage => "user message",
+        WakeReason::ExperimentsComplete => "experiments complete",
+        WakeReason::ExperimentFailed => "experiment failure",
+        WakeReason::BudgetWarning => "budget warning",
+        WakeReason::BudgetExhausted => "budget exhausted",
+        WakeReason::SchedulerTick => "scheduler tick",
+        WakeReason::Timeout => "timeout",
+        WakeReason::ManualResume => "manual resume",
+    }
+}
+
+fn wake_when_label(wake_when: WakeWhen) -> &'static str {
+    match wake_when {
+        WakeWhen::AllComplete => "all complete",
+        WakeWhen::FirstComplete => "first complete",
+        WakeWhen::AnyFailure => "any failure",
+    }
 }
 
 fn truncate_line_with_ellipsis(line: Line<'static>, width: u16) -> Line<'static> {
@@ -369,11 +503,13 @@ mod tests {
 
     use bakudo_core::{
         config::BakudoConfig,
-        mission::{MissionStatus, Posture},
+        mission::{MissionStatus, Posture, WakeReason, WakeWhen},
         provider::ProviderRegistry,
         state::SandboxLedger,
     };
-    use bakudo_daemon::session_controller::{FleetCounts, MissionBanner};
+    use bakudo_daemon::session_controller::{
+        ActiveWaveSummary, FleetCounts, MissionBanner, MissionWakeBanner, MissionWakeState,
+    };
 
     use crate::app::{App, PendingRuntimeWorkKind, ShelfColor, ShelfEntry};
 
@@ -457,7 +593,7 @@ mod tests {
         let rendered = line_to_string(&line);
 
         assert!(rendered.contains("• Working"));
-        assert!(rendered.contains("planning next wake"));
+        assert!(rendered.contains("wake running: manual resume"));
         assert!(rendered.contains("mission Refine the inline status row"));
     }
 
@@ -493,6 +629,53 @@ mod tests {
 
         assert!(rendered.contains("• Waiting"));
         assert!(rendered.contains("sleeping until next wake"));
+    }
+
+    #[test]
+    fn render_top_line_surfaces_blocked_mission_state() {
+        let mut app = fresh_app();
+        let mut banner = mission_banner(MissionStatus::Sleeping, 0, 0, 0, "Wait for an answer");
+        banner.pending_questions = 1;
+        banner.wake = MissionWakeBanner {
+            state: MissionWakeState::Idle,
+            current_reason: None,
+            queued_count: 0,
+        };
+        app.mission_banner = Some(banner);
+
+        let line = render_top_line(&app, 140).expect("top line");
+        let rendered = line_to_string(&line);
+
+        assert!(rendered.contains("• Blocked"));
+        assert!(rendered.contains("1 question pending"));
+    }
+
+    #[test]
+    fn render_top_line_surfaces_wave_state() {
+        let mut app = fresh_app();
+        let mut banner =
+            mission_banner(MissionStatus::Sleeping, 1, 2, 0, "Coordinate a worker wave");
+        banner.active_wave = Some(ActiveWaveSummary {
+            total: 3,
+            running: 1,
+            queued: 2,
+            completed: 0,
+            failed: 0,
+            concurrency_limit: 2,
+            wake_when: WakeWhen::FirstComplete,
+            wake_sent: false,
+        });
+        banner.wake = MissionWakeBanner {
+            state: MissionWakeState::Idle,
+            current_reason: None,
+            queued_count: 0,
+        };
+        app.mission_banner = Some(banner);
+
+        let line = render_top_line(&app, 140).expect("top line");
+        let rendered = line_to_string(&line);
+
+        assert!(rendered.contains("wave 1 active, 2 queued, wake on first complete"));
     }
 
     #[test]
@@ -554,13 +737,29 @@ mod tests {
             goal: goal.to_string(),
             posture: Posture::Mission,
             status,
+            wake: MissionWakeBanner {
+                state: match status {
+                    MissionStatus::Deliberating => MissionWakeState::Running,
+                    MissionStatus::AwaitingDeliberator => MissionWakeState::Queued,
+                    _ => MissionWakeState::Idle,
+                },
+                current_reason: match status {
+                    MissionStatus::Deliberating => Some(WakeReason::ManualResume),
+                    MissionStatus::AwaitingDeliberator => Some(WakeReason::ManualResume),
+                    _ => None,
+                },
+                queued_count: usize::from(matches!(status, MissionStatus::AwaitingDeliberator)),
+            },
+            active_wave: None,
             wall_clock_remaining_secs: 900,
             abox_workers_remaining: 4,
             abox_workers_in_flight: active as u32,
             concurrent_max: 4,
             pending_user_messages,
             pending_questions: 0,
+            pending_approvals: 0,
             latest_issue: None,
+            latest_change: None,
             fleet: FleetCounts {
                 active,
                 queued,
