@@ -23,7 +23,7 @@ use bakudo_core::abox::{sandbox_task_id, AboxAdapter, RunParams};
 use bakudo_core::error::BakudoError;
 use bakudo_core::protocol::{
     AttemptSpec, SandboxLifecycle, TaskId, WorkerProgressEvent, WorkerResult, WorkerStatus,
-    WORKER_ERROR_PREFIX, WORKER_EVENT_PREFIX, WORKER_RESULT_PREFIX,
+    WORKER_ERROR_PREFIX, WORKER_EVENT_PREFIX, WORKER_RESULT_PREFIX, WORKER_SUMMARY_PREFIX,
 };
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 
@@ -337,6 +337,12 @@ fn strip_structured_worker_output(stdout: &str) -> String {
 
 /// Extract a one-line summary from the worker's stdout.
 fn extract_summary(stdout: &str, stderr: &str) -> String {
+    if let Some(summary) =
+        extract_prefixed_summary(stdout).or_else(|| extract_prefixed_summary(stderr))
+    {
+        return summary;
+    }
+
     // Prefer the last meaningful stdout line, but fall back to stderr so
     // provider failures still produce a useful summary.
     [stdout, stderr]
@@ -347,6 +353,16 @@ fn extract_summary(stdout: &str, stderr: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+fn extract_prefixed_summary(stream: &str) -> Option<String> {
+    stream.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(WORKER_SUMMARY_PREFIX)
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| summary.chars().take(200).collect())
+    })
 }
 
 fn attempt_trace_bundle(spec: &AttemptSpec, result: &WorkerResult) -> String {
@@ -482,6 +498,14 @@ mod tests {
     fn extract_summary_falls_back_to_stderr() {
         let summary = extract_summary("", "first\n\nfatal: provider exploded\n");
         assert_eq!(summary, "fatal: provider exploded");
+    }
+
+    #[test]
+    fn extract_summary_prefers_explicit_worker_summary_prefix() {
+        let stdout =
+            "working note\nBAKUDO_SUMMARY: verified README.md exists\nplain trailing line\n";
+        let summary = extract_summary(stdout, "");
+        assert_eq!(summary, "verified README.md exists");
     }
 
     #[test]

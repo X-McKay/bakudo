@@ -436,6 +436,8 @@ pub struct ExperimentSummary {
     pub stdout_tail: String,
     pub stderr_tail: String,
     #[serde(default)]
+    pub worker_summary: Option<String>,
+    #[serde(default)]
     pub metrics: serde_json::Map<String, serde_json::Value>,
     pub patch_path: Option<String>,
 }

@@ -1,7 +1,6 @@
+use crate::provider_runtime::{ProviderEngine, WorkerRuntimeConfig};
 use anyhow::{anyhow, Result};
 use bakudo_core::mission::ExperimentScript;
-
-use crate::provider_runtime::{ProviderEngine, WorkerRuntimeConfig};
 
 const WORKER_WRAPPER_PY: &str = concat!(
     "import json, os, subprocess, sys, threading, time\n",
@@ -26,6 +25,7 @@ const WORKER_WRAPPER_PY: &str = concat!(
     "args = sys.argv[2:]\n",
     "start = time.monotonic()\n",
     "last_line = {'value': ''}\n",
+    "summary_line = {'value': ''}\n",
     "\n",
     "try:\n",
     "    proc = subprocess.Popen(\n",
@@ -56,6 +56,8 @@ const WORKER_WRAPPER_PY: &str = concat!(
     "            continue\n",
     "        if kind == 'assistant_message':\n",
     "            last_line['value'] = trimmed\n",
+    "            if trimmed.startswith('BAKUDO_SUMMARY:'):\n",
+    "                summary_line['value'] = trimmed[len('BAKUDO_SUMMARY:'):].strip()\n",
     "        emit(EVENT_PREFIX, {\n",
     "            'attempt_id': ATTEMPT_ID,\n",
     "            'kind': kind,\n",
@@ -70,7 +72,7 @@ const WORKER_WRAPPER_PY: &str = concat!(
     "exit_code = proc.wait()\n",
     "stderr_thread.join()\n",
     "status = 'succeeded' if exit_code == 0 else 'failed'\n",
-    "summary = last_line['value'] or f'provider exited with code {exit_code}'\n",
+    "summary = summary_line['value'] or last_line['value'] or f'provider exited with code {exit_code}'\n",
     "emit(RESULT_PREFIX, {\n",
     "    'schema_version': SCHEMA_VERSION,\n",
     "    'attempt_id': ATTEMPT_ID,\n",

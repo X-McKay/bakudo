@@ -1520,6 +1520,7 @@ impl MissionCore {
                             duration: Duration::from_secs(0),
                             stdout_tail: String::new(),
                             stderr_tail: "mission recovered after restart".to_string(),
+                            worker_summary: None,
                             metrics: serde_json::Map::new(),
                             patch_path: None,
                         });
@@ -3663,6 +3664,10 @@ impl MissionCore {
             .mission(experiment.mission_id)
             .await?
             .ok_or_else(|| anyhow!("mission '{}' not found", experiment.mission_id))?;
+        let mission_state = self
+            .mission_store
+            .mission_state(experiment.mission_id)
+            .await?;
         let task_id = experiment_task_id(experiment.id);
         let (
             prompt,
@@ -3713,10 +3718,23 @@ impl MissionCore {
                         provider_id
                     )
                 })?;
+                let worker_prompt = build_agent_worker_prompt(
+                    &mission,
+                    &mission_state,
+                    &experiment,
+                    AgentWorkerPromptContext {
+                        raw_prompt: &prompt,
+                        provider_id: &provider_id,
+                        model: model.as_deref(),
+                        sandbox_lifecycle,
+                        candidate_policy,
+                        allow_all_tools,
+                    },
+                );
                 let worker_command =
                     build_agent_worker_command(&worker, model.as_deref(), allow_all_tools)?;
                 (
-                    prompt,
+                    worker_prompt,
                     provider_id,
                     model,
                     worker_command,
@@ -3815,6 +3833,8 @@ impl MissionCore {
                     duration: Duration::from_millis(result.duration_ms),
                     stdout_tail: trim_tail(&result.stdout, 4096),
                     stderr_tail: trim_tail(&result.stderr, 4096),
+                    worker_summary: (!result.summary.trim().is_empty())
+                        .then(|| result.summary.clone()),
                     metrics: extract_metrics(&result.stdout, &experiment.spec.metric_keys),
                     patch_path,
                 };
@@ -3826,6 +3846,7 @@ impl MissionCore {
                     duration: Duration::from_secs(0),
                     stdout_tail: String::new(),
                     stderr_tail: err.to_string(),
+                    worker_summary: None,
                     metrics: serde_json::Map::new(),
                     patch_path: None,
                 };
@@ -3841,6 +3862,7 @@ impl MissionCore {
                     duration: Duration::from_secs(0),
                     stdout_tail: String::new(),
                     stderr_tail: err.to_string(),
+                    worker_summary: None,
                     metrics: serde_json::Map::new(),
                     patch_path: None,
                 };
@@ -4825,6 +4847,57 @@ fn build_deliberator_prompt(system_prompt: &str, wake: &WakeEvent) -> Result<Str
     ))
 }
 
+struct AgentWorkerPromptContext<'a> {
+    raw_prompt: &'a str,
+    provider_id: &'a str,
+    model: Option<&'a str>,
+    sandbox_lifecycle: SandboxLifecycle,
+    candidate_policy: CandidatePolicy,
+    allow_all_tools: bool,
+}
+
+fn build_agent_worker_prompt(
+    mission: &Mission,
+    mission_state: &MissionState,
+    experiment: &Experiment,
+    context: AgentWorkerPromptContext<'_>,
+) -> String {
+    let objective = mission_state
+        .0
+        .get("objective")
+        .and_then(Value::as_str)
+        .map(compact_single_line)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| compact_single_line(&mission.goal));
+    let done_contract =
+        render_worker_context_value(mission_state.0.get("done_contract"), "Not recorded.", 320);
+    let constraints =
+        render_worker_context_value(mission_state.0.get("constraints"), "None recorded.", 320);
+    let best_known =
+        render_worker_context_value(mission_state.0.get("best_known"), "None recorded.", 480);
+    let open_questions =
+        render_worker_context_value(mission_state.0.get("open_questions"), "None recorded.", 320);
+    let next_steps =
+        render_worker_context_value(mission_state.0.get("next_steps"), "None recorded.", 320);
+    let skill = experiment.spec.skill.as_deref().unwrap_or("none");
+    let model = context
+        .model
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default");
+
+    format!(
+        "Scoped Bakudo assignment: {raw_prompt}\n\nYou are a Bakudo worker running inside an `abox` sandbox for one scoped experiment.\nYou are not the mission conductor and you do not manage Bakudo mission state or host-side worktree lifecycle.\n\nOperating rules:\n- Stay inside the provided repo/worktree and use normal local tooling.\n- Do not ask the user for input or attempt host-only actions; leave blockers for the conductor.\n- Do not edit `mission_plan.md` or Bakudo mission state from this worker.\n- Bakudo owns merge/discard/apply decisions for this worktree. Do not merge your own branch.\n- Verify locally when practical before finishing.\n- End with exactly one line starting with `BAKUDO_SUMMARY:` describing the outcome, key files or results, verification, and any blocker.\n\nMission context:\n- objective: {objective}\n- done_contract: {done_contract}\n- constraints: {constraints}\n- best_known: {best_known}\n- open_questions: {open_questions}\n- next_steps: {next_steps}\n\nExperiment context:\n- label: {label}\n- hypothesis: {hypothesis}\n- base_branch: {base_branch}\n- skill: {skill}\n- sandbox_lifecycle: {sandbox_lifecycle}\n- candidate_policy: {candidate_policy}\n- provider: {provider_id}\n- model: {model}\n- allow_all_tools: {allow_all_tools}\n\nDeliver the scoped assignment above. Keep the final hand-off factual and compact.\n",
+        raw_prompt = context.raw_prompt,
+        label = experiment.label,
+        hypothesis = experiment.spec.hypothesis,
+        base_branch = experiment.spec.base_branch,
+        sandbox_lifecycle = context.sandbox_lifecycle,
+        candidate_policy = context.candidate_policy,
+        provider_id = context.provider_id,
+        allow_all_tools = context.allow_all_tools,
+    )
+}
+
 fn tool_definitions() -> Vec<McpToolDefinition> {
     vec![
         McpToolDefinition {
@@ -5256,6 +5329,25 @@ fn compact_single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn render_worker_context_value(value: Option<&Value>, fallback: &str, max_chars: usize) -> String {
+    match value {
+        None | Some(Value::Null) => fallback.to_string(),
+        Some(Value::String(text)) if text.trim().is_empty() => fallback.to_string(),
+        Some(Value::Array(items)) if items.is_empty() => fallback.to_string(),
+        Some(Value::Object(map)) if map.is_empty() => fallback.to_string(),
+        Some(value) => truncate_chars(&compact_json_value(value), max_chars),
+    }
+}
+
+fn compact_json_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => compact_single_line(text),
+        _ => {
+            compact_single_line(&serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
+        }
+    }
+}
+
 fn render_tool_issue_summary(summary: &str) -> String {
     summary
         .strip_prefix("tool_call_error: ")
@@ -5289,6 +5381,18 @@ fn trim_tail(text: &str, max_bytes: usize) -> String {
 
 fn truncate(text: &str) -> String {
     text.chars().take(160).collect()
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return text.chars().take(max_chars).collect();
+    }
+    let head: String = text.chars().take(max_chars - 3).collect();
+    format!("{head}...")
 }
 
 fn extract_metrics(stdout: &str, metric_keys: &[String]) -> serde_json::Map<String, Value> {
@@ -5479,6 +5583,75 @@ mod tests {
         assert!(prompt.contains("MissionState"));
         assert!(prompt.contains("Prefer `abox` work"));
         assert!(prompt.contains("Current WakeEvent JSON"));
+    }
+
+    #[test]
+    fn agent_worker_prompt_includes_bakudo_handoff_contract() {
+        let mission = Mission {
+            id: MissionId(Uuid::new_v4()),
+            goal: "Ship the worker hand-off fix".to_string(),
+            posture: Posture::Mission,
+            provider_name: "codex".to_string(),
+            abox_profile: "dev-broad".to_string(),
+            wallet: Wallet::default(),
+            status: MissionStatus::Sleeping,
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+        let mission_state = MissionState(json!({
+            "objective": "Improve worker hand-offs",
+            "done_contract": "A later wake can understand a worker result without rereading the trace.",
+            "constraints": ["stay inside abox", "do not invent host state"],
+            "best_known": ["worker prompts are raw", "stdout tails are empty for wrapped agent workers"],
+            "open_questions": ["what concise summary should be persisted"],
+            "next_steps": ["wrap worker prompts", "persist worker summary"]
+        }));
+        let experiment = Experiment {
+            id: ExperimentId::new(),
+            mission_id: mission.id,
+            label: "worker-handoff".to_string(),
+            spec: bakudo_core::mission::ExperimentSpec {
+                base_branch: "main".to_string(),
+                workload: ExperimentWorkload::AgentTask {
+                    prompt: "ignored".to_string(),
+                    provider: Some("codex".to_string()),
+                    model: Some("gpt-5.4".to_string()),
+                    sandbox_lifecycle: SandboxLifecycle::Preserved,
+                    candidate_policy: CandidatePolicy::Review,
+                    timeout_secs: Some(300),
+                    allow_all_tools: true,
+                },
+                skill: Some("rust".to_string()),
+                hypothesis: "A scoped worker can land the hand-off fix".to_string(),
+                metric_keys: Vec::new(),
+            },
+            status: ExperimentStatus::Queued,
+            started_at: None,
+            finished_at: None,
+            summary: None,
+        };
+
+        let prompt = build_agent_worker_prompt(
+            &mission,
+            &mission_state,
+            &experiment,
+            AgentWorkerPromptContext {
+                raw_prompt: "Inspect the repo and improve the worker hand-off contract.",
+                provider_id: "codex",
+                model: Some("gpt-5.4"),
+                sandbox_lifecycle: SandboxLifecycle::Preserved,
+                candidate_policy: CandidatePolicy::Review,
+                allow_all_tools: true,
+            },
+        );
+
+        assert!(prompt.contains("Scoped Bakudo assignment: Inspect the repo"));
+        assert!(prompt.contains("You are a Bakudo worker running inside an `abox` sandbox"));
+        assert!(prompt.contains("Do not edit `mission_plan.md` or Bakudo mission state"));
+        assert!(prompt.contains("`BAKUDO_SUMMARY:`"));
+        assert!(prompt.contains("Improve worker hand-offs"));
+        assert!(prompt.contains("worker prompts are raw"));
+        assert!(prompt.contains("candidate_policy: review"));
     }
 
     #[test]

@@ -258,3 +258,5 @@ pub enum WorkerStatus {
 pub const WORKER_RESULT_PREFIX: &str = "BAKUDO_RESULT";
 pub const WORKER_EVENT_PREFIX: &str = "BAKUDO_EVENT";
 pub const WORKER_ERROR_PREFIX: &str = "BAKUDO_ERROR";
+/// Optional assistant-emitted line prefix for a concise final hand-off.
+pub const WORKER_SUMMARY_PREFIX: &str = "BAKUDO_SUMMARY:";

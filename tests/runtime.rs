@@ -292,6 +292,27 @@ fn write_exec_provider_files(repo: &TempRepo, script_path: &Path) {
     write_exec_provider_files_with_budget(repo, script_path, 20, "5m");
 }
 
+fn write_exec_provider_files_with_worker(
+    repo: &TempRepo,
+    script_path: &Path,
+    worker_script_path: &Path,
+) {
+    let providers_dir = repo.path().join(".bakudo").join("providers");
+    fs::create_dir_all(&providers_dir).unwrap();
+    let mission = format!(
+        "name = \"exec-mission\"\nengine = \"exec\"\nposture = \"mission\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/mission.md\"\n[wake_budget]\ntool_calls = 20\nwall_clock = \"5m\"\ndebounce = \"0.1s\"\n\n[worker]\nengine = \"exec\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nallow_all_tools = true\ntimeout_secs = 120\nmax_output_bytes = 262144\n",
+        script_path.display().to_string(),
+        worker_script_path.display().to_string(),
+    );
+    let explore = format!(
+        "name = \"exec-explore\"\nengine = \"exec\"\nposture = \"explore\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nsystem_prompt_file = \"prompts/explore.md\"\n[wake_budget]\ntool_calls = 20\nwall_clock = \"5m\"\ndebounce = \"0.1s\"\n\n[worker]\nengine = \"exec\"\nengine_args = [{:?}]\nabox_profile = \"dev-broad\"\nallow_all_tools = true\ntimeout_secs = 120\nmax_output_bytes = 262144\n",
+        script_path.display().to_string(),
+        worker_script_path.display().to_string(),
+    );
+    fs::write(providers_dir.join("exec-mission.toml"), mission).unwrap();
+    fs::write(providers_dir.join("exec-explore.toml"), explore).unwrap();
+}
+
 fn write_exec_provider_files_with_budget(
     repo: &TempRepo,
     script_path: &Path,
@@ -2183,6 +2204,151 @@ else:
 
     cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_agent_worker_persists_handoff_summary_and_wraps_prompt() {
+    let dir = TempDir::new("bakudo-agent-worker-handoff-runtime");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+if wake["reason"] == "manual_resume":
+    call("dispatch_swarm", {
+        "experiments": [{
+            "label": "agent-worker",
+            "hypothesis": "verify worker hand-off persistence",
+            "base_branch": "main",
+            "kind": "agent_task",
+            "prompt": "Inspect the repo and confirm README.md exists."
+        }],
+        "wake_when": "all_complete"
+    })
+    call("suspend", {"reason": "wait_for_worker"})
+elif wake["reason"] == "experiments_complete":
+    experiment = wake["payload"]["experiments"][0]
+    summary_result, _meta = call("read_experiment_summary", {"experiment_id": experiment["id"]})
+    summary = summary_result["summary"]
+    assert summary["worker_summary"] == "inspected README.md; verified README.md exists", summary
+    call("complete_mission", {"summary": "agent worker hand-off persisted"})
+else:
+    call("complete_mission", {"summary": "mission ended without extra work"})
+"#,
+    );
+    let worker_script = dir.path.join("mock-worker.py");
+    fs::write(
+        &worker_script,
+        r#"#!/usr/bin/env python3
+import sys
+
+_prompt = sys.stdin.read()
+print("starting worker")
+print("BAKUDO_SUMMARY: inspected README.md; verified README.md exists")
+print("plain trailing line that should not replace the summary")
+"#,
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&worker_script).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&worker_script, perms).unwrap();
+    write_exec_provider_files_with_worker(&repo, &script, &worker_script);
+    let (abox_script, log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-agent-worker".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Persist a useful worker hand-off".to_string(),
+            done_contract: Some("later wakes should see the worker summary directly".to_string()),
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if missions
+                .iter()
+                .any(|mission| mission.status == MissionStatus::Completed)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+
+    let invocations = read_invocations(&log);
+    let worker_invocation = invocations
+        .iter()
+        .find(|invocation| {
+            invocation
+                .iter()
+                .any(|arg| arg.starts_with("BAKUDO_PROMPT="))
+        })
+        .expect("worker invocation has BAKUDO_PROMPT");
+    let worker_invocation_text = worker_invocation.join("\n");
+    assert!(worker_invocation_text.contains(
+        "BAKUDO_PROMPT=Scoped Bakudo assignment: Inspect the repo and confirm README.md exists."
+    ));
+    assert!(
+        worker_invocation_text.contains("You are a Bakudo worker running inside an `abox` sandbox")
+    );
+    assert!(worker_invocation_text
+        .contains("Bakudo owns merge/discard/apply decisions for this worktree."));
+    assert!(worker_invocation_text.contains("BAKUDO_SUMMARY:"));
 }
 
 #[tokio::test]
