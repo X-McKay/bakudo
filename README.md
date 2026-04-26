@@ -26,6 +26,17 @@ Version 2 now ships two complementary execution paths:
 - **Repo-scoped control plane**: Persisted run summaries, mission state, candidate listings, and swarm artifacts can be queried later with `bakudo result`, `bakudo wait`, `bakudo candidates`, `bakudo artifact`, and `bakudo status`.
 - **Robust testing**: Includes unit tests, fake-`abox` runtime integration tests, and optional live smoke tests against installed `abox 0.3.2`.
 
+## Deep Documentation
+
+For the full product and runtime model, start here:
+
+- [docs/product-motive-and-operator-workflow.md](docs/product-motive-and-operator-workflow.md):
+  why Bakudo exists, what operator workflow it is optimizing for, and which
+  user-facing semantics are intentional
+- [docs/current-architecture.md](docs/current-architecture.md):
+  the shipped runtime architecture, state model, execution paths, and code
+  boundaries
+
 ## Prerequisites
 
 - **Rust**: Stable toolchain (install via `rustup`).
@@ -60,12 +71,14 @@ bakudo
 
 - `/mission <goal>`: start a mission posture.
 - `/explore <goal>`: start an explore posture.
+- `/missions`: list active and recent missions for this repo.
+- `/focus <number-or-id-prefix>`: focus an active mission by list index or id prefix.
 - `/budget time=<minutes>m workers=<count>`: adjust the active mission wallet.
 - `/wake`: force a manual wake for the active mission.
 - `/lessons`: show the repo lessons directory.
 - `/provider <name>`: set the active provider.
 - `/approve`: approve the next task dispatch when execution policy requires prompting.
-- `/model <name>`: set the active model override.
+- `/model [name]`: set or clear the raw model override for classic runs.
 - `/providers`: list registered providers.
 - `/apply <task-id>`: merge a preserved worktree.
 - `/discard <task-id>`: discard a preserved worktree.
@@ -192,7 +205,12 @@ Bakudo is a Cargo workspace with three main crates plus a thin root binary:
 3. `bakudo-tui`: Application state, slash command parsing, transcript/shelf rendering, and keyboard interaction.
 4. `src/main.rs`: CLI entrypoint and TUI bootstrap.
 
-See [AGENTS.md](AGENTS.md) for development invariants and [docs/current-architecture.md](docs/current-architecture.md) for the current implementation walkthrough. Historical design drafts remain in `docs/archive/` and are marked as archived.
+See [AGENTS.md](AGENTS.md) for development invariants,
+[docs/product-motive-and-operator-workflow.md](docs/product-motive-and-operator-workflow.md)
+for the product rationale and target operator workflow, and
+[docs/current-architecture.md](docs/current-architecture.md) for the current
+implementation walkthrough. Historical design drafts remain in `docs/archive/`
+and are marked as archived.
 
 ## Development
 
