@@ -35,10 +35,6 @@ impl KeyBinding {
     }
 }
 
-pub(crate) const fn plain(key: KeyCode) -> KeyBinding {
-    KeyBinding::new(key, KeyModifiers::NONE)
-}
-
 #[allow(dead_code)]
 pub(crate) const fn alt(key: KeyCode) -> KeyBinding {
     KeyBinding::new(key, KeyModifiers::ALT)

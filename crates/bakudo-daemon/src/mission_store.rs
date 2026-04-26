@@ -20,6 +20,18 @@ pub struct QueuedUserMessage {
 }
 
 #[derive(Debug, Clone)]
+pub struct PendingQuestionRecord {
+    pub request_id: String,
+    pub mission_id: MissionId,
+    pub question: String,
+    pub choices: Vec<String>,
+    pub asked_at: DateTime<Utc>,
+    pub answer: Option<String>,
+    pub answered_at: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StoredWakeEvent {
     pub wake: WakeEvent,
     pub processed_at: Option<DateTime<Utc>>,
@@ -393,6 +405,254 @@ impl MissionStore {
         .context("user message delivery join failed")?
     }
 
+    pub async fn insert_pending_question(&self, question: &PendingQuestionRecord) -> Result<()> {
+        let db_path = self.db_path.clone();
+        let question = question.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            conn.execute(
+                "INSERT INTO pending_questions (
+                    request_id, mission_id, question, choices_json, asked_at, answer_text, answered_at, resolved_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(request_id) DO UPDATE SET
+                    mission_id = excluded.mission_id,
+                    question = excluded.question,
+                    choices_json = excluded.choices_json,
+                    asked_at = excluded.asked_at,
+                    answer_text = excluded.answer_text,
+                    answered_at = excluded.answered_at,
+                    resolved_at = excluded.resolved_at",
+                params![
+                    question.request_id,
+                    question.mission_id.to_string(),
+                    question.question,
+                    serde_json::to_string(&question.choices)?,
+                    question.asked_at.to_rfc3339(),
+                    question.answer,
+                    question.answered_at.map(|at| at.to_rfc3339()),
+                    question.resolved_at.map(|at| at.to_rfc3339()),
+                ],
+            )
+            .context("failed to insert pending question")?;
+            Ok(())
+        })
+        .await
+        .context("pending question insert join failed")?
+    }
+
+    pub async fn pending_question(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<PendingQuestionRecord>> {
+        let db_path = self.db_path.clone();
+        let request_id = request_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            let mut stmt = conn.prepare(
+                "SELECT request_id, mission_id, question, choices_json, asked_at, answer_text, answered_at, resolved_at
+                 FROM pending_questions
+                 WHERE request_id = ?1",
+            )?;
+            stmt.query_row(params![request_id], pending_question_from_row)
+                .optional()
+                .context("failed to load pending question")
+        })
+        .await
+        .context("pending question load join failed")?
+    }
+
+    pub async fn open_pending_questions(
+        &self,
+        mission_id: MissionId,
+    ) -> Result<Vec<PendingQuestionRecord>> {
+        let db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            let mut stmt = conn.prepare(
+                "SELECT request_id, mission_id, question, choices_json, asked_at, answer_text, answered_at, resolved_at
+                 FROM pending_questions
+                 WHERE mission_id = ?1 AND answered_at IS NULL AND resolved_at IS NULL
+                 ORDER BY asked_at ASC, request_id ASC",
+            )?;
+            let rows = stmt.query_map(params![mission_id.to_string()], pending_question_from_row)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to load open pending questions")
+        })
+        .await
+        .context("open pending questions join failed")?
+    }
+
+    pub async fn recoverable_pending_questions(
+        &self,
+        mission_id: MissionId,
+    ) -> Result<Vec<PendingQuestionRecord>> {
+        let db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            let mut stmt = conn.prepare(
+                "SELECT request_id, mission_id, question, choices_json, asked_at, answer_text, answered_at, resolved_at
+                 FROM pending_questions
+                 WHERE mission_id = ?1 AND resolved_at IS NULL
+                 ORDER BY asked_at ASC, request_id ASC",
+            )?;
+            let rows = stmt.query_map(params![mission_id.to_string()], pending_question_from_row)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to load recoverable pending questions")
+        })
+        .await
+        .context("recoverable pending questions join failed")?
+    }
+
+    pub async fn save_pending_question_answer(
+        &self,
+        request_id: &str,
+        answer: &str,
+        answered_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let db_path = self.db_path.clone();
+        let request_id = request_id.to_string();
+        let answer = answer.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            let affected = conn.execute(
+                "UPDATE pending_questions
+                 SET answer_text = ?1, answered_at = ?2
+                 WHERE request_id = ?3 AND answered_at IS NULL AND resolved_at IS NULL",
+                params![answer, answered_at.to_rfc3339(), request_id],
+            )?;
+            if affected == 1 {
+                return Ok(());
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT request_id, mission_id, question, choices_json, asked_at, answer_text, answered_at, resolved_at
+                 FROM pending_questions
+                 WHERE request_id = ?1",
+            )?;
+            let question = stmt
+                .query_row(params![request_id], pending_question_from_row)
+                .optional()
+                .context("failed to inspect pending question answer state")?;
+            match question {
+                Some(question) if question.resolved_at.is_some() => {
+                    Err(anyhow!("question request '{}' was already resolved", question.request_id))
+                }
+                Some(question) if question.answered_at.is_some() => {
+                    Err(anyhow!("question request '{}' was already answered", question.request_id))
+                }
+                Some(question) => Err(anyhow!(
+                    "question request '{}' could not be answered",
+                    question.request_id
+                )),
+                None => Err(anyhow!("unknown question request '{}'", request_id)),
+            }
+        })
+        .await
+        .context("pending question answer join failed")?
+    }
+
+    pub async fn resolve_pending_question(
+        &self,
+        request_id: &str,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let db_path = self.db_path.clone();
+        let request_id = request_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            let affected = conn.execute(
+                "UPDATE pending_questions
+                 SET resolved_at = COALESCE(resolved_at, ?1)
+                 WHERE request_id = ?2",
+                params![resolved_at.to_rfc3339(), request_id],
+            )?;
+            if affected == 0 {
+                Err(anyhow!("unknown question request '{}'", request_id))
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .context("pending question resolve join failed")?
+    }
+
+    pub async fn promote_answered_pending_question_to_user_message(
+        &self,
+        request_id: &str,
+        urgent: bool,
+    ) -> Result<Option<PendingQuestionRecord>> {
+        let db_path = self.db_path.clone();
+        let request_id = request_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            let tx = conn.unchecked_transaction()?;
+            let question = {
+                let mut stmt = tx.prepare(
+                    "SELECT request_id, mission_id, question, choices_json, asked_at, answer_text, answered_at, resolved_at
+                     FROM pending_questions
+                     WHERE request_id = ?1",
+                )?;
+                stmt.query_row(params![request_id], pending_question_from_row)
+                    .optional()
+                    .context("failed to inspect answered pending question")?
+            };
+            let Some(question) = question else {
+                return Ok(None);
+            };
+            if question.resolved_at.is_some() || question.answer.is_none() {
+                return Ok(None);
+            }
+            let answer = question
+                .answer
+                .clone()
+                .ok_or_else(|| anyhow!("pending question '{}' had no answer", question.request_id))?;
+            let message_at = question.answered_at.unwrap_or(question.asked_at);
+            tx.execute(
+                "INSERT INTO user_messages (mission_id, text, urgent, at, delivered_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL)",
+                params![
+                    question.mission_id.to_string(),
+                    answer,
+                    if urgent { 1_i64 } else { 0_i64 },
+                    message_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to promote answered question into user_messages")?;
+            tx.execute(
+                "UPDATE pending_questions
+                 SET resolved_at = ?1
+                 WHERE request_id = ?2 AND resolved_at IS NULL",
+                params![Utc::now().to_rfc3339(), question.request_id],
+            )
+            .context("failed to resolve answered pending question")?;
+            tx.commit()
+                .context("failed to commit answered pending question promotion")?;
+            Ok(Some(question))
+        })
+        .await
+        .context("pending question promotion join failed")?
+    }
+
+    pub async fn latest_tool_call_error(&self, mission_id: MissionId) -> Result<Option<String>> {
+        let db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = open_conn(&db_path)?;
+            conn.query_row(
+                "SELECT summary
+                 FROM ledger
+                 WHERE mission_id = ?1 AND summary LIKE 'tool_call_error:%'
+                 ORDER BY at DESC, id DESC
+                 LIMIT 1",
+                params![mission_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to load latest tool call error")
+        })
+        .await
+        .context("latest tool call error join failed")?
+    }
+
     pub async fn insert_wake(&self, wake: &WakeEvent) -> Result<()> {
         let db_path = self.db_path.clone();
         let wake = wake.clone();
@@ -689,7 +949,19 @@ fn init_schema(path: &Path) -> Result<()> {
            at TEXT NOT NULL,
            delivered_at TEXT
          );
-         CREATE INDEX IF NOT EXISTS user_messages_undelivered ON user_messages(mission_id, delivered_at);",
+         CREATE INDEX IF NOT EXISTS user_messages_undelivered ON user_messages(mission_id, delivered_at);
+         CREATE TABLE IF NOT EXISTS pending_questions (
+           request_id TEXT PRIMARY KEY,
+           mission_id TEXT NOT NULL,
+           question TEXT NOT NULL,
+           choices_json TEXT NOT NULL,
+           asked_at TEXT NOT NULL,
+           answer_text TEXT,
+           answered_at TEXT,
+           resolved_at TEXT
+         );
+         CREATE INDEX IF NOT EXISTS pending_questions_mission_open
+           ON pending_questions(mission_id, resolved_at, answered_at, asked_at);",
     )
     .context("failed to initialize mission store schema")?;
     Ok(())
@@ -755,6 +1027,27 @@ fn active_wave_from_row(row: &Row<'_>) -> rusqlite::Result<ActiveWaveRecord> {
         wake_when: parse_wake_when(&row.get::<_, String>(2)?).map_err(to_sql_error)?,
         wake_sent: row.get::<_, i64>(3)? != 0,
         updated_at: parse_datetime(&row.get::<_, String>(4)?).map_err(to_sql_error)?,
+    })
+}
+
+fn pending_question_from_row(row: &Row<'_>) -> rusqlite::Result<PendingQuestionRecord> {
+    Ok(PendingQuestionRecord {
+        request_id: row.get(0)?,
+        mission_id: parse_mission_id(&row.get::<_, String>(1)?).map_err(to_sql_error)?,
+        question: row.get(2)?,
+        choices: serde_json::from_str(&row.get::<_, String>(3)?).map_err(to_sql_error)?,
+        asked_at: parse_datetime(&row.get::<_, String>(4)?).map_err(to_sql_error)?,
+        answer: row.get(5)?,
+        answered_at: row
+            .get::<_, Option<String>>(6)?
+            .map(|value| parse_datetime(&value))
+            .transpose()
+            .map_err(to_sql_error)?,
+        resolved_at: row
+            .get::<_, Option<String>>(7)?
+            .map(|value| parse_datetime(&value))
+            .transpose()
+            .map_err(to_sql_error)?,
     })
 }
 
@@ -1055,5 +1348,110 @@ mod tests {
         assert_eq!(loaded.wake_when, WakeWhen::FirstComplete);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn mission_store_roundtrips_pending_questions() {
+        let dir = temp_store_dir();
+        let path = dir.db_path();
+        let store = MissionStore::open(&path).unwrap();
+        let mission = sample_mission();
+        let asked_at = Utc::now();
+        store.upsert_mission(&mission).await.unwrap();
+
+        store
+            .insert_pending_question(&PendingQuestionRecord {
+                request_id: "question-1".to_string(),
+                mission_id: mission.id,
+                question: "Choose the next step".to_string(),
+                choices: vec!["wave-1".to_string(), "wave-2".to_string()],
+                asked_at,
+                answer: None,
+                answered_at: None,
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        let open = store.open_pending_questions(mission.id).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].question, "Choose the next step");
+        assert_eq!(open[0].choices, vec!["wave-1", "wave-2"]);
+    }
+
+    #[tokio::test]
+    async fn mission_store_promotes_answered_pending_questions() {
+        let dir = temp_store_dir();
+        let path = dir.db_path();
+        let store = MissionStore::open(&path).unwrap();
+        let mission = sample_mission();
+        let asked_at = Utc::now();
+        store.upsert_mission(&mission).await.unwrap();
+        store
+            .insert_pending_question(&PendingQuestionRecord {
+                request_id: "question-1".to_string(),
+                mission_id: mission.id,
+                question: "Choose the next step".to_string(),
+                choices: vec!["wave-1".to_string(), "wave-2".to_string()],
+                asked_at,
+                answer: None,
+                answered_at: None,
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        store
+            .save_pending_question_answer("question-1", "wave-2", asked_at)
+            .await
+            .unwrap();
+
+        let promoted = store
+            .promote_answered_pending_question_to_user_message("question-1", true)
+            .await
+            .unwrap();
+        assert!(promoted.is_some());
+        let queued = store.undelivered_user_messages(mission.id).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].message.text, "wave-2");
+        assert!(queued[0].message.urgent);
+        assert!(store
+            .open_pending_questions(mission.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn mission_store_reads_latest_tool_call_error_summary() {
+        let dir = temp_store_dir();
+        let path = dir.db_path();
+        let store = MissionStore::open(&path).unwrap();
+        let mission = sample_mission();
+        store.upsert_mission(&mission).await.unwrap();
+        store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::Decision,
+                summary: "tool_call_error: read_plan: boom".to_string(),
+                mission_id: mission.id,
+                experiment_id: None,
+            })
+            .await
+            .unwrap();
+        store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::Decision,
+                summary: "tool_call_error: update_plan: missing field".to_string(),
+                mission_id: mission.id,
+                experiment_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.latest_tool_call_error(mission.id).await.unwrap(),
+            Some("tool_call_error: update_plan: missing field".to_string())
+        );
     }
 }

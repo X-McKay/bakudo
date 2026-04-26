@@ -21,14 +21,11 @@ pub const SHELF_WIDTH: u16 = 34;
 /// Minimum terminal width before the shelf is hidden.
 pub const SHELF_MIN_TERM_WIDTH: u16 = 90;
 
-/// Height of the header bar (2 rows).
-pub const HEADER_HEIGHT: u16 = 2;
-
-/// Minimum height of the composer block (2 borders + 1 input row).
+/// Minimum height of the inline composer surface (top padding, input row, bottom padding).
 pub const COMPOSER_MIN_HEIGHT: u16 = 3;
 
-/// Maximum height the composer may grow to when rendering multi-line input.
-pub const COMPOSER_MAX_HEIGHT: u16 = 12;
+/// Maximum height the inline composer may grow to when rendering multi-line input.
+pub const COMPOSER_MAX_HEIGHT: u16 = 6;
 
 /// Compute the composer's rendered height for an input buffer containing
 /// `line_count` lines (split on `\n`), clamped to the min/max constants.

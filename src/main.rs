@@ -61,14 +61,17 @@ use bakudo_tui::{
     app::App,
     events::{poll_event, TermEvent},
     insert_history,
-    palette::{COMPOSER_MAX_HEIGHT, FOOTER_HEIGHT, HEADER_HEIGHT},
+    palette::{COMPOSER_MAX_HEIGHT, FOOTER_HEIGHT},
     transcript_store::TranscriptStore,
     ui::render,
 };
 
-const INLINE_VIEWPORT_PADDING: u16 = 3;
-const INLINE_VIEWPORT_HEIGHT: u16 =
-    HEADER_HEIGHT + COMPOSER_MAX_HEIGHT + FOOTER_HEIGHT + INLINE_VIEWPORT_PADDING;
+const INLINE_VIEWPORT_PADDING: u16 = 0;
+const INLINE_VIEWPORT_TOP_STRIP_HEIGHT: u16 = 1;
+const INLINE_VIEWPORT_HEIGHT: u16 = INLINE_VIEWPORT_TOP_STRIP_HEIGHT
+    + COMPOSER_MAX_HEIGHT
+    + FOOTER_HEIGHT
+    + INLINE_VIEWPORT_PADDING;
 
 struct FallbackCursorBackend<B> {
     inner: B,
@@ -728,13 +731,19 @@ async fn cmd_status(config: &Arc<BakudoConfig>) -> Result<()> {
     }
 
     println!(
-        "{:<38} {:<9} {:<20} {:<12} GOAL",
-        "MISSION ID", "POSTURE", "STATUS", "WORKERS"
+        "{:<38} {:<9} {:<20} {:<12} {:<7} {:<10} GOAL",
+        "MISSION ID", "POSTURE", "STATUS", "WORKERS", "INBOX", "QUESTIONS"
     );
     println!("{}", "-".repeat(120));
     for mission in missions {
+        let pending_user_messages = store.undelivered_user_messages(mission.id).await?.len();
+        let pending_questions = store.open_pending_questions(mission.id).await?.len();
+        let latest_issue = store
+            .latest_tool_call_error(mission.id)
+            .await?
+            .map(|summary| summary.trim_start_matches("tool_call_error: ").to_string());
         println!(
-            "{:<38} {:<9} {:<20} {:<12} {}",
+            "{:<38} {:<9} {:<20} {:<12} {:<7} {:<10} {}",
             mission.id,
             mission.posture,
             format!("{:?}", mission.status),
@@ -742,8 +751,13 @@ async fn cmd_status(config: &Arc<BakudoConfig>) -> Result<()> {
                 "{}/{}",
                 mission.wallet.abox_workers_in_flight, mission.wallet.abox_workers_remaining
             ),
+            pending_user_messages,
+            pending_questions,
             mission.goal
         );
+        if let Some(issue) = latest_issue {
+            println!("{:>40} latest issue: {}", "", issue);
+        }
     }
     Ok(())
 }

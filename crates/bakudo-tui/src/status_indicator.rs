@@ -1,17 +1,23 @@
-//! Codex-style running status row adapted from `codex-rs/tui/src/status_indicator_widget.rs`
-//! (Apache-2.0). This bakudo version stays single-line and derives context from the shelf.
+//! Codex-style top-strip status rendering adapted from
+//! `codex-rs/tui/src/status_indicator_widget.rs` (Apache-2.0).
+//!
+//! Bakudo uses the same single-line strip to surface both active sandbox work
+//! and mission-runtime state, so the UI does not look idle while the
+//! deliberator is still processing a request.
 
 use chrono::Local;
-use crossterm::event::KeyCode;
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use bakudo_core::mission::MissionStatus;
+use bakudo_daemon::session_controller::MissionBanner;
+
 use crate::{
     app::{App, ShelfColor, short_task_id},
-    key_hint, palette,
+    palette,
     shimmer::shimmer_spans,
 };
 
@@ -29,6 +35,35 @@ pub(crate) fn fmt_elapsed_compact(elapsed_secs: u64) -> String {
     let minutes = (elapsed_secs % 3600) / 60;
     let seconds = elapsed_secs % 60;
     format!("{hours}h {minutes:02}m {seconds:02}s")
+}
+
+pub(crate) fn shows_top_strip(app: &App) -> bool {
+    if app.pending_runtime_work.is_some() {
+        return true;
+    }
+
+    if app.active_task_count > 0
+        || app
+            .shelf
+            .iter()
+            .any(|entry| entry.state_color == ShelfColor::Running)
+    {
+        return true;
+    }
+
+    let Some(banner) = app.mission_banner.as_ref() else {
+        return false;
+    };
+    !matches!(
+        banner.status,
+        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed
+    )
+}
+
+pub(crate) fn render_top_line(app: &App, width: u16) -> Option<Line<'static>> {
+    render_status_line(app, width)
+        .or_else(|| render_mission_line(app, width))
+        .or_else(|| render_pending_line(app, width))
 }
 
 pub(crate) fn render_status_line(app: &App, width: u16) -> Option<Line<'static>> {
@@ -61,11 +96,7 @@ pub(crate) fn render_status_line(app: &App, width: u16) -> Option<Line<'static>>
             .add_modifier(Modifier::BOLD),
     )];
     spans.extend(shimmer_spans("Running"));
-    spans.extend([
-        Span::styled(format!(" ({elapsed} • "), palette::dim_style()),
-        key_hint::plain(KeyCode::Esc).into(),
-        Span::styled(" to interrupt)", palette::dim_style()),
-    ]);
+    spans.push(Span::styled(format!(" ({elapsed})"), palette::dim_style()));
 
     if let Some(entry) = running_entries.first() {
         spans.push(Span::styled(" · ", palette::dim_style()));
@@ -92,6 +123,183 @@ pub(crate) fn render_status_line(app: &App, width: u16) -> Option<Line<'static>>
     }
 
     Some(truncate_line_with_ellipsis(Line::from(spans), width))
+}
+
+fn render_mission_line(app: &App, width: u16) -> Option<Line<'static>> {
+    let banner = app.mission_banner.as_ref()?;
+    if matches!(
+        banner.status,
+        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed
+    ) {
+        return None;
+    }
+
+    let mut spans = vec![Span::styled(
+        "• ",
+        Style::default()
+            .fg(palette::shelf_running())
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    let (label, shimmers, lead_style) = mission_label(banner.status, banner);
+    if shimmers {
+        spans.extend(shimmer_spans(label));
+    } else {
+        spans.push(Span::styled(label.to_string(), lead_style));
+    }
+
+    for detail in mission_details(banner) {
+        spans.push(Span::styled(" · ", palette::dim_style()));
+        spans.push(Span::styled(
+            detail,
+            Style::default().fg(palette::role_agent_fg()),
+        ));
+    }
+
+    spans.push(Span::styled(" · ", palette::dim_style()));
+    spans.push(Span::styled(
+        format!("mission {}", banner.goal),
+        Style::default().fg(Color::White),
+    ));
+
+    Some(truncate_line_with_ellipsis(Line::from(spans), width))
+}
+
+fn render_pending_line(app: &App, width: u16) -> Option<Line<'static>> {
+    let pending = app.pending_runtime_work.as_ref()?;
+    let elapsed = fmt_elapsed_compact(pending.elapsed_secs());
+    let mut spans = vec![Span::styled(
+        "• ",
+        Style::default()
+            .fg(palette::shelf_running())
+            .add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(shimmer_spans(pending.label()));
+    spans.push(Span::styled(format!(" ({elapsed})"), palette::dim_style()));
+    spans.push(Span::styled(" · ", palette::dim_style()));
+    spans.push(Span::styled(
+        pending.detail().to_string(),
+        Style::default().fg(palette::role_agent_fg()),
+    ));
+    if !pending.summary.trim().is_empty() {
+        spans.push(Span::styled(" · ", palette::dim_style()));
+        spans.push(Span::styled(
+            pending.summary.trim().to_string(),
+            Style::default().fg(Color::White),
+        ));
+    }
+    Some(truncate_line_with_ellipsis(Line::from(spans), width))
+}
+
+fn mission_label(status: MissionStatus, banner: &MissionBanner) -> (&'static str, bool, Style) {
+    match status {
+        MissionStatus::Pending
+        | MissionStatus::AwaitingDeliberator
+        | MissionStatus::Deliberating => (
+            "Working",
+            true,
+            Style::default()
+                .fg(palette::shelf_running())
+                .add_modifier(Modifier::BOLD),
+        ),
+        MissionStatus::Sleeping => {
+            let has_pending_work = banner.pending_user_messages > 0
+                || banner.pending_questions > 0
+                || banner.fleet.queued > 0
+                || banner.fleet.active > 0;
+            if has_pending_work {
+                (
+                    "Working",
+                    true,
+                    Style::default()
+                        .fg(palette::shelf_running())
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    "Waiting",
+                    false,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+            }
+        }
+        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed => (
+            "Idle",
+            false,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    }
+}
+
+fn mission_details(banner: &MissionBanner) -> Vec<String> {
+    let mut details = Vec::new();
+    match banner.status {
+        MissionStatus::Pending => details.push("starting mission".to_string()),
+        MissionStatus::AwaitingDeliberator => details.push("wake queued".to_string()),
+        MissionStatus::Deliberating => details.push("planning next wake".to_string()),
+        MissionStatus::Sleeping => {
+            if banner.fleet.active > 0 {
+                details.push(format!(
+                    "{} worker{} active",
+                    banner.fleet.active,
+                    if banner.fleet.active == 1 { "" } else { "s" }
+                ));
+            }
+            if banner.fleet.queued > 0 {
+                details.push(format!(
+                    "{} worker{} queued",
+                    banner.fleet.queued,
+                    if banner.fleet.queued == 1 { "" } else { "s" }
+                ));
+            }
+            if banner.pending_user_messages > 0 {
+                details.push(format!(
+                    "{} message{} queued",
+                    banner.pending_user_messages,
+                    if banner.pending_user_messages == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+            if banner.pending_questions > 0 {
+                details.push(format!(
+                    "{} question{} pending",
+                    banner.pending_questions,
+                    if banner.pending_questions == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+            }
+            if let Some(issue) = banner.latest_issue.as_deref() {
+                details.push(format!("issue: {issue}"));
+            }
+            if details.is_empty() {
+                details.push("sleeping until next wake".to_string());
+            }
+        }
+        MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed => {}
+    }
+
+    if banner.abox_workers_in_flight > 0 {
+        details.push(format!(
+            "{} / {} workers in flight",
+            banner.abox_workers_in_flight, banner.concurrent_max
+        ));
+    } else if banner.abox_workers_remaining < banner.concurrent_max {
+        details.push(format!(
+            "{} workers remaining",
+            banner.abox_workers_remaining
+        ));
+    }
+    details
 }
 
 fn truncate_line_with_ellipsis(line: Line<'static>, width: u16) -> Line<'static> {
@@ -136,10 +344,7 @@ fn truncate_line_with_ellipsis(line: Line<'static>, width: u16) -> Line<'static>
 }
 
 fn trim_trailing_whitespace(spans: &mut Vec<Span<'static>>) {
-    loop {
-        let Some(last) = spans.last_mut() else {
-            break;
-        };
+    while let Some(last) = spans.last_mut() {
         let trimmed = last
             .content
             .trim_end_matches(char::is_whitespace)
@@ -162,11 +367,17 @@ mod tests {
     use chrono::{Duration, Local};
     use tokio::sync::mpsc;
 
-    use bakudo_core::{config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger};
+    use bakudo_core::{
+        config::BakudoConfig,
+        mission::{MissionStatus, Posture},
+        provider::ProviderRegistry,
+        state::SandboxLedger,
+    };
+    use bakudo_daemon::session_controller::{FleetCounts, MissionBanner};
 
-    use crate::app::{App, ShelfColor, ShelfEntry};
+    use crate::app::{App, PendingRuntimeWorkKind, ShelfColor, ShelfEntry};
 
-    use super::{fmt_elapsed_compact, render_status_line};
+    use super::{fmt_elapsed_compact, render_status_line, render_top_line, shows_top_strip};
 
     #[test]
     fn fmt_elapsed_compact_formats_seconds_minutes_and_hours() {
@@ -180,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn render_status_line_includes_elapsed_interrupt_and_inline_context() {
+    fn render_status_line_includes_elapsed_and_inline_context() {
         let mut app = fresh_app();
         app.active_task_count = 2;
         app.shelf.push_back(running_entry(
@@ -197,7 +408,7 @@ mod tests {
         let line = render_status_line(&app, 140).expect("status line");
         let rendered = line_to_string(&line);
 
-        assert!(rendered.contains("• Running (2m 03s • esc to interrupt)"));
+        assert!(rendered.contains("• Running (2m 03s)"));
         assert!(rendered.contains("2 sandboxes active"));
         assert!(rendered.contains("[02bf30c1]"));
         assert!(rendered.contains("Booting sandbox"));
@@ -228,7 +439,67 @@ mod tests {
         let line = render_status_line(&app, 140).expect("status line");
         let rendered = line_to_string(&line);
 
-        assert_eq!(rendered, "• Running (0s • esc to interrupt)");
+        assert_eq!(rendered, "• Running (0s)");
+    }
+
+    #[test]
+    fn render_top_line_surfaces_deliberating_mission_work() {
+        let mut app = fresh_app();
+        app.mission_banner = Some(mission_banner(
+            MissionStatus::Deliberating,
+            0,
+            0,
+            0,
+            "Refine the inline status row",
+        ));
+
+        let line = render_top_line(&app, 140).expect("top line");
+        let rendered = line_to_string(&line);
+
+        assert!(rendered.contains("• Working"));
+        assert!(rendered.contains("planning next wake"));
+        assert!(rendered.contains("mission Refine the inline status row"));
+    }
+
+    #[test]
+    fn render_top_line_surfaces_pending_runtime_work_before_banner_arrives() {
+        let mut app = fresh_app();
+        app.begin_pending_runtime_work(
+            PendingRuntimeWorkKind::RoutingInput,
+            "Explore how to surface background progress",
+        );
+
+        let line = render_top_line(&app, 140).expect("top line");
+        let rendered = line_to_string(&line);
+
+        assert!(rendered.contains("• Working (0s)"));
+        assert!(rendered.contains("routing request"));
+        assert!(rendered.contains("Explore how to surface background progress"));
+    }
+
+    #[test]
+    fn render_top_line_surfaces_sleeping_mission_state() {
+        let mut app = fresh_app();
+        app.mission_banner = Some(mission_banner(
+            MissionStatus::Sleeping,
+            0,
+            0,
+            0,
+            "Wait for the next host update",
+        ));
+
+        let line = render_top_line(&app, 140).expect("top line");
+        let rendered = line_to_string(&line);
+
+        assert!(rendered.contains("• Waiting"));
+        assert!(rendered.contains("sleeping until next wake"));
+    }
+
+    #[test]
+    fn shows_top_strip_hides_terminal_mission_states() {
+        let mut app = fresh_app();
+        app.mission_banner = Some(mission_banner(MissionStatus::Completed, 0, 0, 0, "Done"));
+        assert!(!shows_top_strip(&app));
     }
 
     fn line_to_string(line: &ratatui::text::Line<'static>) -> String {
@@ -268,6 +539,34 @@ mod tests {
             started_at,
             updated_at: started_at,
             pending_action: None,
+        }
+    }
+
+    fn mission_banner(
+        status: MissionStatus,
+        active: usize,
+        queued: usize,
+        pending_user_messages: usize,
+        goal: &str,
+    ) -> MissionBanner {
+        MissionBanner {
+            mission_id: "mission-test".to_string(),
+            goal: goal.to_string(),
+            posture: Posture::Mission,
+            status,
+            wall_clock_remaining_secs: 900,
+            abox_workers_remaining: 4,
+            abox_workers_in_flight: active as u32,
+            concurrent_max: 4,
+            pending_user_messages,
+            pending_questions: 0,
+            latest_issue: None,
+            fleet: FleetCounts {
+                active,
+                queued,
+                completed: 0,
+                failed: 0,
+            },
         }
     }
 }

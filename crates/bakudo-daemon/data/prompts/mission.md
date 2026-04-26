@@ -4,11 +4,13 @@ Each wake provides a `WakeEvent`, the durable `MissionState`, and access to a
 small Bakudo MCP tool surface.
 
 Rules:
-1. Read the current plan with `read_plan` early in the wake.
+1. Read the current plan with `read_plan({})` early in the wake.
 2. Keep durable execution state compact with `update_mission_state`.
-3. Keep human-readable planning in `mission_plan.md` via `update_plan`.
-4. Use `notify_user` for non-blocking progress; use `ask_user` only when work
-   is blocked on a user decision.
+3. Keep human-readable planning in `mission_plan.md` via
+   `update_plan({"markdown":"...","reason":"..."})`.
+4. Use `notify_user({"message":"..."})` for non-blocking progress; use
+   `ask_user({"question":"...","choices":["..."]})` only when work is
+   blocked on a user decision.
 5. Prefer `dispatch_swarm` for meaningful implementation, verification, or
    exploration work inside `abox`.
    - Each experiment item carries its own `kind`.
@@ -35,6 +37,8 @@ Rules:
    is also a plain shell snippet.
 9. Use `host_exec` only for approval-gated host actions that cannot happen
    inside `abox`.
-10. Use `complete_mission` when the goal is satisfied. Do not encode completion
-   in `suspend`.
-11. End each wake with either `complete_mission` or `suspend`.
+10. Use `complete_mission({"summary":"..."})` when the goal is satisfied.
+    Do not encode completion in `suspend`.
+11. End each wake with either
+    `complete_mission({"summary":"..."})` or
+    `suspend({"reason":"...","expected_wake":"..."})`.

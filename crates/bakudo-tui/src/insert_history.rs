@@ -3,6 +3,7 @@ use std::io;
 
 use ratatui::Terminal;
 use ratatui::backend::Backend;
+use ratatui::text::Line;
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
@@ -20,7 +21,10 @@ where
 
     let width = terminal.size()?.width;
     let mut lines = Vec::new();
-    for message in messages {
+    for (idx, message) in messages.iter().enumerate() {
+        if idx > 0 {
+            lines.push(Line::from(""));
+        }
         lines.extend(history_render::render_message(message, width));
     }
     let height = lines.len() as u16;
@@ -76,5 +80,61 @@ mod tests {
             .join("\n");
 
         assert!(top.contains("history line"));
+    }
+
+    #[test]
+    fn separates_adjacent_messages_with_blank_line() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(4),
+            },
+        )
+        .expect("terminal");
+
+        let messages = vec![
+            ChatMessage {
+                role: MessageRole::User,
+                content: "first".to_string(),
+                timestamp: Local::now(),
+            },
+            ChatMessage {
+                role: MessageRole::Info,
+                content: "second".to_string(),
+                timestamp: Local::now(),
+            },
+        ];
+
+        insert_messages(&mut terminal, &messages).expect("insert");
+        let buffer = terminal.backend().buffer();
+        let rows = (0..10)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..40 {
+                    line.push_str(buffer.get(x, y).symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>();
+
+        let first_idx = rows
+            .iter()
+            .position(|row| row.contains("first"))
+            .expect("first row present");
+        let second_idx = rows
+            .iter()
+            .position(|row| row.contains("second"))
+            .expect("second row present");
+
+        assert!(
+            second_idx >= first_idx + 2,
+            "expected a blank separator row between messages: {rows:#?}"
+        );
+        assert!(
+            rows[first_idx + 1].trim().is_empty(),
+            "expected blank row between messages, got {:?}",
+            rows[first_idx + 1]
+        );
     }
 }

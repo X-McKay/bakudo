@@ -51,7 +51,7 @@ use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 
 use crate::hooks::run_post_run_hook;
 use crate::host::{HostAction, HostRuntime, HostSnapshot};
-use crate::mission_store::{ActiveWaveRecord, MissionStore};
+use crate::mission_store::{ActiveWaveRecord, MissionStore, PendingQuestionRecord};
 use crate::provider_runtime::{ProviderCatalog, ProviderEngine};
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use crate::trace::TraceRecorder;
@@ -128,6 +128,8 @@ pub struct MissionBanner {
     pub abox_workers_in_flight: u32,
     pub concurrent_max: u32,
     pub pending_user_messages: usize,
+    pub pending_questions: usize,
+    pub latest_issue: Option<String>,
     pub fleet: FleetCounts,
 }
 
@@ -145,6 +147,11 @@ pub enum MissionActivity {
     QuestionAsked {
         mission_id: String,
         question: String,
+    },
+    ToolCallError {
+        mission_id: String,
+        tool: String,
+        error: String,
     },
     WaveDispatched {
         mission_id: String,
@@ -184,6 +191,14 @@ impl MissionActivity {
                 mission_id,
                 question,
             } => format!("Mission {mission_id}: question asked: {question}"),
+            Self::ToolCallError {
+                mission_id,
+                tool,
+                error,
+            } => format!(
+                "Mission {mission_id}: tool '{tool}' failed: {}",
+                compact_single_line(error)
+            ),
             Self::WaveDispatched {
                 mission_id,
                 experiment_ids,
@@ -282,7 +297,7 @@ pub struct SessionController {
 struct MissionRuntimeState {
     active_mission_id: Option<MissionId>,
     pending_approvals: HashMap<String, oneshot::Sender<HostExecResolution>>,
-    pending_questions: HashMap<String, oneshot::Sender<String>>,
+    pending_questions: HashMap<String, PendingQuestion>,
     deliberating: HashSet<MissionId>,
     wake_user_message_ids: HashMap<WakeId, Vec<i64>>,
     next_agent_wave_approved: bool,
@@ -291,6 +306,21 @@ struct MissionRuntimeState {
 struct HostExecResolution {
     approved: bool,
     edited_command: Option<String>,
+}
+
+enum QuestionResolution {
+    Answered(String),
+    Expired,
+}
+
+struct PendingQuestion {
+    mission_id: MissionId,
+    state: PendingQuestionState,
+}
+
+enum PendingQuestionState {
+    Waiting(oneshot::Sender<QuestionResolution>),
+    Expired,
 }
 
 #[derive(Clone)]
@@ -1441,22 +1471,74 @@ impl MissionCore {
                     mission.wallet.mark_finished(1);
                 }
             }
-            mission.status = MissionStatus::AwaitingDeliberator;
+            let recovered_questions = self
+                .mission_store
+                .recoverable_pending_questions(mission.id)
+                .await?;
+            let mut awaiting_user = false;
+            let mut recovered_user_input = None;
+            for question in recovered_questions {
+                if question.answer.is_some() {
+                    recovered_user_input =
+                        self.recover_answered_pending_question(&question).await?;
+                } else {
+                    awaiting_user = true;
+                    let _ = self
+                        .event_tx
+                        .send(SessionEvent::UserQuestionRequested {
+                            request_id: question.request_id.clone(),
+                            question: question.question.clone(),
+                            choices: question.choices.clone(),
+                        })
+                        .await;
+                }
+            }
+
+            mission.status = if awaiting_user {
+                MissionStatus::Sleeping
+            } else {
+                MissionStatus::AwaitingDeliberator
+            };
             self.mission_store.upsert_mission(&mission).await?;
             self.host
                 .mark_mission_started(&mission.id.to_string(), &mission.goal, mission.posture);
+            if awaiting_user {
+                self.emit_banner().await;
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Info(format!(
+                        "Recovered a pending user question for mission {}. Answer it to resume the mission.",
+                        mission.id
+                    )))
+                    .await;
+                continue;
+            }
             self.evaluate_active_wave(mission.id).await?;
             self.schedule_active_wave(mission.id).await?;
-            self.queue_wake(
-                mission.id,
-                WakeReason::ManualResume,
-                json!({
-                    "recovered_after_restart": true,
-                    "goal": mission.goal,
-                }),
-                true,
-            )
-            .await?;
+            if let Some(text) = recovered_user_input {
+                self.queue_wake(
+                    mission.id,
+                    WakeReason::UserMessage,
+                    json!({
+                        "recovered_after_restart": true,
+                        "text": text,
+                        "urgent": true,
+                    }),
+                    true,
+                )
+                .await?;
+            } else {
+                self.queue_wake(
+                    mission.id,
+                    WakeReason::ManualResume,
+                    json!({
+                        "recovered_after_restart": true,
+                        "goal": mission.goal,
+                    }),
+                    true,
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -1481,6 +1563,16 @@ impl MissionCore {
             .undelivered_user_messages(mission.id)
             .await?
             .len();
+        let pending_questions = self
+            .mission_store
+            .open_pending_questions(mission.id)
+            .await?
+            .len();
+        let latest_issue = self
+            .mission_store
+            .latest_tool_call_error(mission.id)
+            .await?
+            .map(|summary| render_tool_issue_summary(&summary));
         let fleet = FleetCounts {
             active: experiments
                 .iter()
@@ -1516,6 +1608,8 @@ impl MissionCore {
             abox_workers_in_flight: mission.wallet.abox_workers_in_flight,
             concurrent_max: mission.wallet.concurrent_max,
             pending_user_messages,
+            pending_questions,
+            latest_issue,
             fleet,
         }))
     }
@@ -1612,9 +1706,48 @@ impl MissionCore {
 
     async fn enqueue_active_mission_message(&self, text: String, urgent: bool) -> Result<()> {
         let mission_id = self.active_mission_id().await?;
+        self.enqueue_mission_message(mission_id, text, urgent).await
+    }
+
+    async fn enqueue_mission_message(
+        &self,
+        mission_id: MissionId,
+        text: String,
+        urgent: bool,
+    ) -> Result<()> {
+        self.enqueue_mission_message_with_ledger_summary(mission_id, text.clone(), urgent, text)
+            .await
+    }
+
+    async fn enqueue_mission_message_with_ledger_summary(
+        &self,
+        mission_id: MissionId,
+        text: String,
+        urgent: bool,
+        ledger_summary: String,
+    ) -> Result<()> {
+        self.persist_mission_message(mission_id, text.clone(), urgent, ledger_summary)
+            .await?;
+        self.queue_wake(
+            mission_id,
+            WakeReason::UserMessage,
+            json!({ "text": text, "urgent": urgent }),
+            true,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn persist_mission_message(
+        &self,
+        mission_id: MissionId,
+        text: String,
+        urgent: bool,
+        ledger_summary: String,
+    ) -> Result<()> {
         let message = UserMessage {
             at: Utc::now(),
-            text: text.clone(),
+            text,
             urgent,
         };
         self.mission_store
@@ -1624,19 +1757,12 @@ impl MissionCore {
             .append_ledger(&LedgerEntry {
                 at: Utc::now(),
                 kind: LedgerKind::UserSteering,
-                summary: text.clone(),
+                summary: ledger_summary,
                 mission_id,
                 experiment_id: None,
             })
             .await?;
         self.emit_banner().await;
-        self.queue_wake(
-            mission_id,
-            WakeReason::UserMessage,
-            json!({ "text": text, "urgent": urgent }),
-            true,
-        )
-        .await?;
         Ok(())
     }
 
@@ -1698,15 +1824,141 @@ impl MissionCore {
     }
 
     async fn answer_user_question(&self, request_id: String, answer: String) -> Result<()> {
-        let tx = {
+        let pending = {
             let mut state = self.runtime_state.lock().await;
             state.pending_questions.remove(&request_id)
         };
-        let Some(tx) = tx else {
+        let Some(stored_question) = self.mission_store.pending_question(&request_id).await? else {
             anyhow::bail!("unknown question request '{}'", request_id);
         };
-        let _ = tx.send(answer);
+        if stored_question.resolved_at.is_some() {
+            anyhow::bail!("question request '{}' was already resolved", request_id);
+        }
+        if stored_question.answered_at.is_some() {
+            anyhow::bail!("question request '{}' was already answered", request_id);
+        }
+        self.mission_store
+            .save_pending_question_answer(&request_id, &answer, Utc::now())
+            .await?;
+        self.emit_banner().await;
+
+        let Some(pending) = pending else {
+            return self
+                .reroute_late_question_answer(stored_question.mission_id, request_id, answer)
+                .await;
+        };
+        match pending.state {
+            PendingQuestionState::Waiting(answer_tx) => {
+                if answer_tx
+                    .send(QuestionResolution::Answered(answer.clone()))
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+            PendingQuestionState::Expired => {}
+        }
+
+        self.reroute_late_question_answer(pending.mission_id, request_id, answer)
+            .await
+    }
+
+    async fn reroute_late_question_answer(
+        &self,
+        mission_id: MissionId,
+        request_id: String,
+        answer: String,
+    ) -> Result<()> {
+        self.mission_store
+            .promote_answered_pending_question_to_user_message(&request_id, true)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "question request '{}' could not be rerouted into the mission inbox",
+                    request_id
+                )
+            })?;
+        self.append_provenance(
+            mission_id,
+            json!({
+                "event": "late_question_answer_rerouted",
+                "at": Utc::now(),
+                "request_id": request_id,
+                "answer": answer,
+            }),
+        )
+        .await?;
+        self.mission_store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::UserSteering,
+                summary: format!("ask_user: {answer}"),
+                mission_id,
+                experiment_id: None,
+            })
+            .await?;
+        self.emit_banner().await;
+        self.queue_wake(
+            mission_id,
+            WakeReason::UserMessage,
+            json!({ "text": answer, "urgent": true }),
+            true,
+        )
+        .await?;
+        let _ = self
+            .event_tx
+            .send(SessionEvent::Info(
+                "The original question wake had already ended. Routed your answer back into the mission as a normal message.".to_string(),
+            ))
+            .await;
         Ok(())
+    }
+
+    async fn recover_answered_pending_question(
+        &self,
+        question: &PendingQuestionRecord,
+    ) -> Result<Option<String>> {
+        let Some(answer) = question.answer.clone() else {
+            return Ok(None);
+        };
+        let Some(_) = self
+            .mission_store
+            .promote_answered_pending_question_to_user_message(&question.request_id, true)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.mission_store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::UserSteering,
+                summary: format!("ask_user: {answer}"),
+                mission_id: question.mission_id,
+                experiment_id: None,
+            })
+            .await?;
+        self.emit_banner().await;
+        Ok(Some(answer))
+    }
+
+    async fn expire_pending_questions_for_mission(&self, mission_id: MissionId) {
+        let expired: Vec<_> = {
+            let mut state = self.runtime_state.lock().await;
+            let mut expired = Vec::new();
+            for pending in state.pending_questions.values_mut() {
+                if pending.mission_id != mission_id {
+                    continue;
+                }
+                let previous = std::mem::replace(&mut pending.state, PendingQuestionState::Expired);
+                if let PendingQuestionState::Waiting(answer_tx) = previous {
+                    expired.push(answer_tx);
+                }
+            }
+            expired
+        };
+        for answer_tx in expired {
+            let _ = answer_tx.send(QuestionResolution::Expired);
+        }
     }
 
     async fn active_mission_id(&self) -> Result<MissionId> {
@@ -2070,6 +2322,9 @@ impl MissionCore {
         saw_suspend |= final_state.saw_suspend;
         forced_stop |= final_state.forced_stop;
 
+        if forced_stop {
+            self.expire_pending_questions_for_mission(mission.id).await;
+        }
         mcp_server.shutdown().await;
 
         if let Some(status) = child_status {
@@ -2921,9 +3176,27 @@ impl MissionCore {
         let args: AskUserArgs = serde_json::from_value(arguments)?;
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
+        self.mission_store
+            .insert_pending_question(&PendingQuestionRecord {
+                request_id: request_id.clone(),
+                mission_id: mission.id,
+                question: args.question.clone(),
+                choices: args.choices.clone(),
+                asked_at: Utc::now(),
+                answer: None,
+                answered_at: None,
+                resolved_at: None,
+            })
+            .await?;
         {
             let mut state = self.runtime_state.lock().await;
-            state.pending_questions.insert(request_id.clone(), tx);
+            state.pending_questions.insert(
+                request_id.clone(),
+                PendingQuestion {
+                    mission_id: mission.id,
+                    state: PendingQuestionState::Waiting(tx),
+                },
+            );
         }
         self.emit_mission_activity(MissionActivity::QuestionAsked {
             mission_id: mission.id.to_string(),
@@ -2938,7 +3211,12 @@ impl MissionCore {
                 choices: args.choices.clone(),
             })
             .await;
-        let answer = rx.await.unwrap_or_default();
+        let answer = match rx.await.unwrap_or(QuestionResolution::Expired) {
+            QuestionResolution::Answered(answer) => answer,
+            QuestionResolution::Expired => {
+                anyhow::bail!("user question expired before the wake could resume");
+            }
+        };
         self.mission_store
             .append_ledger(&LedgerEntry {
                 at: Utc::now(),
@@ -2948,6 +3226,10 @@ impl MissionCore {
                 experiment_id: None,
             })
             .await?;
+        self.mission_store
+            .resolve_pending_question(&request_id, Utc::now())
+            .await?;
+        self.emit_banner().await;
         Ok(ToolCallOutcome {
             payload: json!({ "answer": answer }),
             suspend: false,
@@ -3065,6 +3347,16 @@ impl MissionCore {
             .undelivered_user_messages(mission_id)
             .await?
             .len();
+        let pending_questions = self
+            .mission_store
+            .open_pending_questions(mission_id)
+            .await?
+            .len();
+        let latest_issue = self
+            .mission_store
+            .latest_tool_call_error(mission_id)
+            .await?
+            .map(|summary| render_tool_issue_summary(&summary));
         Ok(json!({
             "wallet": mission.wallet,
             "fleet": {
@@ -3074,6 +3366,8 @@ impl MissionCore {
                 "failed_this_mission": experiments.iter().filter(|experiment| matches!(experiment.status, ExperimentStatus::Failed | ExperimentStatus::Cancelled | ExperimentStatus::Timeout)).count(),
             },
             "pending_user_messages": pending_user_messages,
+            "pending_questions": pending_questions,
+            "latest_issue": latest_issue,
             "posture": mission.posture,
             "wake_id": wake_id,
         }))
@@ -3526,6 +3820,46 @@ impl MissionCore {
             .join(format!("{mission_id}.ndjson"))
     }
 
+    async fn record_tool_call_error(
+        &self,
+        mission_id: MissionId,
+        wake_id: WakeId,
+        tool_name: &str,
+        tool_args: &Value,
+        err: &anyhow::Error,
+    ) -> Result<()> {
+        let error_text = compact_single_line(&err.to_string());
+        self.append_provenance(
+            mission_id,
+            json!({
+                "event": "tool_call_error",
+                "at": Utc::now(),
+                "wake_id": wake_id,
+                "tool": tool_name,
+                "arguments": tool_args,
+                "error": error_text,
+            }),
+        )
+        .await?;
+        self.mission_store
+            .append_ledger(&LedgerEntry {
+                at: Utc::now(),
+                kind: LedgerKind::Decision,
+                summary: format!("tool_call_error: {tool_name}: {error_text}"),
+                mission_id,
+                experiment_id: None,
+            })
+            .await?;
+        self.emit_mission_activity(MissionActivity::ToolCallError {
+            mission_id: mission_id.to_string(),
+            tool: tool_name.to_string(),
+            error: error_text,
+        })
+        .await;
+        self.emit_banner().await;
+        Ok(())
+    }
+
     async fn append_provenance(&self, mission_id: MissionId, record: Value) -> Result<()> {
         let path = self.provenance_path(mission_id);
         let line = format!("{}\n", serde_json::to_string(&record)?);
@@ -3909,16 +4243,12 @@ impl WakeMcpServerState {
             Err(err) => {
                 let _ = self
                     .core
-                    .append_provenance(
+                    .record_tool_call_error(
                         self.mission.id,
-                        json!({
-                            "event": "tool_call_error",
-                            "at": Utc::now(),
-                            "wake_id": self.wake.id,
-                            "tool": tool_name,
-                            "arguments": tool_args,
-                            "error": err.to_string(),
-                        }),
+                        self.wake.id,
+                        &tool_name,
+                        &tool_args,
+                        &err,
                     )
                     .await;
                 json_response(
@@ -4428,6 +4758,17 @@ fn mission_status_is_terminal(status: MissionStatus) -> bool {
         status,
         MissionStatus::Completed | MissionStatus::Cancelled | MissionStatus::Failed
     )
+}
+
+fn compact_single_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn render_tool_issue_summary(summary: &str) -> String {
+    summary
+        .strip_prefix("tool_call_error: ")
+        .unwrap_or(summary)
+        .to_string()
 }
 
 fn experiment_payload(experiment: &Experiment) -> Value {

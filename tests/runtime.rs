@@ -2657,6 +2657,159 @@ call("complete_mission", {"summary": "user answered the blocking question"})
 }
 
 #[tokio::test]
+async fn mission_runtime_reroutes_late_question_answers_into_user_messages() {
+    let dir = TempDir::new("bakudo-late-ask-user");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+if wake["reason"] == "manual_resume":
+    call("ask_user", {
+        "question": "Choose the next step",
+        "choices": ["wave-1", "wave-2"]
+    })
+    raise AssertionError("manual wake should time out before ask_user returns")
+elif wake["reason"] == "timeout":
+    call("suspend", {
+        "reason": "waiting for the user's late answer",
+        "expected_wake": "user_message"
+    })
+elif wake["reason"] == "user_message":
+    assert wake["user_inbox"], wake
+    assert wake["user_inbox"][-1]["text"] == "wave-2", wake["user_inbox"]
+    call("complete_mission", {"summary": "late answer recovered"})
+else:
+    raise AssertionError(wake["reason"])
+"#,
+    );
+    write_exec_provider_files_with_budget(&repo, &script, 20, "500ms");
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-late-ask-user".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Recover a late answer".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let request_id = timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::UserQuestionRequested { request_id, .. }) => break request_id,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission_id = timeout(Duration::from_secs(5), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions.into_iter().next() {
+                let wakes = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+                if mission.status == MissionStatus::Sleeping && wakes.is_empty() {
+                    break mission.id;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    cmd_tx
+        .send(SessionCommand::AnswerUserQuestion {
+            request_id,
+            answer: "wave-2".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let mission = timeout(Duration::from_secs(5), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                let wakes = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+                if wakes.is_empty() {
+                    break mission;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let ledger = store.recent_ledger(mission.id, 12).await.unwrap();
+    assert!(ledger.iter().any(|entry| entry.summary.contains("wave-2")
+        && entry.kind == bakudo_core::mission::LedgerKind::UserSteering));
+
+    let provenance = fs::read_to_string(
+        repo.path()
+            .join(".bakudo")
+            .join("provenance")
+            .join(format!("{mission_id}.ndjson")),
+    )
+    .unwrap();
+    assert!(provenance.contains("\"event\":\"late_question_answer_rerouted\""));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mission_runtime_records_lessons_to_repo_storage() {
     let dir = TempDir::new("bakudo-record-lesson");
     let repo = TempRepo::new();

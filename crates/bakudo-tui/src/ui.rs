@@ -1,22 +1,10 @@
-//! Ratatui UI rendering — Codex-level polish.
+//! Ratatui UI rendering for bakudo's inline-mode bottom pane.
 //!
-//! Layout (terminal width ≥ SHELF_MIN_TERM_WIDTH):
-//!
-//!  ┌──────────────────────────────────────────────────────┬──────────────────────────┐
-//!  │  bakudo v2  ·  provider: claude  ·  model: opus-4-5  │                          │
-//!  ├──────────────────────────────────────────────────────┤   ╔═ Sandboxes (2) ════╗  │
-//!  │                                                      │   ║ ⠙ running          ║  │
-//!  │  History appears above this prompt.                 │   ║   task-abc         ║  │
-//!  │  Describe a task below to start a sandbox.          │   ║   "fix the bug"    ║  │
-//!  │                                                     │   ║                    ║  │
-//!  │                                                     │   ║ ✓ preserved        ║  │
-//!  │                                                      │   ║   task-xyz         ║  │
-//!  ├──────────────────────────────────────────────────────┤   ╚════════════════════╝  │
-//!  │  [C] > input with cursor█                            │                          │
-//!  └──────────────────────────────────────────────────────┴──────────────────────────┘
-//!   Enter: send  Tab: complete/shelf  Ctrl+C: quit  /help: commands
-//!
-//! When the terminal is narrower than SHELF_MIN_TERM_WIDTH the shelf is hidden.
+//! The live viewport stays intentionally compact:
+//! - an optional single-row top strip for running status or mission context,
+//! - a shaded composer surface,
+//! - a one-line footer,
+//! - and an optional right-side shelf on wide terminals.
 
 use ratatui::{
     Frame,
@@ -32,9 +20,10 @@ use crate::app::{App, FocusedPanel, ShelfColor, short_task_id};
 use crate::commands::SlashCommand;
 use crate::footer::{self, FooterVariant};
 use crate::palette::{
-    self, FOOTER_HEIGHT, HEADER_HEIGHT, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH, composer_height_for,
+    self, FOOTER_HEIGHT, GUTTER, SHELF_MIN_TERM_WIDTH, SHELF_WIDTH, composer_height_for,
 };
 use crate::status_indicator;
+use crate::style::user_message_style;
 use strum::IntoEnumIterator;
 
 // ─── Top-level render ──────────────────────────────────────────────────────
@@ -47,38 +36,24 @@ pub fn render(frame: &mut Frame, app: &App) {
     // not content.
     let show_shelf = area.width >= SHELF_MIN_TERM_WIDTH && !app.shelf.is_empty();
 
-    // ── Slice the header off the top so it spans the full terminal width and
-    //    the shelf naturally starts below it. ──────────────────────────────
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
-        .split(area);
-    let header_area = outer[0];
-    let body_area = outer[1];
-
-    // ── Horizontal split of the body: main | shelf ────────────────────────
+    // ── Horizontal split: main | shelf ────────────────────────────────────
     let h_chunks = if show_shelf {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(SHELF_WIDTH)])
-            .split(body_area)
+            .split(area)
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(100)])
-            .split(body_area)
+            .split(area)
     };
 
     let main_area = h_chunks[0];
 
-    // ── Vertical split of main: context | status | composer | footer ─────
+    // ── Vertical split of main: spacer | top strip | composer | footer ────
     let composer_h = composer_height_for(app.input.split('\n').count());
-    let status_h: u16 = if app.active_task_count > 0
-        || app
-            .shelf
-            .iter()
-            .any(|entry| entry.state_color == ShelfColor::Running)
-    {
+    let top_strip_h: u16 = if status_indicator::shows_top_strip(app) {
         1
     } else {
         0
@@ -86,17 +61,15 @@ pub fn render(frame: &mut Frame, app: &App) {
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),
-            Constraint::Length(status_h),
+            Constraint::Min(0),
+            Constraint::Length(top_strip_h),
             Constraint::Length(composer_h),
             Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(main_area);
 
-    render_header(frame, app, header_area);
-    render_inline_context(frame, app, v_chunks[0]);
-    if status_h > 0 {
-        render_status_strip(frame, app, v_chunks[1]);
+    if top_strip_h > 0 {
+        render_top_strip(frame, app, v_chunks[1]);
     }
     render_composer(frame, app, v_chunks[2]);
     render_footer(frame, app, v_chunks[3], show_shelf);
@@ -121,119 +94,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.help_visible {
         render_help_overlay(frame, app);
     }
-}
-
-// ─── Header ────────────────────────────────────────────────────────────────
-
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    let model_label = app.model_label();
-    let model_str = model_label.as_str();
-    let line_1 = Line::from(vec![
-        Span::raw("  "),
-        Span::styled("bakudo", Style::default().fg(Color::White).bold()),
-        Span::styled(" v2", palette::dim_style()),
-        Span::styled("  ·  ", palette::dim_style()),
-        Span::styled(&app.workspace_label, Style::default().fg(Color::White)),
-        Span::styled("  ·  ", palette::dim_style()),
-        Span::styled("provider: ", Style::default().fg(palette::header_fg())),
-        Span::styled(
-            &app.provider_id,
-            Style::default().fg(palette::provider_accent()).bold(),
-        ),
-        Span::styled("  ·  ", palette::dim_style()),
-        Span::styled("model: ", Style::default().fg(palette::header_fg())),
-        Span::styled(model_str, Style::default().fg(palette::model_accent())),
-    ]);
-    let line_2 = if let Some(banner) = &app.mission_banner {
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("mission ", palette::dim_style()),
-            Span::styled(&banner.goal, Style::default().fg(Color::White).bold()),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("posture ", palette::dim_style()),
-            Span::styled(
-                banner.posture.to_string(),
-                Style::default().fg(palette::provider_accent()).bold(),
-            ),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("wallet ", palette::dim_style()),
-            Span::styled(
-                format!(
-                    "{}s · {} remain · {} in flight / {} max",
-                    banner.wall_clock_remaining_secs,
-                    banner.abox_workers_remaining,
-                    banner.abox_workers_in_flight,
-                    banner.concurrent_max
-                ),
-                Style::default().fg(Color::White),
-            ),
-        ])
-    } else if area.width < SHELF_MIN_TERM_WIDTH {
-        let counts = format!(
-            "r{} p{} c{}",
-            app.running_shelf_count(),
-            app.preserved_shelf_count(),
-            app.conflict_shelf_count(),
-        );
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("base ", palette::dim_style()),
-            Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("policy ", palette::dim_style()),
-            Span::styled(
-                app.config.candidate_policy.to_string(),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("lc ", palette::dim_style()),
-            Span::styled(
-                app.config.sandbox_lifecycle.to_string(),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled(counts, Style::default().fg(Color::White).bold()),
-        ])
-    } else {
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("base ", palette::dim_style()),
-            Span::styled(&app.config.base_branch, Style::default().fg(Color::White)),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("policy ", palette::dim_style()),
-            Span::styled(
-                app.config.candidate_policy.to_string(),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("lifecycle ", palette::dim_style()),
-            Span::styled(
-                app.config.sandbox_lifecycle.to_string(),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("running ", palette::dim_style()),
-            Span::styled(
-                app.running_shelf_count().to_string(),
-                Style::default().fg(palette::shelf_running()).bold(),
-            ),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("preserved ", palette::dim_style()),
-            Span::styled(
-                app.preserved_shelf_count().to_string(),
-                Style::default().fg(palette::shelf_preserved()).bold(),
-            ),
-            Span::styled("  ·  ", palette::dim_style()),
-            Span::styled("conflicts ", palette::dim_style()),
-            Span::styled(
-                app.conflict_shelf_count().to_string(),
-                Style::default().fg(palette::shelf_conflicts()).bold(),
-            ),
-        ])
-    };
-
-    let header = Paragraph::new(Text::from(vec![line_1, line_2]));
-    frame.render_widget(header, area);
 }
 
 fn render_approval_modal(frame: &mut Frame, app: &App) {
@@ -316,133 +176,84 @@ fn centered_rect_with_min(
     }
 }
 
-// ─── Transcript ────────────────────────────────────────────────────────────
+// ─── Composer ──────────────────────────────────────────────────────────────
 
-fn render_inline_context(frame: &mut Frame, app: &App, area: Rect) {
+fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     if area.is_empty() {
         return;
     }
 
-    let lines = if app.active_task_count > 0 {
-        vec![
-            Line::from(Span::styled(
-                "Live output is rendered above this prompt.",
-                Style::default().fg(Color::White).bold(),
-            )),
-            Line::from(Span::styled(
-                "The running row and shelf below stay interactive while work streams.",
-                palette::dim_style(),
-            )),
-        ]
-    } else if app.shelf.is_empty() {
-        vec![
-            Line::from(Span::styled(
-                "History appears above this prompt.",
-                Style::default().fg(Color::White).bold(),
-            )),
-            Line::from(Span::styled(
-                "Describe a task below to start a sandbox.",
-                palette::dim_style(),
-            )),
-        ]
-    } else {
-        vec![
-            Line::from(Span::styled(
-                "History appears above this prompt.",
-                Style::default().fg(Color::White).bold(),
-            )),
-            Line::from(Span::styled(
-                "Use the shelf to inspect, apply, or discard finished sandboxes.",
-                palette::dim_style(),
-            )),
-        ]
-    };
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
-}
-
-// ─── Composer ──────────────────────────────────────────────────────────────
-
-fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == FocusedPanel::Chat && app.terminal_focused;
-    let border_style = if focused {
-        palette::focused_border_style()
-    } else {
-        palette::unfocused_border_style()
+    let surface_style = user_message_style();
+    let base_text_style = surface_style.fg(Color::White);
+    frame.render_widget(Block::default().style(surface_style), area);
+
+    let inner = Rect {
+        x: area.x.saturating_add(GUTTER),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(GUTTER + 1),
+        height: area.height.saturating_sub(2),
     };
+    if inner.is_empty() {
+        return;
+    }
 
-    // Border color signals focus; the title is just a plain label.
-    let title = Span::styled(" Input ", panel_title_style(focused));
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border_style)
-        .title(title);
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    const PROMPT_WIDTH: u16 = 2;
-    let prompt_width = PROMPT_WIDTH.min(inner.width);
+    let prompt_width = GUTTER.min(area.width);
     let prompt_area = Rect {
-        x: inner.x,
+        x: area.x,
         y: inner.y,
         width: prompt_width,
         height: inner.height,
     };
     let text_area = Rect {
-        x: inner.x + prompt_width,
+        x: inner.x,
         y: inner.y,
-        width: inner.width.saturating_sub(prompt_width),
+        width: inner.width,
         height: inner.height,
     };
 
-    // Prompt column: "> " on the first row, "  " on continuation rows so that
-    // multi-line input reads as a single indented block.
     let prompt_lines: Vec<Line> = (0..inner.height)
         .map(|i| {
             if i == 0 {
-                Line::from(Span::styled("> ", palette::dim_style()))
+                let prompt_style = if focused {
+                    surface_style
+                        .fg(palette::focus_border())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    surface_style.add_modifier(Modifier::DIM)
+                };
+                Line::from(Span::styled("› ", prompt_style))
             } else {
                 Line::from(Span::raw("  "))
             }
         })
         .collect();
-    frame.render_widget(Paragraph::new(prompt_lines), prompt_area);
+    frame.render_widget(
+        Paragraph::new(prompt_lines).style(surface_style),
+        prompt_area,
+    );
 
-    // ── Empty input: show a dim placeholder with a reversed cursor cell ──
     if app.input.is_empty() {
         let placeholder_line = Line::from(vec![
             Span::styled(
                 " ",
-                Style::default()
+                surface_style
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             ),
             Span::styled(
-                "Describe a task…  ",
-                palette::dim_style().add_modifier(Modifier::ITALIC),
+                "Describe a task…",
+                surface_style.add_modifier(Modifier::DIM | Modifier::ITALIC),
             ),
-            Span::styled(
-                "Shift+Enter",
-                Style::default()
-                    .fg(palette::hint_key_fg())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" for newline", palette::dim_style()),
         ]);
-        frame.render_widget(Paragraph::new(placeholder_line), text_area);
+        frame.render_widget(
+            Paragraph::new(placeholder_line).style(surface_style),
+            text_area,
+        );
         return;
     }
 
-    // ── Multi-line input ─────────────────────────────────────────────────
     let input_lines: Vec<&str> = app.input.split('\n').collect();
-
-    // Find which rendered row and byte offset within that row the cursor sits.
     let (cursor_row, row_start_byte) = locate_cursor(&app.input, app.cursor);
     let current_line = input_lines[cursor_row];
     let col_byte = app
@@ -466,24 +277,20 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
                 (" ", "")
             };
             text_lines.push(Line::from(vec![
-                Span::styled(before, Style::default().fg(Color::White)),
+                Span::styled(before, base_text_style),
                 Span::styled(
                     at,
-                    Style::default()
+                    surface_style
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD | Modifier::REVERSED),
                 ),
-                Span::styled(after, Style::default().fg(Color::White)),
+                Span::styled(after, base_text_style),
             ]));
         } else {
-            text_lines.push(Line::from(Span::styled(
-                *line_s,
-                Style::default().fg(Color::White),
-            )));
+            text_lines.push(Line::from(Span::styled(*line_s, base_text_style)));
         }
     }
 
-    // Horizontal scroll — keep the cursor column in view for the current row.
     let cursor_col = current_line[..col_byte].width();
     let visible_w = text_area.width as usize;
     let scroll_x: u16 = if visible_w == 0 {
@@ -495,8 +302,6 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
 
-    // Vertical scroll — keep the cursor row in view when input grows beyond
-    // the composer's visible height.
     let visible_h = text_area.height as usize;
     let scroll_y: u16 = if text_lines.len() > visible_h && visible_h > 0 {
         cursor_row.saturating_sub(visible_h - 1) as u16
@@ -504,7 +309,9 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
         0
     };
 
-    let para = Paragraph::new(text_lines).scroll((scroll_y, scroll_x));
+    let para = Paragraph::new(text_lines)
+        .style(surface_style)
+        .scroll((scroll_y, scroll_x));
     frame.render_widget(para, text_area);
 }
 
@@ -585,12 +392,15 @@ fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
     frame.render_widget(list, popup_rect);
 }
 
-// ─── Live status strip ─────────────────────────────────────────────────────
+// ─── Live top strip ────────────────────────────────────────────────────────
 
-fn render_status_strip(frame: &mut Frame, app: &App, area: Rect) {
-    if let Some(line) = status_indicator::render_status_line(app, area.width) {
-        let strip = Paragraph::new(line);
-        frame.render_widget(strip, area);
+fn render_top_strip(frame: &mut Frame, app: &App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+
+    if let Some(line) = status_indicator::render_top_line(app, area.width) {
+        frame.render_widget(Paragraph::new(line), area);
     }
 }
 
@@ -1117,7 +927,13 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use tokio::sync::mpsc;
 
-    use bakudo_core::{config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger};
+    use bakudo_core::{
+        config::BakudoConfig,
+        mission::{MissionStatus, Posture},
+        provider::ProviderRegistry,
+        state::SandboxLedger,
+    };
+    use bakudo_daemon::session_controller::{FleetCounts, MissionBanner};
 
     use crate::app::{App, FocusedPanel, ShelfEntry};
     use crate::palette::{SHELF_MIN_TERM_WIDTH, SHELF_WIDTH};
@@ -1125,7 +941,7 @@ mod tests {
     use super::render;
 
     #[test]
-    fn render_includes_header_context_and_selection_detail() {
+    fn render_keeps_selection_detail_without_idle_header_chrome() {
         let (cmd_tx, _cmd_rx) = mpsc::channel(4);
         let (_event_tx, event_rx) = mpsc::channel(4);
         let mut app = App::new(
@@ -1137,18 +953,18 @@ mod tests {
             None,
             true,
         );
-        app.provider_id = "codex".to_string();
-        app.model = Some("gpt-5".to_string());
+        app.workspace_label = "workspace-header".to_string();
+        app.provider_id = "provider-header".to_string();
+        app.model = Some("model-header".to_string());
         app.focus = FocusedPanel::Shelf;
-        app.active_task_count = 1;
         app.shelf.push_back(ShelfEntry {
             task_id: "task-render".to_string(),
-            provider: "codex".to_string(),
-            model: Some("gpt-5".to_string()),
+            provider: "provider-selection".to_string(),
+            model: Some("model-selection".to_string()),
             prompt_summary: "Make the TUI feel native.".to_string(),
             last_note: "Summarizing diffs before applying the fix.".to_string(),
-            state_label: "running".to_string(),
-            state_color: crate::app::ShelfColor::Running,
+            state_label: "preserved".to_string(),
+            state_color: crate::app::ShelfColor::Preserved,
             started_at: Local::now(),
             updated_at: Local::now(),
             pending_action: None,
@@ -1160,11 +976,12 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let rendered = buffer_to_string(buffer);
-        assert!(rendered.contains("provider: codex"));
-        assert!(rendered.contains("policy review"));
         assert!(rendered.contains("Selection"));
         assert!(rendered.contains("task-render"));
         assert!(rendered.contains("Summarizing diffs"));
+        assert!(!rendered.contains("workspace-header"));
+        assert!(!rendered.contains("provider-header"));
+        assert!(!rendered.contains("model-header"));
     }
 
     fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
@@ -1252,15 +1069,17 @@ mod tests {
     }
 
     #[test]
-    fn rounded_border_corners_used() {
+    fn composer_uses_inline_surface_without_box_title() {
         let app = fresh_app();
         let rendered = render_to_string(&app, 100, 20);
-        // Rounded top-left corner for the Chat and Input blocks.
         assert!(
-            rendered.contains('╭'),
-            "expected rounded ╭ corner in: {rendered}"
+            !rendered.contains(" Input "),
+            "composer title should not render in inline mode: {rendered}"
         );
-        assert!(rendered.contains('╯'));
+        assert!(
+            rendered.contains('›'),
+            "expected codex-style prompt in: {rendered}"
+        );
     }
 
     #[test]
@@ -1275,6 +1094,35 @@ mod tests {
         let rendered = render_to_string(&app, 100, 30);
         assert!(rendered.contains("Keybinds"));
         assert!(rendered.contains("Shift+Enter"));
+    }
+
+    #[test]
+    fn mission_banner_renders_a_working_top_strip() {
+        let mut app = fresh_app();
+        app.mission_banner = Some(MissionBanner {
+            mission_id: "mission-inline".to_string(),
+            goal: "Refine the inline viewport spacing".to_string(),
+            posture: Posture::Mission,
+            status: MissionStatus::Deliberating,
+            wall_clock_remaining_secs: 1800,
+            abox_workers_remaining: 12,
+            abox_workers_in_flight: 0,
+            concurrent_max: 4,
+            pending_user_messages: 0,
+            pending_questions: 0,
+            latest_issue: None,
+            fleet: FleetCounts {
+                active: 0,
+                queued: 0,
+                completed: 0,
+                failed: 0,
+            },
+        });
+
+        let rendered = render_to_string(&app, 100, 20);
+        assert!(rendered.contains("• Working"));
+        assert!(rendered.contains("planning next wake"));
+        assert!(rendered.contains("Refine the inline viewport spacing"));
     }
 
     #[test]
@@ -1294,7 +1142,7 @@ mod tests {
             pending_action: None,
         });
         let rendered = render_to_string(&app, 140, 30);
-        assert!(rendered.contains("• Running (7s • esc to interrupt)"));
+        assert!(rendered.contains("• Running (7s)"));
         assert!(rendered.contains("2 sandboxes active"));
         assert!(rendered.contains("[02bf30c1]"));
         assert!(rendered.contains("Booting sandbox"));

@@ -16,6 +16,7 @@
 use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -175,6 +176,48 @@ pub struct UserQuestionPrompt {
     pub selected: usize,
 }
 
+#[derive(Debug, Clone)]
+pub enum PendingRuntimeWorkKind {
+    RoutingInput,
+    StartingMission,
+    UpdatingBudget,
+    ForcingWake,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingRuntimeWork {
+    pub kind: PendingRuntimeWorkKind,
+    pub summary: String,
+    pub started_at: Instant,
+}
+
+impl PendingRuntimeWork {
+    pub fn new(kind: PendingRuntimeWorkKind, summary: impl Into<String>) -> Self {
+        Self {
+            kind,
+            summary: summary.into(),
+            started_at: Instant::now(),
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        "Working"
+    }
+
+    pub fn detail(&self) -> &'static str {
+        match self.kind {
+            PendingRuntimeWorkKind::RoutingInput => "routing request",
+            PendingRuntimeWorkKind::StartingMission => "starting mission",
+            PendingRuntimeWorkKind::UpdatingBudget => "updating budget",
+            PendingRuntimeWorkKind::ForcingWake => "queueing wake",
+        }
+    }
+
+    pub fn elapsed_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+}
+
 // ─── App state ─────────────────────────────────────────────────────────────
 
 /// The top-level application state.
@@ -212,6 +255,9 @@ pub struct App {
     pub model: Option<String>,
     /// Active durable mission banner, when one exists.
     pub mission_banner: Option<MissionBanner>,
+    /// Local optimistic state for runtime work that has been queued but not yet
+    /// acknowledged by the daemon/session runtime.
+    pub pending_runtime_work: Option<PendingRuntimeWork>,
 
     /// Number of tasks currently in-flight (used to gate commands).
     pub active_task_count: usize,
@@ -279,6 +325,7 @@ impl App {
             provider_id,
             model,
             mission_banner: None,
+            pending_runtime_work: None,
             active_task_count: 0,
             tick: 0,
             completions: Vec::new(),
@@ -334,6 +381,18 @@ impl App {
 
     pub fn take_pending_history(&mut self) -> Vec<ChatMessage> {
         self.pending_history.drain(..).collect()
+    }
+
+    pub fn begin_pending_runtime_work(
+        &mut self,
+        kind: PendingRuntimeWorkKind,
+        summary: impl Into<String>,
+    ) {
+        self.pending_runtime_work = Some(PendingRuntimeWork::new(kind, summary));
+    }
+
+    pub fn clear_pending_runtime_work(&mut self) {
+        self.pending_runtime_work = None;
     }
 
     fn clear_transcript_buffer(&mut self) {
@@ -587,7 +646,7 @@ impl App {
                     request_id: prompt.request_id.clone(),
                     answer: answer.clone(),
                 });
-                self.push_message(ChatMessage::info(format!("Answered question: {}", answer)));
+                self.push_message(ChatMessage::info(format!("Submitted answer: {}", answer)));
                 self.user_question_prompt = None;
             }
             KeyCode::Esc => {
@@ -846,6 +905,7 @@ impl App {
                 model,
                 prompt_summary,
             } => {
+                self.clear_pending_runtime_work();
                 self.active_task_count += 1;
                 let short = short_task_id(&task_id);
                 self.push_message(ChatMessage::info(format!(
@@ -865,6 +925,7 @@ impl App {
                 });
             }
             SessionEvent::TaskProgress { task_id, event } => {
+                self.clear_pending_runtime_work();
                 use bakudo_daemon::task_runner::RunnerEvent;
                 let short = short_task_id(&task_id);
                 match event {
@@ -933,6 +994,7 @@ impl App {
                 }
             }
             SessionEvent::TaskFinished { task_id, state } => {
+                self.clear_pending_runtime_work();
                 if self.active_task_count > 0 {
                     self.active_task_count -= 1;
                 }
@@ -947,6 +1009,7 @@ impl App {
                 )));
             }
             SessionEvent::ProviderChanged { provider_id, model } => {
+                self.clear_pending_runtime_work();
                 self.provider_id = provider_id.clone();
                 self.model = model.clone();
                 let model_label = match model.as_deref() {
@@ -958,6 +1021,7 @@ impl App {
                 )));
             }
             SessionEvent::MissionUpdated { banner } => {
+                self.clear_pending_runtime_work();
                 self.mission_banner = banner;
             }
             SessionEvent::ApprovalRequested {
@@ -965,6 +1029,7 @@ impl App {
                 command,
                 reason,
             } => {
+                self.clear_pending_runtime_work();
                 self.approval_prompt = Some(ApprovalPrompt {
                     request_id,
                     cursor: command.len(),
@@ -979,6 +1044,7 @@ impl App {
                 question,
                 choices,
             } => {
+                self.clear_pending_runtime_work();
                 self.user_question_prompt = Some(UserQuestionPrompt {
                     request_id,
                     question,
@@ -987,16 +1053,20 @@ impl App {
                 });
             }
             SessionEvent::MissionActivity { activity } => {
+                self.clear_pending_runtime_work();
                 self.push_message(ChatMessage::mission(activity.render_text()));
             }
             SessionEvent::Info(message) => {
+                self.clear_pending_runtime_work();
                 self.push_message(ChatMessage::info(message));
             }
             SessionEvent::Error(e) => {
+                self.clear_pending_runtime_work();
                 self.clear_all_pending();
                 self.push_message(ChatMessage::error(e));
             }
             SessionEvent::Shutdown => {
+                self.clear_pending_runtime_work();
                 self.should_quit = true;
             }
         }
@@ -1110,9 +1180,17 @@ impl App {
                 if let Err(reason) = self.preflight_dispatch() {
                     self.push_message(ChatMessage::error(reason));
                 } else {
-                    let _ = self
+                    let summary = truncate_line(input.clone(), 80);
+                    if self
                         .cmd_tx
-                        .try_send(SessionCommand::HostInput { text: input });
+                        .try_send(SessionCommand::HostInput { text: input })
+                        .is_ok()
+                    {
+                        self.begin_pending_runtime_work(
+                            PendingRuntimeWorkKind::RoutingInput,
+                            summary,
+                        );
+                    }
                 }
             }
         }
@@ -1189,6 +1267,10 @@ impl App {
             done_contract: None,
             constraints: None,
         });
+        self.begin_pending_runtime_work(
+            PendingRuntimeWorkKind::StartingMission,
+            truncate_line(trimmed.to_string(), 80),
+        );
         self.push_message(ChatMessage::info(format!(
             "Starting {} mission: {}",
             posture, trimmed
@@ -1211,15 +1293,23 @@ impl App {
             ));
             return;
         }
-        let _ = self.cmd_tx.try_send(SessionCommand::SetMissionBudget {
-            wall_clock_minutes,
-            workers,
-        });
+        if self
+            .cmd_tx
+            .try_send(SessionCommand::SetMissionBudget {
+                wall_clock_minutes,
+                workers,
+            })
+            .is_ok()
+        {
+            self.begin_pending_runtime_work(PendingRuntimeWorkKind::UpdatingBudget, arg);
+        }
         self.push_message(ChatMessage::info("Updating mission wallet…"));
     }
 
     fn cmd_wake(&mut self) {
-        let _ = self.cmd_tx.try_send(SessionCommand::ForceWake);
+        if self.cmd_tx.try_send(SessionCommand::ForceWake).is_ok() {
+            self.begin_pending_runtime_work(PendingRuntimeWorkKind::ForcingWake, "manual wake");
+        }
         self.push_message(ChatMessage::info("Forcing a manual wake…"));
     }
 
@@ -1386,15 +1476,21 @@ impl App {
         )];
         if let Some(banner) = &self.mission_banner {
             lines.push(format!(
-                "  mission:        {} [{} / {:?}]\n  wallet:         {}s left, {} workers remaining, {} in flight, max {}",
+                "  mission:        {} [{} / {:?} / {:?}]\n  wallet:         {}s left, {} workers remaining, {} in flight, max {}\n  mission inbox:  {} pending message(s), {} pending question(s)",
                 banner.goal,
                 banner.mission_id,
                 banner.posture,
+                banner.status,
                 banner.wall_clock_remaining_secs,
                 banner.abox_workers_remaining,
                 banner.abox_workers_in_flight,
                 banner.concurrent_max,
+                banner.pending_user_messages,
+                banner.pending_questions,
             ));
+            if let Some(issue) = banner.latest_issue.as_deref() {
+                lines.push(format!("  latest issue:   {issue}"));
+            }
         }
         let info = lines.join("\n");
         self.push_message(ChatMessage::info(info));
