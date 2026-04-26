@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
+use bakudo_core::abox::sandbox_branch;
 use bakudo_core::error::BakudoError;
 use tokio::process::Command;
 
@@ -20,7 +21,7 @@ pub async fn query_divergence(
     repo: Option<&Path>,
 ) -> Result<DivergenceSummary, BakudoError> {
     let repo = repo.unwrap_or_else(|| Path::new("."));
-    let branch = task_branch(task_id);
+    let branch = sandbox_branch(task_id);
     ensure_branch_exists(repo, &branch).await?;
     let raw = git_output(
         repo,
@@ -47,7 +48,7 @@ pub async fn query_diff(
     repo: Option<&Path>,
 ) -> Result<String, BakudoError> {
     let repo = repo.unwrap_or_else(|| Path::new("."));
-    let branch = task_branch(task_id);
+    let branch = sandbox_branch(task_id);
     ensure_branch_exists(repo, &branch).await?;
     git_output(
         repo,
@@ -60,10 +61,6 @@ pub async fn query_diff(
         ],
     )
     .await
-}
-
-fn task_branch(task_id: &str) -> String {
-    format!("agent/{task_id}")
 }
 
 async fn ensure_branch_exists(repo: &Path, branch: &str) -> Result<(), BakudoError> {

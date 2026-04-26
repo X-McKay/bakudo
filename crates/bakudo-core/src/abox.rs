@@ -37,6 +37,8 @@ pub struct RunResult {
     pub timed_out: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    pub worktree_path: Option<String>,
+    pub worktree_branch: Option<String>,
 }
 
 /// The abox adapter wraps the `abox` binary and exposes typed methods for
@@ -106,6 +108,8 @@ impl AboxAdapter {
         let mut err_buf = String::new();
         let mut stdout_truncated = false;
         let mut stderr_truncated = false;
+        let mut worktree_path = None;
+        let mut worktree_branch = None;
 
         let mut out_reader = BufReader::new(stdout).lines();
         let mut err_reader = BufReader::new(stderr).lines();
@@ -122,6 +126,11 @@ impl AboxAdapter {
                         match line {
                             Ok(Some(l)) => {
                                 on_line(&l);
+                                update_worktree_metadata(
+                                    &l,
+                                    &mut worktree_path,
+                                    &mut worktree_branch,
+                                );
                                 push_capped_line(
                                     &mut out_buf,
                                     &l,
@@ -178,6 +187,8 @@ impl AboxAdapter {
                         timed_out: true,
                         stdout_truncated,
                         stderr_truncated,
+                        worktree_path,
+                        worktree_branch,
                     });
                 }
             }
@@ -204,6 +215,8 @@ impl AboxAdapter {
             timed_out,
             stdout_truncated,
             stderr_truncated,
+            worktree_path,
+            worktree_branch,
         })
     }
 
@@ -355,6 +368,61 @@ pub fn sandbox_task_id(attempt_id: &str) -> String {
             trimmed
         }
     )
+}
+
+pub fn sandbox_branch(task_id: &str) -> String {
+    format!("agent/{task_id}")
+}
+
+pub fn sandbox_default_worktree_path(task_id: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home)
+        .join(".abox")
+        .join("worktrees")
+        .join(task_id);
+    path.exists().then_some(path)
+}
+
+fn update_worktree_metadata(
+    line: &str,
+    worktree_path: &mut Option<String>,
+    worktree_branch: &mut Option<String>,
+) {
+    if worktree_path.is_none() {
+        *worktree_path = extract_worktree_path_from_line(line);
+    }
+    if worktree_branch.is_none() {
+        *worktree_branch = extract_worktree_branch_from_line(line);
+    }
+}
+
+fn extract_worktree_path_from_line(line: &str) -> Option<String> {
+    for marker in ["worktree=", "path="] {
+        let Some(candidate) = extract_marker_value(line, marker) else {
+            continue;
+        };
+        if candidate.starts_with('/') {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn extract_worktree_branch_from_line(line: &str) -> Option<String> {
+    extract_marker_value(line, "branch=")
+        .filter(|branch| branch.starts_with("agent/") || branch.starts_with("bakudo-"))
+}
+
+fn extract_marker_value(line: &str, marker: &str) -> Option<String> {
+    let (_, tail) = line.split_once(marker)?;
+    Some(
+        tail.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .to_string(),
+    )
+    .filter(|value| !value.is_empty())
 }
 
 /// Parse the tabular output of `abox list`.
@@ -518,6 +586,11 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_branch_formats_agent_namespace() {
+        assert_eq!(sandbox_branch("bakudo-task"), "agent/bakudo-task");
+    }
+
+    #[test]
     fn parse_abox_version_plain() {
         assert_eq!(parse_abox_version("abox 0.3.2"), Some((0, 3, 2)));
         assert_eq!(parse_abox_version("abox 1.2.3\n"), Some((1, 2, 3)));
@@ -624,5 +697,18 @@ bakudo-def       agent/bakudo-def         stopped    0        0
         assert_eq!(entries[0].vm_state, "running");
         assert_eq!(entries[1].id, "bakudo-def");
         assert_eq!(entries[1].vm_state, "stopped");
+    }
+
+    #[test]
+    fn extract_worktree_metadata_from_run_line() {
+        let line = "2026-04-24T11:49:56Z INFO Created worktree sandbox_id=\"bakudo-task\" branch=agent/bakudo-task path=/tmp/abox/worktrees/bakudo-task";
+        assert_eq!(
+            extract_worktree_path_from_line(line).as_deref(),
+            Some("/tmp/abox/worktrees/bakudo-task")
+        );
+        assert_eq!(
+            extract_worktree_branch_from_line(line).as_deref(),
+            Some("agent/bakudo-task")
+        );
     }
 }

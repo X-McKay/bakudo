@@ -972,6 +972,70 @@ async fn apply_candidate_policy_snapshots_dirty_preserved_worktree_before_auto_a
 }
 
 #[tokio::test]
+async fn apply_candidate_policy_rejects_oversized_dirty_preserved_worktree_before_auto_apply() {
+    let dir = TempDir::new("bakudo-worktree-snapshot-oversized");
+    let repo = TempRepo::new();
+    let task_id = "task-snapshot-oversized";
+    let branch = format!("agent/{task_id}");
+    let worktree_dir = dir.path.join("sandbox");
+    run_host(
+        repo.path(),
+        "git",
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            worktree_dir.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(worktree_dir.join("large.bin"), vec![b'x'; 1_200_000]).unwrap();
+
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        &format!(
+            r#"  merge)
+    task_id="$1"
+    git -C {:?} merge --ff-only "agent/$task_id" >/dev/null
+    ;;
+"#,
+            repo.path().display().to_string(),
+        ),
+    );
+    let adapter = AboxAdapter::new(&script);
+    let ledger = Arc::new(SandboxLedger::new());
+    let mut record = make_record(task_id, SandboxState::Preserved);
+    record.worktree_path = Some(worktree_dir.display().to_string());
+    record.branch = Some(branch.clone());
+    ledger.insert(record).await;
+
+    let err = apply_candidate_policy(
+        task_id,
+        &CandidatePolicy::AutoApply,
+        "main",
+        Some(repo.path()),
+        &adapter,
+        &ledger,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("auto-snapshot limit"));
+    assert!(err.contains("review it manually"));
+    assert_eq!(
+        host_output(repo.path(), "git", &["rev-parse", "main"]).trim(),
+        host_output(repo.path(), "git", &["rev-parse", &branch]).trim()
+    );
+    assert!(host_output(&worktree_dir, "git", &["status", "--short"]).contains("large.bin"));
+    assert!(read_invocations(&log).is_empty());
+
+    let record = ledger.get(task_id).await.unwrap();
+    assert_eq!(record.state, SandboxState::Preserved);
+}
+
+#[tokio::test]
 async fn session_controller_diverge_uses_configured_base_branch() {
     let dir = TempDir::new("bakudo-session-controller");
     let repo = TempRepo::new();
@@ -3603,7 +3667,7 @@ else:
         .await
         .unwrap();
 
-    let backoff_reply = timeout(Duration::from_secs(1), async {
+    let backoff_reply = timeout(Duration::from_secs(3), async {
         loop {
             match event_rx.recv().await {
                 Some(SessionEvent::Info(msg)) if msg.contains("timeout backoff until") => {

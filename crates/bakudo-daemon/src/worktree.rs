@@ -16,10 +16,24 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use bakudo_core::abox::{AboxAdapter, SandboxEntry};
+use bakudo_core::abox::{sandbox_branch, sandbox_default_worktree_path, AboxAdapter, SandboxEntry};
 use bakudo_core::error::BakudoError;
 use bakudo_core::protocol::CandidatePolicy;
 use bakudo_core::state::{SandboxLedger, SandboxState};
+
+const SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1_048_576;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotIntent {
+    Preserve,
+    Apply,
+}
+
+#[derive(Debug, Default)]
+struct PendingSnapshotStats {
+    changed_paths: usize,
+    total_bytes: u64,
+}
 
 /// Result of a worktree lifecycle action.
 #[derive(Debug)]
@@ -43,7 +57,7 @@ pub async fn apply_candidate_policy(
         CandidatePolicy::AutoApply => merge_sandbox(task_id, base_branch, repo, abox, ledger).await,
         CandidatePolicy::Discard => discard_sandbox(task_id, repo, abox, ledger).await,
         CandidatePolicy::Review => {
-            prepare_preserved_worktree(task_id, ledger).await?;
+            prepare_preserved_worktree(task_id, ledger, SnapshotIntent::Preserve).await?;
             info!("Leaving worktree preserved for task {task_id} (review mode)");
             // Best-effort: populate branch info from abox list so the shelf
             // can surface it.
@@ -67,7 +81,7 @@ pub async fn merge_sandbox(
     abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
 ) -> Result<WorktreeAction, BakudoError> {
-    prepare_preserved_worktree(task_id, ledger).await?;
+    prepare_preserved_worktree(task_id, ledger, SnapshotIntent::Apply).await?;
     info!("Auto-applying worktree for task {task_id}");
     let conflicts = abox.merge(repo, task_id, base_branch).await?;
     if conflicts.is_empty() {
@@ -123,16 +137,35 @@ fn find_entry<'a>(entries: &'a [SandboxEntry], task_id: &str) -> Option<&'a Sand
 async fn prepare_preserved_worktree(
     task_id: &str,
     ledger: &Arc<SandboxLedger>,
+    intent: SnapshotIntent,
 ) -> Result<(), BakudoError> {
-    let branch = task_branch(task_id);
+    let branch = sandbox_branch(task_id);
     let Some(worktree_path) = discover_worktree_path(task_id, ledger).await else {
         return Ok(());
     };
     ledger
         .set_worktree(task_id, worktree_path.display().to_string(), branch)
         .await;
-    if !has_pending_changes(&worktree_path).await? {
+    let stats = pending_snapshot_stats(&worktree_path).await?;
+    if stats.changed_paths == 0 {
         return Ok(());
+    }
+    if stats.total_bytes > SNAPSHOT_MAX_TOTAL_BYTES {
+        let reason = format!(
+            "preserved worktree for task {task_id} totals {} bytes across {} changed path(s), above the {}-byte auto-snapshot limit; review it manually",
+            stats.total_bytes,
+            stats.changed_paths,
+            SNAPSHOT_MAX_TOTAL_BYTES,
+        );
+        match intent {
+            SnapshotIntent::Preserve => {
+                warn!("{reason}");
+                return Ok(());
+            }
+            SnapshotIntent::Apply => {
+                return Err(std::io::Error::other(reason).into());
+            }
+        }
     }
 
     info!("Snapshotting dirty preserved worktree for task {task_id}");
@@ -170,29 +203,57 @@ async fn discover_worktree_path(
         return recorded;
     }
 
-    let home = std::env::var_os("HOME")?;
-    let fallback = std::path::PathBuf::from(home)
-        .join(".abox")
-        .join("worktrees")
-        .join(task_id);
-    fallback.exists().then_some(fallback)
+    sandbox_default_worktree_path(task_id)
 }
 
-async fn has_pending_changes(worktree_path: &Path) -> Result<bool, BakudoError> {
+async fn pending_snapshot_stats(worktree_path: &Path) -> Result<PendingSnapshotStats, BakudoError> {
+    let pending_paths = git_output(
+        worktree_path,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .await?;
+    let mut stats = PendingSnapshotStats::default();
+    for raw_line in pending_paths.lines() {
+        let line = raw_line.trim_end();
+        if line.len() < 4 {
+            continue;
+        }
+        let path = line[3..]
+            .rsplit_once(" -> ")
+            .map(|(_, path)| path)
+            .unwrap_or(&line[3..])
+            .trim()
+            .trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+        stats.changed_paths += 1;
+        let candidate = worktree_path.join(path);
+        if let Ok(metadata) = tokio::fs::symlink_metadata(&candidate).await {
+            if metadata.is_file() || metadata.file_type().is_symlink() {
+                stats.total_bytes = stats.total_bytes.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(stats)
+}
+
+async fn git_output(worktree_path: &Path, args: &[&str]) -> Result<String, BakudoError> {
     let output = Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=all"])
+        .args(args)
         .current_dir(worktree_path)
         .output()
         .await?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
-            "git status failed in '{}': {}",
+            "git {:?} failed in '{}': {}",
+            args,
             worktree_path.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
         .into());
     }
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 async fn run_git(worktree_path: &Path, args: &[&str]) -> Result<(), BakudoError> {
@@ -211,8 +272,4 @@ async fn run_git(worktree_path: &Path, args: &[&str]) -> Result<(), BakudoError>
         String::from_utf8_lossy(&output.stderr).trim()
     ))
     .into())
-}
-
-fn task_branch(task_id: &str) -> String {
-    format!("agent/{task_id}")
 }
