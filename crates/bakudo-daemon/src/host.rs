@@ -8,6 +8,9 @@ use bakudo_core::mission::{MissionStatus, Posture, WakeReason, WakeWhen};
 use bakudo_core::protocol::{WorkerProgressKind, WorkerStatus};
 use bakudo_core::state::{SandboxRecord, SandboxState};
 
+use crate::mission_status::{
+    format_wake_deadline, short_mission_id, wake_reason_label, wake_when_label,
+};
 use crate::task_runner::RunnerEvent;
 
 #[derive(Clone, Default)]
@@ -937,31 +940,6 @@ fn model_label(model: Option<&str>) -> &str {
     model.filter(|model| !model.is_empty()).unwrap_or("default")
 }
 
-fn wake_reason_label(reason: WakeReason) -> &'static str {
-    match reason {
-        WakeReason::UserMessage => "user message",
-        WakeReason::ExperimentsComplete => "experiments complete",
-        WakeReason::ExperimentFailed => "experiment failure",
-        WakeReason::BudgetWarning => "budget warning",
-        WakeReason::BudgetExhausted => "budget exhausted",
-        WakeReason::SchedulerTick => "scheduler tick",
-        WakeReason::Timeout => "timeout",
-        WakeReason::ManualResume => "manual resume",
-    }
-}
-
-fn format_wake_deadline(deadline: DateTime<Utc>) -> String {
-    deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-}
-
-fn wake_when_label(wake_when: WakeWhen) -> &'static str {
-    match wake_when {
-        WakeWhen::AllComplete => "all complete",
-        WakeWhen::FirstComplete => "first complete",
-        WakeWhen::AnyFailure => "any failure",
-    }
-}
-
 fn start_announcement(posture: Posture, objective: &str) -> String {
     format!(
         "Starting {} mission '{}'. I’ll hand the request to the conductor and keep later messages conversational.",
@@ -987,10 +965,6 @@ fn short_task_id(task_id: &str) -> String {
         .chars()
         .take(8)
         .collect()
-}
-
-fn short_mission_id(mission_id: &str) -> String {
-    mission_id.chars().take(8).collect()
 }
 
 fn shelf_state_note(state: &SandboxState) -> &'static str {

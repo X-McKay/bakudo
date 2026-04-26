@@ -2,6 +2,7 @@ pub mod candidate;
 pub mod doctor;
 pub mod hooks;
 pub mod host;
+pub mod mission_status;
 pub mod mission_store;
 pub mod provider_runtime;
 pub mod session_controller;

@@ -13,7 +13,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use bakudo_core::mission::{MissionStatus, WakeReason, WakeWhen};
-use bakudo_daemon::session_controller::{MissionBanner, MissionWakeState};
+use bakudo_daemon::mission_status::{MissionBanner, MissionWakeState};
 
 use crate::{
     app::{App, ShelfColor, short_task_id},
@@ -527,7 +527,7 @@ mod tests {
         provider::ProviderRegistry,
         state::SandboxLedger,
     };
-    use bakudo_daemon::session_controller::{
+    use bakudo_daemon::mission_status::{
         ActiveWaveSummary, FleetCounts, MissionBanner, MissionWakeBanner, MissionWakeState,
     };
 

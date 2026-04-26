@@ -1,6 +1,6 @@
 # 2026-04-26 Runtime Improvements Implementation Plan
 
-Status: Implemented (Phases 1-5 complete; branch hardening verified)
+Status: Implemented (Phases 1-6 complete; branch hardening verified)
 
 Date: 2026-04-26
 
@@ -392,6 +392,15 @@ done".
 
 This phase is intentionally optional for this branch. Only start it if the
 behavioral phases above are landed and verified.
+
+Completed in this branch as a narrow cleanup slice:
+
+- extracted mission banner types and mission-status summarization into
+  `crates/bakudo-daemon/src/mission_status.rs`
+- reused shared wake/mission formatting primitives across
+  `session_controller.rs` and `host.rs`
+- updated the TUI to consume mission banner types from the dedicated module
+  instead of `session_controller.rs`
 
 Candidate cleanup work:
 

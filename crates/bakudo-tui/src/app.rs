@@ -30,8 +30,9 @@ use bakudo_core::protocol::{
 };
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
+use bakudo_daemon::mission_status::MissionBanner;
 use bakudo_daemon::session_controller::{
-    MissionBanner, SessionCommand, SessionEvent, TaskFinishContext, TaskStartContext,
+    SessionCommand, SessionEvent, TaskFinishContext, TaskStartContext,
 };
 
 use crate::commands::{ParsedCommand, SlashCommand, completions_for, parse_slash};

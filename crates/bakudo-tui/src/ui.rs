@@ -1079,7 +1079,7 @@ mod tests {
         provider::ProviderRegistry,
         state::SandboxLedger,
     };
-    use bakudo_daemon::session_controller::{
+    use bakudo_daemon::mission_status::{
         FleetCounts, MissionBanner, MissionWakeBanner, MissionWakeState,
     };
 
