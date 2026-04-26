@@ -42,6 +42,17 @@ Use `just` or `cargo` directly:
 
 Before every commit, `just check` should pass with zero warnings.
 
+## Worktree Hygiene
+
+- Treat `bakudo/` as the canonical source tree.
+- When branch isolation is useful, create feature worktrees from this repo
+  under the parent workspace's `.worktrees/` directory.
+- Do not create or keep alternate top-level Bakudo directories as long-lived
+  working copies.
+- After merge or salvage, remove stale feature worktrees and delete their local
+  branches.
+- Install the local binary from the canonical tree with `just install`.
+
 ## Architecture Invariants
 
 ### 1. Crate boundaries
