@@ -50,7 +50,10 @@ use bakudo_core::session::SessionRecord;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 
 use crate::hooks::run_post_run_hook;
-use crate::host::{HostAction, HostRuntime, HostSnapshot};
+use crate::host::{
+    HostAction, HostActiveWaveSnapshot, HostMissionSnapshot, HostPendingApprovalSnapshot,
+    HostPendingQuestionSnapshot, HostRuntime, HostSnapshot,
+};
 use crate::mission_store::{ActiveWaveRecord, MissionStore, PendingQuestionRecord};
 use crate::provider_runtime::{ProviderCatalog, ProviderEngine};
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
@@ -359,6 +362,9 @@ struct MissionRuntimeState {
 
 struct PendingApproval {
     mission_id: MissionId,
+    command: String,
+    reason: String,
+    requested_at: chrono::DateTime<Utc>,
     response_tx: oneshot::Sender<HostExecResolution>,
 }
 
@@ -841,11 +847,25 @@ impl SessionController {
     }
 
     async fn handle_host_input(&mut self, text: String) {
-        let snapshot = HostSnapshot {
-            entries: self.ledger.all().await,
-            provider_id: self.current_provider.clone(),
-            model: self.current_model.clone(),
-            base_branch: self.config.base_branch.clone(),
+        let snapshot = match self
+            .mission_core()
+            .build_host_snapshot(
+                self.current_provider.clone(),
+                self.current_model.clone(),
+                self.config.base_branch.clone(),
+            )
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let _ = self
+                    .event_tx
+                    .send(SessionEvent::Error(format!(
+                        "Failed to build host status snapshot: {err}"
+                    )))
+                    .await;
+                return;
+            }
         };
         match self.host.handle_input(&text, &snapshot) {
             HostAction::Reply(message) => {
@@ -1227,6 +1247,7 @@ impl SessionController {
                 provider_id: provider_id.clone(),
                 model: model.clone(),
                 base_branch: base_branch.clone(),
+                active_mission: None,
             };
             if let Some(note) = host.maybe_render_completion_note(&snapshot) {
                 let _ = event_tx.send(SessionEvent::Info(note)).await;
@@ -1807,6 +1828,129 @@ impl MissionCore {
             latest_issue,
             latest_change,
             fleet,
+        }))
+    }
+
+    async fn build_host_snapshot(
+        &self,
+        provider_id: String,
+        model: Option<String>,
+        base_branch: String,
+    ) -> Result<HostSnapshot> {
+        let active_mission_id = {
+            let state = self.runtime_state.lock().await;
+            state.active_mission_id
+        };
+        let active_mission = match active_mission_id {
+            Some(mission_id) => self.build_host_mission_snapshot(mission_id).await?,
+            None => None,
+        };
+        Ok(HostSnapshot {
+            entries: self.ledger.all().await,
+            provider_id,
+            model,
+            base_branch,
+            active_mission,
+        })
+    }
+
+    async fn build_host_mission_snapshot(
+        &self,
+        mission_id: MissionId,
+    ) -> Result<Option<HostMissionSnapshot>> {
+        let Some(mission) = self.mission_store.mission(mission_id).await? else {
+            return Ok(None);
+        };
+        let experiments = self
+            .mission_store
+            .experiments_for_mission(mission.id)
+            .await?;
+        let pending_user_messages = self
+            .mission_store
+            .undelivered_user_messages(mission.id)
+            .await?
+            .len();
+        let mut pending_questions = self
+            .mission_store
+            .open_pending_questions(mission.id)
+            .await?
+            .into_iter()
+            .map(|question| HostPendingQuestionSnapshot {
+                request_id: question.request_id,
+                question: question.question,
+                choices: question.choices,
+                asked_at: question.asked_at,
+            })
+            .collect::<Vec<_>>();
+        pending_questions.sort_by_key(|question| question.asked_at);
+        let queued_wakes = self
+            .mission_store
+            .unprocessed_wakes(Some(mission.id))
+            .await?;
+        let latest_tool_call_error = self
+            .mission_store
+            .latest_tool_call_error(mission.id)
+            .await?
+            .map(|summary| render_tool_issue_summary(&summary));
+        let latest_change = self
+            .mission_store
+            .recent_ledger(mission.id, 1)
+            .await?
+            .into_iter()
+            .last()
+            .map(|entry| compact_single_line(&entry.summary));
+        let active_wave = self
+            .mission_store
+            .active_wave(mission.id)
+            .await?
+            .map(|wave| summarize_active_wave(&wave, &experiments))
+            .map(|wave| HostActiveWaveSnapshot {
+                total: wave.total,
+                running: wave.running,
+                queued: wave.queued,
+                completed: wave.completed,
+                failed: wave.failed,
+                concurrency_limit: wave.concurrency_limit,
+                wake_when: wave.wake_when,
+                wake_sent: wave.wake_sent,
+            });
+        let (wake_running, mut pending_approvals) = {
+            let state = self.runtime_state.lock().await;
+            let approvals = state
+                .pending_approvals
+                .iter()
+                .filter(|(_, pending)| pending.mission_id == mission.id)
+                .map(|(request_id, pending)| HostPendingApprovalSnapshot {
+                    request_id: request_id.clone(),
+                    command: pending.command.clone(),
+                    reason: pending.reason.clone(),
+                    requested_at: pending.requested_at,
+                })
+                .collect::<Vec<_>>();
+            (state.deliberating.contains(&mission.id), approvals)
+        };
+        pending_approvals.sort_by_key(|approval| approval.requested_at);
+        let current_wake_reason = queued_wakes.first().map(|record| record.wake.reason);
+        let queued_wakes = if wake_running {
+            queued_wakes.len().saturating_sub(1)
+        } else {
+            queued_wakes.len()
+        };
+
+        Ok(Some(HostMissionSnapshot {
+            mission_id: mission.id.to_string(),
+            goal: mission.goal,
+            posture: mission.posture,
+            status: mission.status,
+            wake_running,
+            queued_wakes,
+            current_wake_reason,
+            active_wave,
+            pending_user_messages,
+            pending_approvals,
+            pending_questions,
+            latest_tool_call_error,
+            latest_change,
         }))
     }
 
@@ -3281,6 +3425,9 @@ impl MissionCore {
                 request_id.clone(),
                 PendingApproval {
                     mission_id: mission.id,
+                    command: args.command.clone(),
+                    reason: args.reason.clone(),
+                    requested_at: Utc::now(),
                     response_tx: tx,
                 },
             );

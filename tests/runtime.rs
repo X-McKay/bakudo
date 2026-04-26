@@ -1422,7 +1422,7 @@ async fn session_controller_routes_host_objectives_into_direct_mission_start() {
 }
 
 #[tokio::test]
-async fn session_controller_answers_progress_queries_from_host_layer() {
+async fn session_controller_answers_running_and_candidate_queries_from_host_layer() {
     let dir = TempDir::new("bakudo-session-host-progress");
     let script = write_fake_abox_script(
         &dir,
@@ -1479,7 +1479,7 @@ async fn session_controller_answers_progress_queries_from_host_layer() {
 
     cmd_tx
         .send(SessionCommand::HostInput {
-            text: "Tell me about how things are progressing".to_string(),
+            text: "What is running right now?".to_string(),
         })
         .await
         .unwrap();
@@ -1487,7 +1487,11 @@ async fn session_controller_answers_progress_queries_from_host_layer() {
     let progress_reply = timeout(Duration::from_secs(1), async {
         loop {
             match event_rx.recv().await {
-                Some(SessionEvent::Info(msg)) if msg.contains("running 1") => break msg,
+                Some(SessionEvent::Info(msg))
+                    if msg.contains("worker") && msg.contains("running") =>
+                {
+                    break msg
+                }
                 Some(_) => continue,
                 None => panic!("event channel closed"),
             }
@@ -1495,7 +1499,162 @@ async fn session_controller_answers_progress_queries_from_host_layer() {
     })
     .await
     .unwrap();
-    assert!(progress_reply.contains("Host status"));
+    assert!(progress_reply.contains("worker"));
+    assert!(progress_reply.contains("running"));
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::TaskFinished { .. }) => break,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "What preserved worktrees need review?".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let candidate_reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) if msg.contains("need review") => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(candidate_reply.contains("preserved"));
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mission_runtime_reports_active_mission_and_queued_wakes_to_host() {
+    let dir = TempDir::new("bakudo-host-queued-wake");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+import time
+time.sleep(1.0)
+call("suspend", {"reason": "waiting for the next wake"})
+"#,
+    );
+    write_exec_provider_files(&repo, &script);
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-host-queued".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Track queued wakes".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission = timeout(Duration::from_secs(2), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions.into_iter().next() {
+                break mission;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cmd_tx.send(SessionCommand::ForceWake).await.unwrap();
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let queued = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+            if queued.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "What is the mission waiting on right now?".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) if msg.contains("additional wake") => break msg,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(reply.contains("Track queued wakes"));
+    assert!(reply.contains("wake running"));
 
     cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
     handle.await.unwrap();
@@ -2673,6 +2832,27 @@ call("complete_mission", {"summary": "host exec approval path completed"})
             observed_events
         ),
     };
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "What is the mission waiting on?".to_string(),
+        })
+        .await
+        .unwrap();
+    let blocker_reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) if msg.contains("approval") => break msg,
+                Some(event) => observed_events.push(format!("{event:?}")),
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(blocker_reply.contains("Waiting on 1 approval"));
+    assert!(blocker_reply.contains("verify approval"));
+
     cmd_tx
         .send(SessionCommand::ResolveHostApproval {
             request_id,
