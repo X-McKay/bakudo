@@ -9,7 +9,8 @@
 //! On startup the session controller calls `abox list` and reconciles the
 //! ledger to recover from any previous crash.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -24,7 +25,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -156,6 +157,8 @@ pub struct MissionWakeBanner {
     pub state: MissionWakeState,
     pub current_reason: Option<WakeReason>,
     pub queued_count: usize,
+    pub next_wake_at: Option<DateTime<Utc>>,
+    pub timeout_streak: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +359,7 @@ struct MissionRuntimeState {
     pending_approvals: HashMap<String, PendingApproval>,
     pending_questions: HashMap<String, PendingQuestion>,
     deliberating: HashSet<MissionId>,
+    scheduled_wake_deadlines: HashMap<MissionId, DateTime<Utc>>,
     wake_user_message_ids: HashMap<WakeId, Vec<i64>>,
     next_agent_wave_approved: bool,
 }
@@ -405,6 +409,9 @@ struct MissionCore {
 
 const MCP_ENDPOINT_PATH: &str = "/mcp";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const WAKE_TIMEOUT_BACKOFF_BASE_MS: u64 = 1_000;
+const WAKE_TIMEOUT_BACKOFF_MAX_MS: u64 = 30_000;
+const WAKE_TIMEOUT_BACKOFF_JITTER_DIVISOR: u64 = 4;
 
 #[derive(Clone, Debug, Default)]
 struct WakeStopState {
@@ -1693,6 +1700,10 @@ impl MissionCore {
             }
             self.evaluate_active_wave(mission.id).await?;
             self.schedule_active_wave(mission.id).await?;
+            let queued_wakes = self
+                .mission_store
+                .unprocessed_wakes(Some(mission.id))
+                .await?;
             if let Some(text) = recovered_user_input {
                 self.queue_wake(
                     mission.id,
@@ -1705,6 +1716,8 @@ impl MissionCore {
                     true,
                 )
                 .await?;
+            } else if !queued_wakes.is_empty() {
+                self.process_next_wake(mission.id).await?;
             } else {
                 self.queue_wake(
                     mission.id,
@@ -1930,21 +1943,18 @@ impl MissionCore {
             (state.deliberating.contains(&mission.id), approvals)
         };
         pending_approvals.sort_by_key(|approval| approval.requested_at);
-        let current_wake_reason = queued_wakes.first().map(|record| record.wake.reason);
-        let queued_wakes = if wake_running {
-            queued_wakes.len().saturating_sub(1)
-        } else {
-            queued_wakes.len()
-        };
+        let wake = summarize_wake_banner(queued_wakes.as_slice(), wake_running);
 
         Ok(Some(HostMissionSnapshot {
             mission_id: mission.id.to_string(),
             goal: mission.goal,
             posture: mission.posture,
             status: mission.status,
-            wake_running,
-            queued_wakes,
-            current_wake_reason,
+            wake_running: wake.state == MissionWakeState::Running,
+            queued_wakes: wake.queued_count,
+            current_wake_reason: wake.current_reason,
+            next_wake_at: wake.next_wake_at,
+            timeout_streak: wake.timeout_streak,
             active_wave,
             pending_user_messages,
             pending_approvals,
@@ -2178,15 +2188,11 @@ impl MissionCore {
         };
         let mission_state =
             initial_mission_state(&goal, done_contract.clone(), constraints.clone());
-        self.mission_store.upsert_mission(&mission).await?;
-        self.mission_store
-            .save_mission_state(mission.id, &mission_state)
-            .await?;
         let plan = initial_mission_plan(&goal, done_contract.as_deref(), constraints.as_deref());
-        self.mission_store
-            .seed_mission_plan(mission.id, &plan)
+        let plan_path = self
+            .mission_store
+            .initialize_mission(&mission, &mission_state, &plan)
             .await?;
-        let plan_path = self.mission_store.mission_plan_path(mission.id);
         self.mission_store
             .append_ledger(&LedgerEntry {
                 at: Utc::now(),
@@ -2498,7 +2504,7 @@ impl MissionCore {
         payload: Value,
         immediate: bool,
     ) -> Result<WakeId> {
-        let wake_id = self.enqueue_wake(mission_id, reason, payload).await?;
+        let wake_id = self.enqueue_wake(mission_id, reason, None, payload).await?;
         if immediate {
             self.process_next_wake(mission_id).await?;
         }
@@ -2509,6 +2515,7 @@ impl MissionCore {
         &self,
         mission_id: MissionId,
         reason: WakeReason,
+        not_before: Option<DateTime<Utc>>,
         payload: Value,
     ) -> Result<WakeId> {
         let Some(mut mission) = self.mission_store.mission(mission_id).await? else {
@@ -2530,6 +2537,7 @@ impl MissionCore {
             mission_id,
             reason,
             created_at: Utc::now(),
+            not_before,
             payload,
             mission_state,
             wallet: mission.wallet.clone(),
@@ -2556,6 +2564,48 @@ impl MissionCore {
         Ok(wake.id)
     }
 
+    async fn reserve_wake_alarm(&self, mission_id: MissionId, wake_at: DateTime<Utc>) -> bool {
+        let mut state = self.runtime_state.lock().await;
+        match state.scheduled_wake_deadlines.get(&mission_id).copied() {
+            Some(existing) if existing <= wake_at => false,
+            _ => {
+                state.scheduled_wake_deadlines.insert(mission_id, wake_at);
+                true
+            }
+        }
+    }
+
+    fn spawn_wake_alarm(&self, mission_id: MissionId, wake_at: DateTime<Utc>) {
+        let core = self.clone();
+        tokio::spawn(async move {
+            let now = Utc::now();
+            if let Ok(delay) = wake_at.signed_duration_since(now).to_std() {
+                tokio::time::sleep(delay).await;
+            }
+
+            let should_fire = {
+                let mut state = core.runtime_state.lock().await;
+                match state.scheduled_wake_deadlines.get(&mission_id).copied() {
+                    Some(deadline) if deadline == wake_at => {
+                        state.scheduled_wake_deadlines.remove(&mission_id);
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if !should_fire {
+                return;
+            }
+
+            if let Err(err) = core.process_next_wake(mission_id).await {
+                let _ = core
+                    .event_tx
+                    .send(SessionEvent::Error(err.to_string()))
+                    .await;
+            }
+        });
+    }
+
     async fn process_next_wake(&self, mission_id: MissionId) -> Result<()> {
         {
             let mut state = self.runtime_state.lock().await;
@@ -2566,17 +2616,15 @@ impl MissionCore {
         }
 
         loop {
-            let wake = self
+            let wakes = self
                 .mission_store
                 .unprocessed_wakes(Some(mission_id))
-                .await?
-                .into_iter()
-                .next()
-                .map(|record| record.wake);
-            let Some(wake) = wake else {
+                .await?;
+            let Some(next_wake) = wakes.into_iter().next() else {
                 {
                     let mut state = self.runtime_state.lock().await;
                     state.deliberating.remove(&mission_id);
+                    state.scheduled_wake_deadlines.remove(&mission_id);
                 }
                 if self
                     .mission_store
@@ -2595,6 +2643,23 @@ impl MissionCore {
                 state.deliberating.insert(mission_id);
                 continue;
             };
+            let wake = next_wake.wake;
+            if !wake.is_ready(Utc::now()) {
+                {
+                    let mut state = self.runtime_state.lock().await;
+                    state.deliberating.remove(&mission_id);
+                }
+                let wake_at = wake.ready_at();
+                if self.reserve_wake_alarm(mission_id, wake_at).await {
+                    self.spawn_wake_alarm(mission_id, wake_at);
+                }
+                self.emit_banner().await;
+                return Ok(());
+            }
+            {
+                let mut state = self.runtime_state.lock().await;
+                state.scheduled_wake_deadlines.remove(&mission_id);
+            }
 
             let Some(mut mission) = self.mission_store.mission(mission_id).await? else {
                 break;
@@ -2643,6 +2708,7 @@ impl MissionCore {
 
         let mut state = self.runtime_state.lock().await;
         state.deliberating.remove(&mission_id);
+        state.scheduled_wake_deadlines.remove(&mission_id);
         Ok(())
     }
 
@@ -2800,6 +2866,8 @@ impl MissionCore {
                     break;
                 }
                 _ = &mut deadline => {
+                    let backoff =
+                        compute_timeout_backoff(mission.id, wake, "wake_budget_wall_clock");
                     self.append_provenance(
                         mission.id,
                         json!({
@@ -2814,9 +2882,15 @@ impl MissionCore {
                     self.enqueue_wake(
                         mission.id,
                         WakeReason::Timeout,
+                        Some(backoff.wake_at),
                         json!({
                             "kind": "wake_budget_wall_clock",
                             "limit_ms": provider.wake_budget.wall_clock.as_millis(),
+                            "timeout_streak": backoff.streak,
+                            "backoff_ms": backoff.delay_ms,
+                            "jitter_ms": backoff.jitter_ms,
+                            "scheduled_for": backoff.wake_at,
+                            "source_wake_id": wake.id,
                         }),
                     )
                     .await?;
@@ -4533,6 +4607,18 @@ fn mission_wake_summary_line(banner: &MissionBanner) -> Option<String> {
                     "s"
                 }
             );
+            if banner.wake.current_reason == Some(WakeReason::Timeout) {
+                if let Some(deadline) = banner.wake.next_wake_at {
+                    let mut summary = format!(
+                        "{prefix}: timeout backoff until {}",
+                        format_wake_deadline(deadline)
+                    );
+                    if let Some(streak) = banner.wake.timeout_streak {
+                        summary.push_str(&format!(" (streak {streak})"));
+                    }
+                    return Some(summary);
+                }
+            }
             Some(match banner.wake.current_reason {
                 Some(reason) => format!("{prefix}: {}", wake_reason_label(reason)),
                 None => prefix,
@@ -4562,6 +4648,10 @@ fn mission_next_action_summary(banner: &MissionBanner) -> &'static str {
     }
     if banner.pending_questions > 0 {
         return "answer the pending user question";
+    }
+    if banner.wake.current_reason == Some(WakeReason::Timeout) && banner.wake.next_wake_at.is_some()
+    {
+        return "wait for timeout backoff or send steering";
     }
     if matches!(banner.wake.state, MissionWakeState::Idle)
         && banner.fleet.active == 0
@@ -4613,12 +4703,22 @@ fn summarize_wake_banner(
     queued_wakes: &[crate::mission_store::StoredWakeEvent],
     deliberating: bool,
 ) -> MissionWakeBanner {
+    let now = Utc::now();
     let current_reason = queued_wakes.first().map(|record| record.wake.reason);
+    let next_wake_at = queued_wakes
+        .first()
+        .map(|record| record.wake.ready_at())
+        .filter(|deadline| *deadline > now);
+    let timeout_streak = queued_wakes
+        .first()
+        .and_then(|record| timeout_streak_from_payload(&record.wake.payload));
     if deliberating {
         return MissionWakeBanner {
             state: MissionWakeState::Running,
             current_reason,
             queued_count: queued_wakes.len().saturating_sub(1),
+            next_wake_at: None,
+            timeout_streak,
         };
     }
     if queued_wakes.is_empty() {
@@ -4626,12 +4726,16 @@ fn summarize_wake_banner(
             state: MissionWakeState::Idle,
             current_reason: None,
             queued_count: 0,
+            next_wake_at: None,
+            timeout_streak: None,
         };
     }
     MissionWakeBanner {
         state: MissionWakeState::Queued,
         current_reason,
         queued_count: queued_wakes.len(),
+        next_wake_at,
+        timeout_streak,
     }
 }
 
@@ -4930,6 +5034,8 @@ impl WakeMcpServerState {
                 "wake tool-call budget exhausted after {} calls",
                 self.tool_call_limit
             );
+            let backoff =
+                compute_timeout_backoff(self.mission.id, &self.wake, "wake_budget_tool_calls");
             let _ = self
                 .core
                 .append_provenance(
@@ -4948,9 +5054,15 @@ impl WakeMcpServerState {
                 .enqueue_wake(
                     self.mission.id,
                     WakeReason::Timeout,
+                    Some(backoff.wake_at),
                     json!({
                         "kind": "wake_budget_tool_calls",
                         "limit": self.tool_call_limit,
+                        "timeout_streak": backoff.streak,
+                        "backoff_ms": backoff.delay_ms,
+                        "jitter_ms": backoff.jitter_ms,
+                        "scheduled_for": backoff.wake_at,
+                        "source_wake_id": self.wake.id,
                     }),
                 )
                 .await;
@@ -5715,6 +5827,56 @@ fn slugify(value: &str) -> String {
         .join("-")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TimeoutBackoffPlan {
+    streak: u32,
+    delay_ms: u64,
+    jitter_ms: u64,
+    wake_at: DateTime<Utc>,
+}
+
+fn compute_timeout_backoff(
+    mission_id: MissionId,
+    wake: &WakeEvent,
+    trigger_kind: &'static str,
+) -> TimeoutBackoffPlan {
+    let streak = timeout_streak_from_payload(&wake.payload)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let shift = streak.saturating_sub(1).min(16);
+    let base_delay_ms = WAKE_TIMEOUT_BACKOFF_BASE_MS
+        .saturating_mul(1_u64 << shift)
+        .min(WAKE_TIMEOUT_BACKOFF_MAX_MS);
+    let jitter_cap = (base_delay_ms / WAKE_TIMEOUT_BACKOFF_JITTER_DIVISOR).max(1);
+    let mut hasher = DefaultHasher::new();
+    mission_id.hash(&mut hasher);
+    wake.id.hash(&mut hasher);
+    trigger_kind.hash(&mut hasher);
+    streak.hash(&mut hasher);
+    let jitter_ms = hasher.finish() % (jitter_cap + 1);
+    let delay_ms = base_delay_ms
+        .saturating_add(jitter_ms)
+        .min(WAKE_TIMEOUT_BACKOFF_MAX_MS);
+    let wake_at = Utc::now() + chrono::Duration::milliseconds(delay_ms as i64);
+    TimeoutBackoffPlan {
+        streak,
+        delay_ms,
+        jitter_ms,
+        wake_at,
+    }
+}
+
+fn timeout_streak_from_payload(payload: &Value) -> Option<u32> {
+    payload
+        .get("timeout_streak")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn format_wake_deadline(deadline: DateTime<Utc>) -> String {
+    deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 fn merge_patch(target: &mut Value, patch: Value) {
     match patch {
         Value::Object(patch_obj) => {
@@ -5846,6 +6008,7 @@ mod tests {
             mission_id: MissionId(Uuid::new_v4()),
             reason: WakeReason::ManualResume,
             created_at: Utc::now(),
+            not_before: None,
             payload: json!({"demo": true}),
             mission_state: MissionState::default_layout(),
             wallet: Wallet::default(),

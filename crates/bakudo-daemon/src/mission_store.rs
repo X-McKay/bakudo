@@ -167,6 +167,18 @@ impl MissionStore {
         .context("mission upsert join failed")?
     }
 
+    pub async fn initialize_mission(
+        &self,
+        mission: &Mission,
+        mission_state: &MissionState,
+        plan_markdown: &str,
+    ) -> Result<PathBuf> {
+        self.upsert_mission(mission).await?;
+        self.save_mission_state(mission.id, mission_state).await?;
+        self.seed_mission_plan(mission.id, plan_markdown).await?;
+        Ok(self.mission_plan_path(mission.id))
+    }
+
     pub async fn mission(&self, mission_id: MissionId) -> Result<Option<Mission>> {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
@@ -249,6 +261,15 @@ impl MissionStore {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
             let conn = open_conn(&db_path)?;
+            let mission_exists = conn
+                .query_row(
+                    "SELECT 1 FROM missions WHERE id = ?1",
+                    params![mission_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .context("failed to verify mission before loading state")?
+                .is_some();
             let json: Option<String> = conn
                 .query_row(
                     "SELECT state_json FROM mission_states WHERE mission_id = ?1",
@@ -259,7 +280,14 @@ impl MissionStore {
                 .context("failed to load mission state")?;
             match json {
                 Some(json) => serde_json::from_str(&json).context("invalid mission state json"),
-                None => Ok(MissionState::default_layout()),
+                None if mission_exists => Err(anyhow!(
+                    "mission '{}' is missing durable mission state",
+                    mission_id
+                )),
+                None => Err(anyhow!(
+                    "mission '{}' not found while loading mission state",
+                    mission_id
+                )),
             }
         })
         .await
@@ -731,6 +759,12 @@ impl MissionStore {
                     serde_json::from_str(&wake_json).context("invalid wake json in store")?;
                 wakes.push(StoredWakeEvent { wake, processed_at });
             }
+            wakes.sort_by(|left, right| {
+                left.wake
+                    .ready_at()
+                    .cmp(&right.wake.ready_at())
+                    .then_with(|| left.wake.created_at.cmp(&right.wake.created_at))
+            });
             Ok(wakes)
         })
         .await
@@ -1186,7 +1220,7 @@ fn parse_ledger_kind(value: &str) -> Result<LedgerKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bakudo_core::mission::{MissionState, Wallet};
+    use bakudo_core::mission::{MissionState, WakeEvent, WakeId, WakeReason, Wallet};
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -1267,6 +1301,71 @@ mod tests {
             mission_state.0
         );
         assert_eq!(store.recent_ledger(mission.id, 8).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mission_store_errors_when_existing_mission_state_is_missing() {
+        let dir = temp_store_dir();
+        let path = dir.db_path();
+        let store = MissionStore::open(&path).unwrap();
+        let mission = sample_mission();
+
+        store.upsert_mission(&mission).await.unwrap();
+
+        let err = store
+            .mission_state(mission.id)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing durable mission state"));
+    }
+
+    #[tokio::test]
+    async fn mission_store_sorts_unprocessed_wakes_by_ready_time() {
+        let dir = temp_store_dir();
+        let path = dir.db_path();
+        let store = MissionStore::open(&path).unwrap();
+        let mission = sample_mission();
+        let mission_state = MissionState::default_layout();
+
+        store.upsert_mission(&mission).await.unwrap();
+        store
+            .save_mission_state(mission.id, &mission_state)
+            .await
+            .unwrap();
+
+        let delayed = WakeEvent {
+            id: WakeId::new(),
+            mission_id: mission.id,
+            reason: WakeReason::Timeout,
+            created_at: Utc::now(),
+            not_before: Some(Utc::now() + chrono::Duration::seconds(30)),
+            payload: serde_json::json!({"timeout_streak": 1}),
+            mission_state: mission_state.clone(),
+            wallet: mission.wallet.clone(),
+            user_inbox: Vec::new(),
+            recent_ledger: Vec::new(),
+        };
+        let immediate = WakeEvent {
+            id: WakeId::new(),
+            mission_id: mission.id,
+            reason: WakeReason::UserMessage,
+            created_at: Utc::now() + chrono::Duration::seconds(1),
+            not_before: None,
+            payload: serde_json::json!({"text": "resume"}),
+            mission_state,
+            wallet: mission.wallet.clone(),
+            user_inbox: Vec::new(),
+            recent_ledger: Vec::new(),
+        };
+
+        store.insert_wake(&delayed).await.unwrap();
+        store.insert_wake(&immediate).await.unwrap();
+
+        let wakes = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+        assert_eq!(wakes.len(), 2);
+        assert_eq!(wakes[0].wake.id, immediate.id);
+        assert_eq!(wakes[1].wake.id, delayed.id);
     }
 
     #[tokio::test]

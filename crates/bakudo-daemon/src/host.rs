@@ -32,6 +32,8 @@ pub struct HostMissionSnapshot {
     pub wake_running: bool,
     pub queued_wakes: usize,
     pub current_wake_reason: Option<WakeReason>,
+    pub next_wake_at: Option<DateTime<Utc>>,
+    pub timeout_streak: Option<u32>,
     pub active_wave: Option<HostActiveWaveSnapshot>,
     pub pending_user_messages: usize,
     pub pending_approvals: Vec<HostPendingApprovalSnapshot>,
@@ -708,6 +710,15 @@ fn mission_state_overview(mission: &HostMissionSnapshot) -> String {
         }
         return running;
     }
+    if mission.current_wake_reason == Some(WakeReason::Timeout) {
+        if let Some(deadline) = mission.next_wake_at {
+            let mut summary = format!("timeout backoff until {}", format_wake_deadline(deadline));
+            if let Some(streak) = mission.timeout_streak {
+                summary.push_str(&format!(" (streak {streak})"));
+            }
+            return summary;
+        }
+    }
     if mission.queued_wakes > 0 {
         return match mission.current_wake_reason {
             Some(reason) => format!(
@@ -805,6 +816,9 @@ fn mission_next_action_summary(mission: &HostMissionSnapshot) -> &'static str {
     }
     if !mission.pending_questions.is_empty() {
         return "answer the pending user question";
+    }
+    if mission.current_wake_reason == Some(WakeReason::Timeout) && mission.next_wake_at.is_some() {
+        return "wait for timeout backoff or send steering";
     }
     if !mission.wake_running
         && mission.queued_wakes == 0
@@ -936,6 +950,10 @@ fn wake_reason_label(reason: WakeReason) -> &'static str {
     }
 }
 
+fn format_wake_deadline(deadline: DateTime<Utc>) -> String {
+    deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 fn wake_when_label(wake_when: WakeWhen) -> &'static str {
     match wake_when {
         WakeWhen::AllComplete => "all complete",
@@ -1040,6 +1058,8 @@ mod tests {
             wake_running: false,
             queued_wakes: 1,
             current_wake_reason: Some(WakeReason::ManualResume),
+            next_wake_at: None,
+            timeout_streak: None,
             active_wave: Some(HostActiveWaveSnapshot {
                 total: 2,
                 running: 0,
@@ -1111,6 +1131,29 @@ mod tests {
                 assert_eq!(text, "Pause and run tests first");
             }
             other => panic!("expected steering, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_runtime_reports_timeout_backoff_from_mission_state() {
+        let host = HostRuntime::new();
+        let mut snapshot = snapshot(Vec::new());
+        let mut mission = active_mission_snapshot();
+        mission.current_wake_reason = Some(WakeReason::Timeout);
+        mission.next_wake_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-04-26T15:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        mission.timeout_streak = Some(2);
+        snapshot.active_mission = Some(mission);
+
+        match host.handle_input("What is the mission waiting on right now?", &snapshot) {
+            HostAction::Reply(message) => {
+                assert!(message.contains("timeout backoff until 2026-04-26T15:04:05Z"));
+                assert!(message.contains("streak 2"));
+            }
+            other => panic!("expected status reply, got {other:?}"),
         }
     }
 

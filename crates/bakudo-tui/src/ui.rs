@@ -1306,6 +1306,8 @@ mod tests {
                 state: MissionWakeState::Running,
                 current_reason: Some(WakeReason::ManualResume),
                 queued_count: 0,
+                next_wake_at: None,
+                timeout_streak: None,
             },
             active_wave: None,
             wall_clock_remaining_secs: 1800,

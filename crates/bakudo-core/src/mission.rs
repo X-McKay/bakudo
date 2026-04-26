@@ -448,6 +448,8 @@ pub struct WakeEvent {
     pub mission_id: MissionId,
     pub reason: WakeReason,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub not_before: Option<DateTime<Utc>>,
     pub payload: serde_json::Value,
     pub mission_state: MissionState,
     pub wallet: Wallet,
@@ -494,6 +496,16 @@ impl MissionState {
             "active_wave": null,
             "completion_summary": null
         }))
+    }
+}
+
+impl WakeEvent {
+    pub fn ready_at(&self) -> DateTime<Utc> {
+        self.not_before.unwrap_or(self.created_at)
+    }
+
+    pub fn is_ready(&self, now: DateTime<Utc>) -> bool {
+        self.ready_at() <= now
     }
 }
 

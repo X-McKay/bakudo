@@ -350,6 +350,10 @@ pub(crate) fn mission_next_action(banner: &MissionBanner) -> &'static str {
     if banner.pending_questions > 0 {
         return "answer the pending user question";
     }
+    if banner.wake.current_reason == Some(WakeReason::Timeout) && banner.wake.next_wake_at.is_some()
+    {
+        return "wait for timeout backoff or send steering";
+    }
     if matches!(banner.wake.state, MissionWakeState::Idle)
         && banner.fleet.active == 0
         && banner.fleet.queued == 0
@@ -375,6 +379,18 @@ pub(crate) fn mission_wake_summary(banner: &MissionBanner) -> Option<String> {
                     "s"
                 }
             );
+            if banner.wake.current_reason == Some(WakeReason::Timeout) {
+                if let Some(deadline) = banner.wake.next_wake_at {
+                    let mut summary = format!(
+                        "{prefix}: timeout backoff until {}",
+                        format_wake_deadline(deadline)
+                    );
+                    if let Some(streak) = banner.wake.timeout_streak {
+                        summary.push_str(&format!(" (streak {streak})"));
+                    }
+                    return Some(summary);
+                }
+            }
             Some(match banner.wake.current_reason {
                 Some(reason) => format!("{prefix}: {}", wake_reason_label(reason)),
                 None => prefix,
@@ -426,6 +442,10 @@ fn wake_reason_label(reason: WakeReason) -> &'static str {
         WakeReason::Timeout => "timeout",
         WakeReason::ManualResume => "manual resume",
     }
+}
+
+fn format_wake_deadline(deadline: chrono::DateTime<chrono::Utc>) -> String {
+    deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn wake_when_label(wake_when: WakeWhen) -> &'static str {
@@ -640,6 +660,8 @@ mod tests {
             state: MissionWakeState::Idle,
             current_reason: None,
             queued_count: 0,
+            next_wake_at: None,
+            timeout_streak: None,
         };
         app.mission_banner = Some(banner);
 
@@ -669,6 +691,8 @@ mod tests {
             state: MissionWakeState::Idle,
             current_reason: None,
             queued_count: 0,
+            next_wake_at: None,
+            timeout_streak: None,
         };
         app.mission_banner = Some(banner);
 
@@ -749,6 +773,8 @@ mod tests {
                     _ => None,
                 },
                 queued_count: usize::from(matches!(status, MissionStatus::AwaitingDeliberator)),
+                next_wake_at: None,
+                timeout_streak: None,
             },
             active_wave: None,
             wall_clock_remaining_secs: 900,

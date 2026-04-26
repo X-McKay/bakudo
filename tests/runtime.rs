@@ -3486,6 +3486,209 @@ else:
 }
 
 #[tokio::test]
+async fn mission_runtime_backs_off_timeout_wakes_and_surfaces_schedule() {
+    let dir = TempDir::new("bakudo-timeout-backoff");
+    let repo = TempRepo::new();
+    let script = write_mock_deliberator_script(
+        &dir,
+        r#"
+import time
+
+if wake["reason"] == "manual_resume":
+    time.sleep(1.0)
+elif wake["reason"] == "timeout":
+    streak = wake["payload"]["timeout_streak"]
+    if streak == 1:
+        time.sleep(1.0)
+    else:
+        call("complete_mission", {"summary": f"recovered after {streak} timeout wakes"})
+else:
+    raise AssertionError(wake["reason"])
+"#,
+    );
+    write_exec_provider_files_with_budget(&repo, &script, 20, "150ms");
+    let (abox_script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    "$@"
+    ;;
+  stop)
+    ;;
+"#,
+    );
+    let config = BakudoConfig {
+        abox_bin: abox_script.display().to_string(),
+        default_provider: "exec".to_string(),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let (cmd_tx, cmd_rx) = mpsc::channel(32);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&abox_script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-timeout-backoff".to_string()),
+                "exec",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::StartMission {
+            posture: Posture::Mission,
+            goal: "Back off timeout wakes".to_string(),
+            done_contract: None,
+            constraints: None,
+        })
+        .await
+        .unwrap();
+
+    let store = MissionStore::open(
+        config
+            .resolved_repo_data_dir(Some(repo.path()))
+            .join("state.db"),
+    )
+    .unwrap();
+    let mission_id = timeout(Duration::from_secs(2), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions.into_iter().next() {
+                break mission.id;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    timeout(Duration::from_secs(4), async {
+        loop {
+            let mission = store.mission(mission_id).await.unwrap().unwrap();
+            let wakes = store.unprocessed_wakes(Some(mission_id)).await.unwrap();
+            if mission.status == MissionStatus::Sleeping
+                && wakes.len() == 1
+                && wakes[0].wake.reason == bakudo_core::mission::WakeReason::Timeout
+                && wakes[0]
+                    .wake
+                    .not_before
+                    .is_some_and(|deadline| deadline > Utc::now())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    cmd_tx
+        .send(SessionCommand::HostInput {
+            text: "What is the mission waiting on right now?".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let backoff_reply = timeout(Duration::from_secs(1), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::Info(msg)) if msg.contains("timeout backoff until") => {
+                    break msg;
+                }
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(backoff_reply.contains("streak 1"));
+
+    let mission = timeout(Duration::from_secs(8), async {
+        loop {
+            let missions = store.list_missions().await.unwrap();
+            if let Some(mission) = missions
+                .into_iter()
+                .find(|mission| mission.status == MissionStatus::Completed)
+            {
+                let wakes = store.unprocessed_wakes(Some(mission.id)).await.unwrap();
+                if wakes.is_empty() {
+                    break mission;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(mission.id, mission_id);
+
+    let provenance_path = repo
+        .path()
+        .join(".bakudo")
+        .join("provenance")
+        .join(format!("{}.ndjson", mission.id));
+    let provenance = fs::read_to_string(&provenance_path).unwrap();
+    let timeout_wakes = provenance
+        .lines()
+        .filter_map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).ok()?;
+            if event.get("event")? != "wake_queued"
+                || event.get("wake")?.get("reason")? != "timeout"
+            {
+                return None;
+            }
+            Some(event)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(timeout_wakes.len(), 2);
+
+    let first_backoff = timeout_wakes[0]["wake"]["payload"]["backoff_ms"]
+        .as_u64()
+        .unwrap();
+    let second_backoff = timeout_wakes[1]["wake"]["payload"]["backoff_ms"]
+        .as_u64()
+        .unwrap();
+    assert!(second_backoff > first_backoff);
+    assert_eq!(
+        timeout_wakes[0]["wake"]["payload"]["timeout_streak"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        timeout_wakes[1]["wake"]["payload"]["timeout_streak"].as_u64(),
+        Some(2)
+    );
+
+    for event in &timeout_wakes {
+        let wake = &event["wake"];
+        let created_at = chrono::DateTime::parse_from_rfc3339(wake["created_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        let not_before = chrono::DateTime::parse_from_rfc3339(wake["not_before"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(not_before > created_at);
+    }
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn mission_runtime_recovers_running_experiment_on_restart() {
     let dir = TempDir::new("bakudo-mission-recovery");
     let repo = TempRepo::new();
