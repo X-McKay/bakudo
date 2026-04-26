@@ -158,11 +158,40 @@ pub enum FocusedPanel {
     Shelf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalAction {
+    Edit,
+    Approve,
+    Deny,
+}
+
+impl ApprovalAction {
+    pub const ALL: [Self; 3] = [Self::Edit, Self::Approve, Self::Deny];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Edit => "Edit command",
+            Self::Approve => "Approve",
+            Self::Deny => "Deny",
+        }
+    }
+
+    pub fn detail(&self) -> &'static str {
+        match self {
+            Self::Edit => "review or amend before approving",
+            Self::Approve => "run the command as shown",
+            Self::Deny => "deny this host action",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ApprovalPrompt {
     pub request_id: String,
     pub command: String,
     pub reason: String,
+    pub selected_action: ApprovalAction,
+    pub selection_touched: bool,
     pub editing: bool,
     pub edited_command: String,
     pub cursor: usize,
@@ -174,6 +203,20 @@ pub struct UserQuestionPrompt {
     pub question: String,
     pub choices: Vec<String>,
     pub selected: usize,
+    pub selection_touched: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlashCommandPopup {
+    pub items: Vec<&'static str>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum PopupState {
+    SlashCommands(SlashCommandPopup),
+    Approval(ApprovalPrompt),
+    UserQuestion(UserQuestionPrompt),
 }
 
 #[derive(Debug, Clone)]
@@ -264,10 +307,8 @@ pub struct App {
     /// Spinner tick counter, incremented every Tick event.
     pub tick: u64,
 
-    /// Tab-completion candidates for the current input prefix.
-    pub completions: Vec<&'static str>,
-    /// Index into `completions` for cycling with Tab.
-    pub completion_idx: usize,
+    /// Active popup surface for slash completion or blocking runtime prompts.
+    pub popup: Option<PopupState>,
 
     /// Whether the `/help` overlay is currently showing.
     pub help_visible: bool,
@@ -276,9 +317,6 @@ pub struct App {
 
     /// Whether the app should exit.
     pub should_quit: bool,
-
-    pub approval_prompt: Option<ApprovalPrompt>,
-    pub user_question_prompt: Option<UserQuestionPrompt>,
 
     /// Channel to send commands to the session controller.
     cmd_tx: mpsc::Sender<SessionCommand>,
@@ -328,13 +366,10 @@ impl App {
             pending_runtime_work: None,
             active_task_count: 0,
             tick: 0,
-            completions: Vec::new(),
-            completion_idx: 0,
+            popup: None,
             help_visible: false,
             help_scroll: 0,
             should_quit: false,
-            approval_prompt: None,
-            user_question_prompt: None,
             cmd_tx,
             event_rx,
             transcript_store,
@@ -491,12 +526,7 @@ impl App {
             let _ = self.cmd_tx.try_send(SessionCommand::Shutdown);
             return true;
         }
-        if self.approval_prompt.is_some() {
-            self.handle_approval_key(key);
-            return true;
-        }
-        if self.user_question_prompt.is_some() {
-            self.handle_question_key(key);
+        if self.handle_modal_popup_key(key) {
             return true;
         }
         // The help overlay consumes all other keys while it's visible.
@@ -505,6 +535,20 @@ impl App {
             return true;
         }
         false
+    }
+
+    fn handle_modal_popup_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        match self.popup.as_ref() {
+            Some(PopupState::Approval(_)) => {
+                self.handle_approval_key(key);
+                true
+            }
+            Some(PopupState::UserQuestion(_)) => {
+                self.handle_question_key(key);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Dispatch a key press while the `/help` overlay is visible.
@@ -536,128 +580,195 @@ impl App {
 
     fn handle_approval_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
-        let Some(prompt) = self.approval_prompt.as_mut() else {
+
+        #[derive(Debug)]
+        enum Outcome {
+            None,
+            Approve {
+                request_id: String,
+                edited_command: Option<String>,
+                message_command: String,
+            },
+            Deny {
+                request_id: String,
+                message_command: String,
+            },
+        }
+
+        let Some(PopupState::Approval(prompt)) = self.popup.as_mut() else {
             return;
         };
-        if prompt.editing {
+        let outcome = if prompt.editing {
             match key.code {
                 KeyCode::Esc => {
                     prompt.editing = false;
                     prompt.edited_command = prompt.command.clone();
                     prompt.cursor = prompt.edited_command.len();
+                    Outcome::None
                 }
-                KeyCode::Enter => {
-                    let request_id = prompt.request_id.clone();
-                    let edited_command = prompt.edited_command.clone();
-                    let _ = self.cmd_tx.try_send(SessionCommand::ResolveHostApproval {
-                        request_id,
-                        approved: true,
-                        edited_command: Some(edited_command.clone()),
-                    });
-                    self.approval_prompt = None;
-                    self.push_message(ChatMessage::info(format!(
-                        "Approved host command: {}",
-                        edited_command
-                    )));
-                }
+                KeyCode::Enter => Outcome::Approve {
+                    request_id: prompt.request_id.clone(),
+                    edited_command: Some(prompt.edited_command.clone()),
+                    message_command: prompt.edited_command.clone(),
+                },
                 KeyCode::Backspace if prompt.cursor > 0 => {
                     let prev = prompt.cursor - 1;
                     prompt.edited_command.drain(prev..prompt.cursor);
                     prompt.cursor = prev;
+                    Outcome::None
                 }
                 KeyCode::Left if prompt.cursor > 0 => {
                     prompt.cursor -= 1;
+                    Outcome::None
                 }
                 KeyCode::Right if prompt.cursor < prompt.edited_command.len() => {
                     prompt.cursor += 1;
+                    Outcome::None
                 }
                 KeyCode::Char(ch) => {
                     prompt.edited_command.insert(prompt.cursor, ch);
                     prompt.cursor += 1;
+                    Outcome::None
                 }
-                _ => {}
+                _ => Outcome::None,
             }
-            return;
-        }
+        } else {
+            match key.code {
+                KeyCode::Up | KeyCode::Left => {
+                    prompt.selected_action = step_approval_action(prompt.selected_action, -1);
+                    prompt.selection_touched = true;
+                    Outcome::None
+                }
+                KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+                    prompt.selected_action = step_approval_action(prompt.selected_action, 1);
+                    prompt.selection_touched = true;
+                    Outcome::None
+                }
+                KeyCode::Enter if prompt.selection_touched => match prompt.selected_action {
+                    ApprovalAction::Edit => {
+                        prompt.editing = true;
+                        prompt.edited_command = prompt.command.clone();
+                        prompt.cursor = prompt.edited_command.len();
+                        Outcome::None
+                    }
+                    ApprovalAction::Approve => Outcome::Approve {
+                        request_id: prompt.request_id.clone(),
+                        edited_command: None,
+                        message_command: prompt.command.clone(),
+                    },
+                    ApprovalAction::Deny => Outcome::Deny {
+                        request_id: prompt.request_id.clone(),
+                        message_command: prompt.command.clone(),
+                    },
+                },
+                KeyCode::Char('a') => Outcome::Approve {
+                    request_id: prompt.request_id.clone(),
+                    edited_command: None,
+                    message_command: prompt.command.clone(),
+                },
+                KeyCode::Char('d') | KeyCode::Esc => Outcome::Deny {
+                    request_id: prompt.request_id.clone(),
+                    message_command: prompt.command.clone(),
+                },
+                KeyCode::Char('e') => {
+                    prompt.editing = true;
+                    prompt.edited_command = prompt.command.clone();
+                    prompt.cursor = prompt.edited_command.len();
+                    Outcome::None
+                }
+                _ => Outcome::None,
+            }
+        };
 
-        match key.code {
-            KeyCode::Char('a') => {
-                let request_id = prompt.request_id.clone();
-                let command = prompt.command.clone();
+        match outcome {
+            Outcome::None => {}
+            Outcome::Approve {
+                request_id,
+                edited_command,
+                message_command,
+            } => {
                 let _ = self.cmd_tx.try_send(SessionCommand::ResolveHostApproval {
                     request_id,
                     approved: true,
-                    edited_command: None,
+                    edited_command,
                 });
-                self.approval_prompt = None;
+                self.popup = None;
                 self.push_message(ChatMessage::info(format!(
                     "Approved host command: {}",
-                    command
+                    message_command
                 )));
             }
-            KeyCode::Char('d') | KeyCode::Esc => {
-                let request_id = prompt.request_id.clone();
-                let command = prompt.command.clone();
+            Outcome::Deny {
+                request_id,
+                message_command,
+            } => {
                 let _ = self.cmd_tx.try_send(SessionCommand::ResolveHostApproval {
                     request_id,
                     approved: false,
                     edited_command: None,
                 });
-                self.approval_prompt = None;
+                self.popup = None;
                 self.push_message(ChatMessage::info(format!(
                     "Denied host command: {}",
-                    command
+                    message_command
                 )));
             }
-            KeyCode::Char('e') => {
-                prompt.editing = true;
-                prompt.edited_command = prompt.command.clone();
-                prompt.cursor = prompt.edited_command.len();
-            }
-            _ => {}
         }
     }
 
     fn handle_question_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
-        let Some(prompt) = self.user_question_prompt.as_mut() else {
+
+        #[derive(Debug)]
+        enum Outcome {
+            None,
+            Answer { request_id: String, answer: String },
+        }
+
+        let Some(PopupState::UserQuestion(prompt)) = self.popup.as_mut() else {
             return;
         };
-        match key.code {
-            KeyCode::Up | KeyCode::Left if prompt.selected > 0 => {
-                prompt.selected -= 1;
+        let outcome = match key.code {
+            KeyCode::Up | KeyCode::Left => {
+                prompt.selected = step_selection(prompt.selected, prompt.choices.len(), -1);
+                prompt.selection_touched = true;
+                Outcome::None
             }
-            KeyCode::Down | KeyCode::Right if prompt.selected + 1 < prompt.choices.len() => {
-                prompt.selected += 1;
+            KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+                prompt.selected = step_selection(prompt.selected, prompt.choices.len(), 1);
+                prompt.selection_touched = true;
+                Outcome::None
             }
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
                 let idx = ch.to_digit(10).unwrap_or(0) as usize;
                 if idx > 0 && idx <= prompt.choices.len() {
                     prompt.selected = idx - 1;
+                    prompt.selection_touched = true;
                 }
+                Outcome::None
             }
-            KeyCode::Enter => {
+            KeyCode::Enter if prompt.selection_touched => {
                 let answer = prompt
                     .choices
                     .get(prompt.selected)
                     .cloned()
                     .unwrap_or_default();
-                let _ = self.cmd_tx.try_send(SessionCommand::AnswerUserQuestion {
-                    request_id: prompt.request_id.clone(),
-                    answer: answer.clone(),
-                });
-                self.push_message(ChatMessage::info(format!("Submitted answer: {}", answer)));
-                self.user_question_prompt = None;
-            }
-            KeyCode::Esc => {
-                let answer = prompt.choices.first().cloned().unwrap_or_default();
-                let _ = self.cmd_tx.try_send(SessionCommand::AnswerUserQuestion {
+                Outcome::Answer {
                     request_id: prompt.request_id.clone(),
                     answer,
-                });
-                self.user_question_prompt = None;
+                }
             }
-            _ => {}
+            KeyCode::Esc => Outcome::None,
+            _ => Outcome::None,
+        };
+
+        if let Outcome::Answer { request_id, answer } = outcome {
+            let _ = self.cmd_tx.try_send(SessionCommand::AnswerUserQuestion {
+                request_id,
+                answer: answer.clone(),
+            });
+            self.push_message(ChatMessage::info(format!("Submitted answer: {}", answer)));
+            self.popup = None;
         }
     }
 
@@ -667,6 +778,10 @@ impl App {
     pub fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if self.handle_slash_popup_key(key) {
+            return;
+        }
 
         match key.code {
             // ── Submit / insert newline ──────────────────────────────────
@@ -688,7 +803,7 @@ impl App {
             // ── Tab — slash-command autocomplete ─────────────────────────
             KeyCode::Tab => {
                 if self.input.starts_with('/') {
-                    self.cycle_completion();
+                    self.cycle_completion(1);
                 } else {
                     // Tab with no slash prefix: switch focus to shelf.
                     self.focus = FocusedPanel::Shelf;
@@ -697,7 +812,7 @@ impl App {
 
             // ── Escape — clear input or dismiss completions ───────────────
             KeyCode::Esc => {
-                if !self.completions.is_empty() {
+                if self.has_slash_popup() {
                     self.clear_completions();
                 } else {
                     self.input.clear();
@@ -793,6 +908,42 @@ impl App {
             }
 
             _ => {}
+        }
+    }
+
+    fn handle_slash_popup_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::KeyCode;
+
+        if !self.input.starts_with('/') && !self.has_slash_popup() {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Tab if self.input.starts_with('/') => {
+                self.cycle_completion(1);
+                true
+            }
+            KeyCode::Down if self.has_slash_popup() => {
+                self.cycle_completion(1);
+                true
+            }
+            KeyCode::Up if self.has_slash_popup() => {
+                self.cycle_completion(-1);
+                true
+            }
+            KeyCode::Enter
+                if self.has_slash_popup()
+                    && self.input.starts_with('/')
+                    && !self.input[1..].contains(' ') =>
+            {
+                self.apply_selected_completion();
+                true
+            }
+            KeyCode::Esc if self.has_slash_popup() => {
+                self.clear_completions();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1030,14 +1181,16 @@ impl App {
                 reason,
             } => {
                 self.clear_pending_runtime_work();
-                self.approval_prompt = Some(ApprovalPrompt {
+                self.popup = Some(PopupState::Approval(ApprovalPrompt {
                     request_id,
                     cursor: command.len(),
                     edited_command: command.clone(),
                     command,
                     reason,
+                    selected_action: ApprovalAction::Edit,
+                    selection_touched: false,
                     editing: false,
-                });
+                }));
             }
             SessionEvent::UserQuestionRequested {
                 request_id,
@@ -1045,12 +1198,13 @@ impl App {
                 choices,
             } => {
                 self.clear_pending_runtime_work();
-                self.user_question_prompt = Some(UserQuestionPrompt {
+                self.popup = Some(PopupState::UserQuestion(UserQuestionPrompt {
                     request_id,
                     question,
                     selected: 0,
+                    selection_touched: false,
                     choices,
-                });
+                }));
             }
             SessionEvent::MissionActivity { activity } => {
                 self.clear_pending_runtime_work();
@@ -1540,36 +1694,82 @@ impl App {
     // ── Tab completion ─────────────────────────────────────────────────────
 
     fn update_completions(&mut self) {
+        if matches!(
+            self.popup,
+            Some(PopupState::Approval(_) | PopupState::UserQuestion(_))
+        ) {
+            return;
+        }
         if self.input.starts_with('/') {
             let prefix = &self.input[1..];
             // Only show completions if there's no space yet (still typing the command).
             if !prefix.contains(' ') {
-                self.completions = completions_for(prefix);
-                self.completion_idx = 0;
+                let items = completions_for(prefix);
+                if items.is_empty() {
+                    self.clear_completions();
+                    return;
+                }
+                let selected = match self.popup.as_ref() {
+                    Some(PopupState::SlashCommands(popup)) => popup
+                        .items
+                        .get(popup.selected)
+                        .and_then(|current| items.iter().position(|item| item == current))
+                        .unwrap_or(0),
+                    _ => 0,
+                };
+                self.popup = Some(PopupState::SlashCommands(SlashCommandPopup {
+                    items,
+                    selected,
+                }));
                 return;
             }
         }
-        self.completions.clear();
-        self.completion_idx = 0;
+        self.clear_completions();
     }
 
-    fn cycle_completion(&mut self) {
-        if self.completions.is_empty() {
+    fn cycle_completion(&mut self, step: isize) {
+        if !self.has_slash_popup() {
             // Trigger completions for current input.
             self.update_completions();
         }
-        if self.completions.is_empty() {
+        if !self.has_slash_popup() {
             return;
         }
-        let candidate = self.completions[self.completion_idx];
+        let advance_first = self.input.starts_with('/') && self.input[1..].contains(' ');
+        let Some(PopupState::SlashCommands(popup)) = self.popup.as_mut() else {
+            return;
+        };
+        let len = popup.items.len();
+        if len == 0 {
+            return;
+        }
+        if advance_first || step.is_negative() {
+            popup.selected = step_selection(popup.selected, len, step);
+        }
+        let candidate = popup.items[popup.selected];
         self.input = format!("/{candidate} ");
         self.cursor = self.input.len();
-        self.completion_idx = (self.completion_idx + 1) % self.completions.len();
     }
 
     fn clear_completions(&mut self) {
-        self.completions.clear();
-        self.completion_idx = 0;
+        if self.has_slash_popup() {
+            self.popup = None;
+        }
+    }
+
+    fn has_slash_popup(&self) -> bool {
+        matches!(self.popup, Some(PopupState::SlashCommands(_)))
+    }
+
+    fn apply_selected_completion(&mut self) {
+        let Some(PopupState::SlashCommands(popup)) = self.popup.as_ref() else {
+            return;
+        };
+        let Some(candidate) = popup.items.get(popup.selected) else {
+            return;
+        };
+        self.input = format!("/{candidate} ");
+        self.cursor = self.input.len();
     }
 
     // ── Cursor helpers ─────────────────────────────────────────────────────
@@ -1691,6 +1891,26 @@ fn locate_cursor_row(input: &str, cursor: usize) -> (usize, usize) {
     (row, start)
 }
 
+fn step_selection(current: usize, len: usize, step: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+
+    if step.is_negative() {
+        current.checked_sub(1).unwrap_or(len - 1)
+    } else {
+        (current + 1) % len
+    }
+}
+
+fn step_approval_action(current: ApprovalAction, step: isize) -> ApprovalAction {
+    let idx = ApprovalAction::ALL
+        .iter()
+        .position(|action| *action == current)
+        .unwrap_or(0);
+    ApprovalAction::ALL[step_selection(idx, ApprovalAction::ALL.len(), step)]
+}
+
 /// Compact a `bakudo-attempt-<uuid>` id down to the first 8 chars of the UUID
 /// for inline chat display.
 pub fn short_task_id(task_id: &str) -> &str {
@@ -1786,7 +2006,34 @@ fn shelf_entry_from_record(record: SandboxRecord) -> ShelfEntry {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use bakudo_core::{config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger};
+
     use super::*;
+
+    fn fresh_app() -> (App, mpsc::Receiver<SessionCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(4);
+        let (_event_tx, event_rx) = mpsc::channel(4);
+        (
+            App::new(
+                Arc::new(BakudoConfig::default()),
+                Arc::new(ProviderRegistry::with_defaults()),
+                Arc::new(SandboxLedger::new()),
+                cmd_tx,
+                event_rx,
+                None,
+                true,
+            ),
+            cmd_rx,
+        )
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
 
     #[test]
     fn humanize_revspec_not_found() {
@@ -1822,5 +2069,67 @@ mod tests {
         // Cursor at start of "bbb".
         assert_eq!(locate_cursor_row(input, 4), (1, 4));
         assert_eq!(locate_cursor_row(input, 8), (2, 8));
+    }
+
+    #[test]
+    fn question_popup_requires_explicit_selection_before_enter() {
+        let (mut app, mut cmd_rx) = fresh_app();
+        app.popup = Some(PopupState::UserQuestion(UserQuestionPrompt {
+            request_id: "q-1".to_string(),
+            question: "Pick one".to_string(),
+            choices: vec!["first".to_string(), "second".to_string()],
+            selected: 0,
+            selection_touched: false,
+        }));
+
+        app.handle_global_key(key(crossterm::event::KeyCode::Enter));
+        assert!(cmd_rx.try_recv().is_err());
+
+        app.handle_global_key(key(crossterm::event::KeyCode::Down));
+        app.handle_global_key(key(crossterm::event::KeyCode::Enter));
+
+        match cmd_rx.try_recv() {
+            Ok(SessionCommand::AnswerUserQuestion { request_id, answer }) => {
+                assert_eq!(request_id, "q-1");
+                assert_eq!(answer, "second");
+            }
+            other => panic!("expected AnswerUserQuestion, got {other:?}"),
+        }
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn approval_popup_uses_navigation_before_enter() {
+        let (mut app, mut cmd_rx) = fresh_app();
+        app.popup = Some(PopupState::Approval(ApprovalPrompt {
+            request_id: "a-1".to_string(),
+            command: "git status".to_string(),
+            reason: "check repo state".to_string(),
+            selected_action: ApprovalAction::Edit,
+            selection_touched: false,
+            editing: false,
+            edited_command: "git status".to_string(),
+            cursor: "git status".len(),
+        }));
+
+        app.handle_global_key(key(crossterm::event::KeyCode::Enter));
+        assert!(cmd_rx.try_recv().is_err());
+
+        app.handle_global_key(key(crossterm::event::KeyCode::Down));
+        app.handle_global_key(key(crossterm::event::KeyCode::Enter));
+
+        match cmd_rx.try_recv() {
+            Ok(SessionCommand::ResolveHostApproval {
+                request_id,
+                approved,
+                edited_command,
+            }) => {
+                assert_eq!(request_id, "a-1");
+                assert!(approved);
+                assert!(edited_command.is_none());
+            }
+            other => panic!("expected ResolveHostApproval, got {other:?}"),
+        }
+        assert!(app.popup.is_none());
     }
 }

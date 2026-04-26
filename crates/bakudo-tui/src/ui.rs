@@ -16,7 +16,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, FocusedPanel, ShelfColor, short_task_id};
+use crate::app::{App, ApprovalAction, FocusedPanel, PopupState, ShelfColor, short_task_id};
 use crate::commands::SlashCommand;
 use crate::footer::{self, FooterVariant};
 use crate::palette::{
@@ -78,16 +78,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_shelf(frame, app, h_chunks[1]);
     }
 
-    // ── Completion popup ────────────────────────────────────────────────────
-    if !app.completions.is_empty() && app.focus == FocusedPanel::Chat {
-        render_completion_popup(frame, app, v_chunks[2]);
-    }
-
-    if app.approval_prompt.is_some() {
-        render_approval_modal(frame, app);
-    }
-    if app.user_question_prompt.is_some() {
-        render_question_modal(frame, app);
+    if app.popup.is_some() {
+        render_popup(frame, app, v_chunks[2]);
     }
 
     // ── Help overlay (drawn last so it sits on top of everything) ───────────
@@ -96,62 +88,275 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn render_approval_modal(frame: &mut Frame, app: &App) {
-    let Some(prompt) = &app.approval_prompt else {
+#[derive(Clone, Copy)]
+enum PopupTone {
+    Default,
+    Positive,
+    Destructive,
+}
+
+fn render_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
+    let Some(popup) = &app.popup else {
         return;
     };
-    let area = centered_rect_with_min(
-        frame.size(),
-        76,
-        if prompt.editing { 72 } else { 62 },
-        54,
-        if prompt.editing { 12 } else { 10 },
-    );
+
+    match popup {
+        PopupState::SlashCommands(commands) if app.focus == FocusedPanel::Chat => {
+            let area = slash_popup_rect(frame.size(), composer_area, commands.items.len());
+            let lines = build_slash_popup_lines(commands);
+            render_popup_surface(frame, area, "Commands", lines);
+        }
+        PopupState::SlashCommands(_) => {}
+        PopupState::Approval(prompt) if prompt.editing => {
+            let area = centered_rect_with_min(frame.size(), 78, 68, 58, 13);
+            let lines = build_approval_edit_lines(prompt, area.width.saturating_sub(4) as usize);
+            render_popup_surface(frame, area, "Approval", lines);
+        }
+        PopupState::Approval(prompt) => {
+            let area = centered_rect_with_min(frame.size(), 78, 62, 58, 13);
+            let lines = build_approval_choice_lines(prompt, area.width.saturating_sub(4) as usize);
+            render_popup_surface(frame, area, "Approval", lines);
+        }
+        PopupState::UserQuestion(prompt) => {
+            let area = centered_rect_with_min(frame.size(), 74, 58, 54, 10);
+            let lines = build_question_popup_lines(prompt, area.width.saturating_sub(4) as usize);
+            render_popup_surface(frame, area, "Question", lines);
+        }
+    }
+}
+
+fn render_popup_surface(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     frame.render_widget(Clear, area);
-    let body = if prompt.editing {
-        format!(
-            "Approval required\n\nCommand:\n{}\n\nReason:\n{}\n\nEdit command, then press Enter to approve.\nEsc returns to approve/deny.",
-            prompt.edited_command, prompt.reason
-        )
-    } else {
-        format!(
-            "Approval required\n\nCommand:\n{}\n\nReason:\n{}\n\n[a] approve   [d] deny   [e] edit",
-            prompt.command, prompt.reason
-        )
-    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(" Approval ");
+        .border_style(Style::default().fg(palette::focus_border()))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(Color::White).bold(),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     frame.render_widget(
-        Paragraph::new(body).block(block).wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::White)),
+        inner,
     );
 }
 
-fn render_question_modal(frame: &mut Frame, app: &App) {
-    let Some(prompt) = &app.user_question_prompt else {
-        return;
-    };
-    let area = centered_rect_with_min(frame.size(), 72, 56, 52, 9);
-    frame.render_widget(Clear, area);
-    let mut lines = vec![Line::from(prompt.question.as_str()), Line::from("")];
-    for (idx, choice) in prompt.choices.iter().enumerate() {
-        let prefix = if idx == prompt.selected { "> " } else { "  " };
-        lines.push(Line::from(format!("{prefix}{}: {}", idx + 1, choice)));
+fn slash_popup_rect(frame_area: Rect, composer_area: Rect, item_count: usize) -> Rect {
+    let visible_items = item_count.min(8) as u16;
+    let popup_height = (visible_items + 3).min(frame_area.height.max(4)); // items + footer + borders
+    let popup_x = composer_area.x + 2;
+    let max_width = frame_area.width.saturating_sub(popup_x).max(1);
+    let popup_width = 34u16.min(max_width).max(22u16.min(max_width));
+    let popup_y = composer_area
+        .y
+        .saturating_sub(popup_height)
+        .max(frame_area.y);
+
+    Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from("Use arrows or number keys, then Enter."));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Question ");
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
+}
+
+fn build_slash_popup_lines(commands: &crate::app::SlashCommandPopup) -> Vec<Line<'static>> {
+    let mut lines = commands
+        .items
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(idx, command)| {
+            popup_option_line(
+                "/".to_string(),
+                (*command).to_string(),
+                None,
+                idx == commands.selected,
+                PopupTone::Default,
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::raw(""));
+    lines.push(popup_hint_line(&[
+        ("Tab/↑/↓", "select"),
+        ("Enter", "apply"),
+        ("Esc", "close"),
+    ]));
+    lines
+}
+
+fn build_approval_choice_lines(
+    prompt: &crate::app::ApprovalPrompt,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "Approval required",
+        Style::default().fg(Color::White).bold(),
+    ))];
+    lines.push(Line::raw(""));
+    lines.extend(labeled_popup_lines("Command", &prompt.command, width));
+    lines.push(Line::raw(""));
+    lines.extend(labeled_popup_lines("Reason", &prompt.reason, width));
+    lines.push(Line::raw(""));
+
+    for action in ApprovalAction::ALL {
+        let tone = match action {
+            ApprovalAction::Approve => PopupTone::Positive,
+            ApprovalAction::Deny => PopupTone::Destructive,
+            ApprovalAction::Edit => PopupTone::Default,
+        };
+        let shortcut = match action {
+            ApprovalAction::Edit => "[e] ".to_string(),
+            ApprovalAction::Approve => "[a] ".to_string(),
+            ApprovalAction::Deny => "[d] ".to_string(),
+        };
+        lines.push(popup_option_line(
+            shortcut,
+            action.label().to_string(),
+            Some(action.detail().to_string()),
+            prompt.selected_action == action,
+            tone,
+        ));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(popup_hint_line(&[
+        ("a/d/e", "direct"),
+        ("↑/↓", "select"),
+        ("Enter", "act"),
+        ("Esc", "deny"),
+    ]));
+    lines
+}
+
+fn build_approval_edit_lines(
+    prompt: &crate::app::ApprovalPrompt,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "Edit the command before approving.",
+        Style::default().fg(Color::White).bold(),
+    ))];
+    lines.push(Line::raw(""));
+    lines.extend(labeled_popup_lines("Reason", &prompt.reason, width));
+    lines.push(Line::raw(""));
+    lines.extend(labeled_popup_lines(
+        "Command",
+        &prompt.edited_command,
+        width,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(popup_hint_line(&[
+        ("Enter", "approve edit"),
+        ("Esc", "back"),
+    ]));
+    lines
+}
+
+fn build_question_popup_lines(
+    prompt: &crate::app::UserQuestionPrompt,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "Answer the question to continue.",
+        Style::default().fg(Color::White).bold(),
+    ))];
+    lines.push(Line::raw(""));
+    lines.extend(wrap_popup_text(&prompt.question, width));
+    lines.push(Line::raw(""));
+    for (idx, choice) in prompt.choices.iter().enumerate() {
+        lines.push(popup_option_line(
+            format!("{}. ", idx + 1),
+            choice.clone(),
+            None,
+            idx == prompt.selected,
+            PopupTone::Default,
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(popup_hint_line(&[
+        ("↑/↓ or 1-9", "select"),
+        ("Enter", "answer"),
+    ]));
+    lines
+}
+
+fn labeled_popup_lines(label: &str, value: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        format!("{label}:"),
+        palette::dim_style(),
+    ))];
+    lines.extend(
+        wrap_popup_text(value, width.saturating_sub(2))
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }),
     );
+    lines
+}
+
+fn wrap_popup_text(text: &str, width: usize) -> Vec<Line<'static>> {
+    wrap_to_width(text, width.max(8))
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+        .collect()
+}
+
+fn popup_option_line(
+    prefix: String,
+    label: String,
+    detail: Option<String>,
+    selected: bool,
+    tone: PopupTone,
+) -> Line<'static> {
+    let (label_style, detail_style) = popup_option_styles(selected, tone);
+    let marker = if selected { "› " } else { "  " };
+    let mut spans = vec![
+        Span::styled(marker, label_style),
+        Span::styled(prefix, label_style),
+        Span::styled(label, label_style),
+    ];
+    if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
+        spans.push(Span::styled("  ", detail_style));
+        spans.push(Span::styled(detail, detail_style));
+    }
+    Line::from(spans)
+}
+
+fn popup_option_styles(selected: bool, tone: PopupTone) -> (Style, Style) {
+    if selected {
+        let style = Style::default()
+            .fg(Color::Black)
+            .bg(palette::focus_border())
+            .add_modifier(Modifier::BOLD);
+        return (style, style);
+    }
+
+    let label_style = match tone {
+        PopupTone::Default => Style::default().fg(Color::White),
+        PopupTone::Positive => Style::default().fg(palette::shelf_merged()).bold(),
+        PopupTone::Destructive => Style::default().fg(palette::shelf_failed()).bold(),
+    };
+    (label_style, palette::dim_style())
+}
+
+fn popup_hint_line(parts: &[(&'static str, &'static str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (idx, (key, action)) in parts.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("  ", palette::dim_style()));
+        }
+        spans.push(hint_key(key));
+        spans.push(Span::styled(format!(" {action}"), palette::dim_style()));
+    }
+    Line::from(spans)
 }
 
 fn centered_rect_with_min(
@@ -331,65 +536,6 @@ fn locate_cursor(input: &str, cursor: usize) -> (usize, usize) {
         }
     }
     (row, start)
-}
-
-// ─── Completion popup ──────────────────────────────────────────────────────
-
-fn render_completion_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
-    if app.completions.is_empty() {
-        return;
-    }
-
-    let popup_height = (app.completions.len() as u16).min(8) + 2; // +2 for borders
-
-    const POPUP_TITLE_FLOOR: u16 = 17;
-    let entries_width = app
-        .completions
-        .iter()
-        .map(|s| s.len() + 3) // "/ " prefix + padding
-        .max()
-        .unwrap_or(12) as u16
-        + 4;
-    let popup_width = entries_width.max(POPUP_TITLE_FLOOR);
-
-    // Position popup just above the composer.
-    let popup_y = composer_area.y.saturating_sub(popup_height);
-    let popup_x = composer_area.x + 2; // align with "> " prompt
-    let popup_rect = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width.min(frame.size().width.saturating_sub(popup_x)),
-        height: popup_height,
-    };
-
-    let items: Vec<ListItem> = app
-        .completions
-        .iter()
-        .enumerate()
-        .map(|(i, cmd)| {
-            let selected = i == app.completion_idx.saturating_sub(1) % app.completions.len();
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(palette::focus_border())
-            } else {
-                Style::default().fg(Color::White)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled("/", palette::dim_style()),
-                Span::styled(*cmd, style),
-            ]))
-        })
-        .collect();
-
-    let popup_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(palette::focus_border()))
-        .title(Span::styled(" Tab: complete ", palette::dim_style()));
-
-    let list = List::new(items).block(popup_block);
-    frame.render_widget(list, popup_rect);
 }
 
 // ─── Live top strip ────────────────────────────────────────────────────────
@@ -937,7 +1083,7 @@ mod tests {
         FleetCounts, MissionBanner, MissionWakeBanner, MissionWakeState,
     };
 
-    use crate::app::{App, FocusedPanel, ShelfEntry};
+    use crate::app::{App, ApprovalAction, FocusedPanel, PopupState, ShelfEntry};
     use crate::palette::{SHELF_MIN_TERM_WIDTH, SHELF_WIDTH};
 
     use super::render;
@@ -1096,6 +1242,56 @@ mod tests {
         let rendered = render_to_string(&app, 100, 30);
         assert!(rendered.contains("Keybinds"));
         assert!(rendered.contains("Shift+Enter"));
+    }
+
+    #[test]
+    fn slash_popup_uses_shared_surface() {
+        let mut app = fresh_app();
+        app.popup = Some(PopupState::SlashCommands(crate::app::SlashCommandPopup {
+            items: vec!["provider", "providers"],
+            selected: 0,
+        }));
+        let rendered = render_to_string(&app, 100, 24);
+        assert!(rendered.contains("Commands"));
+        assert!(rendered.contains("/provider"));
+        assert!(rendered.contains("/providers"));
+    }
+
+    #[test]
+    fn approval_popup_uses_shared_surface() {
+        let mut app = fresh_app();
+        app.popup = Some(PopupState::Approval(crate::app::ApprovalPrompt {
+            request_id: "approval-1".to_string(),
+            command: "git worktree remove stale-branch".to_string(),
+            reason: "Clean up the finished worktree".to_string(),
+            selected_action: ApprovalAction::Edit,
+            selection_touched: false,
+            editing: false,
+            edited_command: "git worktree remove stale-branch".to_string(),
+            cursor: 30,
+        }));
+        let rendered = render_to_string(&app, 100, 30);
+        assert!(rendered.contains("Approval"));
+        assert!(rendered.contains("Edit command"));
+        assert!(rendered.contains("Approve"));
+        assert!(rendered.contains("Deny"));
+    }
+
+    #[test]
+    fn question_popup_uses_shared_surface() {
+        let mut app = fresh_app();
+        app.popup = Some(PopupState::UserQuestion(crate::app::UserQuestionPrompt {
+            request_id: "question-1".to_string(),
+            question: "Which branch should Bakudo continue from?".to_string(),
+            choices: vec!["main".to_string(), "release".to_string()],
+            selected: 0,
+            selection_touched: false,
+        }));
+        let rendered = render_to_string(&app, 100, 24);
+        assert!(rendered.contains("Question"));
+        assert!(rendered.contains("Which branch should Bakudo continue from?"));
+        assert!(rendered.contains("1. main"));
+        assert!(rendered.contains("2. release"));
     }
 
     #[test]
