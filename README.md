@@ -30,6 +30,9 @@ Version 2 now ships two complementary execution paths:
 
 For the full product and runtime model, start here:
 
+- [docs/USER_GUIDE.md](docs/USER_GUIDE.md):
+  practical operator guide, slash commands, engagement points, and an end-to-end
+  mission example
 - [docs/product-motive-and-operator-workflow.md](docs/product-motive-and-operator-workflow.md):
   why Bakudo exists, what operator workflow it is optimizing for, and which
   user-facing semantics are intentional
