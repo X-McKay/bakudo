@@ -28,15 +28,15 @@ supports-color = "3"
 
 [package]
 name = "bakudo"
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-bakudo-core = { version = "2.0.0", path = "crates/bakudo-core" }
-bakudo-tui = { version = "2.0.0", path = "crates/bakudo-tui" }
-bakudo-daemon = { version = "2.0.0", path = "crates/bakudo-daemon" }
+bakudo-core = { version = "2.0.1", path = "crates/bakudo-core" }
+bakudo-tui = { version = "2.0.1", path = "crates/bakudo-tui" }
+bakudo-daemon = { version = "2.0.1", path = "crates/bakudo-daemon" }
 anyhow.workspace = true
 tokio.workspace = true
 clap = { workspace = true, features = ["derive"] }

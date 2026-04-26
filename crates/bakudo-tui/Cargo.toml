@@ -1,14 +1,14 @@
 [package]
 name = "bakudo-tui"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bakudo-core = { version = "2.0.0", path = "../bakudo-core" }
-bakudo-daemon = { version = "2.0.0", path = "../bakudo-daemon" }
+bakudo-core = { version = "2.0.1", path = "../bakudo-core" }
+bakudo-daemon = { version = "2.0.1", path = "../bakudo-daemon" }
 chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
