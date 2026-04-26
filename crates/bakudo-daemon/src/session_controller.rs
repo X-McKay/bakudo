@@ -4821,7 +4821,7 @@ async fn wake_mcp_delete(
 fn build_deliberator_prompt(system_prompt: &str, wake: &WakeEvent) -> Result<String> {
     let wake_json = serde_json::to_string_pretty(wake)?;
     Ok(format!(
-        "{system_prompt}\n\nBakudo has already attached the mission MCP server for this wake. Use the available Bakudo tools directly; do not invent a custom transport or print JSON-RPC by hand.\n\nCurrent WakeEvent JSON:\n{wake_json}\n"
+        "{system_prompt}\n\nBakudo has already attached the mission MCP server for this wake. Use the available Bakudo tools directly; do not invent a custom transport or print JSON-RPC by hand.\n\nWake contract reminders:\n- `WakeEvent` is the source of truth for why you were resumed and what is already in flight.\n- `mission_plan.md` is operator-facing orientation; keep it concise and current.\n- `MissionState` is durable hand-off state; keep it compact, factual, and current.\n- Prefer `abox` work (`dispatch_swarm`, `abox_exec`, `abox_apply_patch`) for repo changes and verification.\n- Use `host_exec` only for real host-boundary actions that cannot happen inside `abox`.\n- End the wake with `complete_mission(...)` or `suspend(...)`, not both.\n\nCurrent WakeEvent JSON:\n{wake_json}\n"
     ))
 }
 
@@ -5366,11 +5366,12 @@ mod tests {
 
     use bakudo_core::abox::AboxAdapter;
     use bakudo_core::config::BakudoConfig;
-    use bakudo_core::mission::{Posture, WakeId};
+    use bakudo_core::mission::{MissionState, Posture, WakeEvent, WakeId, WakeReason, Wallet};
     use bakudo_core::protocol::SessionId;
     use bakudo_core::provider::ProviderRegistry;
     use bakudo_core::session::SessionRecord;
     use bakudo_core::state::SandboxLedger;
+    use chrono::Utc;
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
@@ -5455,6 +5456,29 @@ mod tests {
             .iter()
             .any(|arg| { arg == "mcp_servers.bakudo.default_tools_approval_mode=\"approve\"" }));
         assert_eq!(mcp_launch["tool_approval_mode"], "approve");
+    }
+
+    #[test]
+    fn deliberator_prompt_includes_wake_contract_reminders() {
+        let wake = WakeEvent {
+            id: WakeId(Uuid::new_v4()),
+            mission_id: MissionId(Uuid::new_v4()),
+            reason: WakeReason::ManualResume,
+            created_at: Utc::now(),
+            payload: json!({"demo": true}),
+            mission_state: MissionState::default_layout(),
+            wallet: Wallet::default(),
+            user_inbox: Vec::new(),
+            recent_ledger: Vec::new(),
+        };
+
+        let prompt = build_deliberator_prompt("system prompt", &wake).unwrap();
+
+        assert!(prompt.contains("Wake contract reminders"));
+        assert!(prompt.contains("mission_plan.md"));
+        assert!(prompt.contains("MissionState"));
+        assert!(prompt.contains("Prefer `abox` work"));
+        assert!(prompt.contains("Current WakeEvent JSON"));
     }
 
     #[test]

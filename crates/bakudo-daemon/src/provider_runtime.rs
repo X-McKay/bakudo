@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use bakudo_core::mission::Posture;
 use serde::{Deserialize, Serialize};
 
-pub const MISSION_CONTRACT_VERSION: u32 = 4;
+pub const MISSION_CONTRACT_VERSION: u32 = 5;
 
 const CONTRACT_MANIFEST_FILE: &str = "mission-contract.json";
 
