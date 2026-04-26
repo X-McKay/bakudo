@@ -9,6 +9,25 @@ use crate::mission::normalize_artifact_path;
 use crate::protocol::{CandidatePolicy, SandboxLifecycle, WorkerStatus};
 use crate::state::SandboxState;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Passed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationSummary {
+    pub command: String,
+    pub status: VerificationStatus,
+    pub exit_code: i32,
+    pub timed_out: bool,
+    #[serde(default)]
+    pub stdout_tail: String,
+    #[serde(default)]
+    pub stderr_tail: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummary {
     pub task_id: String,
@@ -34,6 +53,8 @@ pub struct RunSummary {
     pub stderr: String,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -73,6 +94,7 @@ impl RunSummary {
             stderr: String::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            verification: None,
             error: Some(error),
         }
     }
@@ -344,6 +366,14 @@ mod tests {
             stderr: String::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            verification: Some(VerificationSummary {
+                command: "cargo test -q".to_string(),
+                status: VerificationStatus::Passed,
+                exit_code: 0,
+                timed_out: false,
+                stdout_tail: "ok".to_string(),
+                stderr_tail: String::new(),
+            }),
             error: None,
         };
 
@@ -351,6 +381,13 @@ mod tests {
         let loaded = load_run_summary(&dir, "task-123").unwrap().unwrap();
         assert_eq!(loaded.summary, "done");
         assert_eq!(loaded.final_state, SandboxState::Merged);
+        assert_eq!(
+            loaded
+                .verification
+                .as_ref()
+                .map(|verification| verification.status),
+            Some(VerificationStatus::Passed)
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

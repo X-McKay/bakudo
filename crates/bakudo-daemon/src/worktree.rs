@@ -16,7 +16,10 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use bakudo_core::abox::{sandbox_branch, sandbox_default_worktree_path, AboxAdapter, SandboxEntry};
+use bakudo_core::abox::{
+    sandbox_branch, sandbox_default_worktree_path, AboxAdapter, RunParams, SandboxEntry,
+};
+use bakudo_core::control::{VerificationStatus, VerificationSummary};
 use bakudo_core::error::BakudoError;
 use bakudo_core::protocol::CandidatePolicy;
 use bakudo_core::state::{SandboxLedger, SandboxState};
@@ -35,13 +38,39 @@ struct PendingSnapshotStats {
     total_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct AutoApplyVerificationPolicy<'a> {
+    pub command: &'a str,
+    pub timeout_secs: u64,
+}
+
 /// Result of a worktree lifecycle action.
 #[derive(Debug)]
 pub enum WorktreeAction {
-    Merged,
-    MergeConflicts(Vec<String>),
+    Merged {
+        verification: Option<VerificationSummary>,
+    },
+    MergeConflicts {
+        conflicts: Vec<String>,
+        verification: Option<VerificationSummary>,
+    },
     Discarded,
     Preserved,
+    VerificationFailed {
+        verification: VerificationSummary,
+    },
+}
+
+impl WorktreeAction {
+    pub fn verification(&self) -> Option<&VerificationSummary> {
+        match self {
+            Self::Merged { verification } | Self::MergeConflicts { verification, .. } => {
+                verification.as_ref()
+            }
+            Self::VerificationFailed { verification } => Some(verification),
+            Self::Discarded | Self::Preserved => None,
+        }
+    }
 }
 
 /// Apply the candidate policy for a finished task.
@@ -52,9 +81,12 @@ pub async fn apply_candidate_policy(
     repo: Option<&Path>,
     abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
+    verification: Option<AutoApplyVerificationPolicy<'_>>,
 ) -> Result<WorktreeAction, BakudoError> {
     match policy {
-        CandidatePolicy::AutoApply => merge_sandbox(task_id, base_branch, repo, abox, ledger).await,
+        CandidatePolicy::AutoApply => {
+            merge_sandbox(task_id, base_branch, repo, abox, ledger, verification).await
+        }
         CandidatePolicy::Discard => discard_sandbox(task_id, repo, abox, ledger).await,
         CandidatePolicy::Review => {
             prepare_preserved_worktree(task_id, ledger, SnapshotIntent::Preserve).await?;
@@ -80,19 +112,38 @@ pub async fn merge_sandbox(
     repo: Option<&Path>,
     abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
+    verification: Option<AutoApplyVerificationPolicy<'_>>,
 ) -> Result<WorktreeAction, BakudoError> {
     prepare_preserved_worktree(task_id, ledger, SnapshotIntent::Apply).await?;
+    let verification = match verification {
+        Some(policy) => {
+            let verification = verify_auto_apply_candidate(task_id, abox, ledger, policy).await?;
+            if verification.status == VerificationStatus::Failed {
+                warn!(
+                    "Auto-apply verification failed for task {task_id} (exit {}, timed_out={})",
+                    verification.exit_code, verification.timed_out
+                );
+                ledger.update_state(task_id, SandboxState::Preserved).await;
+                return Ok(WorktreeAction::VerificationFailed { verification });
+            }
+            Some(verification)
+        }
+        None => None,
+    };
     info!("Auto-applying worktree for task {task_id}");
     let conflicts = abox.merge(repo, task_id, base_branch).await?;
     if conflicts.is_empty() {
         ledger.update_state(task_id, SandboxState::Merged).await;
-        Ok(WorktreeAction::Merged)
+        Ok(WorktreeAction::Merged { verification })
     } else {
         warn!("Merge conflicts for task {task_id}: {:?}", conflicts);
         ledger
             .update_state(task_id, SandboxState::MergeConflicts)
             .await;
-        Ok(WorktreeAction::MergeConflicts(conflicts))
+        Ok(WorktreeAction::MergeConflicts {
+            conflicts,
+            verification,
+        })
     }
 }
 
@@ -117,7 +168,7 @@ pub async fn manual_apply(
     abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
 ) -> Result<WorktreeAction, BakudoError> {
-    merge_sandbox(task_id, base_branch, repo, abox, ledger).await
+    merge_sandbox(task_id, base_branch, repo, abox, ledger, None).await
 }
 
 /// Manually discard a preserved worktree.
@@ -204,6 +255,62 @@ async fn discover_worktree_path(
     }
 
     sandbox_default_worktree_path(task_id)
+}
+
+async fn verify_auto_apply_candidate(
+    task_id: &str,
+    abox: &AboxAdapter,
+    ledger: &Arc<SandboxLedger>,
+    policy: AutoApplyVerificationPolicy<'_>,
+) -> Result<VerificationSummary, BakudoError> {
+    let worktree_path = discover_worktree_path(task_id, ledger).await.ok_or_else(|| {
+        std::io::Error::other(format!(
+            "auto-apply verification is configured, but the preserved worktree for task {task_id} could not be found"
+        ))
+    })?;
+    let mut params = RunParams::new(
+        format!("{task_id}-verify"),
+        vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            policy.command.to_string(),
+        ],
+    );
+    params.repo = Some(worktree_path);
+    params.ephemeral = true;
+    params.timeout_secs = Some(policy.timeout_secs);
+    params.max_output_bytes = 32 * 1024;
+
+    let run = abox.run(&params, |_| {}).await?;
+    let status = if run.exit_code == 0 && !run.timed_out {
+        VerificationStatus::Passed
+    } else {
+        VerificationStatus::Failed
+    };
+
+    Ok(VerificationSummary {
+        command: policy.command.to_string(),
+        status,
+        exit_code: run.exit_code,
+        timed_out: run.timed_out,
+        stdout_tail: trim_output_tail(&run.stdout, 1024),
+        stderr_tail: trim_output_tail(&run.stderr, 1024),
+    })
+}
+
+fn trim_output_tail(output: &str, limit: usize) -> String {
+    let trimmed = output.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+    trimmed
+        .chars()
+        .rev()
+        .take(limit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 async fn pending_snapshot_stats(worktree_path: &Path) -> Result<PendingSnapshotStats, BakudoError> {

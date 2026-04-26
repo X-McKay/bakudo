@@ -153,6 +153,11 @@ impl TraceRecorder {
         bundle_path
     }
 
+    pub async fn append_attempt_outcome(&self, task_id: &str, markdown: &str) {
+        self.best_effort_append_text(&self.attempt_dir(task_id).join("trace_bundle.md"), markdown)
+            .await;
+    }
+
     async fn best_effort_write_json<T: Serialize>(&self, path: &Path, value: &T) {
         match serde_json::to_vec_pretty(value) {
             Ok(bytes) => {

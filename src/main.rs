@@ -501,7 +501,7 @@ async fn cmd_apply(
 
     let repo = std::env::current_dir().ok();
     match manual_apply(task_id, &config.base_branch, repo.as_deref(), abox, ledger).await? {
-        WorktreeAction::Merged => {
+        WorktreeAction::Merged { .. } => {
             let repo_data_dir = config.resolved_repo_data_dir(repo.as_deref());
             let _ = update_run_summary_outcome(
                 &repo_data_dir,
@@ -512,7 +512,7 @@ async fn cmd_apply(
             )?;
             println!("Merged {} into {}", task_id, config.base_branch);
         }
-        WorktreeAction::MergeConflicts(conflicts) => {
+        WorktreeAction::MergeConflicts { conflicts, .. } => {
             let repo_data_dir = config.resolved_repo_data_dir(repo.as_deref());
             let _ = update_run_summary_outcome(
                 &repo_data_dir,
@@ -527,7 +527,9 @@ async fn cmd_apply(
             }
             std::process::exit(1);
         }
-        WorktreeAction::Discarded | WorktreeAction::Preserved => unreachable!(),
+        WorktreeAction::Discarded
+        | WorktreeAction::Preserved
+        | WorktreeAction::VerificationFailed { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -1574,7 +1576,7 @@ async fn execute_headless_attempt(
         }
     };
 
-    let (final_state, worktree_action, merge_conflicts) =
+    let (final_state, worktree_action, merge_conflicts, verification) =
         if result.status == WorkerStatus::Succeeded {
             match apply_candidate_policy(
                 &task_id,
@@ -1583,26 +1585,47 @@ async fn execute_headless_attempt(
                 std::env::current_dir().ok().as_deref(),
                 &abox,
                 &ledger,
+                config.auto_apply_verify_command.as_deref().map(|command| {
+                    bakudo_daemon::worktree::AutoApplyVerificationPolicy {
+                        command,
+                        timeout_secs: config.timeout_secs,
+                    }
+                }),
             )
             .await?
             {
-                bakudo_daemon::worktree::WorktreeAction::Merged => {
-                    (SandboxState::Merged, HookWorktreeAction::Merged, Vec::new())
-                }
-                bakudo_daemon::worktree::WorktreeAction::MergeConflicts(conflicts) => (
+                bakudo_daemon::worktree::WorktreeAction::Merged { verification } => (
+                    SandboxState::Merged,
+                    HookWorktreeAction::Merged,
+                    Vec::new(),
+                    verification,
+                ),
+                bakudo_daemon::worktree::WorktreeAction::MergeConflicts {
+                    conflicts,
+                    verification,
+                } => (
                     SandboxState::MergeConflicts,
                     HookWorktreeAction::MergeConflicts,
                     conflicts,
+                    verification,
                 ),
                 bakudo_daemon::worktree::WorktreeAction::Discarded => (
                     SandboxState::Discarded,
                     HookWorktreeAction::Discarded,
                     Vec::new(),
+                    None,
                 ),
                 bakudo_daemon::worktree::WorktreeAction::Preserved => (
                     SandboxState::Preserved,
                     HookWorktreeAction::Preserved,
                     Vec::new(),
+                    None,
+                ),
+                bakudo_daemon::worktree::WorktreeAction::VerificationFailed { verification } => (
+                    SandboxState::Preserved,
+                    HookWorktreeAction::VerificationFailed,
+                    Vec::new(),
+                    Some(verification),
                 ),
             }
         } else {
@@ -1616,6 +1639,7 @@ async fn execute_headless_attempt(
                 },
                 HookWorktreeAction::NotApplied,
                 Vec::new(),
+                None,
             )
         };
 
@@ -1640,6 +1664,7 @@ async fn execute_headless_attempt(
         stderr: result.stderr.clone(),
         stdout_truncated: result.stdout_truncated,
         stderr_truncated: result.stderr_truncated,
+        verification: verification.clone(),
         error: None,
     };
     save_run_summary(&repo_data_dir, &summary)?;
@@ -1661,6 +1686,7 @@ async fn execute_headless_attempt(
         duration_ms: result.duration_ms,
         timed_out: result.timed_out,
         merge_conflicts,
+        verification,
     };
     if let Err(err) = run_post_run_hook(&config, &hook_payload).await {
         if let Some(tx) = &stream_tx {
@@ -1937,6 +1963,9 @@ fn render_single_run_footer(summary: &HeadlessRunSummary) {
         HookWorktreeAction::Discarded => println!("Worktree discarded."),
         HookWorktreeAction::Preserved => {
             println!("Worktree preserved at task_id: {}", summary.task_id);
+        }
+        HookWorktreeAction::VerificationFailed => {
+            println!("Worktree preserved after failed auto-apply verification.");
         }
         HookWorktreeAction::NotApplied => {}
     }

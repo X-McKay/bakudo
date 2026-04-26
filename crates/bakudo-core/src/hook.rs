@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::control::VerificationSummary;
 use crate::protocol::{AttemptId, CandidatePolicy, SandboxLifecycle, SessionId, WorkerStatus};
 use crate::state::SandboxState;
 
@@ -10,6 +11,7 @@ pub enum HookWorktreeAction {
     Merged,
     Discarded,
     MergeConflicts,
+    VerificationFailed,
     NotApplied,
 }
 
@@ -33,4 +35,6 @@ pub struct PostRunHookPayload {
     pub timed_out: bool,
     #[serde(default)]
     pub merge_conflicts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<VerificationSummary>,
 }

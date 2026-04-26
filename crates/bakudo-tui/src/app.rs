@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use bakudo_core::config::BakudoConfig;
+use bakudo_core::control::{VerificationStatus, VerificationSummary};
 use bakudo_core::mission::Posture;
 use bakudo_core::protocol::{
     CandidatePolicy, SandboxLifecycle, WorkerProgressEvent, WorkerProgressKind, WorkerStatus,
@@ -2078,6 +2079,19 @@ fn task_progress_chat_message(short: &str, event: &WorkerProgressEvent) -> Optio
 }
 
 fn task_finish_shelf_note(context: &TaskFinishContext) -> String {
+    if let Some(verification) = context
+        .verification
+        .as_ref()
+        .filter(|verification| verification.status == VerificationStatus::Failed)
+    {
+        return truncate_line(
+            format!(
+                "preserved: verification {}",
+                verification_summary_line(verification, false)
+            ),
+            120,
+        );
+    }
     let state_label = shelf_state_view(&context.state).0;
     match context.summary.as_deref().map(str::trim) {
         Some(summary) if !summary.is_empty() => {
@@ -2134,6 +2148,19 @@ fn task_finish_chat_message(context: &TaskFinishContext) -> Option<ChatMessage> 
                 )
             }),
     );
+    if let Some(verification) = context.verification.as_ref() {
+        body.push('\n');
+        body.push_str("verification: ");
+        body.push_str(&verification_summary_line(verification, true));
+        if verification.status == VerificationStatus::Failed {
+            let detail = verification_failure_detail(verification);
+            if !detail.is_empty() {
+                body.push('\n');
+                body.push_str("verification detail: ");
+                body.push_str(&detail);
+            }
+        }
+    }
     if let Some(summary) = context
         .summary
         .as_deref()
@@ -2160,6 +2187,12 @@ fn task_finish_chat_message(context: &TaskFinishContext) -> Option<ChatMessage> 
     ) || matches!(
         context.state,
         SandboxState::Failed { .. } | SandboxState::TimedOut | SandboxState::MergeConflicts
+    ) || matches!(
+        context
+            .verification
+            .as_ref()
+            .map(|verification| verification.status),
+        Some(VerificationStatus::Failed)
     );
 
     Some(if failed {
@@ -2167,6 +2200,32 @@ fn task_finish_chat_message(context: &TaskFinishContext) -> Option<ChatMessage> 
     } else {
         ChatMessage::info(body)
     })
+}
+
+fn verification_summary_line(verification: &VerificationSummary, include_command: bool) -> String {
+    let status = match verification.status {
+        VerificationStatus::Passed => "passed",
+        VerificationStatus::Failed => "failed",
+    };
+    let command = if include_command {
+        format!(" / {}", single_line_text(&verification.command))
+    } else {
+        String::new()
+    };
+    if verification.timed_out {
+        format!("timeout / exit {}{command}", verification.exit_code)
+    } else {
+        format!("{status} / exit {}{command}", verification.exit_code)
+    }
+}
+
+fn verification_failure_detail(verification: &VerificationSummary) -> String {
+    let detail = if !verification.stderr_tail.trim().is_empty() {
+        verification.stderr_tail.trim()
+    } else {
+        verification.stdout_tail.trim()
+    };
+    truncate_line(single_line_text(detail), 200)
 }
 
 fn parse_budget_minutes(value: &str) -> Option<u64> {
@@ -2431,6 +2490,7 @@ mod tests {
                     timeout_secs: Some(600),
                     allow_all_tools: Some(true),
                     worktree_path: Some("/tmp/abox/worktrees/task-progress".to_string()),
+                    verification: None,
                 },
             })
             .unwrap();
@@ -2452,5 +2512,81 @@ mod tests {
         assert!(rendered.contains("cmd -> cargo test -p bakudo-tui app"));
         assert!(rendered.contains("hand-off finished"));
         assert!(rendered.contains("worktree: /tmp/abox/worktrees/task-progress"));
+    }
+
+    #[test]
+    fn task_handoff_surfaces_failed_auto_apply_verification() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut app = App::new(
+            Arc::new(BakudoConfig::default()),
+            Arc::new(ProviderRegistry::with_defaults()),
+            Arc::new(SandboxLedger::new()),
+            cmd_tx,
+            event_rx,
+            None,
+            false,
+        );
+
+        event_tx
+            .try_send(SessionEvent::TaskStarted {
+                context: TaskStartContext {
+                    task_id: "task-verify".to_string(),
+                    provider_id: "codex".to_string(),
+                    model: Some("gpt-5".to_string()),
+                    prompt_summary: "Prepare an auto-apply candidate.".to_string(),
+                    sandbox_lifecycle: SandboxLifecycle::Preserved,
+                    candidate_policy: CandidatePolicy::AutoApply,
+                    timeout_secs: 600,
+                    allow_all_tools: true,
+                },
+            })
+            .unwrap();
+
+        event_tx
+            .try_send(SessionEvent::TaskFinished {
+                context: TaskFinishContext {
+                    task_id: "task-verify".to_string(),
+                    state: SandboxState::Preserved,
+                    worker_status: Some(WorkerStatus::Succeeded),
+                    summary: Some("prepared a candidate for merge".to_string()),
+                    exit_code: Some(0),
+                    duration_ms: Some(3_100),
+                    timed_out: false,
+                    sandbox_lifecycle: SandboxLifecycle::Preserved,
+                    candidate_policy: CandidatePolicy::AutoApply,
+                    timeout_secs: Some(600),
+                    allow_all_tools: Some(true),
+                    worktree_path: Some("/tmp/abox/worktrees/task-verify".to_string()),
+                    verification: Some(VerificationSummary {
+                        command: "cargo test -q".to_string(),
+                        status: VerificationStatus::Failed,
+                        exit_code: 23,
+                        timed_out: false,
+                        stdout_tail: String::new(),
+                        stderr_tail: "smoke test failed".to_string(),
+                    }),
+                },
+            })
+            .unwrap();
+
+        app.drain_session_events();
+
+        let entry = app.shelf.front().expect("shelf entry");
+        assert_eq!(entry.state_color, ShelfColor::Preserved);
+        assert!(entry.last_note.contains("verification failed"));
+
+        let rendered = app
+            .transcript
+            .iter()
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            rendered
+                .iter()
+                .any(|(role, content)| *role == MessageRole::Error
+                    && content.contains("verification: failed / exit 23 / cargo test -q")
+                    && content.contains("verification detail: smoke test failed"))
+        );
     }
 }

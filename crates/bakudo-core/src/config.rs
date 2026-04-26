@@ -47,6 +47,11 @@ pub struct BakudoConfig {
     #[serde(default)]
     pub post_run_hook: Option<Vec<String>>,
 
+    /// Optional shell command run inside a fresh ephemeral abox before
+    /// autonomous auto-apply merges.
+    #[serde(default, deserialize_with = "deserialize_optional_verify_command")]
+    pub auto_apply_verify_command: Option<String>,
+
     /// Directory where bakudo stores session data.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
@@ -72,6 +77,11 @@ struct BakudoConfigLayer {
     execution_policy: Option<ExecutionPolicy>,
     #[serde(default)]
     post_run_hook: Option<Option<Vec<String>>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_verify_command_layer"
+    )]
+    auto_apply_verify_command: Option<Option<String>>,
     #[serde(default)]
     data_dir: Option<PathBuf>,
 }
@@ -107,6 +117,29 @@ where
     Ok(Some(opt.filter(|s| !s.is_empty())))
 }
 
+fn deserialize_optional_verify_command<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt
+        .map(|value| value.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
+fn deserialize_optional_verify_command_layer<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(Some(
+        opt.map(|value| value.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    ))
+}
+
 impl Default for BakudoConfig {
     fn default() -> Self {
         Self {
@@ -119,6 +152,7 @@ impl Default for BakudoConfig {
             timeout_secs: default_timeout_secs(),
             execution_policy: ExecutionPolicy::default(),
             post_run_hook: None,
+            auto_apply_verify_command: None,
             data_dir: None,
         }
     }
@@ -232,6 +266,9 @@ impl BakudoConfigLayer {
             timeout_secs: self.timeout_secs.unwrap_or(base.timeout_secs),
             execution_policy: self.execution_policy.unwrap_or(base.execution_policy),
             post_run_hook: self.post_run_hook.unwrap_or(base.post_run_hook),
+            auto_apply_verify_command: self
+                .auto_apply_verify_command
+                .unwrap_or(base.auto_apply_verify_command),
             data_dir: self.data_dir.or(base.data_dir),
         }
     }
@@ -333,6 +370,15 @@ mod tests {
     }
 
     #[test]
+    fn empty_auto_apply_verify_command_parses_as_none() {
+        let path = std::env::temp_dir().join(format!("bakudo-cfg-verify-{}.toml", Uuid::new_v4()));
+        fs::write(&path, "auto_apply_verify_command = \"   \"\n").unwrap();
+        let cfg = BakudoConfig::load(&path).unwrap();
+        assert_eq!(cfg.auto_apply_verify_command, None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn layered_merge_honors_explicit_default_values() {
         let user: BakudoConfigLayer = toml::from_str(
             "timeout_secs = 42\nbase_branch = \"develop\"\ncandidate_policy = \"discard\"\n",
@@ -347,6 +393,21 @@ mod tests {
         assert_eq!(merged.timeout_secs, 300);
         assert_eq!(merged.base_branch, "main");
         assert_eq!(merged.candidate_policy, CandidatePolicy::Review);
+    }
+
+    #[test]
+    fn layered_merge_honors_repo_verify_command() {
+        let user: BakudoConfigLayer =
+            toml::from_str("auto_apply_verify_command = \"cargo test -q\"\n").unwrap();
+        let repo: BakudoConfigLayer =
+            toml::from_str("auto_apply_verify_command = \"cargo test -p bakudo-daemon\"\n")
+                .unwrap();
+
+        let merged = repo.apply_to(user.apply_to(BakudoConfig::default()));
+        assert_eq!(
+            merged.auto_apply_verify_command.as_deref(),
+            Some("cargo test -p bakudo-daemon")
+        );
     }
 
     #[test]

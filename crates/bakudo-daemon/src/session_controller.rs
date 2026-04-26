@@ -37,7 +37,10 @@ use tracing::{info, warn};
 
 use bakudo_core::abox::AboxAdapter;
 use bakudo_core::config::BakudoConfig;
-use bakudo_core::control::{save_run_summary, update_run_summary_outcome, RunSummary};
+use bakudo_core::control::{
+    save_run_summary, update_run_summary_outcome, RunSummary, VerificationStatus,
+    VerificationSummary,
+};
 use bakudo_core::hook::{HookWorktreeAction, PostRunHookPayload};
 use bakudo_core::mission::{
     Experiment, ExperimentId, ExperimentScript, ExperimentStatus, ExperimentSummary,
@@ -60,7 +63,7 @@ use crate::provider_runtime::{ProviderCatalog, ProviderEngine};
 use crate::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use crate::trace::TraceRecorder;
 use crate::worker::{build_agent_worker_command, build_script_worker_command};
-use crate::worktree::{apply_candidate_policy, WorktreeAction};
+use crate::worktree::{apply_candidate_policy, AutoApplyVerificationPolicy, WorktreeAction};
 
 /// Commands sent from the TUI to the session controller.
 #[derive(Debug)]
@@ -291,6 +294,7 @@ pub struct TaskFinishContext {
     pub timeout_secs: Option<u64>,
     pub allow_all_tools: Option<bool>,
     pub worktree_path: Option<String>,
+    pub verification: Option<VerificationSummary>,
 }
 
 /// Events emitted by the session controller to the TUI.
@@ -1021,6 +1025,7 @@ impl SessionController {
         let timeout_secs = spec.budget.timeout_secs;
         let allow_all_tools = spec.permissions.allow_all_tools;
         let host = self.host.clone();
+        let trace_recorder = self.trace_recorder.clone();
 
         let (mut rx, handle) = run_attempt(spec, cfg).await;
 
@@ -1037,7 +1042,7 @@ impl SessionController {
 
             let (finish_context, hook_payload) = match handle.await {
                 Ok(Ok(result)) => {
-                    let (final_state, worktree_action, merge_conflicts) =
+                    let (final_state, worktree_action, merge_conflicts, verification) =
                         if result.status == WorkerStatus::Succeeded {
                             match apply_candidate_policy(
                                 &tid,
@@ -1046,13 +1051,20 @@ impl SessionController {
                                 repo.as_deref(),
                                 &abox,
                                 &ledger,
+                                auto_apply_verification_policy(config.as_ref()),
                             )
                             .await
                             {
                                 Ok(action) => {
+                                    let verification = action.verification().cloned();
                                     let (hook_action, conflicts) =
                                         hook_action_from_worktree_action(&action);
-                                    (state_from_worktree_action(action), hook_action, conflicts)
+                                    (
+                                        state_from_worktree_action(action),
+                                        hook_action,
+                                        conflicts,
+                                        verification,
+                                    )
                                 }
                                 Err(e) => {
                                     let _ = event_tx
@@ -1068,6 +1080,7 @@ impl SessionController {
                                             .unwrap_or(SandboxState::Preserved),
                                         HookWorktreeAction::NotApplied,
                                         Vec::new(),
+                                        None,
                                     )
                                 }
                             }
@@ -1076,6 +1089,7 @@ impl SessionController {
                                 state_from_worker_status(&result.status, result.exit_code),
                                 HookWorktreeAction::NotApplied,
                                 Vec::new(),
+                                None,
                             )
                         };
 
@@ -1100,6 +1114,7 @@ impl SessionController {
                         stderr: result.stderr.clone(),
                         stdout_truncated: result.stdout_truncated,
                         stderr_truncated: result.stderr_truncated,
+                        verification: verification.clone(),
                         error: None,
                     };
                     if let Err(err) = save_run_summary(&repo_data_dir, &summary) {
@@ -1109,6 +1124,17 @@ impl SessionController {
                             )))
                             .await;
                     }
+                    trace_recorder
+                        .append_attempt_outcome(
+                            &tid,
+                            &render_attempt_outcome_trace(
+                                &final_state,
+                                worktree_action,
+                                &merge_conflicts,
+                                verification.as_ref(),
+                            ),
+                        )
+                        .await;
 
                     let worktree_path = ledger
                         .get(&tid)
@@ -1129,6 +1155,7 @@ impl SessionController {
                             timeout_secs: Some(timeout_secs),
                             allow_all_tools: Some(allow_all_tools),
                             worktree_path,
+                            verification: verification.clone(),
                         },
                         Some(PostRunHookPayload {
                             session_id,
@@ -1147,6 +1174,7 @@ impl SessionController {
                             duration_ms: result.duration_ms,
                             timed_out: result.timed_out,
                             merge_conflicts,
+                            verification,
                         }),
                     )
                 }
@@ -1184,6 +1212,7 @@ impl SessionController {
                             timeout_secs: Some(timeout_secs),
                             allow_all_tools: Some(allow_all_tools),
                             worktree_path: None,
+                            verification: None,
                         },
                         None,
                     )
@@ -1226,6 +1255,7 @@ impl SessionController {
                             timeout_secs: Some(timeout_secs),
                             allow_all_tools: Some(allow_all_tools),
                             worktree_path: None,
+                            verification: None,
                         },
                         None,
                     )
@@ -1306,10 +1336,10 @@ impl SessionController {
         {
             Ok(action) => {
                 let (state, hook_action, conflicts) = match action {
-                    WorktreeAction::Merged => {
+                    WorktreeAction::Merged { .. } => {
                         (SandboxState::Merged, HookWorktreeAction::Merged, Vec::new())
                     }
-                    WorktreeAction::MergeConflicts(conflicts) => (
+                    WorktreeAction::MergeConflicts { conflicts, .. } => (
                         SandboxState::MergeConflicts,
                         HookWorktreeAction::MergeConflicts,
                         conflicts,
@@ -1322,6 +1352,11 @@ impl SessionController {
                     WorktreeAction::Preserved => (
                         SandboxState::Preserved,
                         HookWorktreeAction::Preserved,
+                        Vec::new(),
+                    ),
+                    WorktreeAction::VerificationFailed { .. } => (
+                        SandboxState::Preserved,
+                        HookWorktreeAction::VerificationFailed,
                         Vec::new(),
                     ),
                 };
@@ -1357,6 +1392,7 @@ impl SessionController {
                             timeout_secs: None,
                             allow_all_tools: None,
                             worktree_path: None,
+                            verification: None,
                         },
                     })
                     .await;
@@ -1409,6 +1445,7 @@ impl SessionController {
                             timeout_secs: None,
                             allow_all_tools: None,
                             worktree_path: None,
+                            verification: None,
                         },
                     })
                     .await;
@@ -4123,9 +4160,10 @@ impl MissionCore {
                 .await;
         }
 
-        let (status, summary, final_state) = match handle.await {
+        let (status, summary, final_state, verification) = match handle.await {
             Ok(Ok(result)) => {
                 let mut final_state = state_from_worker_status(&result.status, result.exit_code);
+                let mut verification = None;
                 if result.status == WorkerStatus::Succeeded {
                     match apply_candidate_policy(
                         &task_id,
@@ -4134,10 +4172,12 @@ impl MissionCore {
                         self.session.repo_root.as_deref().map(Path::new),
                         &self.abox,
                         &self.ledger,
+                        auto_apply_verification_policy(self.config.as_ref()),
                     )
                     .await
                     {
                         Ok(action) => {
+                            verification = action.verification().cloned();
                             final_state = state_from_worktree_action(action);
                         }
                         Err(err) => {
@@ -4166,7 +4206,7 @@ impl MissionCore {
                     metrics: extract_metrics(&result.stdout, &experiment.spec.metric_keys),
                     patch_path,
                 };
-                (status, summary, final_state)
+                (status, summary, final_state, verification)
             }
             Ok(Err(err)) => {
                 let summary = ExperimentSummary {
@@ -4182,6 +4222,7 @@ impl MissionCore {
                     ExperimentStatus::Failed,
                     summary,
                     SandboxState::Failed { exit_code: -1 },
+                    None,
                 )
             }
             Err(err) => {
@@ -4198,6 +4239,7 @@ impl MissionCore {
                     ExperimentStatus::Failed,
                     summary,
                     SandboxState::Failed { exit_code: -1 },
+                    None,
                 )
             }
         };
@@ -4237,6 +4279,17 @@ impl MissionCore {
             .await;
         self.host.note_task_finished(&task_id, &final_state);
         let trace_bundle_path = self.trace_recorder.attempt_trace_bundle_path(&task_id);
+        self.trace_recorder
+            .append_attempt_outcome(
+                &task_id,
+                &render_attempt_outcome_trace(
+                    &final_state,
+                    hook_action_from_final_state(&final_state, verification.as_ref()),
+                    &[],
+                    verification.as_ref(),
+                ),
+            )
+            .await;
         self.emit_mission_activity(MissionActivity::WorkerFinished {
             mission_id: experiment.mission_id.to_string(),
             experiment_id: experiment.id.to_string(),
@@ -4263,6 +4316,7 @@ impl MissionCore {
                     timeout_secs: Some(timeout_secs),
                     allow_all_tools: Some(allow_all_tools),
                     worktree_path: summary.patch_path.clone(),
+                    verification,
                 },
             })
             .await;
@@ -4778,22 +4832,100 @@ fn state_from_worker_status(status: &WorkerStatus, exit_code: i32) -> SandboxSta
 
 fn state_from_worktree_action(action: WorktreeAction) -> SandboxState {
     match action {
-        WorktreeAction::Merged => SandboxState::Merged,
-        WorktreeAction::MergeConflicts(_) => SandboxState::MergeConflicts,
+        WorktreeAction::Merged { .. } => SandboxState::Merged,
+        WorktreeAction::MergeConflicts { .. } => SandboxState::MergeConflicts,
         WorktreeAction::Discarded => SandboxState::Discarded,
-        WorktreeAction::Preserved => SandboxState::Preserved,
+        WorktreeAction::Preserved | WorktreeAction::VerificationFailed { .. } => {
+            SandboxState::Preserved
+        }
     }
 }
 
 fn hook_action_from_worktree_action(action: &WorktreeAction) -> (HookWorktreeAction, Vec<String>) {
     match action {
-        WorktreeAction::Merged => (HookWorktreeAction::Merged, Vec::new()),
-        WorktreeAction::MergeConflicts(conflicts) => {
+        WorktreeAction::Merged { .. } => (HookWorktreeAction::Merged, Vec::new()),
+        WorktreeAction::MergeConflicts { conflicts, .. } => {
             (HookWorktreeAction::MergeConflicts, conflicts.clone())
         }
         WorktreeAction::Discarded => (HookWorktreeAction::Discarded, Vec::new()),
         WorktreeAction::Preserved => (HookWorktreeAction::Preserved, Vec::new()),
+        WorktreeAction::VerificationFailed { .. } => {
+            (HookWorktreeAction::VerificationFailed, Vec::new())
+        }
     }
+}
+
+fn auto_apply_verification_policy(
+    config: &BakudoConfig,
+) -> Option<AutoApplyVerificationPolicy<'_>> {
+    config
+        .auto_apply_verify_command
+        .as_deref()
+        .map(|command| AutoApplyVerificationPolicy {
+            command,
+            timeout_secs: config.timeout_secs,
+        })
+}
+
+fn hook_action_from_final_state(
+    state: &SandboxState,
+    verification: Option<&VerificationSummary>,
+) -> HookWorktreeAction {
+    if matches!(
+        verification.map(|verification| verification.status),
+        Some(VerificationStatus::Failed)
+    ) {
+        return HookWorktreeAction::VerificationFailed;
+    }
+    match state {
+        SandboxState::Merged => HookWorktreeAction::Merged,
+        SandboxState::Discarded => HookWorktreeAction::Discarded,
+        SandboxState::MergeConflicts => HookWorktreeAction::MergeConflicts,
+        SandboxState::Preserved => HookWorktreeAction::Preserved,
+        SandboxState::Starting
+        | SandboxState::Running
+        | SandboxState::Failed { .. }
+        | SandboxState::TimedOut => HookWorktreeAction::NotApplied,
+    }
+}
+
+fn render_attempt_outcome_trace(
+    final_state: &SandboxState,
+    worktree_action: HookWorktreeAction,
+    merge_conflicts: &[String],
+    verification: Option<&VerificationSummary>,
+) -> String {
+    let mut markdown = format!(
+        "\n## Autonomous Outcome\n- final_state: `{:?}`\n- worktree_action: `{:?}`\n",
+        final_state, worktree_action
+    );
+    if !merge_conflicts.is_empty() {
+        markdown.push_str("- merge_conflicts:\n");
+        for conflict in merge_conflicts {
+            markdown.push_str(&format!("  - `{conflict}`\n"));
+        }
+    }
+    if let Some(verification) = verification {
+        markdown.push_str("\n### Verification\n");
+        markdown.push_str(&format!(
+            "- status: `{:?}`\n- exit_code: `{}`\n- timed_out: `{}`\n- command: `{}`\n",
+            verification.status,
+            verification.exit_code,
+            verification.timed_out,
+            verification.command
+        ));
+        if !verification.stdout_tail.trim().is_empty() {
+            markdown.push_str("\n#### stdout_tail\n```\n");
+            markdown.push_str(verification.stdout_tail.trim());
+            markdown.push_str("\n```\n");
+        }
+        if !verification.stderr_tail.trim().is_empty() {
+            markdown.push_str("\n#### stderr_tail\n```\n");
+            markdown.push_str(verification.stderr_tail.trim());
+            markdown.push_str("\n```\n");
+        }
+    }
+    markdown
 }
 
 fn initial_mission_state(

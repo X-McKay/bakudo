@@ -10,7 +10,7 @@ use bakudo_core::abox::{
     check_abox_version, sandbox_task_id, AboxAdapter, AboxVersionStatus, RunParams,
 };
 use bakudo_core::config::BakudoConfig;
-use bakudo_core::control::swarm_artifact_root;
+use bakudo_core::control::{load_run_summary, swarm_artifact_root, VerificationStatus};
 use bakudo_core::error::AboxError;
 use bakudo_core::mission::{
     Experiment, ExperimentStatus, Mission, MissionId, MissionState, MissionStatus, Posture, Wallet,
@@ -29,7 +29,9 @@ use bakudo_daemon::session_controller::{
     TaskStartContext,
 };
 use bakudo_daemon::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
-use bakudo_daemon::worktree::{apply_candidate_policy, WorktreeAction};
+use bakudo_daemon::worktree::{
+    apply_candidate_policy, AutoApplyVerificationPolicy, WorktreeAction,
+};
 use bakudo_tui::app::{App, ChatMessage, MessageRole, ShelfColor};
 use bakudo_tui::transcript_store::TranscriptStore;
 use chrono::{TimeZone, Utc};
@@ -361,6 +363,31 @@ fn invocation_task_id(invocation: &[String]) -> String {
         .position(|arg| arg == "--task")
         .expect("invocation has --task");
     invocation[task_pos + 1].clone()
+}
+
+fn invocation_subcommand(invocation: &[String]) -> String {
+    let start = if invocation.first().map(String::as_str) == Some("--repo") {
+        2
+    } else {
+        0
+    };
+    invocation
+        .get(start)
+        .cloned()
+        .expect("invocation has subcommand")
+}
+
+fn merge_invocation_task_id(invocation: &[String]) -> String {
+    let start = if invocation.first().map(String::as_str) == Some("--repo") {
+        2
+    } else {
+        0
+    };
+    assert_eq!(invocation.get(start).map(String::as_str), Some("merge"));
+    invocation
+        .get(start + 1)
+        .cloned()
+        .expect("merge invocation has task id")
 }
 
 fn write_config_file(dir: &TempDir, abox_bin: &Path) -> PathBuf {
@@ -888,12 +915,13 @@ EOF
         None,
         &adapter,
         &ledger,
+        None,
     )
     .await
     .unwrap();
 
     match action {
-        WorktreeAction::MergeConflicts(conflicts) => {
+        WorktreeAction::MergeConflicts { conflicts, .. } => {
             assert_eq!(conflicts, vec!["src/lib.rs", "src/main.rs"]);
         }
         other => panic!("expected conflicts, got {other:?}"),
@@ -950,11 +978,15 @@ async fn apply_candidate_policy_snapshots_dirty_preserved_worktree_before_auto_a
         Some(repo.path()),
         &adapter,
         &ledger,
+        None,
     )
     .await
     .unwrap();
 
-    assert!(matches!(action, WorktreeAction::Merged));
+    assert!(matches!(
+        action,
+        WorktreeAction::Merged { verification: None }
+    ));
     assert_eq!(
         fs::read_to_string(repo.path().join("smoke.txt")).unwrap(),
         "OK\n"
@@ -969,6 +1001,184 @@ async fn apply_candidate_policy_snapshots_dirty_preserved_worktree_before_auto_a
 
     let record = ledger.get(task_id).await.unwrap();
     assert_eq!(record.state, SandboxState::Merged);
+}
+
+#[tokio::test]
+async fn apply_candidate_policy_verifies_candidate_before_auto_apply_merge() {
+    let dir = TempDir::new("bakudo-worktree-verify-success");
+    let repo = TempRepo::new();
+    let task_id = "task-verify-success";
+    let branch = format!("agent/{task_id}");
+    let worktree_dir = dir.path.join("sandbox");
+    run_host(
+        repo.path(),
+        "git",
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            worktree_dir.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(worktree_dir.join("smoke.txt"), "OK\n").unwrap();
+
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        &format!(
+            r#"  run)
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    [[ "$1" == "bash" ]]
+    [[ "$2" == "-lc" ]]
+    [[ "$3" == "test -f smoke.txt" ]]
+    echo "verification passed"
+    ;;
+  merge)
+    task_id="$1"
+    git -C {:?} merge --ff-only "agent/$task_id" >/dev/null
+    ;;
+"#,
+            repo.path().display().to_string(),
+        ),
+    );
+    let adapter = AboxAdapter::new(&script);
+    let ledger = Arc::new(SandboxLedger::new());
+    let mut record = make_record(task_id, SandboxState::Preserved);
+    record.worktree_path = Some(worktree_dir.display().to_string());
+    record.branch = Some(branch.clone());
+    ledger.insert(record).await;
+
+    let action = apply_candidate_policy(
+        task_id,
+        &CandidatePolicy::AutoApply,
+        "main",
+        Some(repo.path()),
+        &adapter,
+        &ledger,
+        Some(AutoApplyVerificationPolicy {
+            command: "test -f smoke.txt",
+            timeout_secs: 30,
+        }),
+    )
+    .await
+    .unwrap();
+
+    match action {
+        WorktreeAction::Merged {
+            verification: Some(verification),
+        } => {
+            assert_eq!(verification.status, VerificationStatus::Passed);
+            assert_eq!(verification.exit_code, 0);
+            assert_eq!(verification.command, "test -f smoke.txt");
+            assert!(verification.stdout_tail.contains("verification passed"));
+        }
+        other => panic!("expected verified merge, got {other:?}"),
+    }
+
+    let invocations = read_invocations(&log);
+    assert_eq!(invocations.len(), 2);
+    assert_eq!(invocations[0][0], "--repo");
+    assert_eq!(invocation_subcommand(&invocations[0]), "run");
+    assert_eq!(
+        invocation_task_id(&invocations[0]),
+        format!("{task_id}-verify")
+    );
+    assert!(invocations[0].iter().any(|arg| arg == "--ephemeral"));
+    assert_eq!(invocations[1][0], "--repo");
+    assert_eq!(invocation_subcommand(&invocations[1]), "merge");
+    assert_eq!(merge_invocation_task_id(&invocations[1]), task_id);
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("smoke.txt")).unwrap(),
+        "OK\n"
+    );
+    let record = ledger.get(task_id).await.unwrap();
+    assert_eq!(record.state, SandboxState::Merged);
+}
+
+#[tokio::test]
+async fn apply_candidate_policy_preserves_candidate_when_verification_fails() {
+    let dir = TempDir::new("bakudo-worktree-verify-failed");
+    let repo = TempRepo::new();
+    let task_id = "task-verify-failed";
+    let branch = format!("agent/{task_id}");
+    let worktree_dir = dir.path.join("sandbox");
+    run_host(
+        repo.path(),
+        "git",
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            worktree_dir.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(worktree_dir.join("smoke.txt"), "OK\n").unwrap();
+
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        r#"  run)
+    echo "verification failed" >&2
+    exit 23
+    ;;
+  merge)
+    echo "merge should not run" >&2
+    exit 99
+    ;;
+"#,
+    );
+    let adapter = AboxAdapter::new(&script);
+    let ledger = Arc::new(SandboxLedger::new());
+    let mut record = make_record(task_id, SandboxState::Preserved);
+    record.worktree_path = Some(worktree_dir.display().to_string());
+    record.branch = Some(branch.clone());
+    ledger.insert(record).await;
+
+    let action = apply_candidate_policy(
+        task_id,
+        &CandidatePolicy::AutoApply,
+        "main",
+        Some(repo.path()),
+        &adapter,
+        &ledger,
+        Some(AutoApplyVerificationPolicy {
+            command: "test -f smoke.txt",
+            timeout_secs: 30,
+        }),
+    )
+    .await
+    .unwrap();
+
+    match action {
+        WorktreeAction::VerificationFailed { verification } => {
+            assert_eq!(verification.status, VerificationStatus::Failed);
+            assert_eq!(verification.exit_code, 23);
+            assert!(verification.stderr_tail.contains("verification failed"));
+        }
+        other => panic!("expected verification failure, got {other:?}"),
+    }
+
+    let invocations = read_invocations(&log);
+    assert_eq!(invocations.len(), 1);
+    assert_eq!(invocations[0][0], "--repo");
+    assert_eq!(invocation_subcommand(&invocations[0]), "run");
+    assert_eq!(
+        invocation_task_id(&invocations[0]),
+        format!("{task_id}-verify")
+    );
+    assert!(invocations[0].iter().any(|arg| arg == "--ephemeral"));
+
+    assert!(!repo.path().join("smoke.txt").exists());
+    assert_eq!(
+        host_output(repo.path(), "git", &["rev-parse", "main"]).trim(),
+        host_output(repo.path(), "git", &["merge-base", "main", &branch]).trim()
+    );
+    let record = ledger.get(task_id).await.unwrap();
+    assert_eq!(record.state, SandboxState::Preserved);
 }
 
 #[tokio::test]
@@ -1017,6 +1227,7 @@ async fn apply_candidate_policy_rejects_oversized_dirty_preserved_worktree_befor
         Some(repo.path()),
         &adapter,
         &ledger,
+        None,
     )
     .await
     .unwrap_err()
@@ -1116,6 +1327,188 @@ async fn session_controller_diverge_uses_configured_base_branch() {
         "expected only the startup list invocation"
     );
     assert!(invocations[0].iter().any(|arg| arg == "list"));
+}
+
+#[tokio::test]
+async fn session_controller_persists_auto_apply_verification_and_trace_details() {
+    let dir = TempDir::new("bakudo-session-auto-verify");
+    let repo = TempRepo::new();
+    let worktree_root = dir.path.join("worktrees");
+    let (script, log) = write_fake_abox_script(
+        &dir,
+        &format!(
+            r#"  list)
+    echo "No active sandboxes."
+    ;;
+  run)
+    task_id=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --task)
+          task_id="$2"
+          shift 2
+          ;;
+        --)
+          shift
+          break
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [[ "$task_id" == *"-verify" ]]; then
+      echo "verification passed"
+      exit 0
+    fi
+    worktree_path="{}/$task_id"
+    branch="agent/$task_id"
+    if [[ ! -d "$worktree_path/.git" ]]; then
+      git -C {:?} worktree add -b "$branch" "$worktree_path" main >/dev/null
+    fi
+    printf 'worktree=%s branch=%s\n' "$worktree_path" "$branch"
+    printf 'auto-apply candidate\n' > "$worktree_path/smoke.txt"
+    echo "BAKUDO_SUMMARY: updated smoke.txt and prepared auto-apply verification"
+    ;;
+  merge)
+    task_id="$1"
+    git -C {:?} merge --ff-only "agent/$task_id" >/dev/null
+    ;;
+  stop)
+    ;;
+"#,
+            worktree_root.display(),
+            repo.path().display().to_string(),
+            repo.path().display().to_string(),
+        ),
+    );
+
+    let config = BakudoConfig {
+        abox_bin: script.display().to_string(),
+        candidate_policy: CandidatePolicy::AutoApply,
+        auto_apply_verify_command: Some("test -f smoke.txt".to_string()),
+        data_dir: Some(dir.path.join("data")),
+        ..Default::default()
+    };
+    let repo_data_dir = config.resolved_repo_data_dir(Some(repo.path()));
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let controller = SessionController::with_session(
+        Arc::new(config.clone()),
+        Arc::new(AboxAdapter::new(&script)),
+        Arc::new(SandboxLedger::new()),
+        Arc::new(ProviderRegistry::with_defaults()),
+        SessionBootstrap {
+            session: SessionRecord::with_id(
+                SessionId("session-auto-verify".to_string()),
+                "claude",
+                None,
+                Some(repo.path().display().to_string()),
+            ),
+            resume_only: false,
+        },
+        cmd_tx.clone(),
+        cmd_rx,
+        event_tx,
+    );
+
+    let handle = tokio::spawn(controller.run());
+    cmd_tx
+        .send(SessionCommand::Dispatch {
+            prompt: "prepare a verified auto-apply candidate".to_string(),
+            approved: false,
+        })
+        .await
+        .unwrap();
+
+    let task_id = timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::TaskStarted { context }) => break context.task_id,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let finish = timeout(Duration::from_secs(2), async {
+        loop {
+            match event_rx.recv().await {
+                Some(SessionEvent::TaskFinished { context }) => break context,
+                Some(_) => continue,
+                None => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(finish.task_id, task_id);
+    assert_eq!(finish.state, SandboxState::Merged);
+    assert_eq!(
+        finish
+            .verification
+            .as_ref()
+            .map(|verification| verification.status),
+        Some(VerificationStatus::Passed)
+    );
+
+    let summary = load_run_summary(&repo_data_dir, &task_id)
+        .unwrap()
+        .expect("persisted run summary");
+    assert_eq!(summary.final_state, SandboxState::Merged);
+    assert_eq!(
+        summary.worktree_action,
+        bakudo_core::hook::HookWorktreeAction::Merged
+    );
+    assert_eq!(
+        summary
+            .verification
+            .as_ref()
+            .map(|verification| verification.status),
+        Some(VerificationStatus::Passed)
+    );
+    assert_eq!(
+        summary
+            .verification
+            .as_ref()
+            .map(|verification| verification.command.as_str()),
+        Some("test -f smoke.txt")
+    );
+
+    let trace_bundle = fs::read_to_string(
+        repo_data_dir
+            .join("traces")
+            .join("attempts")
+            .join(&task_id)
+            .join("trace_bundle.md"),
+    )
+    .unwrap();
+    assert!(trace_bundle.contains("## Autonomous Outcome"));
+    assert!(trace_bundle.contains("### Verification"));
+    assert!(trace_bundle.contains("test -f smoke.txt"));
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("smoke.txt")).unwrap(),
+        "auto-apply candidate\n"
+    );
+
+    cmd_tx.send(SessionCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+
+    let invocations = read_invocations(&log);
+    assert_eq!(invocations.len(), 4);
+    assert!(invocations[0].iter().any(|arg| arg == "list"));
+    assert_eq!(invocation_subcommand(&invocations[1]), "run");
+    assert_eq!(invocation_task_id(&invocations[1]), task_id);
+    assert_eq!(invocation_subcommand(&invocations[2]), "run");
+    assert_eq!(
+        invocation_task_id(&invocations[2]),
+        format!("{task_id}-verify")
+    );
+    assert_eq!(invocation_subcommand(&invocations[3]), "merge");
+    assert_eq!(merge_invocation_task_id(&invocations[3]), task_id);
 }
 
 #[tokio::test]
@@ -5049,6 +5442,7 @@ fn app_drain_session_events_updates_shelf_and_blocks_mutating_commands() {
                 timeout_secs: Some(300),
                 allow_all_tools: Some(false),
                 worktree_path: Some("/tmp/worktree/task-1".to_string()),
+                verification: None,
             },
         })
         .unwrap();
