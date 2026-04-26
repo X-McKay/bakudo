@@ -259,25 +259,45 @@ impl MissionActivity {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TaskStartContext {
+    pub task_id: String,
+    pub provider_id: String,
+    pub model: Option<String>,
+    pub prompt_summary: String,
+    pub sandbox_lifecycle: SandboxLifecycle,
+    pub candidate_policy: CandidatePolicy,
+    pub timeout_secs: u64,
+    pub allow_all_tools: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskFinishContext {
+    pub task_id: String,
+    pub state: SandboxState,
+    pub worker_status: Option<WorkerStatus>,
+    pub summary: Option<String>,
+    pub exit_code: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub timed_out: bool,
+    pub sandbox_lifecycle: SandboxLifecycle,
+    pub candidate_policy: CandidatePolicy,
+    pub timeout_secs: Option<u64>,
+    pub allow_all_tools: Option<bool>,
+    pub worktree_path: Option<String>,
+}
+
 /// Events emitted by the session controller to the TUI.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     /// Snapshot of the current sandbox ledger, used for startup recovery.
     LedgerSnapshot { entries: Vec<SandboxRecord> },
     /// A new task was dispatched.
-    TaskStarted {
-        task_id: String,
-        provider_id: String,
-        model: Option<String>,
-        prompt_summary: String,
-    },
+    TaskStarted { context: TaskStartContext },
     /// A progress event from a running task.
     TaskProgress { task_id: String, event: RunnerEvent },
     /// A task finished.
-    TaskFinished {
-        task_id: String,
-        state: SandboxState,
-    },
+    TaskFinished { context: TaskFinishContext },
     /// Provider changed.
     ProviderChanged {
         provider_id: String,
@@ -925,10 +945,16 @@ impl SessionController {
         let _ = self
             .event_tx
             .send(SessionEvent::TaskStarted {
-                task_id: task_id.clone(),
-                provider_id: self.current_provider.clone(),
-                model: self.current_model.clone(),
-                prompt_summary: prompt_summary.clone(),
+                context: TaskStartContext {
+                    task_id: task_id.clone(),
+                    provider_id: self.current_provider.clone(),
+                    model: self.current_model.clone(),
+                    prompt_summary: prompt_summary.clone(),
+                    sandbox_lifecycle,
+                    candidate_policy,
+                    timeout_secs: spec.budget.timeout_secs,
+                    allow_all_tools: execution_decision.allow_all_tools,
+                },
             })
             .await;
 
@@ -965,6 +991,8 @@ impl SessionController {
         let session_id = spec.session_id.clone();
         let attempt_id = spec.attempt_id.clone();
         let sandbox_lifecycle = spec.sandbox_lifecycle;
+        let timeout_secs = spec.budget.timeout_secs;
+        let allow_all_tools = spec.permissions.allow_all_tools;
         let host = self.host.clone();
 
         let (mut rx, handle) = run_attempt(spec, cfg).await;
@@ -980,7 +1008,7 @@ impl SessionController {
                     .await;
             }
 
-            let (final_state, hook_payload) = match handle.await {
+            let (finish_context, hook_payload) = match handle.await {
                 Ok(Ok(result)) => {
                     let (final_state, worktree_action, merge_conflicts) =
                         if result.status == WorkerStatus::Succeeded {
@@ -1055,8 +1083,26 @@ impl SessionController {
                             .await;
                     }
 
+                    let worktree_path = ledger
+                        .get(&tid)
+                        .await
+                        .and_then(|record| record.worktree_path);
+
                     (
-                        final_state.clone(),
+                        TaskFinishContext {
+                            task_id: tid.clone(),
+                            state: final_state.clone(),
+                            worker_status: Some(result.status.clone()),
+                            summary: Some(result.summary.clone()),
+                            exit_code: Some(result.exit_code),
+                            duration_ms: Some(result.duration_ms),
+                            timed_out: result.timed_out,
+                            sandbox_lifecycle,
+                            candidate_policy,
+                            timeout_secs: Some(timeout_secs),
+                            allow_all_tools: Some(allow_all_tools),
+                            worktree_path,
+                        },
                         Some(PostRunHookPayload {
                             session_id,
                             attempt_id,
@@ -1097,7 +1143,23 @@ impl SessionController {
                             )))
                             .await;
                     }
-                    (SandboxState::Failed { exit_code: -1 }, None)
+                    (
+                        TaskFinishContext {
+                            task_id: tid.clone(),
+                            state: SandboxState::Failed { exit_code: -1 },
+                            worker_status: None,
+                            summary: Some(format!("Infrastructure error: {e}")),
+                            exit_code: Some(-1),
+                            duration_ms: None,
+                            timed_out: false,
+                            sandbox_lifecycle,
+                            candidate_policy,
+                            timeout_secs: Some(timeout_secs),
+                            allow_all_tools: Some(allow_all_tools),
+                            worktree_path: None,
+                        },
+                        None,
+                    )
                 }
                 Err(e) => {
                     let _ = event_tx
@@ -1123,11 +1185,27 @@ impl SessionController {
                             )))
                             .await;
                     }
-                    (SandboxState::Failed { exit_code: -1 }, None)
+                    (
+                        TaskFinishContext {
+                            task_id: tid.clone(),
+                            state: SandboxState::Failed { exit_code: -1 },
+                            worker_status: None,
+                            summary: Some(format!("Task join error: {e}")),
+                            exit_code: Some(-1),
+                            duration_ms: None,
+                            timed_out: false,
+                            sandbox_lifecycle,
+                            candidate_policy,
+                            timeout_secs: Some(timeout_secs),
+                            allow_all_tools: Some(allow_all_tools),
+                            worktree_path: None,
+                        },
+                        None,
+                    )
                 }
             };
 
-            host.note_task_finished(&tid, &final_state);
+            host.note_task_finished(&tid, &finish_context.state);
             if let Some(payload) = hook_payload {
                 if let Err(err) = run_post_run_hook(&config, &payload).await {
                     let _ = event_tx
@@ -1140,8 +1218,7 @@ impl SessionController {
 
             let _ = event_tx
                 .send(SessionEvent::TaskFinished {
-                    task_id: tid.clone(),
-                    state: final_state,
+                    context: finish_context,
                 })
                 .await;
 
@@ -1239,8 +1316,20 @@ impl SessionController {
                 let _ = self
                     .event_tx
                     .send(SessionEvent::TaskFinished {
-                        task_id: task_id.to_string(),
-                        state,
+                        context: TaskFinishContext {
+                            task_id: task_id.to_string(),
+                            state,
+                            worker_status: None,
+                            summary: None,
+                            exit_code: None,
+                            duration_ms: None,
+                            timed_out: false,
+                            sandbox_lifecycle: SandboxLifecycle::Preserved,
+                            candidate_policy: CandidatePolicy::Review,
+                            timeout_secs: None,
+                            allow_all_tools: None,
+                            worktree_path: None,
+                        },
                     })
                     .await;
             }
@@ -1279,8 +1368,20 @@ impl SessionController {
                 let _ = self
                     .event_tx
                     .send(SessionEvent::TaskFinished {
-                        task_id: task_id.to_string(),
-                        state: SandboxState::Discarded,
+                        context: TaskFinishContext {
+                            task_id: task_id.to_string(),
+                            state: SandboxState::Discarded,
+                            worker_status: None,
+                            summary: None,
+                            exit_code: None,
+                            duration_ms: None,
+                            timed_out: false,
+                            sandbox_lifecycle: SandboxLifecycle::Preserved,
+                            candidate_policy: CandidatePolicy::Review,
+                            timeout_secs: None,
+                            allow_all_tools: None,
+                            worktree_path: None,
+                        },
                     })
                     .await;
             }
@@ -3765,10 +3866,16 @@ impl MissionCore {
         let _ = self
             .event_tx
             .send(SessionEvent::TaskStarted {
-                task_id: task_id.clone(),
-                provider_id: provider_id.clone(),
-                model: model.clone(),
-                prompt_summary: experiment.label.clone(),
+                context: TaskStartContext {
+                    task_id: task_id.clone(),
+                    provider_id: provider_id.clone(),
+                    model: model.clone(),
+                    prompt_summary: experiment.label.clone(),
+                    sandbox_lifecycle,
+                    candidate_policy,
+                    timeout_secs,
+                    allow_all_tools,
+                },
             })
             .await;
         experiment.status = ExperimentStatus::Running;
@@ -3922,8 +4029,20 @@ impl MissionCore {
         let _ = self
             .event_tx
             .send(SessionEvent::TaskFinished {
-                task_id,
-                state: final_state,
+                context: TaskFinishContext {
+                    task_id,
+                    state: final_state,
+                    worker_status: Some(experiment_status_to_worker_status(experiment.status)),
+                    summary: summary.worker_summary.clone(),
+                    exit_code: Some(summary.exit_code),
+                    duration_ms: Some(summary.duration.as_millis() as u64),
+                    timed_out: matches!(experiment.status, ExperimentStatus::Timeout),
+                    sandbox_lifecycle,
+                    candidate_policy,
+                    timeout_secs: Some(timeout_secs),
+                    allow_all_tools: Some(allow_all_tools),
+                    worktree_path: summary.patch_path.clone(),
+                },
             })
             .await;
         match self
@@ -5305,6 +5424,17 @@ fn worker_status_to_experiment_status(status: &WorkerStatus) -> ExperimentStatus
         WorkerStatus::Succeeded => ExperimentStatus::Succeeded,
         WorkerStatus::TimedOut => ExperimentStatus::Timeout,
         WorkerStatus::Failed | WorkerStatus::Cancelled => ExperimentStatus::Failed,
+    }
+}
+
+fn experiment_status_to_worker_status(status: ExperimentStatus) -> WorkerStatus {
+    match status {
+        ExperimentStatus::Succeeded => WorkerStatus::Succeeded,
+        ExperimentStatus::Timeout => WorkerStatus::TimedOut,
+        ExperimentStatus::Failed
+        | ExperimentStatus::Cancelled
+        | ExperimentStatus::Queued
+        | ExperimentStatus::Running => WorkerStatus::Failed,
     }
 }
 

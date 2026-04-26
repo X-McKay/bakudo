@@ -24,10 +24,14 @@ use tokio::sync::mpsc;
 
 use bakudo_core::config::BakudoConfig;
 use bakudo_core::mission::Posture;
-use bakudo_core::protocol::{WorkerProgressKind, WorkerStatus};
+use bakudo_core::protocol::{
+    CandidatePolicy, SandboxLifecycle, WorkerProgressEvent, WorkerProgressKind, WorkerStatus,
+};
 use bakudo_core::provider::ProviderRegistry;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
-use bakudo_daemon::session_controller::{MissionBanner, SessionCommand, SessionEvent};
+use bakudo_daemon::session_controller::{
+    MissionBanner, SessionCommand, SessionEvent, TaskFinishContext, TaskStartContext,
+};
 
 use crate::commands::{ParsedCommand, SlashCommand, completions_for, parse_slash};
 use crate::transcript_store::TranscriptStore;
@@ -1050,24 +1054,17 @@ impl App {
                     )));
                 }
             }
-            SessionEvent::TaskStarted {
-                task_id,
-                provider_id,
-                model,
-                prompt_summary,
-            } => {
+            SessionEvent::TaskStarted { context } => {
                 self.clear_pending_runtime_work();
                 self.active_task_count += 1;
-                let short = short_task_id(&task_id);
-                self.push_message(ChatMessage::info(format!(
-                    "⟳  [{short}] {provider_id} dispatched: {prompt_summary}"
-                )));
+                self.push_message(ChatMessage::info(task_start_chat_body(&context)));
+                let last_note = task_start_shelf_note(&context);
                 self.upsert_shelf_entry(ShelfEntry {
-                    task_id,
-                    provider: provider_id,
-                    model,
-                    prompt_summary,
-                    last_note: "Booting sandbox".to_string(),
+                    task_id: context.task_id,
+                    provider: context.provider_id,
+                    model: context.model,
+                    prompt_summary: context.prompt_summary.clone(),
+                    last_note,
                     state_label: "running".to_string(),
                     state_color: ShelfColor::Running,
                     started_at: Local::now(),
@@ -1088,33 +1085,11 @@ impl App {
                         }
                     }
                     RunnerEvent::Progress(p) => {
-                        self.record_shelf_activity(&task_id, &p.message);
-                        match p.kind {
-                            WorkerProgressKind::AssistantMessage => {
-                                self.push_message(ChatMessage::agent(format!(
-                                    "[{short}] {}",
-                                    p.message
-                                )));
-                            }
-                            WorkerProgressKind::ToolCall => {
-                                self.push_message(ChatMessage::info(format!(
-                                    "[{short}] tool → {}",
-                                    p.message
-                                )));
-                            }
-                            WorkerProgressKind::ToolResult => {
-                                self.push_message(ChatMessage::info(format!(
-                                    "[{short}] tool ✓ {}",
-                                    p.message
-                                )));
-                            }
-                            WorkerProgressKind::StatusUpdate => {
-                                self.push_message(ChatMessage::info(format!(
-                                    "[{short}] {}",
-                                    p.message
-                                )));
-                            }
-                            WorkerProgressKind::Heartbeat => {}
+                        if let Some(note) = task_progress_shelf_note(&p) {
+                            self.record_shelf_activity(&task_id, note);
+                        }
+                        if let Some(message) = task_progress_chat_message(&short, &p) {
+                            self.push_message(message);
                         }
                     }
                     RunnerEvent::InfraError(e) => {
@@ -1125,39 +1100,33 @@ impl App {
                         )));
                     }
                     RunnerEvent::Finished(result) => {
-                        self.record_shelf_activity(&task_id, &result.summary);
-                        let body = format!(
-                            "[{short}] {} ({}, {}ms)",
-                            result.summary,
-                            render_worker_status(&result.status),
-                            result.duration_ms,
-                        );
-                        let msg = match result.status {
-                            WorkerStatus::Succeeded => ChatMessage::info(format!("✓  {body}")),
-                            WorkerStatus::Failed
-                            | WorkerStatus::TimedOut
-                            | WorkerStatus::Cancelled => {
-                                ChatMessage::error(failure_chat_body(body, &result))
-                            }
-                        };
-                        self.push_message(msg);
+                        if !result.summary.trim().is_empty() {
+                            self.record_shelf_activity(
+                                &task_id,
+                                format!("finalizing: {}", result.summary.trim()),
+                            );
+                        }
                     }
                 }
             }
-            SessionEvent::TaskFinished { task_id, state } => {
+            SessionEvent::TaskFinished { context } => {
                 self.clear_pending_runtime_work();
                 if self.active_task_count > 0 {
                     self.active_task_count -= 1;
                 }
-                let (label, color) = shelf_state_view(&state);
-                self.update_shelf_state(&task_id, label, color);
-                self.clear_pending(&task_id);
-                self.record_shelf_activity(&task_id, shelf_state_note(&state));
-                let short = short_task_id(&task_id);
-                self.push_message(ChatMessage::info(format!(
-                    "[{short}] {}",
-                    shelf_state_note(&state)
-                )));
+                let (label, color) = shelf_state_view(&context.state);
+                self.update_shelf_state(&context.task_id, label, color);
+                self.clear_pending(&context.task_id);
+                self.record_shelf_activity(&context.task_id, task_finish_shelf_note(&context));
+                if let Some(message) = task_finish_chat_message(&context) {
+                    self.push_message(message);
+                } else {
+                    let short = short_task_id(&context.task_id);
+                    self.push_message(ChatMessage::info(format!(
+                        "[{short}] {}",
+                        shelf_state_note(&context.state)
+                    )));
+                }
             }
             SessionEvent::ProviderChanged { provider_id, model } => {
                 self.clear_pending_runtime_work();
@@ -1826,38 +1795,10 @@ fn is_abox_lifecycle_noise(line: &str) -> bool {
         && (line.ends_with("' starting...") || line.ends_with("' exited cleanly."))
 }
 
-/// Build the multi-line chat body for a failed Finished event.
-fn failure_chat_body(headline: String, result: &bakudo_core::protocol::WorkerResult) -> String {
-    let mut out = headline;
-
-    // Prefer a human-readable explanation when the stderr matches a known
-    // infrastructure-error pattern; otherwise fall back to the raw tail.
-    if let Some(explanation) = humanize_infra_error(&result.stderr) {
-        out.push('\n');
-        out.push_str("→ ");
-        out.push_str(&explanation);
-    } else {
-        let stderr_tail = result
-            .stderr
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .map(str::to_string);
-        if let Some(line) = stderr_tail {
-            out.push('\n');
-            out.push_str("→ stderr: ");
-            out.push_str(&truncate_line(line.trim(), 200));
-        }
-    }
-
-    out.push('\n');
-    out.push_str("→ full logs at ~/.local/share/bakudo/bakudo.log");
-    out
-}
-
 /// Recognise common abox/libgit2 failure fingerprints in `stderr` and return a
 /// friendlier, actionable explanation. Returns `None` when nothing matches —
 /// callers should fall back to showing the raw stderr tail.
+#[cfg(test)]
 fn humanize_infra_error(stderr: &str) -> Option<String> {
     // libgit2: `revspec 'main' not found; class=Reference (4); code=NotFound (-3)`
     if let Some(idx) = stderr.find("revspec '") {
@@ -1942,6 +1883,292 @@ fn render_worker_status(status: &WorkerStatus) -> &'static str {
     }
 }
 
+fn render_provider_model(provider_id: &str, model: Option<&str>) -> String {
+    match model.filter(|model| !model.is_empty()) {
+        Some(model) => format!("{provider_id}/{model}"),
+        None => format!("{provider_id}/default"),
+    }
+}
+
+fn render_timeout_secs(timeout_secs: u64) -> String {
+    if timeout_secs < 60 {
+        return format!("{timeout_secs}s");
+    }
+    if timeout_secs < 3600 {
+        let minutes = timeout_secs / 60;
+        let seconds = timeout_secs % 60;
+        return if seconds == 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{minutes}m {seconds}s")
+        };
+    }
+
+    let hours = timeout_secs / 3600;
+    let minutes = (timeout_secs % 3600) / 60;
+    if minutes == 0 {
+        format!("{hours}h")
+    } else {
+        format!("{hours}h {minutes}m")
+    }
+}
+
+fn render_duration_ms(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        return format!("{duration_ms}ms");
+    }
+    render_timeout_secs(duration_ms / 1_000)
+}
+
+fn render_policy_line(
+    sandbox_lifecycle: SandboxLifecycle,
+    candidate_policy: CandidatePolicy,
+    timeout_secs: u64,
+    allow_all_tools: bool,
+) -> String {
+    format!(
+        "sandbox {} / candidate {} / timeout {} / {}",
+        sandbox_lifecycle,
+        candidate_policy,
+        render_timeout_secs(timeout_secs),
+        if allow_all_tools {
+            "allow-all tools"
+        } else {
+            "standard tools"
+        }
+    )
+}
+
+fn single_line_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn task_start_chat_body(context: &TaskStartContext) -> String {
+    let short = short_task_id(&context.task_id);
+    format!(
+        "[{short}] hand-off started\nprovider: {}\npolicy: {}\nscope: {}",
+        render_provider_model(&context.provider_id, context.model.as_deref()),
+        render_policy_line(
+            context.sandbox_lifecycle,
+            context.candidate_policy,
+            context.timeout_secs,
+            context.allow_all_tools,
+        ),
+        truncate_line(single_line_text(&context.prompt_summary), 200),
+    )
+}
+
+fn task_start_shelf_note(context: &TaskStartContext) -> String {
+    truncate_line(
+        format!(
+            "handoff: {}",
+            render_policy_line(
+                context.sandbox_lifecycle,
+                context.candidate_policy,
+                context.timeout_secs,
+                context.allow_all_tools,
+            )
+        ),
+        120,
+    )
+}
+
+fn task_progress_primary_value(event: &WorkerProgressEvent) -> Option<String> {
+    let message = event.message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let metadata = event.metadata.as_ref();
+    let value = match event.kind {
+        WorkerProgressKind::CommandExecution => format!(
+            "cmd: {}",
+            metadata
+                .and_then(|meta| meta.command.as_deref())
+                .unwrap_or(message)
+        ),
+        WorkerProgressKind::FileExploration => format!(
+            "read: {}",
+            metadata
+                .and_then(|meta| meta.path.as_deref())
+                .unwrap_or(message)
+        ),
+        WorkerProgressKind::CodeEdit => format!(
+            "edit: {}",
+            metadata
+                .and_then(|meta| meta.path.as_deref())
+                .unwrap_or(message)
+        ),
+        WorkerProgressKind::ToolCall => format!(
+            "tool: {}",
+            metadata
+                .and_then(|meta| meta.tool_name.as_deref())
+                .unwrap_or(message)
+        ),
+        WorkerProgressKind::ToolResult => format!(
+            "tool result: {}",
+            metadata
+                .and_then(|meta| meta.tool_name.as_deref())
+                .unwrap_or(message)
+        ),
+        WorkerProgressKind::AssistantMessage => message.to_string(),
+        WorkerProgressKind::StatusUpdate => {
+            if metadata.and_then(|meta| meta.detail.as_deref()) == Some("summary") {
+                return None;
+            }
+            message.to_string()
+        }
+        WorkerProgressKind::Heartbeat => return None,
+    };
+    Some(value)
+}
+
+fn task_progress_shelf_note(event: &WorkerProgressEvent) -> Option<String> {
+    task_progress_primary_value(event).map(|value| truncate_line(value, 120))
+}
+
+fn task_progress_chat_message(short: &str, event: &WorkerProgressEvent) -> Option<ChatMessage> {
+    let message = event.message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let metadata = event.metadata.as_ref();
+    match event.kind {
+        WorkerProgressKind::CommandExecution => Some(ChatMessage::info(format!(
+            "[{short}] cmd -> {}",
+            metadata
+                .and_then(|meta| meta.command.as_deref())
+                .unwrap_or(message)
+        ))),
+        WorkerProgressKind::FileExploration => Some(ChatMessage::info(format!(
+            "[{short}] read -> {}",
+            metadata
+                .and_then(|meta| meta.path.as_deref())
+                .unwrap_or(message)
+        ))),
+        WorkerProgressKind::CodeEdit => Some(ChatMessage::info(format!(
+            "[{short}] edit -> {}",
+            metadata
+                .and_then(|meta| meta.path.as_deref())
+                .unwrap_or(message)
+        ))),
+        WorkerProgressKind::ToolCall => Some(ChatMessage::info(format!(
+            "[{short}] tool -> {}",
+            metadata
+                .and_then(|meta| meta.tool_name.as_deref())
+                .unwrap_or(message)
+        ))),
+        WorkerProgressKind::ToolResult => Some(ChatMessage::info(format!(
+            "[{short}] tool <- {}",
+            metadata
+                .and_then(|meta| meta.tool_name.as_deref())
+                .unwrap_or(message)
+        ))),
+        WorkerProgressKind::AssistantMessage => {
+            Some(ChatMessage::agent(format!("[{short}] {message}")))
+        }
+        WorkerProgressKind::StatusUpdate => {
+            if metadata.and_then(|meta| meta.detail.as_deref()) == Some("summary") {
+                None
+            } else {
+                Some(ChatMessage::info(format!("[{short}] {message}")))
+            }
+        }
+        WorkerProgressKind::Heartbeat => None,
+    }
+}
+
+fn task_finish_shelf_note(context: &TaskFinishContext) -> String {
+    let state_label = shelf_state_view(&context.state).0;
+    match context.summary.as_deref().map(str::trim) {
+        Some(summary) if !summary.is_empty() => {
+            truncate_line(format!("{state_label}: {}", single_line_text(summary)), 120)
+        }
+        _ => truncate_line(shelf_state_note(&context.state), 120),
+    }
+}
+
+fn task_finish_chat_message(context: &TaskFinishContext) -> Option<ChatMessage> {
+    if context.worker_status.is_none()
+        && context
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        && context.duration_ms.is_none()
+    {
+        return None;
+    }
+
+    let short = short_task_id(&context.task_id);
+    let worker_status = context
+        .worker_status
+        .as_ref()
+        .map(render_worker_status)
+        .unwrap_or(shelf_state_view(&context.state).0);
+    let exit_code = context
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let duration = context
+        .duration_ms
+        .map(render_duration_ms)
+        .unwrap_or_else(|| "n/a".to_string());
+    let mut body = format!(
+        "[{short}] hand-off finished\nresult: {worker_status} / exit {exit_code} / {duration}\nstate: {}\npolicy: {}",
+        shelf_state_view(&context.state).0,
+        context
+            .timeout_secs
+            .map(|timeout_secs| {
+                render_policy_line(
+                    context.sandbox_lifecycle,
+                    context.candidate_policy,
+                    timeout_secs,
+                    context.allow_all_tools.unwrap_or(false),
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "sandbox {} / candidate {}",
+                    context.sandbox_lifecycle, context.candidate_policy
+                )
+            }),
+    );
+    if let Some(summary) = context
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        body.push('\n');
+        body.push_str("summary: ");
+        body.push_str(&truncate_line(single_line_text(summary), 200));
+    }
+    if let Some(path) = context
+        .worktree_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        body.push('\n');
+        body.push_str("worktree: ");
+        body.push_str(&truncate_line(path.trim(), 200));
+    }
+
+    let failed = matches!(
+        context.worker_status,
+        Some(WorkerStatus::Failed | WorkerStatus::TimedOut | WorkerStatus::Cancelled)
+    ) || matches!(
+        context.state,
+        SandboxState::Failed { .. } | SandboxState::TimedOut | SandboxState::MergeConflicts
+    );
+
+    Some(if failed {
+        ChatMessage::error(body)
+    } else {
+        ChatMessage::info(body)
+    })
+}
+
 fn parse_budget_minutes(value: &str) -> Option<u64> {
     let trimmed = value.trim();
     if let Some(minutes) = trimmed.strip_suffix('m') {
@@ -2008,9 +2235,20 @@ fn shelf_entry_from_record(record: SandboxRecord) -> ShelfEntry {
 mod tests {
     use std::sync::Arc;
 
+    use chrono::Utc;
     use tokio::sync::mpsc;
 
-    use bakudo_core::{config::BakudoConfig, provider::ProviderRegistry, state::SandboxLedger};
+    use bakudo_core::{
+        config::BakudoConfig,
+        protocol::{
+            AttemptId, CandidatePolicy, SandboxLifecycle, WorkerProgressEvent, WorkerProgressKind,
+            WorkerProgressMetadata, WorkerStatus,
+        },
+        provider::ProviderRegistry,
+        state::{SandboxLedger, SandboxState},
+    };
+    use bakudo_daemon::session_controller::{TaskFinishContext, TaskStartContext};
+    use bakudo_daemon::task_runner::RunnerEvent;
 
     use super::*;
 
@@ -2131,5 +2369,88 @@ mod tests {
             other => panic!("expected ResolveHostApproval, got {other:?}"),
         }
         assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn task_handoff_and_semantic_progress_render_cleanly() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut app = App::new(
+            Arc::new(BakudoConfig::default()),
+            Arc::new(ProviderRegistry::with_defaults()),
+            Arc::new(SandboxLedger::new()),
+            cmd_tx,
+            event_rx,
+            None,
+            false,
+        );
+
+        event_tx
+            .try_send(SessionEvent::TaskStarted {
+                context: TaskStartContext {
+                    task_id: "task-progress".to_string(),
+                    provider_id: "codex".to_string(),
+                    model: Some("gpt-5".to_string()),
+                    prompt_summary: "Update the runtime progress surfacing.".to_string(),
+                    sandbox_lifecycle: SandboxLifecycle::Preserved,
+                    candidate_policy: CandidatePolicy::Review,
+                    timeout_secs: 600,
+                    allow_all_tools: true,
+                },
+            })
+            .unwrap();
+        event_tx
+            .try_send(SessionEvent::TaskProgress {
+                task_id: "task-progress".to_string(),
+                event: RunnerEvent::Progress(WorkerProgressEvent {
+                    attempt_id: AttemptId("attempt-progress".to_string()),
+                    kind: WorkerProgressKind::CommandExecution,
+                    message: "cargo test -p bakudo-tui app".to_string(),
+                    metadata: Some(WorkerProgressMetadata {
+                        command: Some("cargo test -p bakudo-tui app".to_string()),
+                        path: None,
+                        tool_name: None,
+                        detail: None,
+                    }),
+                    timestamp: Utc::now(),
+                }),
+            })
+            .unwrap();
+        event_tx
+            .try_send(SessionEvent::TaskFinished {
+                context: TaskFinishContext {
+                    task_id: "task-progress".to_string(),
+                    state: SandboxState::Merged,
+                    worker_status: Some(WorkerStatus::Succeeded),
+                    summary: Some("updated protocol and TUI progress rendering".to_string()),
+                    exit_code: Some(0),
+                    duration_ms: Some(2_500),
+                    timed_out: false,
+                    sandbox_lifecycle: SandboxLifecycle::Preserved,
+                    candidate_policy: CandidatePolicy::Review,
+                    timeout_secs: Some(600),
+                    allow_all_tools: Some(true),
+                    worktree_path: Some("/tmp/abox/worktrees/task-progress".to_string()),
+                },
+            })
+            .unwrap();
+
+        app.drain_session_events();
+
+        let entry = app.shelf.front().expect("shelf entry");
+        assert_eq!(entry.state_color, ShelfColor::Merged);
+        assert!(entry.last_note.contains("merged"));
+        assert!(entry.last_note.contains("updated protocol"));
+
+        let rendered = app
+            .transcript
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("hand-off started"));
+        assert!(rendered.contains("cmd -> cargo test -p bakudo-tui app"));
+        assert!(rendered.contains("hand-off finished"));
+        assert!(rendered.contains("worktree: /tmp/abox/worktrees/task-progress"));
     }
 }

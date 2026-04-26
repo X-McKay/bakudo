@@ -25,7 +25,8 @@ use bakudo_core::session::SessionRecord;
 use bakudo_core::state::{SandboxLedger, SandboxRecord, SandboxState};
 use bakudo_daemon::mission_store::MissionStore;
 use bakudo_daemon::session_controller::{
-    SessionBootstrap, SessionCommand, SessionController, SessionEvent,
+    SessionBootstrap, SessionCommand, SessionController, SessionEvent, TaskFinishContext,
+    TaskStartContext,
 };
 use bakudo_daemon::task_runner::{run_attempt, RunnerEvent, TaskRunnerConfig};
 use bakudo_daemon::worktree::{apply_candidate_policy, WorktreeAction};
@@ -631,6 +632,7 @@ async fn task_runner_emits_progress_and_updates_ledger() {
         attempt_id: AttemptId("attempt-runner-progress".to_string()),
         kind: WorkerProgressKind::AssistantMessage,
         message: "worker is thinking".to_string(),
+        metadata: None,
         timestamp: Utc::now(),
     };
     let progress_line = format!(
@@ -1237,7 +1239,7 @@ async fn session_controller_reports_failed_tasks_as_failed() {
     let final_state = timeout(Duration::from_secs(2), async {
         loop {
             match event_rx.recv().await {
-                Some(SessionEvent::TaskFinished { state, .. }) => break state,
+                Some(SessionEvent::TaskFinished { context }) => break context.state,
                 Some(_) => continue,
                 None => panic!("event channel closed"),
             }
@@ -1327,7 +1329,7 @@ async fn session_controller_requires_approval_when_policy_prompts() {
     let saw_started = timeout(Duration::from_secs(2), async {
         loop {
             match event_rx.recv().await {
-                Some(SessionEvent::TaskStarted { prompt_summary, .. }) => break prompt_summary,
+                Some(SessionEvent::TaskStarted { context }) => break context.prompt_summary,
                 Some(_) => continue,
                 None => panic!("event channel closed"),
             }
@@ -3926,7 +3928,7 @@ async fn bakudo_wait_cli_observes_session_controller_result() {
     let task_id = timeout(Duration::from_secs(2), async {
         loop {
             match event_rx.recv().await {
-                Some(SessionEvent::TaskStarted { task_id, .. }) => break task_id,
+                Some(SessionEvent::TaskStarted { context }) => break context.task_id,
                 Some(_) => continue,
                 None => panic!("event channel closed"),
             }
@@ -4555,10 +4557,16 @@ fn app_drain_session_events_updates_shelf_and_blocks_mutating_commands() {
 
     event_tx
         .try_send(SessionEvent::TaskStarted {
-            task_id: "task-1".to_string(),
-            provider_id: "claude".to_string(),
-            model: None,
-            prompt_summary: "test prompt".to_string(),
+            context: TaskStartContext {
+                task_id: "task-1".to_string(),
+                provider_id: "claude".to_string(),
+                model: None,
+                prompt_summary: "test prompt".to_string(),
+                sandbox_lifecycle: bakudo_core::protocol::SandboxLifecycle::Preserved,
+                candidate_policy: CandidatePolicy::Review,
+                timeout_secs: 300,
+                allow_all_tools: false,
+            },
         })
         .unwrap();
     app.drain_session_events();
@@ -4581,8 +4589,20 @@ fn app_drain_session_events_updates_shelf_and_blocks_mutating_commands() {
 
     event_tx
         .try_send(SessionEvent::TaskFinished {
-            task_id: "task-1".to_string(),
-            state: SandboxState::Merged,
+            context: TaskFinishContext {
+                task_id: "task-1".to_string(),
+                state: SandboxState::Merged,
+                worker_status: Some(WorkerStatus::Succeeded),
+                summary: Some("updated README and verified tests".to_string()),
+                exit_code: Some(0),
+                duration_ms: Some(1_250),
+                timed_out: false,
+                sandbox_lifecycle: bakudo_core::protocol::SandboxLifecycle::Preserved,
+                candidate_policy: CandidatePolicy::Review,
+                timeout_secs: Some(300),
+                allow_all_tools: Some(false),
+                worktree_path: Some("/tmp/worktree/task-1".to_string()),
+            },
         })
         .unwrap();
     app.drain_session_events();

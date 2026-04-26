@@ -212,12 +212,29 @@ pub struct WorkerProgressEvent {
     pub attempt_id: AttemptId,
     pub kind: WorkerProgressKind,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<WorkerProgressMetadata>,
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerProgressMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerProgressKind {
+    CommandExecution,
+    FileExploration,
+    CodeEdit,
     Heartbeat,
     ToolCall,
     ToolResult,

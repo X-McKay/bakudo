@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 
 use bakudo_core::mission::Posture;
-use bakudo_core::protocol::WorkerStatus;
+use bakudo_core::protocol::{WorkerProgressKind, WorkerStatus};
 use bakudo_core::state::{SandboxRecord, SandboxState};
 
 use crate::task_runner::RunnerEvent;
@@ -181,7 +181,13 @@ impl HostRuntime {
         let mut state = self.inner.lock().expect("host runtime mutex poisoned");
         let note = match event {
             RunnerEvent::RawLine(line) => truncate(line.trim()),
-            RunnerEvent::Progress(progress) => truncate(progress.message.trim()),
+            RunnerEvent::Progress(progress) => {
+                if matches!(progress.kind, WorkerProgressKind::Heartbeat) {
+                    String::new()
+                } else {
+                    truncate(progress.message.trim())
+                }
+            }
             RunnerEvent::InfraError(err) => truncate(&format!("Infrastructure error: {err}")),
             RunnerEvent::Finished(result) => truncate(&format!(
                 "{} ({})",

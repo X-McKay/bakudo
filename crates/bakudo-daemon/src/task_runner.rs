@@ -141,6 +141,10 @@ async fn run_attempt_inner(
             "BAKUDO_PROTOCOL_SCHEMA_VERSION".to_string(),
             bakudo_core::protocol::PROTOCOL_SCHEMA_VERSION.to_string(),
         ),
+        (
+            "BAKUDO_HEARTBEAT_INTERVAL_MS".to_string(),
+            spec.budget.heartbeat_interval_ms.to_string(),
+        ),
     ];
     if let Some(m) = spec.model.as_ref() {
         env_vars.push(("BAKUDO_MODEL".to_string(), m.clone()));
@@ -418,15 +422,22 @@ fn default_worktree_path(task_id: &str) -> Option<String> {
 mod tests {
     use super::*;
     use bakudo_core::protocol::{
-        AttemptId, SessionId, TaskId, WorkerProgressKind, PROTOCOL_SCHEMA_VERSION,
+        AttemptId, SessionId, TaskId, WorkerProgressKind, WorkerProgressMetadata,
+        PROTOCOL_SCHEMA_VERSION,
     };
 
     #[test]
     fn parse_worker_line_parses_structured_progress_events() {
         let event = WorkerProgressEvent {
             attempt_id: AttemptId("attempt-parse-progress".to_string()),
-            kind: WorkerProgressKind::StatusUpdate,
-            message: "working".to_string(),
+            kind: WorkerProgressKind::CommandExecution,
+            message: "cargo test -p bakudo-tui".to_string(),
+            metadata: Some(WorkerProgressMetadata {
+                command: Some("cargo test -p bakudo-tui".to_string()),
+                path: None,
+                tool_name: None,
+                detail: None,
+            }),
             timestamp: Utc::now(),
         };
         let line = format!(
@@ -437,7 +448,15 @@ mod tests {
 
         match parse_worker_line(&line) {
             RunnerEvent::Progress(parsed) => {
-                assert_eq!(parsed.message, "working");
+                assert_eq!(parsed.kind, WorkerProgressKind::CommandExecution);
+                assert_eq!(parsed.message, "cargo test -p bakudo-tui");
+                assert_eq!(
+                    parsed
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.command.as_deref()),
+                    Some("cargo test -p bakudo-tui")
+                );
             }
             other => panic!("expected Progress event, got {other:?}"),
         }
