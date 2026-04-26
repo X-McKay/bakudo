@@ -1,6 +1,6 @@
 # 2026-04-26 Runtime Improvements Implementation Plan
 
-Status: Proposed
+Status: Implemented (Phases 1-5 complete; branch hardening verified)
 
 Date: 2026-04-26
 
@@ -112,44 +112,44 @@ When Bakudo dispatches a worker, the operator should see:
 
 ### Implementation
 
-- [ ] Unify the classic and mission worker wrappers into one shared wrapper
+- [x] Unify the classic and mission worker wrappers into one shared wrapper
       implementation.
   The shared implementation should live in one module and standardize on the
   `BAKUDO_SUMMARY:` contract.
 
-- [ ] Expand `WorkerProgressKind` with semantic activity variants.
+- [x] Expand `WorkerProgressKind` with semantic activity variants.
   Target variants:
   `CommandExecution`, `FileExploration`, `CodeEdit`, `ToolCall`,
   `ToolResult`, `AssistantMessage`, `StatusUpdate`, `Heartbeat`.
 
-- [ ] Add an optional structured metadata field to `WorkerProgressEvent`.
+- [x] Add an optional structured metadata field to `WorkerProgressEvent`.
   Keep `message` for display, but allow structured payloads for path and
   command-specific rendering.
 
-- [ ] Emit heartbeats from the shared wrapper.
+- [x] Emit heartbeats from the shared wrapper.
   The existing `AttemptBudget.heartbeat_interval_ms` is currently unused and
   should become active.
 
-- [ ] Teach the wrapper to classify common progress lines into semantic events.
+- [x] Teach the wrapper to classify common progress lines into semantic events.
   Start with deterministic, conservative extraction:
   command execution, file reads, file edits, tool call boundaries, summary
   emission, and plain fallback narration.
 
-- [ ] Extend `SessionEvent::TaskStarted` and `SessionEvent::TaskFinished`.
+- [x] Extend `SessionEvent::TaskStarted` and `SessionEvent::TaskFinished`.
   Include enough context to render explicit hand-off and completion blocks
   without re-querying state:
   provider, model, lifecycle, candidate policy, timeout, summary, exit code,
   duration, and final state.
 
-- [ ] Update the TUI transcript rendering to bracket worker runs.
+- [x] Update the TUI transcript rendering to bracket worker runs.
   The start event should render an explicit hand-off annotation.
   The finish event should render a matching resolved annotation.
 
-- [ ] Add a dedicated live activity surface in the TUI.
+- [x] Add a dedicated live activity surface in the TUI.
   The first implementation can be a focused activity block backed by shelf
   state rather than a large pane redesign.
 
-- [ ] Keep the top status strip, but make it summarize real worker activity
+- [x] Keep the top status strip, but make it summarize real worker activity
   rather than only generic running state.
 
 ### Acceptance Criteria
@@ -196,30 +196,30 @@ string matches.
 
 ### Implementation
 
-- [ ] Replace `is_status_query` phrase matching with a structured host-intent
+- [x] Replace `is_status_query` phrase matching with a structured host-intent
       layer.
   Introduce a `HostIntent` enum with at least:
   `StatusSummary`, `RunningWorkers`, `MissionBlockers`, `Candidates`,
   `MissionSteering`, `MissionStart`, and `ClarifyStart`.
 
-- [ ] Build a richer `HostSnapshot`.
+- [x] Build a richer `HostSnapshot`.
   The snapshot should include:
   ledger entries, active mission summary, queued wakes, active wave summary,
   pending approvals, pending user questions, latest tool call error, and the
   current provider/model view.
 
-- [ ] Move snapshot construction into mission runtime code rather than leaving
+- [x] Move snapshot construction into mission runtime code rather than leaving
   `HostRuntime` to infer everything from partial fields.
 
-- [ ] Add dedicated renderers for the common operator questions.
+- [x] Add dedicated renderers for the common operator questions.
   These renderers should answer using live mission and ledger state rather than
   canned text templates keyed only on the input string.
 
-- [ ] Keep steering local and deterministic.
+- [x] Keep steering local and deterministic.
   Inputs classified as steering should still enqueue a mission message through
   the existing runtime flow.
 
-- [ ] Add an extension seam for a future cheap host model, but do not require
+- [x] Add an extension seam for a future cheap host model, but do not require
   one in the first implementation.
   The branch should land a better deterministic host layer first.
 
@@ -256,29 +256,29 @@ same degraded wake loop.
 
 ### Implementation
 
-- [ ] Split mission-state loading into two behaviors:
+- [x] Split mission-state loading into two behaviors:
   one path for initial mission creation and one path for loading existing
   mission state.
 
-- [ ] Stop returning `MissionState::default_layout()` for an existing mission
+- [x] Stop returning `MissionState::default_layout()` for an existing mission
       when the row is missing.
   Missing state for an existing mission should surface a hard error or enter a
   defined recovery path.
 
-- [ ] Ensure mission creation writes mission row, mission state, and
+- [x] Ensure mission creation writes mission row, mission state, and
       `mission_plan.md` in one coherent flow.
   If needed, add a higher-level mission initialization helper in
   `MissionStore` or `MissionCore`.
 
-- [ ] Add durable wake backoff.
+- [x] Add durable wake backoff.
   Introduce a `not_before` or equivalent scheduled-at field for wakes so
   timeout follow-ups can be delayed rather than processed immediately.
 
-- [ ] On provider wake timeout, enqueue the next timeout wake with exponential
+- [x] On provider wake timeout, enqueue the next timeout wake with exponential
       backoff and jitter within bounded limits.
   The wake payload should carry enough detail for operator introspection.
 
-- [ ] Surface timeout streaks and next wake timing in the mission banner or
+- [x] Surface timeout streaks and next wake timing in the mission banner or
       host status output.
 
 ### Acceptance Criteria
@@ -312,22 +312,22 @@ changing Bakudo's host-owned candidate policy model.
 
 ### Implementation
 
-- [ ] Centralize worktree branch-name formatting and worktree-path resolution in
+- [x] Centralize worktree branch-name formatting and worktree-path resolution in
       a single host-owned helper module.
 
-- [ ] Remove duplicated `agent/<task_id>` formatting from multiple modules.
+- [x] Remove duplicated `agent/<task_id>` formatting from multiple modules.
 
-- [ ] Prefer structured worktree path capture over stdout scraping.
+- [x] Prefer structured worktree path capture over stdout scraping.
   If `abox` already exposes enough structured data, consume it directly.
   If it does not, add the upstream `abox` change first and then wire Bakudo to
   use it.
 
-- [ ] Harden dirty preserved snapshot behavior.
+- [x] Harden dirty preserved snapshot behavior.
   Add size and content guardrails before `git add -A` and auto-commit.
   The first version should at minimum detect oversized snapshots and surface a
   review-required outcome rather than silently committing everything.
 
-- [ ] Keep `.gitignore` behavior intact.
+- [x] Keep `.gitignore` behavior intact.
   Do not reimplement Git ignore rules; add Bakudo-specific snapshot guardrails
   on top.
 
@@ -362,18 +362,18 @@ done".
 
 ### Implementation
 
-- [ ] Introduce a verification step before autonomous merge.
+- [x] Introduce a verification step before autonomous merge.
   The host should spin a fresh ephemeral `abox` run against the merged result
   or the preserved worktree candidate and run a configured verification command.
 
-- [ ] Make verification policy configurable.
+- [x] Make verification policy configurable.
   The initial config can be repo-level and explicit, for example a list of
   commands or one command string for autonomous candidate verification.
 
-- [ ] On verification failure, downgrade the worktree outcome from
+- [x] On verification failure, downgrade the worktree outcome from
   auto-mergeable to review-required or conflict-like preserved state.
 
-- [ ] Surface verification outcome in `RunSummary`, trace bundles, and TUI
+- [x] Surface verification outcome in `RunSummary`, trace bundles, and TUI
   completion messaging.
 
 ### Acceptance Criteria

@@ -379,17 +379,17 @@ pub(crate) fn mission_wake_summary(banner: &MissionBanner) -> Option<String> {
                     "s"
                 }
             );
-            if banner.wake.current_reason == Some(WakeReason::Timeout) {
-                if let Some(deadline) = banner.wake.next_wake_at {
-                    let mut summary = format!(
-                        "{prefix}: timeout backoff until {}",
-                        format_wake_deadline(deadline)
-                    );
-                    if let Some(streak) = banner.wake.timeout_streak {
-                        summary.push_str(&format!(" (streak {streak})"));
-                    }
-                    return Some(summary);
+            if banner.wake.current_reason == Some(WakeReason::Timeout)
+                && let Some(deadline) = banner.wake.next_wake_at
+            {
+                let mut summary = format!(
+                    "{prefix}: timeout backoff until {}",
+                    format_wake_deadline(deadline)
+                );
+                if let Some(streak) = banner.wake.timeout_streak {
+                    summary.push_str(&format!(" (streak {streak})"));
                 }
+                return Some(summary);
             }
             Some(match banner.wake.current_reason {
                 Some(reason) => format!("{prefix}: {}", wake_reason_label(reason)),

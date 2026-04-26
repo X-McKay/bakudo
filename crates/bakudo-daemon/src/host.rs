@@ -825,7 +825,7 @@ fn mission_next_action_summary(mission: &HostMissionSnapshot) -> &'static str {
         && mission
             .active_wave
             .as_ref()
-            .map_or(true, |wave| wave.running == 0 && wave.queued == 0)
+            .is_none_or(|wave| wave.running == 0 && wave.queued == 0)
     {
         return "send steering or use /wake";
     }

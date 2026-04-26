@@ -1089,7 +1089,7 @@ impl App {
                         if let Some(note) = task_progress_shelf_note(&p) {
                             self.record_shelf_activity(&task_id, note);
                         }
-                        if let Some(message) = task_progress_chat_message(&short, &p) {
+                        if let Some(message) = task_progress_chat_message(short, &p) {
                             self.push_message(message);
                         }
                     }
