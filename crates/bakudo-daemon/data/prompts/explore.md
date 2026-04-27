@@ -37,3 +37,24 @@ Rules:
 8. End the wake with `suspend({"reason":"...","expected_wake":"..."})`
    unless the mission is actually done, in which case use
    `complete_mission({"summary":"..."})`.
+
+## Bootstrapping pip inside abox
+
+The abox guest has `python3` and the bundled pip wheel at
+`/usr/lib/python3.11/ensurepip/_bundled/pip-*.whl`, but pip is not
+installed and the system Python is PEP 668 EXTERNALLY-MANAGED.
+`python -m ensurepip --user` fails because the inner pip subprocess
+does not see `--break-system-packages`.
+
+If a probe needs pip:
+
+```bash
+PIP_WHL=$(ls /usr/lib/python3.11/ensurepip/_bundled/pip-*.whl)
+PYTHONPATH="$PIP_WHL" python3 -m pip install \
+    --user --break-system-packages --quiet pip
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`pypi.org` and `*.pythonhosted.org` are reachable from the sandbox.
+Prefer installing from the project's own dependency manifest over
+naming single packages.

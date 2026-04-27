@@ -86,3 +86,31 @@ Rules:
     - `complete_mission({"summary":"..."})` when the mission is done;
     - `suspend({"reason":"...","expected_wake":"..."})` when waiting on a
       worker, a user answer, a host approval, or the next deliberate step.
+
+## Bootstrapping pip inside abox
+
+The abox guest rootfs ships `python3` and the bundled pip wheel at
+`/usr/lib/python3.11/ensurepip/_bundled/pip-*.whl`, but pip is not
+installed and the system Python is marked PEP 668 EXTERNALLY-MANAGED.
+`python -m ensurepip --user` fails because the inner pip subprocess
+that ensurepip spawns does not see `--break-system-packages` and the
+marker blocks the install.
+
+If a worker (or an `abox_exec` probe) needs pip on a fresh sandbox,
+bootstrap it directly from the bundled wheel and use `--user`:
+
+```bash
+PIP_WHL=$(ls /usr/lib/python3.11/ensurepip/_bundled/pip-*.whl)
+PYTHONPATH="$PIP_WHL" python3 -m pip install \
+    --user --break-system-packages --quiet pip
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+After that, `pip install --user --break-system-packages <pkg>` resolves
+through pypi normally. `pypi.org` and `*.pythonhosted.org` are reachable
+from the sandbox; no host credentials are forwarded.
+
+Prefer installing from the project's own dependency manifest
+(`requirements*.txt`, `pyproject.toml [project.optional-dependencies]`,
+`setup.cfg`) over naming single packages — that mirrors the project's
+own CI and avoids drift from real-world dependency resolution.
