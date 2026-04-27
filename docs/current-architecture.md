@@ -424,12 +424,17 @@ The mission runtime exposes a deliberately small tool contract:
 - `read_experiment_summary`
 - `dispatch_swarm`
 - `abox_exec`
-- `abox_apply_patch`
 - `host_exec`
 - `cancel_experiments`
 - `update_mission_state`
 - `record_lesson`
 - `suspend`
+
+Repo mutations come exclusively from `dispatch_swarm` workers (the actual
+unit of repo work) plus host-owned candidate policy. The conductor has no
+patch-apply tool: `abox` is the execution boundary, and `bakudo` (the host)
+reviews worker output and decides whether to merge, discard, or leave a
+preserved worktree for review.
 
 The conductor prompt tells the provider to use the tools directly and not
 invent a side transport.
@@ -660,12 +665,6 @@ It takes a plain shell snippet and returns:
 
 This keeps the conductor from having to launch a whole agent worker for simple
 checks.
-
-### `abox_apply_patch`
-
-`abox_apply_patch` is a small surgical-edit path for cases where the conductor
-already knows the exact patch and just needs sandboxed application plus
-verification.
 
 ### `host_exec`
 

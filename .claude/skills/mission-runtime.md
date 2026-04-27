@@ -35,8 +35,10 @@ The mission runtime lives primarily in:
 3. The mission tool surface is fixed unless the product contract changes:
    `read_plan`, `update_plan`, `notify_user`, `ask_user`,
    `complete_mission`, `read_experiment_summary`, `dispatch_swarm`,
-   `abox_exec`, `abox_apply_patch`, `host_exec`, `cancel_experiments`,
-   `update_mission_state`, `record_lesson`, and `suspend`.
+   `abox_exec`, `host_exec`, `cancel_experiments`,
+   `update_mission_state`, `record_lesson`, and `suspend`. Repo mutations
+   are produced by `dispatch_swarm` workers and merged by the host's
+   candidate-policy path; the conductor has no patch-apply tool.
 
    `dispatch_swarm` experiment items stay typed: use top-level
    `{"kind":"script","script":...}` for script workers and
@@ -50,8 +52,8 @@ The mission runtime lives primarily in:
    set `sandbox_lifecycle = "preserved"` plus
    `candidate_policy = "auto_apply"` on the script experiment.
 
-   `abox_exec` and `abox_apply_patch` are simpler on purpose: pass plain
-   shell strings for `script` and `verify`, not tagged script objects.
+   `abox_exec` is for short verification probes inside the sandbox: pass a
+   plain shell string for `script`, not a tagged script object.
 
 4. `MissionState` remains the compact durable execution state, but
    `mission_plan.md` is the conductor-facing planning artifact. Do not

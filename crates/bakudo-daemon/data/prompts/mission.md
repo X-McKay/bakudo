@@ -49,7 +49,10 @@ Rules:
      `candidate_policy:"discard"`. If later steps need the script worker's repo
      changes to remain visible on `main`, either use an `agent_task` worker or
      explicitly set `sandbox_lifecycle:"preserved"` plus
-     `candidate_policy:"auto_apply"`.
+     `candidate_policy:"auto_apply"`. The dispatcher rejects experiments where
+     `candidate_policy` is `"auto_apply"` or `"review"` without
+     `sandbox_lifecycle:"preserved"` — the host needs the agent branch to
+     still exist when it runs the merge or review.
    - Agent experiments use:
      `{"label":"...","hypothesis":"...","kind":"agent_task","prompt":"..."}`
      with optional `provider`, `model`, `sandbox_lifecycle`,
@@ -63,9 +66,12 @@ Rules:
    a plain shell snippet:
    `{"script":"cd /workspace && test -f smoke.txt","timeout_secs":60}`
    Do not wrap the script in a tagged object.
-8. `abox_apply_patch` takes `{"patch":"...","verify":"..."}` where `verify`
-   is also a plain shell snippet. Prefer it for small surgical edits when a
-   full worker is unnecessary.
+8. Repo mutations are produced by `dispatch_swarm` workers, not by the
+   conductor. The host owns the candidate policy (`Review`, `AutoApply`,
+   `Discard`); after a worker finishes, read the experiment summary and
+   either steer the next wake or surface the preserved candidate to the
+   operator. Do not try to hand-craft and apply patches yourself — there is
+   no conductor-side patch-apply tool.
 9. Use `host_exec` only for approval-gated host actions that cannot happen
    inside `abox`, such as host-owned worktree or environment operations.
    Never use it just because it seems faster than staying inside the sandbox.

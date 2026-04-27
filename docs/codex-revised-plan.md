@@ -155,7 +155,6 @@ The first target tool surface is:
 - `read_experiment_summary`
 - `dispatch_swarm`
 - `abox_exec`
-- `abox_apply_patch`
 - `host_exec`
 - `cancel_experiments`
 - `update_mission_state`
@@ -164,6 +163,8 @@ The first target tool surface is:
 
 This is intentionally small. If the model needs more repo context, it should
 obtain it inside an `abox` worker, not by reading the host filesystem directly.
+Repo mutations land through `dispatch_swarm` workers and the host-owned
+candidate policy; there is no conductor-side patch-apply tool.
 
 ### 4. Prefer prompt and provider configuration over Rust branching
 
@@ -336,7 +337,6 @@ This plan keeps the tool surface small and explicit.
 
 - `dispatch_swarm`
 - `abox_exec`
-- `abox_apply_patch`
 - `host_exec`
 - `update_mission_state`
 - `record_lesson`
@@ -352,14 +352,19 @@ This plan keeps the tool surface small and explicit.
 - `complete_mission({ summary }) -> { completed: true }`
 - `read_experiment_summary({ experiment_id }) -> { summary, trace_bundle_path? }`
 
+### Removed
+
+- `abox_apply_patch` — repo mutations are produced by `dispatch_swarm`
+  workers and merged by the host's candidate-policy path. The conductor has
+  no patch-apply tool: `abox` executes, `bakudo` reviews and merges.
+
 ### Change
 
 - `suspend` should mean "yield this wake and sleep", not "complete mission"
 - `ask_user` remains the blocking question tool
 - `notify_user` is non-blocking and transcript-facing
-- `abox_exec` and `abox_apply_patch` should take plain shell strings for
-  quick conductor-side verification, while `dispatch_swarm` keeps the stricter
-  typed experiment payloads
+- `abox_exec` takes a plain shell string for `script`, while `dispatch_swarm`
+  keeps the stricter typed experiment payloads
 
 ### Do Not Add In Phase 1
 

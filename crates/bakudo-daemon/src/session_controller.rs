@@ -509,14 +509,6 @@ struct AboxExecArgs {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct AboxApplyPatchArgs {
-    patch: String,
-    verify: String,
-    #[serde(default)]
-    abox_profile: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
 struct HostExecArgs {
     command: String,
     reason: String,
@@ -3121,10 +3113,6 @@ impl MissionCore {
                     .await?
             }
             "abox_exec" => self.tool_abox_exec(mission, wake, call.arguments).await?,
-            "abox_apply_patch" => {
-                self.tool_abox_apply_patch(mission, wake, call.arguments)
-                    .await?
-            }
             "host_exec" => self.tool_host_exec(mission, wake, call.arguments).await?,
             "update_mission_state" => {
                 self.tool_update_mission_state(mission, wake, call.arguments)
@@ -3239,13 +3227,22 @@ impl MissionCore {
                                 "script experiments only accept kind, script, label, hypothesis, base_branch, skill, metric_keys, sandbox_lifecycle, and candidate_policy"
                             );
                         }
+                        let resolved_lifecycle =
+                            sandbox_lifecycle.unwrap_or(SandboxLifecycle::Ephemeral);
+                        let resolved_policy =
+                            candidate_policy.unwrap_or(CandidatePolicy::Discard);
+                        require_preserved_for_policy(
+                            &label,
+                            sandbox_lifecycle,
+                            resolved_lifecycle,
+                            resolved_policy,
+                        )?;
                         ExperimentWorkload::Script {
                             script: script.ok_or_else(|| {
                                 anyhow!("script experiments require a script payload")
                             })?,
-                            sandbox_lifecycle: sandbox_lifecycle
-                                .unwrap_or(SandboxLifecycle::Ephemeral),
-                            candidate_policy: candidate_policy.unwrap_or(CandidatePolicy::Discard),
+                            sandbox_lifecycle: resolved_lifecycle,
+                            candidate_policy: resolved_policy,
                         }
                     }
                     DispatchExperimentKind::AgentTask => {
@@ -3280,13 +3277,22 @@ impl MissionCore {
                                     provider_id
                                 )
                             })?;
+                        let resolved_lifecycle =
+                            sandbox_lifecycle.unwrap_or(SandboxLifecycle::Preserved);
+                        let resolved_policy =
+                            candidate_policy.unwrap_or(CandidatePolicy::Review);
+                        require_preserved_for_policy(
+                            &label,
+                            sandbox_lifecycle,
+                            resolved_lifecycle,
+                            resolved_policy,
+                        )?;
                         ExperimentWorkload::AgentTask {
                             prompt,
                             provider: Some(provider_id),
                             model,
-                            sandbox_lifecycle: sandbox_lifecycle
-                                .unwrap_or(SandboxLifecycle::Preserved),
-                            candidate_policy: candidate_policy.unwrap_or(CandidatePolicy::Review),
+                            sandbox_lifecycle: resolved_lifecycle,
+                            candidate_policy: resolved_policy,
                             timeout_secs: timeout_secs.or(Some(worker_cfg.timeout_secs)),
                             allow_all_tools: allow_all_tools
                                 .unwrap_or(policy.allow_all_tools && worker_cfg.allow_all_tools),
@@ -3436,35 +3442,6 @@ impl MissionCore {
                 "duration_ms": outcome.duration_ms,
                 "stdout_tail": outcome.stdout_tail,
                 "stderr_tail": outcome.stderr_tail,
-            }),
-            suspend: false,
-            mission_status: None,
-        })
-    }
-
-    async fn tool_abox_apply_patch(
-        &self,
-        mission: &Mission,
-        wake: &WakeEvent,
-        arguments: Value,
-    ) -> Result<ToolCallOutcome> {
-        let args: AboxApplyPatchArgs = serde_json::from_value(arguments)?;
-        let inner = self
-            .tool_abox_exec(
-                mission,
-                wake,
-                serde_json::to_value(AboxExecArgs {
-                    script: patch_apply_script(&args.patch, &args.verify),
-                    abox_profile: args.abox_profile,
-                    timeout_secs: Some(120),
-                })?,
-            )
-            .await?;
-        let verify = inner.payload.clone();
-        Ok(ToolCallOutcome {
-            payload: json!({
-                "applied": verify.get("exit_code").and_then(Value::as_i64) == Some(0),
-                "verify": verify,
             }),
             suspend: false,
             mission_status: None,
@@ -5075,7 +5052,7 @@ async fn wake_mcp_delete(
 fn build_deliberator_prompt(system_prompt: &str, wake: &WakeEvent) -> Result<String> {
     let wake_json = serde_json::to_string_pretty(wake)?;
     Ok(format!(
-        "{system_prompt}\n\nBakudo has already attached the mission MCP server for this wake. Use the available Bakudo tools directly; do not invent a custom transport or print JSON-RPC by hand.\n\nWake contract reminders:\n- `WakeEvent` is the source of truth for why you were resumed and what is already in flight.\n- `mission_plan.md` is operator-facing orientation; keep it concise and current.\n- `MissionState` is durable hand-off state; keep it compact, factual, and current.\n- Prefer `abox` work (`dispatch_swarm`, `abox_exec`, `abox_apply_patch`) for repo changes and verification.\n- Use `host_exec` only for real host-boundary actions that cannot happen inside `abox`.\n- End the wake with `complete_mission(...)` or `suspend(...)`, not both.\n\nCurrent WakeEvent JSON:\n{wake_json}\n"
+        "{system_prompt}\n\nBakudo has already attached the mission MCP server for this wake. Use the available Bakudo tools directly; do not invent a custom transport or print JSON-RPC by hand.\n\nWake contract reminders:\n- `WakeEvent` is the source of truth for why you were resumed and what is already in flight.\n- `mission_plan.md` is operator-facing orientation; keep it concise and current.\n- `MissionState` is durable hand-off state; keep it compact, factual, and current.\n- Prefer `abox` work (`dispatch_swarm`, `abox_exec`) for repo changes and verification. Repo mutations land through workers (`dispatch_swarm`) and the host's review/merge path; do not try to hand-craft and apply patches yourself.\n- Use `host_exec` only for real host-boundary actions that cannot happen inside `abox`.\n- End the wake with `complete_mission(...)` or `suspend(...)`, not both.\n\nCurrent WakeEvent JSON:\n{wake_json}\n"
     ))
 }
 
@@ -5239,23 +5216,6 @@ fn tool_definitions() -> Vec<McpToolDefinition> {
                     "timeout_secs": { "type": "integer", "minimum": 1 },
                 },
                 "required": ["script"],
-                "additionalProperties": false,
-            }),
-        },
-        McpToolDefinition {
-            name: "abox_apply_patch",
-            description: "Apply a patch in an abox and verify it with a plain shell snippet.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "patch": { "type": "string" },
-                    "verify": {
-                        "type": "string",
-                        "description": "Shell snippet run with bash -lc after the patch is applied.",
-                    },
-                    "abox_profile": { "type": "string" },
-                },
-                "required": ["patch", "verify"],
                 "additionalProperties": false,
             }),
         },
@@ -5638,6 +5598,35 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     format!("{head}...")
 }
 
+/// Reject experiment specs whose `candidate_policy` requires a host-side merge
+/// or review of the worker's worktree but whose `sandbox_lifecycle` would have
+/// abox tear that worktree down. The host needs the agent branch to still
+/// exist when it runs the merge; ephemeral lifecycle deletes it on worker
+/// exit, leaving the merge nothing to apply.
+fn require_preserved_for_policy(
+    label: &str,
+    raw_lifecycle: Option<SandboxLifecycle>,
+    resolved_lifecycle: SandboxLifecycle,
+    resolved_policy: CandidatePolicy,
+) -> Result<()> {
+    if !matches!(
+        resolved_policy,
+        CandidatePolicy::AutoApply | CandidatePolicy::Review
+    ) {
+        return Ok(());
+    }
+    if resolved_lifecycle == SandboxLifecycle::Preserved {
+        return Ok(());
+    }
+    let got = match raw_lifecycle {
+        Some(value) => format!("'{value}'"),
+        None => format!("unset (resolved to '{resolved_lifecycle}')"),
+    };
+    anyhow::bail!(
+        "experiment '{label}': candidate_policy '{resolved_policy}' requires sandbox_lifecycle 'preserved'; got {got}. Set sandbox_lifecycle: \"preserved\" on the experiment."
+    );
+}
+
 fn extract_metrics(stdout: &str, metric_keys: &[String]) -> serde_json::Map<String, Value> {
     let mut metrics = serde_json::Map::new();
     if metric_keys.is_empty() {
@@ -5656,12 +5645,6 @@ fn extract_metrics(stdout: &str, metric_keys: &[String]) -> serde_json::Map<Stri
         }
     }
     metrics
-}
-
-fn patch_apply_script(patch: &str, verify: &str) -> String {
-    format!(
-        "set -euo pipefail\ncat > /tmp/bakudo.patch <<'PATCH'\n{patch}\nPATCH\ngit apply /tmp/bakudo.patch\n{verify}\n"
-    )
 }
 
 fn slugify(value: &str) -> String {
@@ -6034,13 +6017,116 @@ mod tests {
     }
 
     #[test]
-    fn abox_apply_patch_args_accept_plain_verify_string() {
-        let args: AboxApplyPatchArgs = serde_json::from_value(json!({
-            "patch": "--- a/x\n+++ b/x\n@@\n-old\n+new\n",
-            "verify": "test -f x",
-        }))
-        .expect("abox_apply_patch string args should parse");
+    fn require_preserved_accepts_coherent_combinations() {
+        // Default agent_task: lifecycle preserved + policy review → coherent.
+        require_preserved_for_policy(
+            "label",
+            None,
+            SandboxLifecycle::Preserved,
+            CandidatePolicy::Review,
+        )
+        .expect("agent_task default should be coherent");
 
-        assert_eq!(args.verify, "test -f x");
+        // Default script: lifecycle ephemeral + policy discard → coherent.
+        require_preserved_for_policy(
+            "label",
+            None,
+            SandboxLifecycle::Ephemeral,
+            CandidatePolicy::Discard,
+        )
+        .expect("script default should be coherent");
+
+        // Script with explicit preserved + auto_apply → coherent.
+        require_preserved_for_policy(
+            "label",
+            Some(SandboxLifecycle::Preserved),
+            SandboxLifecycle::Preserved,
+            CandidatePolicy::AutoApply,
+        )
+        .expect("preserved + auto_apply should be coherent");
+
+        // Preserved + discard is allowed (host throws away the worktree, but it
+        // still existed on disk during the run — useful for debugging).
+        require_preserved_for_policy(
+            "label",
+            Some(SandboxLifecycle::Preserved),
+            SandboxLifecycle::Preserved,
+            CandidatePolicy::Discard,
+        )
+        .expect("preserved + discard should be coherent");
+    }
+
+    #[test]
+    fn require_preserved_rejects_auto_apply_with_ephemeral_explicit() {
+        let err = require_preserved_for_policy(
+            "fix-thing",
+            Some(SandboxLifecycle::Ephemeral),
+            SandboxLifecycle::Ephemeral,
+            CandidatePolicy::AutoApply,
+        )
+        .expect_err("auto_apply + ephemeral must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fix-thing"),
+            "label should appear in error: {msg}"
+        );
+        assert!(msg.contains("auto_apply"), "policy should appear: {msg}");
+        assert!(
+            msg.contains("'ephemeral'"),
+            "lifecycle should appear: {msg}"
+        );
+        assert!(
+            msg.contains("preserved"),
+            "remediation should name preserved: {msg}"
+        );
+    }
+
+    #[test]
+    fn require_preserved_rejects_auto_apply_with_unset_lifecycle() {
+        // Unset lifecycle on a script workload resolves to ephemeral. The error
+        // should call out that the field was unset so the operator knows what
+        // to add, not just that ephemeral was bad.
+        let err = require_preserved_for_policy(
+            "fix-thing",
+            None,
+            SandboxLifecycle::Ephemeral,
+            CandidatePolicy::AutoApply,
+        )
+        .expect_err("auto_apply + unset lifecycle must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unset"),
+            "should flag that the field was unset: {msg}"
+        );
+        assert!(
+            msg.contains("resolved to 'ephemeral'"),
+            "should explain what unset resolved to: {msg}"
+        );
+    }
+
+    #[test]
+    fn require_preserved_rejects_review_with_ephemeral() {
+        let err = require_preserved_for_policy(
+            "explore",
+            Some(SandboxLifecycle::Ephemeral),
+            SandboxLifecycle::Ephemeral,
+            CandidatePolicy::Review,
+        )
+        .expect_err("review + ephemeral must be rejected (review needs the worktree present)");
+        assert!(err.to_string().contains("review"));
+    }
+
+    #[test]
+    fn mission_tool_surface_does_not_expose_abox_apply_patch() {
+        // Repo mutations come from `dispatch_swarm` workers and the host's
+        // candidate-policy path. The conductor must not have a host-resident
+        // patch-apply tool: that would let the conductor mutate the repo
+        // outside the worker-review-merge boundary.
+        let names: Vec<&str> = tool_definitions().iter().map(|t| t.name).collect();
+        assert!(
+            !names.contains(&"abox_apply_patch"),
+            "abox_apply_patch must not be exposed; got tools = {:?}",
+            names
+        );
     }
 }
