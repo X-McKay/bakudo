@@ -119,7 +119,12 @@ fn render_popup(frame: &mut Frame, app: &App, composer_area: Rect) {
         }
         PopupState::UserQuestion(prompt) => {
             let area = centered_rect_with_min(frame.size(), 74, 58, 54, 10);
-            let lines = build_question_popup_lines(prompt, area.width.saturating_sub(4) as usize);
+            let inner_width = area.width.saturating_sub(4) as usize;
+            let lines = if prompt.editing {
+                build_question_popup_edit_lines(prompt, inner_width)
+            } else {
+                build_question_popup_lines(prompt, inner_width)
+            };
             render_popup_surface(frame, area, "Question", lines);
         }
     }
@@ -281,7 +286,30 @@ fn build_question_popup_lines(
     lines.push(popup_hint_line(&[
         ("↑/↓ or 1-9", "select"),
         ("Enter", "answer"),
+        ("c", "custom answer"),
     ]));
+    lines
+}
+
+fn build_question_popup_edit_lines(
+    prompt: &crate::app::UserQuestionPrompt,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "Type your answer.",
+        Style::default().fg(Color::White).bold(),
+    ))];
+    lines.push(Line::raw(""));
+    lines.extend(wrap_popup_text(&prompt.question, width));
+    lines.push(Line::raw(""));
+    lines.extend(labeled_popup_lines("Answer", &prompt.edited_answer, width));
+    lines.push(Line::raw(""));
+    let escape_hint = if prompt.choices.is_empty() {
+        ("Esc", "cancel")
+    } else {
+        ("Esc", "back to choices")
+    };
+    lines.push(popup_hint_line(&[("Enter", "submit"), escape_hint]));
     lines
 }
 
@@ -1286,12 +1314,40 @@ mod tests {
             choices: vec!["main".to_string(), "release".to_string()],
             selected: 0,
             selection_touched: false,
+            editing: false,
+            edited_answer: String::new(),
+            cursor: 0,
         }));
         let rendered = render_to_string(&app, 100, 24);
         assert!(rendered.contains("Question"));
         assert!(rendered.contains("Which branch should Bakudo continue from?"));
         assert!(rendered.contains("1. main"));
         assert!(rendered.contains("2. release"));
+        assert!(
+            rendered.contains("custom answer"),
+            "choice view should hint at the freeform editor: {rendered}"
+        );
+    }
+
+    #[test]
+    fn question_popup_edit_view_shows_typed_answer_and_submit_hint() {
+        let mut app = fresh_app();
+        app.popup = Some(PopupState::UserQuestion(crate::app::UserQuestionPrompt {
+            request_id: "question-2".to_string(),
+            question: "How should we proceed?".to_string(),
+            choices: vec!["alpha".to_string(), "beta".to_string()],
+            selected: 0,
+            selection_touched: false,
+            editing: true,
+            edited_answer: "use the third option".to_string(),
+            cursor: "use the third option".len(),
+        }));
+        let rendered = render_to_string(&app, 100, 24);
+        assert!(rendered.contains("Type your answer"));
+        assert!(rendered.contains("use the third option"));
+        assert!(rendered.contains("Enter"));
+        assert!(rendered.contains("submit"));
+        assert!(rendered.contains("back to choices"));
     }
 
     #[test]

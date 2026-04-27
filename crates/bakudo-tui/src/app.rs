@@ -210,6 +210,9 @@ pub struct UserQuestionPrompt {
     pub choices: Vec<String>,
     pub selected: usize,
     pub selection_touched: bool,
+    pub editing: bool,
+    pub edited_answer: String,
+    pub cursor: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -734,38 +737,96 @@ impl App {
         let Some(PopupState::UserQuestion(prompt)) = self.popup.as_mut() else {
             return;
         };
-        let outcome = match key.code {
-            KeyCode::Up | KeyCode::Left => {
-                prompt.selected = step_selection(prompt.selected, prompt.choices.len(), -1);
-                prompt.selection_touched = true;
-                Outcome::None
-            }
-            KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
-                prompt.selected = step_selection(prompt.selected, prompt.choices.len(), 1);
-                prompt.selection_touched = true;
-                Outcome::None
-            }
-            KeyCode::Char(ch) if ch.is_ascii_digit() => {
-                let idx = ch.to_digit(10).unwrap_or(0) as usize;
-                if idx > 0 && idx <= prompt.choices.len() {
-                    prompt.selected = idx - 1;
-                    prompt.selection_touched = true;
+        let outcome = if prompt.editing {
+            match key.code {
+                KeyCode::Esc => {
+                    // If choices exist, drop back to choice view; otherwise
+                    // close the popup without submitting.
+                    if prompt.choices.is_empty() {
+                        Outcome::None
+                    } else {
+                        prompt.editing = false;
+                        prompt.edited_answer.clear();
+                        prompt.cursor = 0;
+                        Outcome::None
+                    }
                 }
-                Outcome::None
-            }
-            KeyCode::Enter if prompt.selection_touched => {
-                let answer = prompt
-                    .choices
-                    .get(prompt.selected)
-                    .cloned()
-                    .unwrap_or_default();
-                Outcome::Answer {
+                KeyCode::Enter if !prompt.edited_answer.trim().is_empty() => Outcome::Answer {
                     request_id: prompt.request_id.clone(),
-                    answer,
+                    answer: prompt.edited_answer.clone(),
+                },
+                KeyCode::Backspace if prompt.cursor > 0 => {
+                    let prev = prompt.cursor - 1;
+                    prompt.edited_answer.drain(prev..prompt.cursor);
+                    prompt.cursor = prev;
+                    Outcome::None
                 }
+                KeyCode::Left if prompt.cursor > 0 => {
+                    prompt.cursor -= 1;
+                    Outcome::None
+                }
+                KeyCode::Right if prompt.cursor < prompt.edited_answer.len() => {
+                    prompt.cursor += 1;
+                    Outcome::None
+                }
+                KeyCode::Home => {
+                    prompt.cursor = 0;
+                    Outcome::None
+                }
+                KeyCode::End => {
+                    prompt.cursor = prompt.edited_answer.len();
+                    Outcome::None
+                }
+                KeyCode::Char(ch) => {
+                    prompt.edited_answer.insert(prompt.cursor, ch);
+                    prompt.cursor += 1;
+                    Outcome::None
+                }
+                _ => Outcome::None,
             }
-            KeyCode::Esc => Outcome::None,
-            _ => Outcome::None,
+        } else {
+            match key.code {
+                KeyCode::Up | KeyCode::Left => {
+                    prompt.selected = step_selection(prompt.selected, prompt.choices.len(), -1);
+                    prompt.selection_touched = true;
+                    Outcome::None
+                }
+                KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+                    prompt.selected = step_selection(prompt.selected, prompt.choices.len(), 1);
+                    prompt.selection_touched = true;
+                    Outcome::None
+                }
+                KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                    let idx = ch.to_digit(10).unwrap_or(0) as usize;
+                    if idx > 0 && idx <= prompt.choices.len() {
+                        prompt.selected = idx - 1;
+                        prompt.selection_touched = true;
+                    }
+                    Outcome::None
+                }
+                KeyCode::Char('c') => {
+                    // Open the freeform answer editor. Works whether or not
+                    // choices exist — operators can always answer outside the
+                    // conductor's offered set.
+                    prompt.editing = true;
+                    prompt.edited_answer.clear();
+                    prompt.cursor = 0;
+                    Outcome::None
+                }
+                KeyCode::Enter if prompt.selection_touched => {
+                    let answer = prompt
+                        .choices
+                        .get(prompt.selected)
+                        .cloned()
+                        .unwrap_or_default();
+                    Outcome::Answer {
+                        request_id: prompt.request_id.clone(),
+                        answer,
+                    }
+                }
+                KeyCode::Esc => Outcome::None,
+                _ => Outcome::None,
+            }
         };
 
         if let Outcome::Answer { request_id, answer } = outcome {
@@ -1169,12 +1230,19 @@ impl App {
                 choices,
             } => {
                 self.clear_pending_runtime_work();
+                // When the conductor offers no choices, jump straight into
+                // freeform edit mode so the operator isn't trapped with no
+                // way to answer.
+                let editing = choices.is_empty();
                 self.popup = Some(PopupState::UserQuestion(UserQuestionPrompt {
                     request_id,
                     question,
                     selected: 0,
                     selection_touched: false,
                     choices,
+                    editing,
+                    edited_answer: String::new(),
+                    cursor: 0,
                 }));
             }
             SessionEvent::MissionActivity { activity } => {
@@ -2369,16 +2437,25 @@ mod tests {
         assert_eq!(locate_cursor_row(input, 8), (2, 8));
     }
 
+    fn question_prompt(choices: Vec<&str>) -> UserQuestionPrompt {
+        UserQuestionPrompt {
+            request_id: "q-1".to_string(),
+            question: "Pick one".to_string(),
+            choices: choices.into_iter().map(str::to_string).collect(),
+            selected: 0,
+            selection_touched: false,
+            editing: false,
+            edited_answer: String::new(),
+            cursor: 0,
+        }
+    }
+
     #[test]
     fn question_popup_requires_explicit_selection_before_enter() {
         let (mut app, mut cmd_rx) = fresh_app();
-        app.popup = Some(PopupState::UserQuestion(UserQuestionPrompt {
-            request_id: "q-1".to_string(),
-            question: "Pick one".to_string(),
-            choices: vec!["first".to_string(), "second".to_string()],
-            selected: 0,
-            selection_touched: false,
-        }));
+        app.popup = Some(PopupState::UserQuestion(question_prompt(vec![
+            "first", "second",
+        ])));
 
         app.handle_global_key(key(crossterm::event::KeyCode::Enter));
         assert!(cmd_rx.try_recv().is_err());
@@ -2394,6 +2471,100 @@ mod tests {
             other => panic!("expected AnswerUserQuestion, got {other:?}"),
         }
         assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn question_popup_c_key_opens_freeform_editor_and_submits_typed_answer() {
+        let (mut app, mut cmd_rx) = fresh_app();
+        app.popup = Some(PopupState::UserQuestion(question_prompt(vec![
+            "first", "second",
+        ])));
+
+        // 'c' switches into edit mode without sending anything.
+        app.handle_global_key(key(crossterm::event::KeyCode::Char('c')));
+        assert!(cmd_rx.try_recv().is_err());
+        match app.popup.as_ref() {
+            Some(PopupState::UserQuestion(p)) => assert!(p.editing),
+            other => panic!("expected editing UserQuestion, got {other:?}"),
+        }
+
+        for ch in "custom".chars() {
+            app.handle_global_key(key(crossterm::event::KeyCode::Char(ch)));
+        }
+        app.handle_global_key(key(crossterm::event::KeyCode::Enter));
+
+        match cmd_rx.try_recv() {
+            Ok(SessionCommand::AnswerUserQuestion { request_id, answer }) => {
+                assert_eq!(request_id, "q-1");
+                assert_eq!(answer, "custom");
+            }
+            other => panic!("expected AnswerUserQuestion, got {other:?}"),
+        }
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn user_question_with_no_choices_starts_in_edit_mode() {
+        let (mut app, _) = fresh_app();
+        app.handle_session_event(SessionEvent::UserQuestionRequested {
+            request_id: "q-2".to_string(),
+            question: "What now?".to_string(),
+            choices: vec![],
+        });
+        match app.popup.as_ref() {
+            Some(PopupState::UserQuestion(p)) => {
+                assert!(p.editing, "no-choice questions must auto-enter edit mode");
+                assert_eq!(p.choices.len(), 0);
+            }
+            other => panic!("expected UserQuestion popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_popup_esc_in_edit_mode_returns_to_choice_view() {
+        let (mut app, mut cmd_rx) = fresh_app();
+        app.popup = Some(PopupState::UserQuestion(question_prompt(vec![
+            "first", "second",
+        ])));
+
+        app.handle_global_key(key(crossterm::event::KeyCode::Char('c')));
+        for ch in "abc".chars() {
+            app.handle_global_key(key(crossterm::event::KeyCode::Char(ch)));
+        }
+        app.handle_global_key(key(crossterm::event::KeyCode::Esc));
+
+        // Esc out of editing returns to choice view, popup still open, no submit.
+        assert!(cmd_rx.try_recv().is_err());
+        match app.popup.as_ref() {
+            Some(PopupState::UserQuestion(p)) => {
+                assert!(!p.editing);
+                assert!(p.edited_answer.is_empty());
+            }
+            other => panic!("expected UserQuestion popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_popup_blank_freeform_answer_does_not_submit() {
+        let (mut app, mut cmd_rx) = fresh_app();
+        app.popup = Some(PopupState::UserQuestion(question_prompt(vec![])));
+        match app.popup.as_ref() {
+            Some(PopupState::UserQuestion(p)) => assert!(!p.editing),
+            _ => panic!(),
+        }
+        // Force editing on for this test (no auto-edit when constructing directly).
+        if let Some(PopupState::UserQuestion(p)) = app.popup.as_mut() {
+            p.editing = true;
+        }
+        // Empty Enter is a no-op.
+        app.handle_global_key(key(crossterm::event::KeyCode::Enter));
+        assert!(cmd_rx.try_recv().is_err());
+        // Whitespace-only also does not submit.
+        for ch in "   ".chars() {
+            app.handle_global_key(key(crossterm::event::KeyCode::Char(ch)));
+        }
+        app.handle_global_key(key(crossterm::event::KeyCode::Enter));
+        assert!(cmd_rx.try_recv().is_err());
     }
 
     #[test]
