@@ -1,0 +1,150 @@
+# Bakudo-owned abox proxy policy.
+#
+# This file ships inside the bakudo-daemon binary and is materialized to
+# <bakudo-data-root>/abox-runtime/policies/default.toml on first use.
+# Bakudo invokes abox with --config pointing at a config that names this
+# directory as policy_dir, so this policy is used for every sandbox
+# bakudo dispatches.
+#
+# The operator's own ~/.abox/policies/default.toml is NOT consulted for
+# bakudo-driven sandboxes — direct `abox run` use is unaffected.
+#
+# This decouples bakudo's runtime contract (e.g., pypi reachable for pip
+# install during worker bootstrap) from whatever the host's abox install
+# happens to be configured for.
+
+# Default action for CLI commands not matching any policy: "allow" or "deny".
+default_cli_action = "deny"
+
+# Default action for HTTP requests not matching any egress rule: "deny".
+default_egress_action = "deny"
+
+# ── TLS Bypass List ─────────────────────────────────────────────────────
+# Domains listed here use plain TCP passthrough (no TLS termination).
+# Use this for cert-pinned clients that would reject the MITM CA cert,
+# or for uncredentialed registries (pypi, npm) where MITM would break
+# the client's own cert verification with no benefit.
+# Supports exact match and wildcard prefix (e.g., "*.pinned.io").
+#
+# This list MUST stay before any `[[cli]]` or `[[egress]]` array tables —
+# in TOML, top-level fields after an array-of-tables would be parsed as
+# fields of that table.
+bypass_tls = [
+    "pypi.org",
+    "*.pythonhosted.org",
+    "registry.npmjs.org",
+    "registry.npmjs.com",
+]
+
+# ── Git ──────────────────────────────────────────────────────────────────
+[[cli]]
+command = "git"
+forward_ssh_agent = true
+
+# Allowed git operations (regexes matched against the full argument string).
+allow = [
+    "^status",
+    "^log",
+    "^diff",
+    "^show",
+    "^branch",
+    "^add\\s+",
+    "^commit\\s+",
+    "^checkout\\s+",
+    "^switch\\s+",
+    "^push\\s+origin\\s+\\S+$",
+    "^pull\\s+",
+    "^fetch\\s+",
+    "^clone\\s+",
+    "^stash",
+    "^rebase\\s+",
+    "^merge\\s+",
+    "^rev-parse",
+    "^remote\\s+-v",
+]
+
+# Denied git operations (checked first — deny takes precedence).
+deny = [
+    "--force",
+    "-f\\b",
+    "push\\s+--delete",
+    "push\\s+origin\\s+:refs",
+    "\\breset\\s+--hard",
+    "\\bclean\\s+-fd",
+]
+
+# ── GitHub CLI ───────────────────────────────────────────────────────────
+[[cli]]
+command = "gh"
+forward_ssh_agent = false
+
+allow = [
+    "^pr\\s+(create|list|view|diff)",
+    "^issue\\s+(list|view)",
+    "^repo\\s+view",
+    "^auth\\s+status",
+]
+
+deny = [
+    "^pr\\s+checkout",
+    "^pr\\s+merge",
+    "^issue\\s+create",
+    "^repo\\s+delete",
+    "^auth\\s+login",
+]
+
+# ── HTTP Egress Rules ────────────────────────────────────────────────────
+# Each rule matches a domain. Most rules also inject a credential header
+# from a host-side secret. Public uncredentialed registries (pypi, npm)
+# use an empty inject_header — combined with bypass_tls they pass
+# straight through without modification.
+
+# Public Python and Node package registries. Workers can `pip install`
+# and `npm install` without the host putting any credentials inside the
+# guest VM. Sandboxed by abox; no secrets injected.
+[[egress]]
+domain = "pypi.org"
+inject_header = ""
+
+[[egress]]
+domain = "*.pythonhosted.org"
+inject_header = ""
+
+[[egress]]
+domain = "registry.npmjs.org"
+inject_header = ""
+
+[[egress]]
+domain = "registry.npmjs.com"
+inject_header = ""
+
+[[egress]]
+domain = "api.anthropic.com"
+inject_header = "Authorization"
+credential_file = "~/.claude/.credentials.json"
+json_path = "claudeAiOauth.accessToken"
+header_template = "Bearer {value}"
+
+[[egress]]
+domain = "api.openai.com"
+inject_header = "Authorization"
+env_var = "OPENAI_API_KEY"
+credential_file = "~/.codex/auth.json"
+json_path = "tokens.access_token"
+header_template = "Bearer {value}"
+
+# Codex Responses API — same credential as api.openai.com.
+[[egress]]
+domain = "chatgpt.com"
+inject_header = "Authorization"
+credential_file = "~/.codex/auth.json"
+json_path = "tokens.access_token"
+header_template = "Bearer {value}"
+
+# Codex token refresh endpoint.
+[[egress]]
+domain = "auth.openai.com"
+inject_header = "Authorization"
+credential_file = "~/.codex/auth.json"
+json_path = "tokens.access_token"
+header_template = "Bearer {value}"

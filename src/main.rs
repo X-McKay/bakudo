@@ -311,8 +311,22 @@ async fn main() -> Result<()> {
             .context("failed to load config")?,
     );
 
+    // Materialize bakudo's own abox config + proxy policy under the
+    // repo-scoped data dir, then point every abox invocation at it via
+    // `--config`. The operator's `~/.abox/config.toml` is intentionally
+    // not consulted for bakudo-driven sandboxes — bakudo's runtime
+    // contract (e.g. pypi reachable for worker pip bootstrap, git push
+    // allowed) lives in the bakudo source tree, not in the host install.
+    let bakudo_data_dir = config.resolved_repo_data_dir(repo_root.as_deref());
+    let abox_runtime =
+        bakudo_daemon::abox_runtime::AboxRuntimeAssets::ensure_materialized(&bakudo_data_dir)
+            .context("failed to materialize bakudo-managed abox runtime config")?;
+
     // Build shared components.
-    let abox = Arc::new(AboxAdapter::new(&config.abox_bin));
+    let abox = Arc::new(AboxAdapter::with_config(
+        &config.abox_bin,
+        abox_runtime.config_path(),
+    ));
     let registry = Arc::new(ProviderRegistry::with_defaults());
     let ledger_path = config
         .resolved_repo_data_dir(repo_root.as_deref())

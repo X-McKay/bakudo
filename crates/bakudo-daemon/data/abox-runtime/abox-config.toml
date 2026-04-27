@@ -1,0 +1,23 @@
+# Bakudo-managed abox runtime config.
+#
+# This file is shipped inside the bakudo-daemon binary and materialized
+# under <bakudo-data-root>/abox-runtime/abox-config.toml on first use.
+# Bakudo invokes abox with `--config <materialized path>`, so this file
+# fully overrides the operator's own ~/.abox/config.toml for bakudo's
+# sandbox invocations only. Direct `abox run` use by other tools on the
+# same host is unaffected.
+#
+# The policy_dir value below carries a placeholder in the embedded
+# source (see crates/bakudo-daemon/data/abox-runtime/abox-config.toml);
+# bakudo rewrites it to an absolute path at materialization time. Do
+# not edit the materialized copy directly — changes here travel with
+# the bakudo source tree.
+#
+# Only fields that bakudo explicitly wants to control are set. All other
+# AboxConfig fields fall back to abox's compiled-in defaults
+# (state_dir = ~/.abox, vm_defaults, runtime_dir, etc.).
+
+[proxy]
+# Absolute path to the directory containing policy files. abox loads
+# `<policy_dir>/default.toml` on each sandbox start.
+policy_dir = "{POLICY_DIR}"

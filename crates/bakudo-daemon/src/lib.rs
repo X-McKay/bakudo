@@ -1,3 +1,4 @@
+pub mod abox_runtime;
 pub mod candidate;
 pub mod doctor;
 pub mod hooks;

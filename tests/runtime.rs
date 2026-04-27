@@ -136,9 +136,13 @@ fi
   printf '%s\n' "$@"
   printf '__END__\n'
 }} >> '{log_path}'
-if [[ "${{1:-}}" == "--repo" ]]; then
+# Strip global flags that come before the subcommand. abox accepts these
+# in any order; bakudo currently passes `--config <path>` (added when
+# bakudo started materializing its own abox runtime config) and may pass
+# `--repo <path>`. Both flags consume two argv positions.
+while [[ "${{1:-}}" == "--config" || "${{1:-}}" == "--repo" ]]; do
   shift 2
-fi
+done
 sub="${{1:-}}"
 if [[ -n "$sub" ]]; then
   shift

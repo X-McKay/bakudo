@@ -47,16 +47,45 @@ pub struct RunResult {
 pub struct AboxAdapter {
     /// Path to the `abox` binary.
     pub bin: PathBuf,
+    /// Optional path passed as `--config` on every abox invocation.
+    /// Bakudo uses this to point abox at a bakudo-owned config + proxy
+    /// policy rather than the operator's own `~/.abox/config.toml`. See
+    /// `bakudo_daemon::abox_runtime` for the materialization details.
+    config_path: Option<PathBuf>,
 }
 
 impl AboxAdapter {
     pub fn new(bin: impl Into<PathBuf>) -> Self {
-        Self { bin: bin.into() }
+        Self {
+            bin: bin.into(),
+            config_path: None,
+        }
     }
 
-    /// Build the base command with the optional `--repo` global flag.
+    /// Construct an adapter that passes `--config <path>` on every abox
+    /// invocation. The config file fully replaces the abox-side default
+    /// (i.e. it is not merged with `~/.abox/config.toml`).
+    pub fn with_config(bin: impl Into<PathBuf>, config_path: impl Into<PathBuf>) -> Self {
+        Self {
+            bin: bin.into(),
+            config_path: Some(config_path.into()),
+        }
+    }
+
+    /// Path passed on `abox --config <...>`, if any.
+    pub fn config_path(&self) -> Option<&Path> {
+        self.config_path.as_deref()
+    }
+
+    /// Build the base command with the optional global `--config` and
+    /// `--repo` flags. abox parses both at the top level (before the
+    /// subcommand), so they must be added here, not after the
+    /// subcommand argument.
     fn base_cmd(&self, repo: Option<&Path>) -> Command {
         let mut cmd = Command::new(&self.bin);
+        if let Some(cfg) = &self.config_path {
+            cmd.arg("--config").arg(cfg);
+        }
         if let Some(r) = repo {
             cmd.args(["--repo", r.to_str().unwrap_or(".")]);
         }
@@ -578,6 +607,30 @@ impl AboxAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_new_has_no_config_path() {
+        let adapter = AboxAdapter::new("/usr/local/bin/abox");
+        assert!(
+            adapter.config_path().is_none(),
+            "AboxAdapter::new must not invent a config path; \
+             only with_config opts into bakudo-managed runtime",
+        );
+    }
+
+    #[test]
+    fn adapter_with_config_remembers_path() {
+        let adapter = AboxAdapter::with_config(
+            "/usr/local/bin/abox",
+            "/var/data/bakudo/abox-runtime/abox-config.toml",
+        );
+        assert_eq!(
+            adapter.config_path().map(|p| p.to_path_buf()),
+            Some(PathBuf::from(
+                "/var/data/bakudo/abox-runtime/abox-config.toml"
+            )),
+        );
+    }
 
     #[test]
     fn sandbox_task_id_sanitises() {

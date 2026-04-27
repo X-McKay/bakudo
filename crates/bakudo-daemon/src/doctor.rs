@@ -45,6 +45,20 @@ pub async fn run(config: &BakudoConfig, abox: &AboxAdapter, registry: &ProviderR
         }
     }
 
+    // Surface which abox config bakudo is pointing at. With the
+    // bakudo-managed runtime path this is always set; an unset value
+    // would mean the operator built bakudo without the runtime
+    // materializer wired in (i.e. a regression).
+    match abox.config_path() {
+        Some(path) => lines.push(format!(
+            "  abox cfg   [ ok ]  {} (bakudo-managed)",
+            path.display()
+        )),
+        None => lines.push(String::from(
+            "  abox cfg   [warn]  bakudo did not pin --config; abox will read ~/.abox/config.toml",
+        )),
+    }
+
     // Providers.
     for id in registry.list_ids() {
         let Some(spec) = registry.get(id) else {
