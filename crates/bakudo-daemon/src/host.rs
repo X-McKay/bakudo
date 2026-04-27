@@ -645,16 +645,17 @@ fn task_note<'a>(state: &'a HostRuntimeState, entry: &'a SandboxRecord) -> &'a s
 
 fn classify_intent(text: &str, has_active_mission: bool) -> HostIntent {
     let normalized = normalize(text);
-    if matches_candidate_query(&normalized) {
+    let allow_status_match = looks_like_status_query(&normalized);
+    if allow_status_match && matches_candidate_query(&normalized) {
         return HostIntent::Candidates;
     }
-    if matches_running_query(&normalized) {
+    if allow_status_match && matches_running_query(&normalized) {
         return HostIntent::RunningWorkers;
     }
-    if matches_blocker_query(&normalized) {
+    if allow_status_match && matches_blocker_query(&normalized) {
         return HostIntent::MissionBlockers;
     }
-    if matches_status_query(&normalized) {
+    if allow_status_match && matches_status_query(&normalized) {
         return HostIntent::StatusSummary;
     }
     if has_active_mission {
@@ -665,6 +666,60 @@ fn classify_intent(text: &str, has_active_mission: bool) -> HostIntent {
     } else {
         HostIntent::MissionStart
     }
+}
+
+/// Negative cap on status-query classification.
+///
+/// Status questions are short. Long inputs and inputs that lead with a clear
+/// imperative verb are objectives or steering, even when they happen to
+/// mention `candidate_policy`, `preserved`, `review`, etc. inside the body.
+/// Routing those to a status reply silently eats the operator's mission start.
+fn looks_like_status_query(normalized: &str) -> bool {
+    let word_count = normalized.split_whitespace().count();
+    if word_count > STATUS_QUERY_MAX_WORDS {
+        return false;
+    }
+    if starts_with_imperative(normalized) {
+        return false;
+    }
+    true
+}
+
+const STATUS_QUERY_MAX_WORDS: usize = 20;
+
+/// Words that are unambiguously instructions when they lead a sentence. The
+/// list deliberately omits short status-shape verbs ("show", "list", "tell")
+/// that could plausibly start a question.
+fn starts_with_imperative(normalized: &str) -> bool {
+    const IMPERATIVES: &[&str] = &[
+        "fix ",
+        "have ",
+        "dispatch ",
+        "use ",
+        "make ",
+        "run ",
+        "implement ",
+        "build ",
+        "create ",
+        "add ",
+        "remove ",
+        "update ",
+        "refactor ",
+        "rewrite ",
+        "verify ",
+        "investigate ",
+        "explore ",
+        "review ",
+        "set up ",
+        "tear down ",
+        "kick off ",
+        "launch ",
+        "merge ",
+        "apply ",
+        "discard ",
+        "ensure ",
+    ];
+    IMPERATIVES.iter().any(|verb| normalized.starts_with(verb))
 }
 
 fn mission_status_label(mission: &HostMissionSnapshot) -> &'static str {
@@ -1149,6 +1204,69 @@ mod tests {
             classify_intent("where are things at overall?", true),
             HostIntent::StatusSummary
         );
+    }
+
+    #[test]
+    fn long_objective_mentioning_status_keywords_routes_to_mission() {
+        // These are the three reproducer messages from the e2e session that
+        // got mis-classified as `Candidates`/`StatusSummary` because the body
+        // contained substrings like `candidate_policy`, `preserved worktree`,
+        // or `review`. The length/imperative gate must short-circuit the
+        // status matchers in all three cases.
+        let cases = [
+            "Dispatch a script worker via dispatch_swarm to fix wordstats.py count_unique_words by lowercasing tokens. The worker should produce a preserved worktree with candidate_policy=auto_apply so the host can merge it.",
+            "Fix the failing test in wordstats.py by lowercasing tokens in count_unique_words. Use dispatch_swarm with a script worker, sandbox_lifecycle=preserved, candidate_policy=auto_apply.",
+            "Have an abox script worker fix wordstats.py count_unique_words by lowercasing the tokens. Dispatch via dispatch_swarm with sandbox_lifecycle set to preserved and candidate_policy set to auto_apply.",
+        ];
+        for input in cases {
+            assert_eq!(
+                classify_intent(input, false),
+                HostIntent::MissionStart,
+                "long objective mis-classified as status: {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn short_status_questions_still_match_after_gate() {
+        // The gate must not break the existing short-form status queries.
+        assert_eq!(
+            classify_intent("what's running?", true),
+            HostIntent::RunningWorkers
+        );
+        assert_eq!(
+            classify_intent("any candidates?", true),
+            HostIntent::Candidates
+        );
+        assert_eq!(classify_intent("status?", true), HostIntent::StatusSummary);
+        assert_eq!(
+            classify_intent("what are we waiting on?", true),
+            HostIntent::MissionBlockers
+        );
+    }
+
+    #[test]
+    fn imperative_short_input_does_not_match_status_keywords() {
+        // Short imperative-leading inputs that mention status keywords
+        // (`candidate`, `preserved worktree`, `review`) must not be routed to
+        // a status reply. With an active mission the right outcome is
+        // MissionSteering; without one, the under-specified-objective path
+        // (ClarifyStart) is fine — both keep the input in the mission lane.
+        let with_mission = classify_intent("Apply the candidate.", true);
+        assert_eq!(
+            with_mission,
+            HostIntent::MissionSteering,
+            "active-mission path should treat imperative as steering"
+        );
+        let without_mission = classify_intent("Review the preserved worktree.", false);
+        assert!(
+            matches!(
+                without_mission,
+                HostIntent::MissionStart | HostIntent::ClarifyStart
+            ),
+            "no-mission path must stay in mission lane, got {without_mission:?}"
+        );
+        assert_ne!(without_mission, HostIntent::Candidates);
     }
 
     #[test]
