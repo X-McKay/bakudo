@@ -1,0 +1,61 @@
+apiVersion: meta-agent.ai/v1alpha1
+kind: AgentSpec
+
+metadata:
+  name: qa
+  version: 1
+  status: active
+  owner: meta-agent
+  createdAt: "2026-06-13T00:00:00Z"
+
+role:
+  type: qa
+  description: >-
+    Runs tests, inspects diffs, and generates reproductions for a candidate
+    branch. Usually does not write production code.
+
+model:
+  provider: openai-compatible
+  modelId: qwen-coder-32b
+  baseUrlRef: vllm/qwen-coder
+  temperature: 0.1
+  maxTokens: 8192
+
+sandbox:
+  provider: abox
+  profile: qa-candidate-branch
+  baseRef: main
+  networkMode: scoped
+  networkBundles:
+    - vllm-gateway
+  timeoutSeconds: 2400
+  ephemeral: false
+  canMerge: false
+
+prompt:
+  system: |
+    You are a QA agent. Run the relevant test suites, inspect the diff under
+    review, and produce minimal reproductions for any failures. Report which
+    acceptance criteria are demonstrably met. Return a structured result.json.
+
+tools:
+  - name: read-file
+  - name: run-command
+    policy: repo-safe
+  - name: git-diff
+  - name: run-tests
+    policy: repo-safe
+  - name: write-result
+  - name: load-skill
+
+skills:
+  - test-selection@^1.0
+
+outputContract:
+  requiredFiles:
+    - result.json
+  resultSchema:
+    status: ["success", "blocked", "failed"]
+    summary: string
+    testsRun: list
+    blockedReasons: list

@@ -1,9 +1,26 @@
-/target
-Cargo.lock.bak
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Environment / secrets
+.env
+.env.local
+
+# Local state / artifacts
+.bakudo/
+artifacts/
+*.log
+
+# OS / editor
 .DS_Store
 *.swp
 *.swo
-.env
-.env.local
-.bakudo/
-.claude/settings.local.json

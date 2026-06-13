@@ -1,54 +1,38 @@
-# Skill: Run Tests in Bakudo
+# Skill: Run tests and checks in bakudo
 
 ## Trigger
 
-When asked to verify the correctness of the `bakudo` repository or after
-making any code changes.
+When verifying correctness of the `bakudo` repository, after making changes, or
+before committing.
 
-## Context
+## Steps
 
-Bakudo v2 uses Rust's built-in test framework. Tests live in two places:
-- **Crate-level unit tests**: `#[cfg(test)]` modules inside each crate's
-  source files (e.g., `crates/bakudo-core/src/provider.rs`).
-- **Workspace integration tests**: `tests/integration.rs` for classic CLI and
-  provider paths, plus `tests/runtime.rs` for wake-based mission runtime,
-  host approvals, wallet enforcement, restart, provenance, and related flows.
+bakudo is a Python project (`src/` layout, package `bakudo`). The control-plane
+domain logic runs with only the light core deps — no Temporal/Postgres/Neo4j/
+abox/vLLM are needed for the suite.
 
-## Process
+```bash
+pip install -e ".[dev]"     # first time only
+ruff check src tests        # lint
+python3 -m pytest           # full suite (fast, in-process)
+```
 
-1. **Run all tests:**
-   ```bash
-   cargo test --workspace
-   ```
+Smoke-check the operator surface and the offline run pipeline:
 
-2. **Run tests for a specific crate:**
-   ```bash
-   cargo test -p bakudo-core
-   cargo test -p bakudo-daemon
-   cargo test -p bakudo-tui
-   ```
+```bash
+bakudo validate-spec agents/add-feature.yaml
+bakudo skills
+bakudo demo                 # bundle -> local sandbox -> result.json -> eval -> scorecard
+```
 
-3. **Run a specific test by name:**
-   ```bash
-   cargo test -p bakudo-core abox::tests::parse_list_with_entries
-   ```
+## Notes
 
-4. **Run integration tests only:**
-   ```bash
-   cargo test --test integration
-   cargo test --test runtime
-   ```
-
-5. **Interpret results.** All tests must pass. If a test fails, read the
-   assertion error carefully — it will show the expected vs. actual value.
-   Common issues: incorrect argument order in abox adapter calls, wrong
-   provider flag strings, or stale ledger state in async tests.
-
-6. **Add new tests.** Unit tests go in the relevant source file under
-   `#[cfg(test)]`. Integration tests go in `tests/integration.rs` or
-   `tests/runtime.rs`, depending on whether the behavior is classic CLI flow
-   or wake-based mission flow.
-
-## Quality Gate
-
-`cargo test --workspace` must pass with zero failures before every commit.
+- The local sandbox (`abox/local.py`) and the offline driver (`runner/agent.py`)
+  let the whole run lifecycle run without a model or microVM. Set
+  `BAKUDO_OFFLINE=1` to bypass the model.
+- Temporal workflow code (`src/bakudo/temporal/workflows.py`) requires the
+  `temporal` extra; it is intentionally not imported by the core package or the
+  test suite.
+- Keep `result.json`, `Objective`, `AgentSpec`, and `EvalResult` changes in sync
+  with `schemas/*.schema.json` — those JSON Schemas are the cross-language
+  source of truth and are validated at the trust boundaries.

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bakudo.ai/schemas/result.schema.json",
+  "title": "RunResult",
+  "description": "The structured output every worker run must write to result.json. See spec section 12.2.",
+  "type": "object",
+  "required": ["run_id", "agent", "objective_id", "status", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": { "type": "string" },
+    "agent": { "type": "string", "description": "name@version, e.g. add-feature@12" },
+    "objective_id": { "type": "string" },
+    "status": { "enum": ["success", "blocked", "failed"] },
+    "summary": { "type": "string" },
+    "changed_files": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "tests_run": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["command", "status"],
+        "additionalProperties": true,
+        "properties": {
+          "command": { "type": "string" },
+          "status": { "enum": ["passed", "failed", "skipped", "error"] }
+        }
+      }
+    },
+    "blocked_reasons": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "proposed_followups": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "memories_to_write": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["type", "content", "evidence"],
+        "additionalProperties": true,
+        "properties": {
+          "type": { "type": "string" },
+          "content": { "type": "string" },
+          "evidence": { "type": "array" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "skill_suggestions": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["name", "why"],
+        "additionalProperties": true,
+        "properties": {
+          "name": { "type": "string" },
+          "why": { "type": "string" }
+        }
+      }
+    }
+  }
+}

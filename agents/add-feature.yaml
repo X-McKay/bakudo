@@ -1,0 +1,80 @@
+apiVersion: meta-agent.ai/v1alpha1
+kind: AgentSpec
+
+metadata:
+  name: add-feature
+  version: 1
+  status: active
+  owner: meta-agent
+  createdAt: "2026-06-13T00:00:00Z"
+
+role:
+  type: add-feature
+  description: >-
+    Implements small-to-medium scoped code changes from an objective and its
+    acceptance criteria.
+
+model:
+  provider: openai-compatible
+  modelId: qwen-coder-32b
+  baseUrlRef: vllm/qwen-coder
+  temperature: 0.2
+  maxTokens: 8192
+
+sandbox:
+  provider: abox
+  profile: add-feature-python
+  baseRef: main
+  networkMode: scoped
+  networkBundles:
+    - github-api
+    - pypi-public
+    - vllm-gateway
+  timeoutSeconds: 3600
+  ephemeral: false
+  maxChangedFiles: 8
+  canMerge: false
+
+prompt:
+  system: |
+    You are an implementation agent. Make the smallest correct change.
+    Always inspect existing code before editing. Run relevant tests before
+    reporting completion. Stay within the objective's acceptance criteria and
+    constraints. Return a structured result.json.
+
+tools:
+  - name: read-file
+  - name: edit-file
+  - name: run-command
+    policy: repo-safe
+  - name: git-diff
+  - name: run-tests
+    policy: repo-safe
+  - name: write-result
+  - name: load-skill
+  - name: query-memory
+
+skills:
+  - codebase-navigation@^1.0
+  - test-selection@^1.0
+  - safe-refactor@^1.0
+
+mcpServers:
+  - name: github-readonly
+    transport: streamable-http
+    urlRef: mcp/github-readonly
+    allowedTools:
+      - get_issue
+      - list_pr_comments
+
+outputContract:
+  requiredFiles:
+    - result.json
+  resultSchema:
+    status: ["success", "blocked", "failed"]
+    summary: string
+    changedFiles: list
+    testsRun: list
+    proposedFollowups: list
+    memoriesToWrite: list
+    skillSuggestions: list

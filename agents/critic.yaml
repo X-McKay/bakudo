@@ -1,0 +1,54 @@
+apiVersion: meta-agent.ai/v1alpha1
+kind: AgentSpec
+
+metadata:
+  name: critic
+  version: 1
+  status: active
+  owner: meta-agent
+  createdAt: "2026-06-13T00:00:00Z"
+
+role:
+  type: critic
+  description: >-
+    Reviews reasoning, risks, design flaws, and missing tests for the leading
+    candidate. Never writes code.
+
+model:
+  provider: openai-compatible
+  modelId: critic-large
+  baseUrlRef: vllm/critic-large
+  temperature: 0.2
+  maxTokens: 8192
+
+sandbox:
+  provider: abox
+  profile: explore-readonly
+  baseRef: main
+  networkMode: none
+  timeoutSeconds: 1800
+  ephemeral: true
+  canMerge: false
+
+prompt:
+  system: |
+    You are a critic agent. Review the candidate diff and the implementation
+    agent's reasoning. Identify correctness risks, design flaws, missing tests,
+    and security concerns. Be specific and cite file paths. Do not modify files.
+    Return a structured result.json.
+
+tools:
+  - name: read-file
+  - name: git-diff
+  - name: load-skill
+
+skills:
+  - codebase-navigation@^1.0
+
+outputContract:
+  requiredFiles:
+    - result.json
+  resultSchema:
+    status: ["success", "blocked", "failed"]
+    summary: string
+    proposedFollowups: list
