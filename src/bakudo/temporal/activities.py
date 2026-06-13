@@ -26,6 +26,11 @@ except Exception:  # noqa: BLE001 - SDK optional
         return wrap(fn) if fn else wrap
 
 
+@_DEFN(name="create_run")
+async def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
+    return _impl.create_run(inp, workflow_id)
+
+
 @_DEFN(name="render_bundle")
 async def render_bundle(inp: AgentRunInput) -> dict:
     return _impl.render_bundle(inp)
@@ -51,4 +56,11 @@ async def decide_promotion(inp: PromotionInput) -> dict:
     return _impl.decide_promotion(inp)
 
 
-ALL_ACTIVITIES = [render_bundle, run_sandbox, persist_run, run_eval_suite, decide_promotion]
+ALL_ACTIVITIES = [
+    create_run,
+    render_bundle,
+    run_sandbox,
+    persist_run,
+    run_eval_suite,
+    decide_promotion,
+]

@@ -49,7 +49,10 @@ def local_sandbox(
     spec = bundle.agent_spec
     workspace = Workspace(workspace_root)
     skills = SkillRegistry(allowed=spec.skills)
-    ctx = ToolContext(workspace=workspace, skills=skills, run_id=bundle.run_id)
+    ctx = ToolContext(
+        workspace=workspace, skills=skills, run_id=bundle.run_id,
+        memory_query=bundle.memory_query,
+    )
 
     raw = build_and_run(spec, bundle, ctx, offline_driver=offline_driver)
     result = normalize_result(
@@ -68,5 +71,6 @@ def local_sandbox(
         result=result.to_dict(),
         diff=workspace.git_diff(),
         changed_files=result.changed_files,
+        denied_commands=list(ctx.denied_commands),
         stdout=json.dumps(result.to_dict()),
     )

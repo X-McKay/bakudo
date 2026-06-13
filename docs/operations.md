@@ -17,6 +17,11 @@ The local sandbox (`abox/local.py`) is **not** a security boundary — it runs t
 runner in-process against a throwaway git workspace. It exists to make the
 pipeline demonstrable; production runs go through abox.
 
+Sandbox selection **fails closed**: the Temporal activity layer refuses to pick
+a sandbox implicitly. Set `BAKUDO_SANDBOX=abox` (production) or
+`BAKUDO_SANDBOX=local` (which additionally requires `BAKUDO_ENV=dev`). The
+offline CLI/demo path calls the local sandbox directly and is unaffected.
+
 ## What needs live infrastructure
 
 | Capability | Needs | Extra |

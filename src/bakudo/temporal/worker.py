@@ -24,7 +24,7 @@ async def _run() -> None:
     if dsn:
         from ..registry.postgres_ledger import PostgresLedger
 
-        _impl.configure(ledger=await PostgresLedger.connect(dsn))
+        _impl.configure(ledger=PostgresLedger.connect(dsn))
 
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")

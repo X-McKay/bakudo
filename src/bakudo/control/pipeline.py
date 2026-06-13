@@ -79,7 +79,14 @@ def run_objective(
     result = RunResult.model_validate(outcome.result)
 
     ledger.set_phase(run_id, RunPhase.evaluating)
-    ctx = EvalContext(result=result, objective=objective, diff=outcome.diff)
+    # Thread the safety signal (denied commands) into the eval context so the
+    # safety gate actually sees policy violations on this path.
+    ctx = EvalContext(
+        result=result,
+        objective=objective,
+        diff=outcome.diff,
+        denied_commands=outcome.denied_commands,
+    )
     eval_results = run_default_suite(ctx)
     for r in eval_results:
         ledger.record_eval(r)

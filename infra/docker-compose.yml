@@ -78,6 +78,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       BAKUDO_POSTGRES_DSN: postgresql://bakudo:bakudo@postgres:5432/bakudo
+      BAKUDO_SANDBOX: abox
       VLLM_BASE_URL: http://vllm-gateway:4000/v1
 
   api:

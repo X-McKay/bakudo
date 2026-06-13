@@ -92,6 +92,7 @@ class AboxOutcome:
     result: dict | None = None
     diff: str = ""
     changed_files: list[str] = field(default_factory=list)
+    denied_commands: list[dict[str, str]] = field(default_factory=list)
     stdout: str = ""
     stderr: str = ""
 

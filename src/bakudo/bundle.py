@@ -65,3 +65,15 @@ class TaskBundle(BaseModel):
 
     def objective_json(self) -> dict[str, Any]:
         return self.objective.to_dict()
+
+    def memory_query(self, query: str) -> list[dict[str, Any]]:
+        """Retrieve from the excerpts pre-loaded into this bundle.
+
+        The worker runs in a sandbox without control-plane access, so the
+        ``query-memory`` tool is backed by the memories the control plane
+        already selected and shipped in the bundle (a case-insensitive
+        substring match in v0.1).
+        """
+        q = query.strip().lower()
+        matches = [m for m in self.memory_excerpts if not q or q in m.content.lower()]
+        return [m.model_dump(mode="json") for m in matches]

@@ -23,6 +23,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from .activities import (
+        create_run,
         persist_run,
         render_bundle,
         run_eval_suite,
@@ -73,7 +74,11 @@ class AgentRunWorkflow:
 
     @workflow.run
     async def run(self, inp: AgentRunInput) -> AgentRunOutput:
-        await self._advance(inp.run_id, "created")
+        workflow_id = workflow.info().workflow_id
+        await workflow.execute_activity(
+            create_run, args=[inp, workflow_id], **_SHORT
+        )
+        self._phase = "created"
 
         bundle = await workflow.execute_activity(render_bundle, inp, **_SHORT)
         await self._advance(inp.run_id, "bundle_rendered")
@@ -104,6 +109,7 @@ class AgentRunWorkflow:
                 objective=inp.objective,
                 result=result,
                 diff=sandbox.get("diff", ""),
+                denied_commands=sandbox.get("denied_commands", []),
                 schema_valid=True,
             ),
             id=f"eval-{inp.run_id}",

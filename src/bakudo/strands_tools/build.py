@@ -6,6 +6,7 @@ through Strands and logged for the agent-observability layer (spec section 18.3)
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -120,5 +121,8 @@ def build_tool_callables(
         if impl is None:
             # write-result and unknown tools are handled elsewhere / ignored.
             continue
-        bound[tool.name] = (lambda fn: lambda **kw: fn(ctx, **kw))(impl)
+        # functools.partial binds the ToolContext while preserving the remaining
+        # parameters' names and type hints, so Strands can derive a correct
+        # input schema for each tool (unlike a **kwargs lambda).
+        bound[tool.name] = functools.partial(impl, ctx)
     return bound

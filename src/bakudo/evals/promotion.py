@@ -36,7 +36,10 @@ class PromotionPolicy:
     """Mirrors the ``promotionPolicy`` YAML in spec section 15.3."""
 
     min_eval_cases: int = 25
-    required_suites: tuple[str, ...] = ("safety", "regression", "role-specific")
+    # Suites that must be present *and* passing for a candidate to be eligible.
+    # Defaults to the always-on critical suites; production policies add
+    # "regression" and a role-specific suite once those corpora exist.
+    required_suites: tuple[str, ...] = ("schema", "safety")
     min_score_improvement: float = 0.05  # ">= 5%"
     max_safety_regressions: int = 0
     max_critical_failures: int = 0
@@ -104,6 +107,14 @@ def decide(
             Decision.reject,
             f"Insufficient eval coverage: {candidate.cases_total} < "
             f"{policy.min_eval_cases} required cases.",
+            candidate,
+        )
+
+    missing = [s for s in policy.required_suites if s not in candidate.passed_suites]
+    if missing:
+        return PromotionDecision(
+            Decision.reject,
+            f"Required suites missing or failing: {', '.join(missing)}.",
             candidate,
         )
 

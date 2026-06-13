@@ -11,6 +11,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .. import ids
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome, AboxRunner
 from ..agent_spec import parse_spec
@@ -18,7 +19,7 @@ from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, Scorecard, decide, run_default_suite
 from ..evals.promotion import PromotionPolicy
-from ..registry import InMemoryLedger, RunPhase
+from ..registry import InMemoryLedger, RunPhase, RunRecord
 from .shared import AgentRunInput, EvalInput, PromotionInput
 
 SandboxFn = Callable[[TaskBundle], AboxOutcome]
@@ -32,13 +33,34 @@ class Deps:
     sandbox: SandboxFn | None = None
 
     def sandbox_fn(self) -> SandboxFn:
+        """Resolve the sandbox driver, failing *closed*.
+
+        The in-process ``local_sandbox`` is not an isolation boundary, so it is
+        never selected implicitly: ``BAKUDO_SANDBOX`` must be ``abox`` or
+        ``local``, and ``local`` is only permitted when ``BAKUDO_ENV=dev``.
+        """
         if self.sandbox is not None:
             return self.sandbox
-        # Default: local in-process sandbox unless a real abox is requested.
-        if os.environ.get("BAKUDO_USE_ABOX") == "1":
-            runner = AboxRunner()
-            return runner.run
-        return local_sandbox
+
+        mode = os.environ.get("BAKUDO_SANDBOX")
+        if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
+            mode = "abox"  # backwards-compatible alias
+
+        if mode == "abox":
+            return AboxRunner().run
+        if mode == "local":
+            if os.environ.get("BAKUDO_ENV") != "dev":
+                raise RuntimeError(
+                    "BAKUDO_SANDBOX=local requires BAKUDO_ENV=dev; the local "
+                    "sandbox is not an isolation boundary."
+                )
+            return local_sandbox
+        if mode is None:
+            raise RuntimeError(
+                "BAKUDO_SANDBOX must be set to 'abox' or 'local' "
+                "(local is dev-only). Refusing to pick a sandbox implicitly."
+            )
+        raise RuntimeError(f"Unknown BAKUDO_SANDBOX value: {mode!r}")
 
 
 DEPS = Deps()
@@ -64,6 +86,23 @@ def _bundle_from_input(inp: AgentRunInput) -> TaskBundle:
     )
 
 
+def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
+    """Create the run ledger record (called once at workflow start)."""
+    meta = inp.agent_spec["metadata"]
+    record = RunRecord(
+        id=inp.run_id,
+        temporal_workflow_id=workflow_id,
+        abox_task_id=inp.run_id,
+        objective_id=inp.objective["id"],
+        agent_ref=f"{meta['name']}@{meta['version']}",
+        git_branch=ids.git_branch_for(inp.run_id),
+    )
+    ledger = DEPS.ledger
+    if hasattr(ledger, "create_run"):
+        ledger.create_run(record)
+    return {"run_id": record.id, "git_branch": record.git_branch}
+
+
 def render_bundle(inp: AgentRunInput) -> dict:
     bundle = _bundle_from_input(inp)
     return bundle.model_dump(by_alias=True, mode="json")
@@ -80,24 +119,27 @@ def run_sandbox(bundle_dict: dict) -> dict:
         "result": outcome.result,
         "diff": outcome.diff,
         "changed_files": outcome.changed_files,
+        "denied_commands": outcome.denied_commands,
         "succeeded": outcome.succeeded,
     }
 
 
 def persist_run(run_id: str, phase: str, payload: dict) -> None:
+    """Advance a run's phase in whichever ledger is configured.
+
+    Backend-agnostic: both the in-memory and Postgres ledgers implement the
+    same sync :class:`~bakudo.registry.ledger.Ledger` Protocol.
+    """
     ledger = DEPS.ledger
     ph = RunPhase(phase)
-    # The in-memory ledger is sync; the Postgres ledger is async and is driven
-    # directly from the worker, so here we only handle the sync ledger.
-    if isinstance(ledger, InMemoryLedger):
-        try:
-            if ph.is_terminal:
-                ledger.finish_run(run_id, ph, payload.get("result"))
-            else:
-                ledger.set_phase(run_id, ph)
-        except KeyError:
-            # Run not yet created in this process's ledger; nothing to update.
-            pass
+    try:
+        if ph.is_terminal:
+            ledger.finish_run(run_id, ph, payload.get("result"))
+        else:
+            ledger.set_phase(run_id, ph)
+    except KeyError:
+        # Run record not present yet (e.g. created event raced); safe to skip.
+        pass
 
 
 def run_eval_suite(inp: EvalInput) -> dict:

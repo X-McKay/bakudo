@@ -113,6 +113,13 @@ abox microVM runner, Strands/vLLM model wiring, and Postgres/Neo4j adapters are
 implemented against their real client libraries (installed via extras) and
 exercised through the same building blocks the offline pipeline uses.
 
+A follow-up hardening pass closed the highest-risk seams: the safety gate now
+sees denied commands on every run path; the ledger is a single sync Protocol
+backed by either in-memory or Postgres (`psycopg`), with run records created and
+advanced uniformly; sandbox selection **fails closed**; promotion enforces
+`required_suites`; worker tools preserve their signatures for Strands; and
+`query-memory` is wired to the bundle's excerpts.
+
 See [docs/spec.md](docs/spec.md) for the full design and [docs/operations.md](docs/operations.md)
 for what is wired end-to-end versus what needs live infrastructure.
 

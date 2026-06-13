@@ -51,7 +51,10 @@ def run(args: argparse.Namespace) -> int:
 
     workspace = Workspace(Path(args.workspace))
     skills = SkillRegistry(allowed=spec.skills)
-    ctx = ToolContext(workspace=workspace, skills=skills, run_id=bundle.run_id)
+    ctx = ToolContext(
+        workspace=workspace, skills=skills, run_id=bundle.run_id,
+        memory_query=bundle.memory_query,
+    )
 
     try:
         raw = build_and_run(spec, bundle, ctx)
