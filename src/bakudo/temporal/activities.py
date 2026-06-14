@@ -11,7 +11,14 @@ applies the ``@activity.defn`` decorators when the SDK is present.
 from __future__ import annotations
 
 from . import _impl
-from .shared import AgentRunInput, EvalInput, PromotionInput
+from .shared import (
+    AgentRunInput,
+    CompactionInput,
+    EvalInput,
+    EvolutionInput,
+    ObserveInput,
+    PromotionInput,
+)
 
 try:  # pragma: no cover - exercised only with the temporal extra installed
     from temporalio import activity
@@ -56,6 +63,21 @@ async def decide_promotion(inp: PromotionInput) -> dict:
     return _impl.decide_promotion(inp)
 
 
+@_DEFN(name="run_agent_evolution")
+async def run_agent_evolution(inp: EvolutionInput) -> dict:
+    return _impl.run_agent_evolution(inp)
+
+
+@_DEFN(name="compact_memories")
+async def compact_memories(inp: CompactionInput) -> dict:
+    return _impl.compact_memories(inp)
+
+
+@_DEFN(name="collect_signals")
+async def collect_signals(inp: ObserveInput) -> list[dict]:
+    return _impl.collect_signals(inp)
+
+
 ALL_ACTIVITIES = [
     create_run,
     render_bundle,
@@ -63,4 +85,7 @@ ALL_ACTIVITIES = [
     persist_run,
     run_eval_suite,
     decide_promotion,
+    run_agent_evolution,
+    compact_memories,
+    collect_signals,
 ]

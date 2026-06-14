@@ -41,7 +41,10 @@ class Scorecard(BaseModel):
         critical_failures = sum(
             1 for r in results if not r.passed and r.suite_name in critical_suites
         )
-        cases_total = sum(int(r.details.get("cases_total", 1)) for r in results)
+        # cases_total is the number of *distinct* eval cases, not a sum across
+        # suites: a corpus run reports the same case count on each suite, so we
+        # take the max (a single run defaults to 1).
+        cases_total = max((int(r.details.get("cases_total", 1)) for r in results), default=1)
 
         return cls(
             subject_type=results[0].subject_type,

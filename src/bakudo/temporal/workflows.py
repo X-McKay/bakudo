@@ -23,13 +23,24 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from .activities import (
+        collect_signals,
+        compact_memories,
         create_run,
         persist_run,
         render_bundle,
+        run_agent_evolution,
         run_eval_suite,
         run_sandbox,
     )
-    from .shared import AgentRunInput, AgentRunOutput, EvalInput
+    from .client import META_WORKFLOW_ID
+    from .shared import (
+        AgentRunInput,
+        AgentRunOutput,
+        CompactionInput,
+        EvalInput,
+        EvolutionInput,
+        ObserveInput,
+    )
 
 # Activities that touch the network/model get generous timeouts; ledger writes
 # are quick. All are retried with backoff.
@@ -141,6 +152,8 @@ class MetaState:
     role_concurrency: dict[str, int] = field(default_factory=lambda: {"add-feature": 2})
     budget_usd_remaining: float = 100.0
     processed_objectives: int = 0
+    # Undispatched backlog carried across Continue-As-New boundaries.
+    pending_backlog: list[dict[str, Any]] = field(default_factory=list)
 
 
 # Continue-As-New after this many handled events keeps history bounded.
@@ -214,24 +227,32 @@ class MetaAgentWorkflow:
         self._state.role_concurrency[role] = limit
         return dict(self._state.role_concurrency)
 
+    def _can_dispatch(self) -> bool:
+        # observe = signals only; propose = human approval required before runs.
+        return (
+            not self._paused
+            and self._state.mode not in ("observe", "propose")
+            and bool(self._backlog)
+        )
+
     @workflow.run
     async def run(self, carried: MetaState | None = None) -> None:
         if carried is not None:
             self._state = carried
+            # Restore any backlog carried across the Continue-As-New boundary.
+            self._backlog = list(carried.pending_backlog)
+            self._state.pending_backlog = []
 
         while True:
+            # Wake only when there is dispatchable work or it is time to roll
+            # history. Backlog is never dropped while paused/observing.
             await workflow.wait_condition(
-                lambda: bool(self._backlog) or self._handled >= _CONTINUE_AS_NEW_THRESHOLD
+                lambda: self._can_dispatch() or self._handled >= _CONTINUE_AS_NEW_THRESHOLD
             )
             if self._handled >= _CONTINUE_AS_NEW_THRESHOLD:
-                # Bound event history (section 11.3).
+                # Carry the full state, including any undispatched backlog.
+                self._state.pending_backlog = list(self._backlog)
                 workflow.continue_as_new(self._state)
-
-            if self._paused or self._state.mode == "observe":
-                # In observe/paused modes we accumulate but do not dispatch runs.
-                self._backlog.clear()
-                self._handled += 1
-                continue
 
             objective = self._backlog.pop(0)
             run_id = objective.get("run_id") or workflow.uuid4().hex
@@ -249,3 +270,47 @@ class MetaAgentWorkflow:
                 ),
                 id=f"run-{run_id}",
             )
+
+
+# --- Evolution & curriculum workflows (spec sections 11.1, 15, 16) ---
+
+@workflow.defn
+class AgentEvolutionWorkflow:
+    """Propose, test, compare, and decide an agent spec change (section 15)."""
+
+    @workflow.run
+    async def run(self, inp: EvolutionInput) -> dict:
+        return await workflow.execute_activity(run_agent_evolution, inp, **_LONG)
+
+
+@workflow.defn
+class MemoryCompactionWorkflow:
+    """Convert a run's emitted memories into durable, vetted memories (section 14)."""
+
+    @workflow.run
+    async def run(self, inp: CompactionInput) -> dict:
+        return await workflow.execute_activity(compact_memories, inp, **_SHORT)
+
+
+@workflow.defn
+class RepoObserverWorkflow:
+    """Watch a repo and emit candidate objectives to the meta-agent (section 16).
+
+    Runs as a periodic loop: collect signals, signal each candidate objective to
+    the singleton MetaAgentWorkflow, sleep, then Continue-As-New to bound
+    history.
+    """
+
+    @workflow.run
+    async def run(self, inp: ObserveInput, *, iterations: int = 0) -> None:
+        objectives = await workflow.execute_activity(collect_signals, inp, **_SHORT)
+        meta = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
+        for objective in objectives:
+            await meta.signal("new_objective", objective)
+
+        # Poll on an interval; cap iterations per execution to keep history small.
+        await workflow.sleep(timedelta(minutes=15))
+        if iterations >= 32:
+            workflow.continue_as_new(inp)
+        else:
+            workflow.continue_as_new(inp, iterations=iterations + 1)

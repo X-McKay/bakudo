@@ -59,3 +59,27 @@ class PromotionInput:
     candidate: dict[str, Any]              # Scorecard dump
     baseline: dict[str, Any] | None = None
     mutation_kinds: list[str] = field(default_factory=list)
+
+
+@dataclass
+class EvolutionInput:
+    """Score a candidate spec against a baseline over an eval corpus."""
+
+    baseline_spec: dict[str, Any]
+    candidate_spec: dict[str, Any]
+    corpus_path: str
+
+
+@dataclass
+class CompactionInput:
+    """Compact one run's emitted memories into the durable store."""
+
+    repo: str
+    result: dict[str, Any]
+
+
+@dataclass
+class ObserveInput:
+    """Collect repository signals and emit candidate objectives."""
+
+    repo: str

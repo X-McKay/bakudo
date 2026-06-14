@@ -14,13 +14,25 @@ from dataclasses import dataclass, field
 from .. import ids
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome, AboxRunner
-from ..agent_spec import parse_spec
+from ..agent_spec import AgentSpec, parse_spec
 from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, Scorecard, decide, run_default_suite
+from ..evals.corpus import CaseRun, load_corpus
+from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy
+from ..memory.compaction import compact
+from ..memory.semantic import SemanticMemoryStore
 from ..registry import InMemoryLedger, RunPhase, RunRecord
-from .shared import AgentRunInput, EvalInput, PromotionInput
+from ..runner.result import RunResult
+from .shared import (
+    AgentRunInput,
+    CompactionInput,
+    EvalInput,
+    EvolutionInput,
+    ObserveInput,
+    PromotionInput,
+)
 
 SandboxFn = Callable[[TaskBundle], AboxOutcome]
 
@@ -31,6 +43,7 @@ class Deps:
 
     ledger: object = field(default_factory=InMemoryLedger)
     sandbox: SandboxFn | None = None
+    memory: object = field(default_factory=SemanticMemoryStore)
 
     def sandbox_fn(self) -> SandboxFn:
         """Resolve the sandbox driver, failing *closed*.
@@ -66,12 +79,19 @@ class Deps:
 DEPS = Deps()
 
 
-def configure(*, ledger: object | None = None, sandbox: SandboxFn | None = None) -> None:
+def configure(
+    *,
+    ledger: object | None = None,
+    sandbox: SandboxFn | None = None,
+    memory: object | None = None,
+) -> None:
     """Inject real dependencies (called by the worker entrypoint)."""
     if ledger is not None:
         DEPS.ledger = ledger
     if sandbox is not None:
         DEPS.sandbox = sandbox
+    if memory is not None:
+        DEPS.memory = memory
 
 
 def _bundle_from_input(inp: AgentRunInput) -> TaskBundle:
@@ -143,8 +163,6 @@ def persist_run(run_id: str, phase: str, payload: dict) -> None:
 
 
 def run_eval_suite(inp: EvalInput) -> dict:
-    from ..runner.result import RunResult
-
     ctx = EvalContext(
         result=RunResult.model_validate(inp.result),
         objective=Objective.model_validate(inp.objective),
@@ -174,3 +192,59 @@ def decide_promotion(inp: PromotionInput) -> dict:
         policy=PromotionPolicy(), mutation_kinds=inp.mutation_kinds,
     )
     return decision.to_dict()
+
+
+def _run_case(spec: AgentSpec, objective: Objective) -> CaseRun:
+    """Run one eval case in the configured sandbox and shape it for grading."""
+    bundle = TaskBundle(
+        run_id=ids.run_id(),
+        objective_id=objective.id,
+        objective=objective,
+        agent_spec=spec,
+        budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
+    )
+    outcome = DEPS.sandbox_fn()(bundle)
+    if outcome.result:
+        result = RunResult.model_validate(outcome.result)
+    else:
+        result = RunResult(
+            run_id=bundle.run_id, agent=spec.ref, objective_id=objective.id,
+            status="failed", summary="no result produced",
+        )
+    return CaseRun(
+        result=result, diff=outcome.diff, denied_commands=outcome.denied_commands
+    )
+
+
+def run_agent_evolution(inp: EvolutionInput) -> dict:
+    """Score a candidate spec against a baseline over an eval corpus (§15)."""
+    baseline = parse_spec(inp.baseline_spec)
+    candidate = parse_spec(inp.candidate_spec)
+    _, cases = load_corpus(inp.corpus_path)
+    outcome = evolve_agent(baseline, candidate, cases, _run_case)
+
+    record_promotion = getattr(DEPS.ledger, "record_promotion", None)
+    if callable(record_promotion):
+        record_promotion(outcome.decision)
+    return {
+        "decision": outcome.decision.to_dict(),
+        "baseline_scorecard": outcome.baseline.model_dump(mode="json"),
+        "candidate_scorecard": outcome.candidate.model_dump(mode="json"),
+    }
+
+
+def compact_memories(inp: CompactionInput) -> dict:
+    """Compact a run's emitted memories into the durable store (§14, §10.1)."""
+    result = RunResult.model_validate(inp.result)
+    report = compact(result, DEPS.memory, repo=inp.repo)
+    return {"written": report.written, "rejected": report.rejected}
+
+
+def collect_signals(inp: ObserveInput) -> list[dict]:
+    """Collect repo signals and emit candidate objectives (§16.1).
+
+    v0.1 ships the signal->objective mapping (``curriculum.observe``); wiring a
+    live GitHub/CI/coverage collector is a deployment concern. Returns an empty
+    backlog until a collector is configured.
+    """
+    return []
