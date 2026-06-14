@@ -18,7 +18,7 @@ from ..agent_spec import AgentSpec
 from ..bundle import Budget, TaskBundle
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, EvalResult, Scorecard, run_default_suite
-from ..registry import InMemoryLedger, RunPhase, RunRecord
+from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
 from ..registry.ledger import Ledger
 from ..runner.result import RunResult
 
@@ -79,13 +79,19 @@ def run_objective(
     result = RunResult.model_validate(outcome.result)
 
     ledger.set_phase(run_id, RunPhase.evaluating)
-    # Thread the safety signal (denied commands) into the eval context so the
-    # safety gate actually sees policy violations on this path.
+    if outcome.observability:
+        ledger.append_event(
+            RunEvent(run_id=run_id, event_type="observability", payload=outcome.observability)
+        )
+    # Thread the safety signal (denied commands) and cost signals (tokens,
+    # runtime) into the eval context so the safety and cost gates are meaningful.
     ctx = EvalContext(
         result=result,
         objective=objective,
         diff=outcome.diff,
         denied_commands=outcome.denied_commands,
+        runtime_seconds=outcome.runtime_seconds,
+        tokens_used=outcome.tokens_used,
     )
     eval_results = run_default_suite(ctx)
     for r in eval_results:

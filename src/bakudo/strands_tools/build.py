@@ -7,6 +7,7 @@ through Strands and logged for the agent-observability layer (spec section 18.3)
 from __future__ import annotations
 
 import functools
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,9 +21,23 @@ from .workspace import Workspace
 Tool = Callable[..., dict[str, Any]]
 
 
+class BudgetExceeded(Exception):
+    """Raised when a run exceeds its time or token budget (spec section 19.1)."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"Budget exceeded: {reason}")
+
+
 @dataclass
 class ToolContext:
-    """Shared state threaded through every tool invocation in a run."""
+    """Shared state threaded through every tool invocation in a run.
+
+    Besides the workspace/skills handles, it accumulates the agent-observability
+    counters (spec section 18.3) and enforces the run budget (section 19.1): a
+    wall-clock deadline and an optional token cap, checked before every tool
+    call so a runaway tool loop is stopped with a clear, attributable error.
+    """
 
     workspace: Workspace
     skills: SkillRegistry
@@ -32,18 +47,60 @@ class ToolContext:
     # Optional control-plane memory retrieval callback (query -> list of dicts).
     memory_query: Callable[[str], list[dict[str, Any]]] | None = None
 
+    # --- budget (section 19.1) ---
+    deadline_monotonic: float | None = None
+    token_cap: int | None = None
+
+    # --- observability counters (section 18.3) ---
+    tool_calls: int = 0
+    model_calls: int = 0
+    tokens_used: int = 0
+    memories_retrieved: int = 0
+    skills_loaded: list[str] = field(default_factory=list)
+
+    def set_budget(
+        self, *, timeout_seconds: int | None = None, token_cap: int | None = None
+    ) -> None:
+        if timeout_seconds is not None:
+            self.deadline_monotonic = time.monotonic() + timeout_seconds
+        self.token_cap = token_cap
+
+    def check_budget(self) -> None:
+        if self.deadline_monotonic is not None and time.monotonic() > self.deadline_monotonic:
+            raise BudgetExceeded("timeout")
+        if self.token_cap is not None and self.tokens_used >= self.token_cap:
+            raise BudgetExceeded("token_cap")
+
+    def _enter_tool(self) -> None:
+        """Account for a tool call and enforce the budget before running it."""
+        self.tool_calls += 1
+        self.check_budget()
+
+    def observability(self) -> dict[str, Any]:
+        return {
+            "tool_calls": self.tool_calls,
+            "model_calls": self.model_calls,
+            "tokens_used": self.tokens_used,
+            "memories_retrieved": self.memories_retrieved,
+            "skills_loaded": list(self.skills_loaded),
+            "denied_commands": len(self.denied_commands),
+        }
+
 
 def _read_file(ctx: ToolContext, path: str) -> dict[str, Any]:
+    ctx._enter_tool()
     return {"path": path, "content": ctx.workspace.read(path)}
 
 
 def _edit_file(ctx: ToolContext, path: str, content: str) -> dict[str, Any]:
+    ctx._enter_tool()
     written = ctx.workspace.write(path, content)
     return {"path": path, "bytes_written": written}
 
 
 def _make_run_command(policy: CommandPolicy) -> Tool:
     def _run_command(ctx: ToolContext, command: str, timeout: int = 600) -> dict[str, Any]:
+        ctx._enter_tool()
         try:
             argv = policy.check(command)
         except CommandDenied as denied:
@@ -61,6 +118,7 @@ def _make_run_command(policy: CommandPolicy) -> Tool:
 
 
 def _git_diff(ctx: ToolContext) -> dict[str, Any]:
+    ctx._enter_tool()
     return {"diff": ctx.workspace.git_diff(), "changed_files": ctx.workspace.changed_files()}
 
 
@@ -82,13 +140,19 @@ def _make_run_tests(policy: CommandPolicy) -> Tool:
 
 
 def _load_skill(ctx: ToolContext, name: str) -> dict[str, Any]:
-    return ctx.skills.load_skill(name)
+    ctx._enter_tool()
+    loaded = ctx.skills.load_skill(name)
+    ctx.skills_loaded.append(name)
+    return loaded
 
 
 def _query_memory(ctx: ToolContext, query: str) -> dict[str, Any]:
+    ctx._enter_tool()
     if ctx.memory_query is None:
         return {"results": [], "note": "memory retrieval not available in this run"}
-    return {"results": ctx.memory_query(query)}
+    results = ctx.memory_query(query)
+    ctx.memories_retrieved += len(results)
+    return {"results": results}
 
 
 def build_tool_callables(

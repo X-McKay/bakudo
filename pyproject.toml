@@ -85,3 +85,4 @@ ignore = ["UP042"]
 python_version = "3.11"
 packages = ["bakudo"]
 ignore_missing_imports = true
+plugins = ["pydantic.mypy"]

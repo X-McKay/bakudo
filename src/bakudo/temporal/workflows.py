@@ -121,6 +121,8 @@ class AgentRunWorkflow:
                 result=result,
                 diff=sandbox.get("diff", ""),
                 denied_commands=sandbox.get("denied_commands", []),
+                runtime_seconds=sandbox.get("runtime_seconds", 0.0),
+                tokens_used=sandbox.get("tokens_used", 0),
                 schema_valid=True,
             ),
             id=f"eval-{inp.run_id}",

@@ -15,11 +15,23 @@ from ..control import MetaAgentTools
 
 def build_app(tools: MetaAgentTools | None = None) -> Any:
     """Build the FastAPI app. Requires the ``api`` extra (fastapi, uvicorn)."""
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, Header, HTTPException
     from pydantic import BaseModel
 
     tools = tools or MetaAgentTools()
     app = FastAPI(title="bakudo control plane", version="3.0.0")
+
+    # Optional bearer-token auth on mutating routes. When BAKUDO_API_TOKEN is
+    # unset, auth is disabled (dev only); set it in any shared environment.
+    api_token = os.environ.get("BAKUDO_API_TOKEN")
+
+    def require_auth(authorization: str | None = Header(default=None)) -> None:
+        if not api_token:
+            return
+        if authorization != f"Bearer {api_token}":
+            raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+
+    auth = [Depends(require_auth)]
 
     class ObjectiveIn(BaseModel):
         repo: str
@@ -29,7 +41,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         acceptanceCriteria: list[str] = []
         constraints: dict[str, Any] = {}
 
-    @app.post("/objectives")
+    @app.post("/objectives", dependencies=auth)
     def submit_objective(body: ObjectiveIn) -> dict[str, str]:
         from .. import ids
 
@@ -45,7 +57,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     def list_objectives(queue: str = "ready") -> list[dict[str, Any]]:
         return tools.list_objectives(queue)
 
-    @app.post("/runs")
+    @app.post("/runs", dependencies=auth)
     def spawn_run(objective_id: str, agent: str) -> dict[str, str]:
         try:
             run_id = tools.spawn_agent_run(objective_id, agent)
@@ -64,9 +76,15 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     def get_logs(run_id: str) -> list[dict[str, Any]]:
         return tools.query_logs(run_id)
 
-    @app.post("/promotions/approve")
+    @app.post("/promotions/approve", dependencies=auth)
     def approve_promotion(candidate: dict[str, Any], baseline: dict[str, Any] | None = None):
         return tools.promote_candidate(candidate, baseline)
+
+    @app.get("/promotions/pending")
+    def pending_promotions() -> list[dict[str, Any]]:
+        """Promotion decisions awaiting a human gate (spec sections 19.2, 26)."""
+        promotions: list = getattr(tools.ledger, "promotions", lambda: [])()
+        return [p.to_dict() for p in promotions if p.requires_human]
 
     @app.get("/status")
     def status() -> dict[str, Any]:

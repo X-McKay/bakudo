@@ -16,9 +16,12 @@ from .models import MemoryItem
 _SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{16}"),                      # AWS access key id
     re.compile(r"sk-[A-Za-z0-9]{20,}"),                   # OpenAI-style key
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),                   # GitHub PAT
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{36}"),             # GitHub tokens (PAT/OAuth/etc.)
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),          # Slack tokens
+    re.compile(r"AIza[0-9A-Za-z\-_]{35}"),                # Google API key
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),    # PEM private key
-    re.compile(r"(?i)\b(password|secret|api[_-]?key)\b\s*[:=]\s*\S+"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
+    re.compile(r"(?i)\b(password|secret|api[_-]?key|token)\b\s*[:=]\s*\S+"),
 )
 
 MIN_CONFIDENCE = 0.5

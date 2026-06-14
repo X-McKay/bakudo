@@ -93,6 +93,9 @@ class AboxOutcome:
     diff: str = ""
     changed_files: list[str] = field(default_factory=list)
     denied_commands: list[dict[str, str]] = field(default_factory=list)
+    runtime_seconds: float = 0.0
+    tokens_used: int = 0
+    observability: dict = field(default_factory=dict)
     stdout: str = ""
     stderr: str = ""
 

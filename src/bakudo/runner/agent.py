@@ -7,13 +7,14 @@ runtime extras are missing and no offline driver is supplied.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from typing import Any
 
 from ..agent_spec import AgentSpec
 from ..bundle import TaskBundle
-from ..strands_tools import ToolContext, build_tool_callables
+from ..strands_tools import BudgetExceeded, ToolContext, build_tool_callables
 from .prompts import render_system_prompt, render_user_prompt
 
 # An offline driver maps (system_prompt, user_prompt, tools) -> raw model text.
@@ -83,21 +84,48 @@ def build_and_run(
     user_prompt = render_user_prompt(bundle)
     tool_callables = build_tool_callables(spec, ctx)
 
+    # Apply the run budget to the tool layer (wall-clock deadline + token cap).
+    ctx.set_budget(
+        timeout_seconds=bundle.budget.timeout_seconds,
+        token_cap=bundle.budget.max_tokens,
+    )
+
     if offline_driver is None and os.environ.get("BAKUDO_OFFLINE") == "1":
         offline_driver = _default_offline_driver
-    if offline_driver is not None:
-        return offline_driver(system_prompt, user_prompt, tool_callables)
 
-    from strands import Agent  # type: ignore
+    try:
+        if offline_driver is not None:
+            return offline_driver(system_prompt, user_prompt, tool_callables)
 
-    model = build_model(spec)
-    agent = Agent(
-        model=model,
-        system_prompt=system_prompt,
-        tools=to_strands_tools(tool_callables),
-    )
-    response = agent(user_prompt)
-    return str(response)
+        from strands import Agent  # type: ignore
+
+        model = build_model(spec)
+        agent = Agent(
+            model=model,
+            system_prompt=system_prompt,
+            tools=to_strands_tools(tool_callables),
+        )
+        ctx.model_calls += 1
+        response = agent(user_prompt)
+        _capture_usage(ctx, response)
+        return str(response)
+    except BudgetExceeded as exc:
+        return json.dumps(
+            {
+                "status": "blocked",
+                "summary": f"Run stopped: budget exceeded ({exc.reason}).",
+                "blocked_reasons": [f"budget:{exc.reason}"],
+            }
+        )
+
+
+def _capture_usage(ctx: ToolContext, response: Any) -> None:
+    """Best-effort token accounting from a Strands response (section 18.3)."""
+    try:
+        usage = response.metrics.accumulated_usage  # type: ignore[attr-defined]
+        ctx.tokens_used += int(usage.get("totalTokens", 0))
+    except Exception:  # noqa: BLE001 - usage shape varies; never fail the run on it
+        pass
 
 
 def _default_offline_driver(
@@ -109,8 +137,6 @@ def _default_offline_driver(
     render -> sandbox -> result capture -> eval) can be exercised end-to-end
     without a model. Real runs use Strands + vLLM.
     """
-    import json
-
     return json.dumps(
         {
             "status": "blocked",

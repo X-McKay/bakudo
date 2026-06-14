@@ -24,7 +24,8 @@ from ..evals.promotion import PromotionPolicy
 from ..memory.compaction import compact
 from ..memory.semantic import SemanticMemoryStore
 from ..registry import InMemoryLedger, RunPhase, RunRecord
-from ..runner.result import RunResult
+from ..registry.ledger import Ledger
+from ..runner.result import RunResult, RunStatus
 from .shared import (
     AgentRunInput,
     CompactionInput,
@@ -41,7 +42,7 @@ SandboxFn = Callable[[TaskBundle], AboxOutcome]
 class Deps:
     """Injectable dependencies for the activity implementations."""
 
-    ledger: object = field(default_factory=InMemoryLedger)
+    ledger: Ledger = field(default_factory=InMemoryLedger)
     sandbox: SandboxFn | None = None
     memory: object = field(default_factory=SemanticMemoryStore)
 
@@ -81,7 +82,7 @@ DEPS = Deps()
 
 def configure(
     *,
-    ledger: object | None = None,
+    ledger: Ledger | None = None,
     sandbox: SandboxFn | None = None,
     memory: object | None = None,
 ) -> None:
@@ -140,6 +141,9 @@ def run_sandbox(bundle_dict: dict) -> dict:
         "diff": outcome.diff,
         "changed_files": outcome.changed_files,
         "denied_commands": outcome.denied_commands,
+        "runtime_seconds": outcome.runtime_seconds,
+        "tokens_used": outcome.tokens_used,
+        "observability": outcome.observability,
         "succeeded": outcome.succeeded,
     }
 
@@ -209,7 +213,7 @@ def _run_case(spec: AgentSpec, objective: Objective) -> CaseRun:
     else:
         result = RunResult(
             run_id=bundle.run_id, agent=spec.ref, objective_id=objective.id,
-            status="failed", summary="no result produced",
+            status=RunStatus.failed, summary="no result produced",
         )
     return CaseRun(
         result=result, diff=outcome.diff, denied_commands=outcome.denied_commands

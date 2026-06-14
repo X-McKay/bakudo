@@ -6,7 +6,7 @@ the concrete callables; :func:`bakudo.runner.agent.to_strands_tools` adapts them
 to the Strands runtime when it is installed.
 """
 
-from .build import ToolContext, build_tool_callables
+from .build import BudgetExceeded, ToolContext, build_tool_callables
 from .policy import REPO_SAFE, CommandDenied, CommandPolicy
 from .workspace import Workspace
 
@@ -16,5 +16,6 @@ __all__ = [
     "REPO_SAFE",
     "Workspace",
     "ToolContext",
+    "BudgetExceeded",
     "build_tool_callables",
 ]

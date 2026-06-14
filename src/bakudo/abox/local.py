@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from .. import ids
@@ -23,16 +24,19 @@ from ..strands_tools import ToolContext, Workspace
 from .runner import AboxOutcome
 
 
+def _git(path: Path, *args: str) -> None:
+    subprocess.run(["git", *args], check=True, cwd=path, capture_output=True, text=True)
+
+
 def _git_init(path: Path) -> None:
-    env_args = dict(check=True, cwd=path, capture_output=True, text=True)
-    subprocess.run(["git", "init", "-q"], **env_args)
-    subprocess.run(["git", "config", "user.email", "runner@bakudo"], **env_args)
-    subprocess.run(["git", "config", "user.name", "bakudo-runner"], **env_args)
+    _git(path, "init", "-q")
+    _git(path, "config", "user.email", "runner@bakudo")
+    _git(path, "config", "user.name", "bakudo-runner")
     # The throwaway workspace must not require commit signing.
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], **env_args)
+    _git(path, "config", "commit.gpgsign", "false")
     (path / ".gitkeep").write_text("")
-    subprocess.run(["git", "add", "-A"], **env_args)
-    subprocess.run(["git", "commit", "-q", "-m", "init"], **env_args)
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", "init")
 
 
 def local_sandbox(
@@ -54,7 +58,9 @@ def local_sandbox(
         memory_query=bundle.memory_query,
     )
 
+    started = time.monotonic()
     raw = build_and_run(spec, bundle, ctx, offline_driver=offline_driver)
+    runtime_seconds = time.monotonic() - started
     result = normalize_result(
         raw, run_id=bundle.run_id, agent=spec.ref, objective_id=bundle.objective_id
     )
@@ -72,5 +78,8 @@ def local_sandbox(
         diff=workspace.git_diff(),
         changed_files=result.changed_files,
         denied_commands=list(ctx.denied_commands),
+        runtime_seconds=runtime_seconds,
+        tokens_used=ctx.tokens_used,
+        observability=ctx.observability(),
         stdout=json.dumps(result.to_dict()),
     )

@@ -68,7 +68,18 @@ once you have hosted vLLM backends configured in `infra/vllm-gateway/config.yaml
   `result.json`.
 
 The Postgres `run_events` table is the durable event log; the `outbox` table is
-the integration-event projection point (spec §17.1).
+the integration-event projection point (spec §17.1). Each run also emits an
+`observability` event (tool/model calls, tokens, skills loaded, memories
+retrieved) captured on the `ToolContext`, and the run budget (wall-clock
+deadline + token cap) is enforced before every tool call — a breach stops the
+run with a `budget:*` blocked reason rather than running away.
+
+## CI and types
+
+`make check` runs the full local gate (`ruff` + `mypy` + `pytest`). The Python
+CI workflow lives at `ci/python-ci.yml`; a maintainer should
+`git mv ci/python-ci.yml .github/workflows/ci.yml` to activate it (the
+automation cannot modify `.github/workflows/` itself).
 
 ## Build order (spec §29)
 
@@ -76,5 +87,9 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
 (3) abox activity, (4) Temporal workflows, (5) Postgres ledger, (6) first roles
 `explore`/`add-feature`/`qa` (+`critic`), (7) first evals, (8) skill registry,
 (9) memory pipeline, (10) candidate evolution (prompt-mutation + eval comparison
-+ canary). Remaining work: live regression eval corpora, the curriculum
-`RepoObserver`, and skill/memory *curation* workflows.
++ canary). The curriculum `RepoObserver`, the evolution/compaction workflows,
+the eval-corpus runner + LLM critic grader, semantic memory, budget enforcement,
+observability counters, and API auth are implemented. Remaining work: a live
+GitHub/CI/coverage signal collector behind `collect_signals`, a durable
+(Postgres/Neo4j) memory store wired into the worker, and growing the eval
+corpora past `minEvalCases` with real historical failures.
