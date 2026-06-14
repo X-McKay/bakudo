@@ -16,6 +16,8 @@ from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome, AboxRunner
 from ..agent_spec import AgentSpec, parse_spec
 from ..bundle import Budget, MemoryExcerpt, TaskBundle
+from ..curriculum import build_default_collector, generate_objectives
+from ..curriculum.collectors import SignalCollector
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, Scorecard, decide, run_default_suite
 from ..evals.corpus import CaseRun, load_corpus
@@ -45,6 +47,7 @@ class Deps:
     ledger: Ledger = field(default_factory=InMemoryLedger)
     sandbox: SandboxFn | None = None
     memory: object = field(default_factory=SemanticMemoryStore)
+    collector: SignalCollector | None = None
 
     def sandbox_fn(self) -> SandboxFn:
         """Resolve the sandbox driver, failing *closed*.
@@ -85,6 +88,7 @@ def configure(
     ledger: Ledger | None = None,
     sandbox: SandboxFn | None = None,
     memory: object | None = None,
+    collector: SignalCollector | None = None,
 ) -> None:
     """Inject real dependencies (called by the worker entrypoint)."""
     if ledger is not None:
@@ -93,6 +97,8 @@ def configure(
         DEPS.sandbox = sandbox
     if memory is not None:
         DEPS.memory = memory
+    if collector is not None:
+        DEPS.collector = collector
 
 
 def _bundle_from_input(inp: AgentRunInput) -> TaskBundle:
@@ -247,8 +253,13 @@ def compact_memories(inp: CompactionInput) -> dict:
 def collect_signals(inp: ObserveInput) -> list[dict]:
     """Collect repo signals and emit candidate objectives (§16.1).
 
-    v0.1 ships the signal->objective mapping (``curriculum.observe``); wiring a
-    live GitHub/CI/coverage collector is a deployment concern. Returns an empty
-    backlog until a collector is configured.
+    Uses the injected collector, or one assembled from environment config
+    (``BAKUDO_REPO_PATH``, ``BAKUDO_COVERAGE_XML``, ``BAKUDO_JUNIT_XML``,
+    ``GITHUB_TOKEN``). Returns an empty backlog when nothing is configured,
+    rather than guessing.
     """
-    return []
+    collector = DEPS.collector or build_default_collector(inp.repo)
+    if collector is None:
+        return []
+    signals = collector.collect(inp.repo)
+    return [obj.to_dict() for obj in generate_objectives(signals)]

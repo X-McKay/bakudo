@@ -87,9 +87,11 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
 (3) abox activity, (4) Temporal workflows, (5) Postgres ledger, (6) first roles
 `explore`/`add-feature`/`qa` (+`critic`), (7) first evals, (8) skill registry,
 (9) memory pipeline, (10) candidate evolution (prompt-mutation + eval comparison
-+ canary). The curriculum `RepoObserver`, the evolution/compaction workflows,
-the eval-corpus runner + LLM critic grader, semantic memory, budget enforcement,
-observability counters, and API auth are implemented. Remaining work: a live
-GitHub/CI/coverage signal collector behind `collect_signals`, a durable
++ canary). The curriculum `RepoObserver` (with live TODO/coverage/JUnit/GitHub
+collectors, configured via `BAKUDO_REPO_PATH`/`BAKUDO_COVERAGE_XML`/
+`BAKUDO_JUNIT_XML`/`GITHUB_TOKEN`), the evolution/compaction workflows, the
+eval-corpus runner + LLM critic grader, semantic memory, budget enforcement,
+observability counters, and API auth are implemented. Remaining work: a durable
 (Postgres/Neo4j) memory store wired into the worker, and growing the eval
-corpora past `minEvalCases` with real historical failures.
+corpora past `minEvalCases` with real historical failures. See
+`docs/HUMAN_TASKS.md` for the operator handoff.
