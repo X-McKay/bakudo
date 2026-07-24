@@ -1,10 +1,16 @@
-//! abox v0.3.2 adapter.
+//! abox v0.6.0 adapter.
 //!
 //! All abox invocations follow the pattern:
 //!   abox [--repo <path>] <subcommand> [args...]
 //!
 //! The `--repo` flag is a global flag on the root Cli struct, so it must come
 //! BEFORE the subcommand.
+//!
+//! Machine-readable surfaces (abox ≥ 0.6.0): `list --json` returns the
+//! sandbox table as a JSON array (including each sandbox's host-side
+//! `worktree_path`), and `path <task>` prints the worktree location as a
+//! supported contract. Bakudo consumes both instead of scraping the
+//! human-oriented table/log output.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,14 +24,23 @@ use tracing::{debug, warn};
 
 use crate::error::AboxError;
 
-/// A single row from `abox list` output.
+/// A single row from `abox list --json` output.
+///
+/// Field names mirror the abox JSON contract (`state`, `pid`, `ahead`);
+/// the Rust names keep bakudo's historical vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxEntry {
     pub id: String,
     pub branch: String,
+    #[serde(rename = "state")]
     pub vm_state: String,
-    pub vm_pid: String,
-    pub commits_ahead: String,
+    #[serde(rename = "pid")]
+    pub vm_pid: u32,
+    #[serde(rename = "ahead")]
+    pub commits_ahead: u32,
+    /// Host-side worktree path reported by abox.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
 }
 
 /// Result of an `abox run` invocation (blocking, not --detach).
@@ -249,17 +264,34 @@ impl AboxAdapter {
         })
     }
 
-    /// `abox [--repo <repo>] list` — returns parsed sandbox entries.
+    /// `abox [--repo <repo>] list --json` — returns parsed sandbox entries.
     pub async fn list(&self, repo: Option<&Path>) -> Result<Vec<SandboxEntry>, AboxError> {
         let mut cmd = self.base_cmd(repo);
-        cmd.arg("list");
+        cmd.args(["list", "--json"]);
         let out = cmd.output().await.map_err(AboxError::Io)?;
         if !out.status.success() {
             return Err(AboxError::ListFailed {
                 detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
             });
         }
-        parse_list_output(&String::from_utf8_lossy(&out.stdout))
+        parse_list_json(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    /// `abox [--repo <repo>] path <task_id>` — the authoritative host-side
+    /// worktree path for a sandbox. Errors with [`AboxError::SandboxNotFound`]
+    /// when abox has no sandbox by that name.
+    pub async fn path(&self, repo: Option<&Path>, task_id: &str) -> Result<PathBuf, AboxError> {
+        let mut cmd = self.base_cmd(repo);
+        cmd.arg("path").arg(task_id);
+        let out = cmd.output().await.map_err(AboxError::Io)?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let path = stdout.trim();
+        if !out.status.success() || path.is_empty() {
+            return Err(AboxError::SandboxNotFound {
+                task_id: task_id.to_string(),
+            });
+        }
+        Ok(PathBuf::from(path))
     }
 
     /// `abox [--repo <repo>] stop <task_id> [--clean]`
@@ -454,100 +486,23 @@ fn extract_marker_value(line: &str, marker: &str) -> Option<String> {
     .filter(|value| !value.is_empty())
 }
 
-/// Parse the tabular output of `abox list`.
-/// Header line format: ID  BRANCH  STATE  PID  AHEAD
-///
-/// Uses the header row to determine fixed column offsets, falling back to
-/// whitespace splitting only if the header can't be found. This tolerates
-/// state/branch strings that contain spaces (e.g. "merge conflicts").
-fn parse_list_output(output: &str) -> Result<Vec<SandboxEntry>, AboxError> {
-    let mut lines = output.lines();
-    let header = loop {
-        match lines.next() {
-            Some(line) if line.trim_start().starts_with("ID") => break Some(line),
-            Some(_) => continue,
-            None => break None,
-        }
-    };
-
-    let offsets = header.and_then(header_offsets);
-
-    let mut entries = Vec::new();
-    for line in lines {
-        let trimmed = line.trim_end();
-        if trimmed.trim().is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('-') {
-            continue;
-        }
-        if trimmed.trim_start().starts_with("No active") || trimmed.contains("sandbox(es)") {
-            continue;
-        }
-        match &offsets {
-            Some(off) => {
-                if let Some(entry) = parse_by_offsets(trimmed, off) {
-                    entries.push(entry);
-                }
-            }
-            None => {
-                let cols: Vec<&str> = trimmed.split_whitespace().collect();
-                if cols.len() >= 5 {
-                    entries.push(SandboxEntry {
-                        id: cols[0].to_string(),
-                        branch: cols[1].to_string(),
-                        vm_state: cols[2].to_string(),
-                        vm_pid: cols[3].to_string(),
-                        commits_ahead: cols[4].to_string(),
-                    });
-                }
-            }
-        }
+/// Parse the JSON array emitted by `abox list --json`.
+fn parse_list_json(output: &str) -> Result<Vec<SandboxEntry>, AboxError> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
     }
-    Ok(entries)
-}
-
-/// Determine the byte offsets of each column header in the `abox list` header row.
-fn header_offsets(header: &str) -> Option<[usize; 5]> {
-    let id = header.find("ID")?;
-    let branch = header[id..].find("BRANCH").map(|i| i + id)?;
-    let state = header[branch..].find("STATE").map(|i| i + branch)?;
-    let pid = header[state..].find("PID").map(|i| i + state)?;
-    let ahead = header[pid..].find("AHEAD").map(|i| i + pid)?;
-    Some([id, branch, state, pid, ahead])
-}
-
-fn parse_by_offsets(line: &str, offsets: &[usize; 5]) -> Option<SandboxEntry> {
-    fn slice(line: &str, start: usize, end: Option<usize>) -> Option<String> {
-        if start >= line.len() {
-            return None;
-        }
-        let end = end.unwrap_or(line.len()).min(line.len());
-        if end <= start {
-            return None;
-        }
-        Some(line[start..end].trim().to_string())
-    }
-    let id = slice(line, offsets[0], Some(offsets[1]))?;
-    let branch = slice(line, offsets[1], Some(offsets[2]))?;
-    let vm_state = slice(line, offsets[2], Some(offsets[3]))?;
-    let vm_pid = slice(line, offsets[3], Some(offsets[4]))?;
-    let commits_ahead = slice(line, offsets[4], None).unwrap_or_default();
-    if id.is_empty() {
-        return None;
-    }
-    Some(SandboxEntry {
-        id,
-        branch,
-        vm_state,
-        vm_pid,
-        commits_ahead,
+    serde_json::from_str(trimmed).map_err(|e| {
+        AboxError::ParseError(format!(
+            "abox list --json returned invalid JSON ({e}): {}",
+            &trimmed[..trimmed.len().min(200)]
+        ))
     })
 }
 
 /// Minimum abox version bakudo is known to work with. Keep in sync with the
 /// `//! abox v<X.Y.Z> adapter.` doc-comment at the top of this file.
-pub const MIN_ABOX_VERSION: (u32, u32, u32) = (0, 3, 2);
+pub const MIN_ABOX_VERSION: (u32, u32, u32) = (0, 6, 0);
 
 /// Result of cross-checking `abox --version` output against [`MIN_ABOX_VERSION`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,8 +626,12 @@ mod tests {
     #[test]
     fn check_abox_version_ok_when_meets_minimum() {
         assert!(matches!(
-            check_abox_version("abox 0.3.2"),
-            AboxVersionStatus::Ok { current: (0, 3, 2) }
+            check_abox_version("abox 0.6.0"),
+            AboxVersionStatus::Ok { current: (0, 6, 0) }
+        ));
+        assert!(matches!(
+            check_abox_version("abox 0.6.1"),
+            AboxVersionStatus::Ok { .. }
         ));
         assert!(matches!(
             check_abox_version("abox 1.0.0"),
@@ -690,16 +649,16 @@ mod tests {
             }
         );
         assert_eq!(
-            check_abox_version("abox 0.3.0"),
+            check_abox_version("abox 0.3.2"),
             AboxVersionStatus::TooOld {
-                current: (0, 3, 0),
+                current: (0, 3, 2),
                 min: MIN_ABOX_VERSION,
             }
         );
         assert_eq!(
-            check_abox_version("abox 0.3.1"),
+            check_abox_version("abox 0.5.9"),
             AboxVersionStatus::TooOld {
-                current: (0, 3, 1),
+                current: (0, 5, 9),
                 min: MIN_ABOX_VERSION,
             }
         );
@@ -714,42 +673,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_list_empty() {
-        let out = "No active sandboxes.\n";
-        let entries = parse_list_output(out).unwrap();
-        assert!(entries.is_empty());
+    fn parse_list_json_empty_array() {
+        assert!(parse_list_json("[]\n").unwrap().is_empty());
+        assert!(parse_list_json("").unwrap().is_empty());
     }
 
     #[test]
-    fn parse_list_tolerates_multi_word_state() {
-        let out = "\
-ID               BRANCH                   STATE            PID      AHEAD
-------------------------------------------------------------------------------
-bakudo-abc       agent/bakudo-abc         merge conflicts  12345    3
-";
-        let entries = parse_list_output(out).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].vm_state, "merge conflicts");
-        assert_eq!(entries[0].vm_pid, "12345");
-        assert_eq!(entries[0].commits_ahead, "3");
-    }
-
-    #[test]
-    fn parse_list_with_entries() {
-        let out = "\
-ID               BRANCH                   STATE      PID      AHEAD   
-----------------------------------------------------------------------
-bakudo-abc       agent/bakudo-abc         running    12345    3       
-bakudo-def       agent/bakudo-def         stopped    0        0       
-
-2 sandbox(es) active
-";
-        let entries = parse_list_output(out).unwrap();
+    fn parse_list_json_with_entries() {
+        let out = r#"[
+  {"id":"bakudo-abc","branch":"agent/bakudo-abc","state":"running","pid":12345,"ahead":3,"worktree_path":"/tmp/abox/worktrees/bakudo-abc"},
+  {"id":"bakudo-def","branch":"agent/bakudo-def","state":"stopped","pid":0,"ahead":0,"worktree_path":"/tmp/abox/worktrees/bakudo-def"}
+]"#;
+        let entries = parse_list_json(out).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, "bakudo-abc");
         assert_eq!(entries[0].vm_state, "running");
-        assert_eq!(entries[1].id, "bakudo-def");
+        assert_eq!(entries[0].vm_pid, 12345);
+        assert_eq!(entries[0].commits_ahead, 3);
+        assert_eq!(
+            entries[0].worktree_path.as_deref(),
+            Some("/tmp/abox/worktrees/bakudo-abc")
+        );
         assert_eq!(entries[1].vm_state, "stopped");
+    }
+
+    #[test]
+    fn parse_list_json_tolerates_multi_word_state_and_missing_worktree() {
+        let out = r#"[{"id":"bakudo-abc","branch":"agent/bakudo-abc","state":"merge conflicts","pid":12345,"ahead":3}]"#;
+        let entries = parse_list_json(out).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].vm_state, "merge conflicts");
+        assert!(entries[0].worktree_path.is_none());
+    }
+
+    #[test]
+    fn parse_list_json_rejects_non_json() {
+        let err = parse_list_json("No active sandboxes.\n").unwrap_err();
+        assert!(matches!(err, AboxError::ParseError(_)));
     }
 
     #[test]

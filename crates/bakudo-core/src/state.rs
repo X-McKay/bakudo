@@ -231,7 +231,7 @@ impl SandboxLedger {
                             } else {
                                 Some(now)
                             },
-                            worktree_path: None,
+                            worktree_path: entry.worktree_path.clone(),
                             branch: Some(entry.branch.clone()),
                         },
                     );
@@ -352,8 +352,9 @@ mod tests {
             id: "task-running".to_string(),
             branch: "agent/task-running".to_string(),
             vm_state: "running".to_string(),
-            vm_pid: "1234".to_string(),
-            commits_ahead: "0".to_string(),
+            vm_pid: 1234,
+            commits_ahead: 0,
+            worktree_path: None,
         }];
 
         ledger.reconcile(&abox_entries).await;
@@ -373,15 +374,17 @@ mod tests {
                 id: "bakudo-orphan-run".to_string(),
                 branch: "agent/bakudo-orphan-run".to_string(),
                 vm_state: "running".to_string(),
-                vm_pid: "111".to_string(),
-                commits_ahead: "0".to_string(),
+                vm_pid: 111,
+                commits_ahead: 0,
+                worktree_path: None,
             },
             SandboxEntry {
                 id: "bakudo-orphan-stop".to_string(),
                 branch: "agent/bakudo-orphan-stop".to_string(),
                 vm_state: "stopped".to_string(),
-                vm_pid: "0".to_string(),
-                commits_ahead: "2".to_string(),
+                vm_pid: 0,
+                commits_ahead: 2,
+                worktree_path: Some("/tmp/abox/worktrees/bakudo-orphan-stop".to_string()),
             },
         ];
 
@@ -393,6 +396,10 @@ mod tests {
 
         let preserved = ledger.get("bakudo-orphan-stop").await.unwrap();
         assert_eq!(preserved.state, SandboxState::Preserved);
+        assert_eq!(
+            preserved.worktree_path.as_deref(),
+            Some("/tmp/abox/worktrees/bakudo-orphan-stop")
+        );
     }
 
     #[tokio::test]

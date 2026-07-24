@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed (abox 0.6.0 upgrade)
+
+- Bakudo now requires `abox 0.6.0` or newer; the runtime minimum-version gate, installer check, test fixtures, and documentation all target the new baseline.
+- `AboxAdapter::list` uses `abox list --json` instead of scraping the human-readable table; `SandboxEntry` gained a `worktree_path` field and its `vm_pid` / `commits_ahead` fields are now numeric, mirroring the abox JSON contract.
+- Worktree discovery consults the new `abox path <task>` contract (via `AboxAdapter::path`) between the ledger record and the `~/.abox/worktrees/<task>` default-layout guess, so relocated abox state dirs no longer break preserved-worktree flows.
+- Review-mode candidate handling records the sandbox's real worktree path from `abox list --json` instead of clearing it while back-filling the branch; ledger reconcile also ingests `worktree_path` for recovered sandboxes.
+- Mission/explore prompts document the `python-glibc` guest profile (abox ≥ 0.6.0) for packages that only ship manylinux wheels; the embedded abox runtime config documents that `[[host_ports]]` bridging stays disabled.
+
 ### Added
 
 - Guest-side provider wrapper: `python3 -c` wrapper command now emits structured `BAKUDO_EVENT` / `BAKUDO_RESULT` envelopes around provider output so the host can render tool-call / assistant-message events instead of raw stdout without depending on an extra guest binary.

@@ -114,3 +114,13 @@ Prefer installing from the project's own dependency manifest
 (`requirements*.txt`, `pyproject.toml [project.optional-dependencies]`,
 `setup.cfg`) over naming single packages — that mirrors the project's
 own CI and avoids drift from real-world dependency resolution.
+
+If `pip install` fails building a native extension because the package
+only ships manylinux wheels, the repo can opt into abox's `python-glibc`
+guest profile (Debian/glibc base, manylinux-compatible; abox ≥ 0.6.0)
+via `.abox/project.toml`:
+
+```toml
+[environment]
+profile = "python-glibc"
+```

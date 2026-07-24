@@ -16,6 +16,11 @@
 # Only fields that bakudo explicitly wants to control are set. All other
 # AboxConfig fields fall back to abox's compiled-in defaults
 # (state_dir = ~/.abox, vm_defaults, runtime_dir, etc.).
+#
+# This config targets the abox 0.6.0 baseline (bakudo's minimum version).
+# abox 0.6.0 also supports config-only `[[host_ports]]` bridging from guest
+# loopback to host loopback services; bakudo deliberately does not enable
+# any — workers must not reach host services.
 
 [proxy]
 # Absolute path to the directory containing policy files. abox loads

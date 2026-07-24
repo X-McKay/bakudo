@@ -58,3 +58,8 @@ export PATH="$HOME/.local/bin:$PATH"
 `pypi.org` and `*.pythonhosted.org` are reachable from the sandbox.
 Prefer installing from the project's own dependency manifest over
 naming single packages.
+
+If a package only ships manylinux wheels and fails to build natively,
+the repo can opt into abox's `python-glibc` guest profile
+(Debian/glibc base; abox ≥ 0.6.0) via `.abox/project.toml`
+(`[environment] profile = "python-glibc"`).

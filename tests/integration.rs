@@ -146,8 +146,9 @@ mod state_ledger_tests {
             id: "running-ok".to_string(),
             branch: "agent/running-ok".to_string(),
             vm_state: "running".to_string(),
-            vm_pid: "1234".to_string(),
-            commits_ahead: "0".to_string(),
+            vm_pid: 1234,
+            commits_ahead: 0,
+            worktree_path: None,
         }];
 
         ledger.reconcile(&entries).await;

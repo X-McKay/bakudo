@@ -59,7 +59,7 @@ ok "cargo: $(cargo --version)"
 # ─── Prereq: abox on PATH ───────────────────────────────────────────────────
 # Hard prereq — bakudo cannot dispatch without it. Check BEFORE installing
 # bakudo so a missing abox doesn't leave the user with a half-working setup.
-MIN_ABOX_VERSION="0.3.2"
+MIN_ABOX_VERSION="0.6.0"
 if ! command -v abox >/dev/null 2>&1; then
     err "abox is not on PATH. bakudo cannot dispatch tasks without it."
     err "Install abox from the bakudo-abox workspace root:  just install-abox"

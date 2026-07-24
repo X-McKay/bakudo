@@ -89,14 +89,25 @@ pub async fn apply_candidate_policy(
         }
         CandidatePolicy::Discard => discard_sandbox(task_id, repo, abox, ledger).await,
         CandidatePolicy::Review => {
-            prepare_preserved_worktree(task_id, ledger, SnapshotIntent::Preserve).await?;
+            prepare_preserved_worktree(task_id, repo, abox, ledger, SnapshotIntent::Preserve)
+                .await?;
             info!("Leaving worktree preserved for task {task_id} (review mode)");
-            // Best-effort: populate branch info from abox list so the shelf
-            // can surface it.
+            // Best-effort: populate branch and worktree path from
+            // `abox list --json` so the shelf can surface them.
             if let Ok(entries) = abox.list(repo).await {
                 if let Some(entry) = find_entry(&entries, task_id) {
+                    let path = match entry.worktree_path.clone() {
+                        Some(path) => path,
+                        // Keep whatever path is already recorded — an empty
+                        // path would clear it.
+                        None => ledger
+                            .get(task_id)
+                            .await
+                            .and_then(|record| record.worktree_path)
+                            .unwrap_or_default(),
+                    };
                     ledger
-                        .set_worktree(task_id, String::new(), entry.branch.clone())
+                        .set_worktree(task_id, path, entry.branch.clone())
                         .await;
                 }
             }
@@ -114,10 +125,11 @@ pub async fn merge_sandbox(
     ledger: &Arc<SandboxLedger>,
     verification: Option<AutoApplyVerificationPolicy<'_>>,
 ) -> Result<WorktreeAction, BakudoError> {
-    prepare_preserved_worktree(task_id, ledger, SnapshotIntent::Apply).await?;
+    prepare_preserved_worktree(task_id, repo, abox, ledger, SnapshotIntent::Apply).await?;
     let verification = match verification {
         Some(policy) => {
-            let verification = verify_auto_apply_candidate(task_id, abox, ledger, policy).await?;
+            let verification =
+                verify_auto_apply_candidate(task_id, repo, abox, ledger, policy).await?;
             if verification.status == VerificationStatus::Failed {
                 warn!(
                     "Auto-apply verification failed for task {task_id} (exit {}, timed_out={})",
@@ -187,11 +199,13 @@ fn find_entry<'a>(entries: &'a [SandboxEntry], task_id: &str) -> Option<&'a Sand
 
 async fn prepare_preserved_worktree(
     task_id: &str,
+    repo: Option<&Path>,
+    abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
     intent: SnapshotIntent,
 ) -> Result<(), BakudoError> {
     let branch = sandbox_branch(task_id);
-    let Some(worktree_path) = discover_worktree_path(task_id, ledger).await else {
+    let Some(worktree_path) = discover_worktree_path(task_id, repo, abox, ledger).await else {
         return Ok(());
     };
     ledger
@@ -241,6 +255,8 @@ async fn prepare_preserved_worktree(
 
 async fn discover_worktree_path(
     task_id: &str,
+    repo: Option<&Path>,
+    abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
 ) -> Option<std::path::PathBuf> {
     let recorded = ledger
@@ -254,16 +270,27 @@ async fn discover_worktree_path(
         return recorded;
     }
 
+    // `abox path` is the supported contract for worktree locations
+    // (abox ≥ 0.6.0); ask it before falling back to the default-layout guess.
+    if let Ok(path) = abox.path(repo, task_id).await {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
     sandbox_default_worktree_path(task_id)
 }
 
 async fn verify_auto_apply_candidate(
     task_id: &str,
+    repo: Option<&Path>,
     abox: &AboxAdapter,
     ledger: &Arc<SandboxLedger>,
     policy: AutoApplyVerificationPolicy<'_>,
 ) -> Result<VerificationSummary, BakudoError> {
-    let worktree_path = discover_worktree_path(task_id, ledger).await.ok_or_else(|| {
+    let worktree_path = discover_worktree_path(task_id, repo, abox, ledger)
+        .await
+        .ok_or_else(|| {
         std::io::Error::other(format!(
             "auto-apply verification is configured, but the preserved worktree for task {task_id} could not be found"
         ))

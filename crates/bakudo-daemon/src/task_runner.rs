@@ -9,7 +9,7 @@
 //!   5. Updates the SandboxLedger as the VM transitions through states.
 //!   6. Returns a WorkerResult when the VM exits.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{Arc as StdArc, Mutex};
 use std::time::Instant;
@@ -217,9 +217,20 @@ async fn run_attempt_inner(
                     exit_code: run.exit_code,
                 },
             };
-            if let Some(path) = run.worktree_path.clone().or_else(|| {
+            // Resolve the worktree path: run-output metadata first, then the
+            // `abox path` contract, then the default-layout guess.
+            let worktree_path = if let Some(path) = run.worktree_path.clone() {
+                Some(path)
+            } else if let Ok(path) = cfg
+                .abox
+                .path(spec.repo_root.as_deref().map(Path::new), &task_id)
+                .await
+            {
+                Some(path.display().to_string())
+            } else {
                 sandbox_default_worktree_path(&task_id).map(|path| path.display().to_string())
-            }) {
+            };
+            if let Some(path) = worktree_path {
                 cfg.ledger
                     .set_worktree(
                         &task_id,

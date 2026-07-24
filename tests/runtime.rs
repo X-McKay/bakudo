@@ -129,8 +129,25 @@ set -euo pipefail
 # version. Answer with a version that satisfies the check without logging the
 # invocation, so tests that assert on invocation counts stay stable.
 if [[ "${{1:-}}" == "--version" ]]; then
-  echo "abox 0.3.2"
+  echo "abox 0.6.0"
   exit 0
+fi
+# `abox path` (abox >= 0.6.0) is a cheap metadata query bakudo issues while
+# resolving worktree locations. Answer it without logging, like --version, so
+# invocation-count assertions stay stable. Tests that want a successful
+# response write the path into '{path_response}'.
+args=("$@")
+i=0
+while [[ "${{args[$i]:-}}" == "--config" || "${{args[$i]:-}}" == "--repo" ]]; do
+  i=$((i + 2))
+done
+if [[ "${{args[$i]:-}}" == "path" ]]; then
+  if [[ -f '{path_response}' ]]; then
+    cat '{path_response}'
+    exit 0
+  fi
+  echo "No sandbox named '${{args[$((i + 1))]:-}}'." >&2
+  exit 1
 fi
 {{
   printf '%s\n' "$@"
@@ -156,6 +173,7 @@ case "$sub" in
 esac
 "#,
         log_path = log_path.display(),
+        path_response = dir.path.join("path-response").display(),
         body = body
     );
     let mut file = fs::File::create(&temp_path).unwrap();
@@ -602,6 +620,53 @@ async fn adapter_list_returns_error_on_failure() {
     match err {
         AboxError::ListFailed { detail } => assert!(detail.contains("list failed")),
         other => panic!("expected ListFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn adapter_list_parses_json_entries() {
+    let dir = TempDir::new("bakudo-fake-abox");
+    let (script, _log) = write_fake_abox_script(
+        &dir,
+        r#"  list)
+    echo '[{"id":"bakudo-abc","branch":"agent/bakudo-abc","state":"running","pid":42,"ahead":1,"worktree_path":"/tmp/abox/worktrees/bakudo-abc"}]'
+    ;;
+"#,
+    );
+    let adapter = AboxAdapter::new(&script);
+    let entries = adapter.list(None).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "bakudo-abc");
+    assert_eq!(entries[0].vm_pid, 42);
+    assert_eq!(
+        entries[0].worktree_path.as_deref(),
+        Some("/tmp/abox/worktrees/bakudo-abc")
+    );
+}
+
+#[tokio::test]
+async fn adapter_path_returns_worktree_location() {
+    let dir = TempDir::new("bakudo-fake-abox");
+    let (script, _log) = write_fake_abox_script(&dir, "");
+    fs::write(
+        dir.path.join("path-response"),
+        "/tmp/abox/worktrees/bakudo-task\n",
+    )
+    .unwrap();
+    let adapter = AboxAdapter::new(&script);
+    let path = adapter.path(None, "bakudo-task").await.unwrap();
+    assert_eq!(path, PathBuf::from("/tmp/abox/worktrees/bakudo-task"));
+}
+
+#[tokio::test]
+async fn adapter_path_errors_when_sandbox_unknown() {
+    let dir = TempDir::new("bakudo-fake-abox");
+    let (script, _log) = write_fake_abox_script(&dir, "");
+    let adapter = AboxAdapter::new(&script);
+    let err = adapter.path(None, "bakudo-missing").await.unwrap_err();
+    match err {
+        AboxError::SandboxNotFound { task_id } => assert_eq!(task_id, "bakudo-missing"),
+        other => panic!("expected SandboxNotFound, got {other:?}"),
     }
 }
 
@@ -1266,7 +1331,7 @@ async fn session_controller_diverge_uses_configured_base_branch() {
     let (script, log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
 "#,
     );
@@ -1342,7 +1407,7 @@ async fn session_controller_persists_auto_apply_verification_and_trace_details()
         &dir,
         &format!(
             r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     task_id=""
@@ -1528,7 +1593,7 @@ async fn session_controller_diff_uses_task_branch() {
     let (script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
 "#,
     );
@@ -1594,7 +1659,7 @@ async fn session_controller_resume_only_filters_snapshot_to_requested_session() 
     let (script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
 "#,
     );
@@ -1660,7 +1725,7 @@ async fn session_controller_reports_failed_tasks_as_failed() {
     let script = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     echo "worker exploded"
@@ -1721,7 +1786,7 @@ async fn session_controller_requires_approval_when_policy_prompts() {
     let script = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     echo "approved run"
@@ -1811,7 +1876,7 @@ async fn session_controller_routes_host_objectives_into_direct_mission_start() {
     let script = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     echo "worker completed"
@@ -1888,7 +1953,7 @@ async fn session_controller_answers_running_and_candidate_queries_from_host_laye
     let script = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     echo "worker is warming up"
@@ -2015,7 +2080,7 @@ call("suspend", {"reason": "waiting for the next wake"})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -2153,7 +2218,7 @@ else:
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -2303,7 +2368,7 @@ else:
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -2433,7 +2498,7 @@ call("complete_mission", {"summary": "wallet rejected oversized wave"})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -2546,7 +2611,7 @@ else:
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -2689,7 +2754,7 @@ else:
         &dir,
         &format!(
             r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     task_id=""
@@ -2877,7 +2942,7 @@ print("plain trailing line that should not replace the summary")
     let (abox_script, log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3007,7 +3072,7 @@ else:
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3120,7 +3185,7 @@ call("complete_mission", {{"summary": "prompt bootstrap completed"}})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3227,7 +3292,7 @@ call("complete_mission", {"summary": "host exec approval path completed"})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3367,7 +3432,7 @@ call("complete_mission", {"summary": "user answered the blocking question"})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3495,7 +3560,7 @@ else:
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3637,7 +3702,7 @@ call("complete_mission", {"summary": "lesson recorded"})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3737,7 +3802,7 @@ call("complete_mission", {"summary": "provenance mission completed"})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3859,7 +3924,7 @@ else:
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -3971,7 +4036,7 @@ else:
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -4163,7 +4228,7 @@ call("complete_mission", {"summary": "restart recovery completed"})
     let (abox_script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     while [[ "$1" != "--" ]]; do shift; done
@@ -4433,7 +4498,7 @@ fn bakudo_sessions_lists_saved_sessions_for_current_repo() {
     let script = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
 "#,
     )
@@ -4723,7 +4788,7 @@ async fn bakudo_wait_cli_observes_session_controller_result() {
     let (script, _log) = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
   run)
     sleep 0.4
@@ -4822,7 +4887,7 @@ async fn bakudo_candidates_cli_lists_actionable_candidates() {
     let script = write_fake_abox_script(
         &dir,
         r#"  list)
-    echo "No active sandboxes."
+    echo "[]"
     ;;
 "#,
     )
@@ -5525,7 +5590,7 @@ fn app_rebuilds_shelf_from_recovered_ledger_snapshot() {
 #[tokio::test]
 async fn real_abox_ephemeral_run_smoke() {
     let Some(_guard) = lock_real_abox().await else {
-        eprintln!("skipping real abox smoke: abox >= 0.3.2 not available");
+        eprintln!("skipping real abox smoke: abox >= 0.6.0 not available");
         return;
     };
 
@@ -5569,7 +5634,7 @@ async fn real_abox_ephemeral_run_smoke() {
 #[tokio::test]
 async fn real_abox_preserved_stop_cleans_agent_branch() {
     let Some(_guard) = lock_real_abox().await else {
-        eprintln!("skipping real abox smoke: abox >= 0.3.2 not available");
+        eprintln!("skipping real abox smoke: abox >= 0.6.0 not available");
         return;
     };
 
