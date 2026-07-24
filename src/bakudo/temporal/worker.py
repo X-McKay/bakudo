@@ -19,12 +19,32 @@ async def _run() -> None:
     from .shared import TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS
     from .workflows import AgentRunWorkflow, EvalWorkflow, MetaAgentWorkflow
 
-    # Wire the durable ledger if a DSN is configured (otherwise in-memory).
+    # Wire the durable ledger + memory if a DSN is configured (otherwise
+    # in-memory). The Neo4j graph mirror rides along when NEO4J_URI is set.
     dsn = os.environ.get("BAKUDO_POSTGRES_DSN")
     if dsn:
+        from ..memory.store_pg import PgSemanticMemoryStore
         from ..registry.postgres_ledger import PostgresLedger
 
-        _impl.configure(ledger=PostgresLedger.connect(dsn))
+        graph = None
+        neo4j_uri = os.environ.get("NEO4J_URI")
+        if neo4j_uri:
+            from ..memory.graph import Neo4jGraphMemory
+
+            password = os.environ.get("NEO4J_PASSWORD")
+            if not password:
+                raise RuntimeError(
+                    "NEO4J_URI is set but NEO4J_PASSWORD is not; refusing to "
+                    "guess credentials for the graph memory mirror."
+                )
+            graph = Neo4jGraphMemory.connect(
+                neo4j_uri, os.environ.get("NEO4J_USER", "neo4j"), password
+            )
+
+        _impl.configure(
+            ledger=PostgresLedger.connect(dsn),
+            memory=PgSemanticMemoryStore.connect(dsn, graph=graph),
+        )
 
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")

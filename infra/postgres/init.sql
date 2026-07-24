@@ -3,8 +3,9 @@
 -- event log, eval results, memories, and promotion decisions.
 
 create extension if not exists "pgcrypto";   -- gen_random_uuid()
--- Optional: enable pgvector for embedding search (spec section 14.1).
--- create extension if not exists vector;
+-- pgvector for embedding search (spec section 14.1); the compose image is
+-- pgvector/pgvector so the extension is always available here.
+create extension if not exists vector;
 
 create table if not exists agent_specs (
   id uuid primary key default gen_random_uuid(),
@@ -124,11 +125,16 @@ create table if not exists memory_items (
   created_at timestamptz not null default now()
 );
 
--- Embedding search support (enable the vector extension above first).
--- create table if not exists memory_embeddings (
---   memory_id text references memory_items(id) on delete cascade,
---   embedding vector(1536) not null
--- );
+-- Embedding search support (PgSemanticMemoryStore). The column is
+-- dimension-agnostic so the embedder is swappable (the default
+-- HashingEmbedder emits 256 dims); once a production embedder is fixed,
+-- retype to vector(<dim>) and add an HNSW index for scale:
+--   alter table memory_embeddings alter column embedding type vector(<dim>);
+--   create index on memory_embeddings using hnsw (embedding vector_cosine_ops);
+create table if not exists memory_embeddings (
+  memory_id text references memory_items(id) on delete cascade,
+  embedding vector not null
+);
 
 create table if not exists promotion_decisions (
   id uuid primary key default gen_random_uuid(),

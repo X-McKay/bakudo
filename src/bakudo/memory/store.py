@@ -2,7 +2,7 @@
 
 The :class:`MemoryStore` protocol is what the control plane depends on. The
 in-memory implementation is used by tests and for control-plane reasoning; the
-:class:`PgGraphMemoryStore` (in ``store_pg.py``) is the durable implementation.
+:class:`PgSemanticMemoryStore` (in ``store_pg.py``) is the durable implementation.
 
 Writes always pass through :func:`bakudo.memory.policy.validate_memory_candidate`
 first — unverified memories never become facts.

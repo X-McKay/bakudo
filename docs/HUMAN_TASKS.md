@@ -134,14 +134,21 @@ Promotion requires `promotionPolicy.minEvalCases` (25) real cases. The sample
 
 ---
 
-## 8. Durable memory store (remaining engineering, but human-prioritised)
+## 8. Durable memory store (engineering done; operator decisions remain)
 
-The worker currently uses an in-process `SemanticMemoryStore`. For durability:
+The durable store is implemented: `PgSemanticMemoryStore`
+(`src/bakudo/memory/store_pg.py`) persists memories in `memory_items` +
+`memory_embeddings` with server-side pgvector similarity, and the worker wires
+it automatically whenever `BAKUDO_POSTGRES_DSN` is set (with a Neo4j graph
+mirror when `NEO4J_URI`/`NEO4J_PASSWORD` are set). What remains is judgement:
 
-- [ ] Decide repo-scoped vs org-wide memory (spec open question §28.10).
-- [ ] Back memory with pgvector (`memory_embeddings`) and the Neo4j vector
-      index (both have commented hooks in `infra/`), and inject that store via
-      `bakudo.temporal._impl.configure(memory=...)` in the worker.
+- [ ] Decide repo-scoped vs org-wide memory (spec open question §28.10) —
+      writes are currently scoped `{"repo": ...}` by compaction.
+- [ ] Once a production embedder is fixed (the default `HashingEmbedder` is
+      256-dim and lexical), retype `memory_embeddings.embedding` to
+      `vector(<dim>)` and add the HNSW index (see the comment in
+      `infra/postgres/init.sql`), and optionally enable the Neo4j vector index
+      in `infra/neo4j/init.cypher` with matching dimensions.
 - [ ] **Acceptance:** memories written by one run are retrievable by a later
       run (semantic `query-memory` returns them across processes).
 

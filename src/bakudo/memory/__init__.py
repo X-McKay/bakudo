@@ -5,6 +5,7 @@ from .models import Evidence, MemoryItem, MemoryType
 from .policy import MemoryRejected, validate_memory_candidate
 from .semantic import SemanticMemoryStore
 from .store import InMemoryStore, MemoryStore
+from .store_pg import PgSemanticMemoryStore
 
 __all__ = [
     "Evidence",
@@ -15,6 +16,7 @@ __all__ = [
     "MemoryStore",
     "InMemoryStore",
     "SemanticMemoryStore",
+    "PgSemanticMemoryStore",
     "Embedder",
     "HashingEmbedder",
     "cosine",

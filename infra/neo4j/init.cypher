@@ -28,6 +28,9 @@ create constraint file_key if not exists
   for (f:File) require (f.repo, f.path) is unique;
 
 // Optional: a vector index over memory embeddings for semantic retrieval.
+// Memory nodes carry an `embedding` property (mirrored by
+// PgSemanticMemoryStore when the graph is wired); dimensions must match the
+// configured embedder (the default HashingEmbedder emits 256, not 1536).
 // create vector index memory_embeddings if not exists
 //   for (m:Memory) on (m.embedding)
 //   options { indexConfig: { `vector.dimensions`: 1536, `vector.similarity_function`: 'cosine' } };

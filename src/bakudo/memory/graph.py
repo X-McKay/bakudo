@@ -56,17 +56,31 @@ class Neo4jGraphMemory:
                 objective_id=objective_id, files=touched_files, repo=repo,
             )
 
-    def record_memory_edge(self, run_id: str, memory: MemoryItem) -> None:
+    def record_memory_edge(
+        self,
+        run_id: str,
+        memory: MemoryItem,
+        embedding: list[float] | None = None,
+    ) -> None:
+        """Mirror a memory write into the graph.
+
+        When ``embedding`` is provided it is stored on the ``Memory`` node,
+        which is what the optional vector index in ``infra/neo4j/init.cypher``
+        indexes for graph-side semantic retrieval.
+        """
         cypher = """
         merge (r:Run {id: $run_id})
         merge (m:Memory {id: $mem_id})
           set m.type = $type, m.confidence = $confidence
+        foreach (_ in case when $embedding is null then [] else [1] end |
+          set m.embedding = $embedding)
         merge (r)-[:PRODUCED_MEMORY]->(m)
         """
         with self._driver.session() as session:
             session.run(
                 cypher, run_id=run_id, mem_id=memory.id,
                 type=memory.type, confidence=memory.confidence,
+                embedding=embedding,
             )
 
     def skills_for_failure_mode(self, failure_mode: str, limit: int = 10) -> list[str]:

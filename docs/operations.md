@@ -53,7 +53,9 @@ cd infra && docker compose up -d
 ```
 
 The worker connects to Temporal and, if `BAKUDO_POSTGRES_DSN` is set, wires the
-Postgres ledger into the activity layer (`temporal/worker.py`). Model traffic is
+Postgres ledger and the durable `PgSemanticMemoryStore` into the activity layer
+(`temporal/worker.py`); if `NEO4J_URI` is also set, accepted memory writes are
+mirrored into the graph. Model traffic is
 routed through the vLLM gateway; bring it up with the `models` compose profile
 once you have hosted vLLM backends configured in `infra/vllm-gateway/config.yaml`.
 
@@ -90,8 +92,10 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
 + canary). The curriculum `RepoObserver` (with live TODO/coverage/JUnit/GitHub
 collectors, configured via `BAKUDO_REPO_PATH`/`BAKUDO_COVERAGE_XML`/
 `BAKUDO_JUNIT_XML`/`GITHUB_TOKEN`), the evolution/compaction workflows, the
-eval-corpus runner + LLM critic grader, semantic memory, budget enforcement,
-observability counters, and API auth are implemented. Remaining work: a durable
-(Postgres/Neo4j) memory store wired into the worker, and growing the eval
-corpora past `minEvalCases` with real historical failures. See
-`docs/HUMAN_TASKS.md` for the operator handoff.
+eval-corpus runner + LLM critic grader, semantic memory (including the durable
+`PgSemanticMemoryStore` over pgvector, auto-wired in the worker from
+`BAKUDO_POSTGRES_DSN` with an optional Neo4j graph mirror from
+`NEO4J_URI`/`NEO4J_PASSWORD`), budget enforcement, observability counters, and
+API auth are implemented. Remaining work: growing the eval corpora past
+`minEvalCases` with real historical failures. See `docs/HUMAN_TASKS.md` for
+the operator handoff.
