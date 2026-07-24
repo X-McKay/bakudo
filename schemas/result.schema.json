@@ -26,6 +26,12 @@
         }
       }
     },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": { "type": "number" },
+      "default": {},
+      "description": "Numeric self-reported measurements, e.g. bench_seconds_before/after."
+    },
     "blocked_reasons": { "type": "array", "items": { "type": "string" }, "default": [] },
     "proposed_followups": { "type": "array", "items": { "type": "string" }, "default": [] },
     "memories_to_write": {

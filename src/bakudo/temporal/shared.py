@@ -83,3 +83,15 @@ class ObserveInput:
     """Collect repository signals and emit candidate objectives."""
 
     repo: str
+
+
+@dataclass
+class OptimizeInput:
+    """Drive one optimize objective through scout → attempts → selection."""
+
+    objective: dict[str, Any]              # Objective.to_dict(), type "optimize"
+    scout_spec: dict[str, Any]             # optimize-scout AgentSpec document
+    attempt_spec: dict[str, Any]           # optimize-attempt AgentSpec document
+    max_rounds: int = 2
+    max_approaches: int = 3
+    timeout_seconds: int = 3600

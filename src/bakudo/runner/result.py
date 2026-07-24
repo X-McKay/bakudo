@@ -55,6 +55,9 @@ class RunResult(BaseModel):
     summary: str
     changed_files: list[str] = Field(default_factory=list)
     tests_run: list[TestRun] = Field(default_factory=list)
+    # Numeric measurements a run reports about its own outcome, e.g. the
+    # optimize role's bench_seconds_before/after and complexity_before/after.
+    metrics: dict[str, float] = Field(default_factory=dict)
     blocked_reasons: list[str] = Field(default_factory=list)
     proposed_followups: list[str] = Field(default_factory=list)
     memories_to_write: list[MemoryToWrite] = Field(default_factory=list)

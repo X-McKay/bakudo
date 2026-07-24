@@ -30,7 +30,8 @@
         "type": {
           "enum": [
             "explore", "add-feature", "qa", "critic", "eval-author",
-            "skill-curator", "memory-curator", "release-manager"
+            "skill-curator", "memory-curator", "release-manager",
+            "optimize-scout", "optimize-attempt"
           ]
         },
         "description": { "type": "string" }

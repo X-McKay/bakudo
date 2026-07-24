@@ -26,6 +26,8 @@ class RoleType(str, Enum):
     skill_curator = "skill-curator"
     memory_curator = "memory-curator"
     release_manager = "release-manager"
+    optimize_scout = "optimize-scout"
+    optimize_attempt = "optimize-attempt"
 
 
 class SpecStatus(str, Enum):

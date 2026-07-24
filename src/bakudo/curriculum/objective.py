@@ -20,6 +20,7 @@ class ObjectiveType(str, Enum):
     eval_author = "eval-author"
     skill_gen = "skill-gen"
     maintenance = "maintenance"
+    optimize = "optimize"
 
 
 class ObjectiveStatus(str, Enum):
@@ -95,6 +96,10 @@ class Constraints(BaseModel):
     avoid_public_api_changes: bool | None = Field(
         default=None, alias="avoidPublicApiChanges"
     )
+    # Optimize-role fields: the benchmark to run before/after, and the paths
+    # the optimization is allowed to touch.
+    bench_command: str | None = Field(default=None, alias="benchCommand")
+    target_paths: list[str] | None = Field(default=None, alias="targetPaths")
 
 
 class Objective(BaseModel):

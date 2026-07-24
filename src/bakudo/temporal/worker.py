@@ -17,7 +17,12 @@ async def _run() -> None:
     from . import _impl
     from .activities import ALL_ACTIVITIES
     from .shared import TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS
-    from .workflows import AgentRunWorkflow, EvalWorkflow, MetaAgentWorkflow
+    from .workflows import (
+        AgentRunWorkflow,
+        EvalWorkflow,
+        MetaAgentWorkflow,
+        OptimizationWorkflow,
+    )
 
     # Wire the durable ledger + memory if a DSN is configured (otherwise
     # in-memory). The Neo4j graph mirror rides along when NEO4J_URI is set.
@@ -50,7 +55,7 @@ async def _run() -> None:
     namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
     client = await Client.connect(address, namespace=namespace)
 
-    workflows = [MetaAgentWorkflow, AgentRunWorkflow, EvalWorkflow]
+    workflows = [MetaAgentWorkflow, AgentRunWorkflow, EvalWorkflow, OptimizationWorkflow]
 
     control = Worker(
         client,
@@ -61,7 +66,7 @@ async def _run() -> None:
     runs = Worker(
         client,
         task_queue=TASK_QUEUE_RUNS,
-        workflows=[AgentRunWorkflow, EvalWorkflow],
+        workflows=[AgentRunWorkflow, EvalWorkflow, OptimizationWorkflow],
         activities=ALL_ACTIVITIES,
     )
     print(f"[bakudo-worker] serving {TASK_QUEUE_CONTROL} + {TASK_QUEUE_RUNS} at {address}")

@@ -57,7 +57,8 @@ src/bakudo/
   api/           FastAPI control surface (§25)
   cli.py         the `bakudo` operator CLI
 schemas/         JSON Schemas: AgentSpec, Objective, RunResult, EvalResult (§29.1)
-agents/          seed AgentSpecs: explore, add-feature, qa, critic (§9)
+agents/          seed AgentSpecs: explore, add-feature, qa, critic,
+                 optimize-scout, optimize-attempt (§9)
 skills/          seed skills: codebase-navigation, test-selection, safe-refactor
 infra/           docker-compose, Postgres DDL, Neo4j schema, vLLM gateway (§20, §21, §24)
 docs/            spec, architecture, security, operations

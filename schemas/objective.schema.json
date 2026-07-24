@@ -9,7 +9,7 @@
   "properties": {
     "id": { "type": "string", "pattern": "^obj_[0-9A-HJKMNP-TV-Z]{26}$" },
     "type": {
-      "enum": ["explore", "add-feature", "qa", "critic", "eval-author", "skill-gen", "maintenance"]
+      "enum": ["explore", "add-feature", "qa", "critic", "eval-author", "skill-gen", "maintenance", "optimize"]
     },
     "repo": { "type": "string" },
     "title": { "type": "string", "minLength": 1 },
@@ -20,7 +20,9 @@
       "additionalProperties": true,
       "properties": {
         "maxFilesChanged": { "type": "integer", "minimum": 0 },
-        "avoidPublicApiChanges": { "type": "boolean" }
+        "avoidPublicApiChanges": { "type": "boolean" },
+        "benchCommand": { "type": "string" },
+        "targetPaths": { "type": "array", "items": { "type": "string" } }
       }
     },
     "suggestedAgents": { "type": "array", "items": { "type": "string" } },

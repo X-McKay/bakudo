@@ -14,6 +14,7 @@ Implemented here:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -22,6 +23,12 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    from ..control.optimize import (
+        attempt_objective,
+        round_feedback,
+        scout_objective,
+        select_winner,
+    )
     from .activities import (
         collect_signals,
         compact_memories,
@@ -40,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         EvalInput,
         EvolutionInput,
         ObserveInput,
+        OptimizeInput,
     )
 
 # Activities that touch the network/model get generous timeouts; ledger writes
@@ -139,6 +147,113 @@ class AgentRunWorkflow:
             scorecard=eval_out.get("scorecard"),
             eval_results=eval_out.get("eval_results", []),
         )
+
+
+@workflow.defn
+class OptimizationWorkflow:
+    """Scout → parallel single-hypothesis attempts → winner, looping with
+    feedback (spec sections 11, 15).
+
+    The control plane owns the fan-out: the untrusted worker plane never
+    schedules its own sub-agents. Each attempt runs in its own sandbox on its
+    own branch, so candidates are directly comparable and the winning diff is
+    already host-reviewable. Returning ``no-change`` after exhausting the
+    round budget is a success outcome, not a failure.
+    """
+
+    def __init__(self) -> None:
+        self._round = 0
+        self._phase = "created"
+
+    @workflow.query
+    def status(self) -> dict:
+        return {"round": self._round, "phase": self._phase}
+
+    async def _child_run(self, objective: dict, spec: dict, timeout: int) -> dict:
+        run_id = workflow.uuid4().hex
+        handle = await workflow.start_child_workflow(
+            AgentRunWorkflow.run,
+            AgentRunInput(
+                run_id=run_id,
+                objective=objective,
+                agent_spec=spec,
+                timeout_seconds=timeout,
+            ),
+            id=f"run-{run_id}",
+        )
+        out = await handle
+        return out if isinstance(out, dict) else _as_dict(out)
+
+    @workflow.run
+    async def run(self, inp: OptimizeInput) -> dict:
+        feedback: list[str] = []
+        while self._round < inp.max_rounds:
+            self._round += 1
+
+            self._phase = "scouting"
+            scout = await self._child_run(
+                scout_objective(inp.objective, feedback=feedback),
+                inp.scout_spec,
+                inp.timeout_seconds,
+            )
+            scout_result = scout.get("result") or {}
+            approaches = list(
+                scout_result.get("proposed_followups", [])
+            )[: inp.max_approaches]
+            if not approaches:
+                # The scout found nothing worth trying — a valid outcome.
+                self._phase = "no-change"
+                return {
+                    "status": "no-change",
+                    "rounds_used": self._round,
+                    "reason": "scout proposed no approaches",
+                }
+
+            self._phase = "attempting"
+            attempts = await asyncio.gather(
+                *(
+                    self._child_run(
+                        attempt_objective(inp.objective, approach=a, index=i),
+                        inp.attempt_spec,
+                        inp.timeout_seconds,
+                    )
+                    for i, a in enumerate(approaches)
+                )
+            )
+
+            self._phase = "selecting"
+            winner = select_winner(list(attempts))
+            if winner is not None:
+                self._phase = "improved"
+                return {
+                    "status": "improved",
+                    "rounds_used": self._round,
+                    "winner_run_id": winner.get("run_id"),
+                    "git_branch": winner.get("git_branch"),
+                    "scorecard": winner.get("scorecard"),
+                    "result": winner.get("result"),
+                }
+            feedback = round_feedback(list(attempts))
+
+        self._phase = "no-change"
+        return {
+            "status": "no-change",
+            "rounds_used": self._round,
+            "reason": "no attempt cleared the gates",
+            "feedback": feedback,
+        }
+
+
+def _as_dict(out: AgentRunOutput) -> dict:
+    return {
+        "run_id": out.run_id,
+        "phase": out.phase,
+        "agent_ref": out.agent_ref,
+        "git_branch": out.git_branch,
+        "result": out.result,
+        "scorecard": out.scorecard,
+        "eval_results": out.eval_results,
+    }
 
 
 # --- Long-running meta-agent entity workflow (section 11.3) ---

@@ -92,7 +92,12 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
 + canary). The curriculum `RepoObserver` (with live TODO/coverage/JUnit/GitHub
 collectors, configured via `BAKUDO_REPO_PATH`/`BAKUDO_COVERAGE_XML`/
 `BAKUDO_JUNIT_XML`/`GITHUB_TOKEN`), the evolution/compaction workflows, the
-eval-corpus runner + LLM critic grader, semantic memory (including the durable
+eval-corpus runner + LLM critic grader, the optimization loop
+(`OptimizationWorkflow`: an `optimize-scout` proposes approaches, parallel
+single-hypothesis `optimize-attempt` runs implement them in sibling sandboxes,
+perf/simplicity graders + hard behavior-preservation gates pick a winner or
+return no-change, looping with feedback across bounded rounds), semantic
+memory (including the durable
 `PgSemanticMemoryStore` over pgvector, auto-wired in the worker from
 `BAKUDO_POSTGRES_DSN` with an optional Neo4j graph mirror from
 `NEO4J_URI`/`NEO4J_PASSWORD`), budget enforcement, observability counters, and

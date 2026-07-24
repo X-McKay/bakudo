@@ -19,7 +19,7 @@ from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum import build_default_collector, generate_objectives
 from ..curriculum.collectors import SignalCollector
 from ..curriculum.objective import Objective
-from ..evals import EvalContext, Scorecard, decide, run_default_suite
+from ..evals import EvalContext, Scorecard, decide, run_suite
 from ..evals.corpus import CaseRun, load_corpus
 from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy
@@ -182,7 +182,8 @@ def run_eval_suite(inp: EvalInput) -> dict:
         tokens_used=inp.tokens_used,
         schema_valid=inp.schema_valid,
     )
-    results = run_default_suite(ctx)
+    # Suite selection keys off the objective: optimize runs add perf/simplicity.
+    results = run_suite(ctx)
     scorecard = Scorecard.from_results(results)
     record_eval = getattr(DEPS.ledger, "record_eval", None)
     if callable(record_eval):

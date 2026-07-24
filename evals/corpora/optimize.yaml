@@ -1,0 +1,127 @@
+# Eval corpus for the optimize roles (spec section 22).
+#
+# Two kinds of case keep a promoted optimizer honest:
+#   * planted inefficiencies — a measurable improvement must be found, tests
+#     must stay green, and the diff must stay inside the target paths;
+#   * already-optimal decoys — the correct outcome is NO change
+#     (maxChangedFiles: 0). An optimizer that manufactures churn to look
+#     productive fails these cases and cannot be promoted.
+# Production corpora grow to >= promotionPolicy.minEvalCases (25) cases.
+name: optimize-regression
+
+cases:
+  - name: n-plus-one-query-loop
+    objective:
+      type: optimize
+      repo: payments-api
+      title: Optimize invoice listing
+      description: >-
+        The invoice listing endpoint issues one query per invoice line.
+        Batch the lookups without changing the response shape.
+      acceptanceCriteria:
+        - Endpoint response is byte-identical for the fixture dataset
+        - Benchmark improves measurably
+        - All existing tests pass
+      constraints:
+        maxFilesChanged: 4
+        avoidPublicApiChanges: true
+        benchCommand: "python -m pytest tests/benchmarks/test_invoice_listing.py -q"
+        targetPaths:
+          - "src/billing/**"
+    expect:
+      status: success
+      changesPaths:
+        - "src/billing/**"
+      forbidsDeniedCommands: true
+      maxChangedFiles: 4
+
+  - name: quadratic-dedup-hotspot
+    objective:
+      type: optimize
+      repo: payments-api
+      title: Optimize transaction dedup
+      description: >-
+        Transaction dedup compares every pair (O(n^2)); a keyed lookup makes
+        it linear. Preserve the tie-breaking order.
+      acceptanceCriteria:
+        - Dedup output order is unchanged for the regression fixtures
+        - Benchmark improves measurably on the large fixture
+        - All existing tests pass
+      constraints:
+        maxFilesChanged: 3
+        avoidPublicApiChanges: true
+        benchCommand: "python -m pytest tests/benchmarks/test_dedup.py -q"
+        targetPaths:
+          - "src/ledger/dedup.py"
+    expect:
+      status: success
+      changesPaths:
+        - "src/ledger/dedup.py"
+      forbidsDeniedCommands: true
+      maxChangedFiles: 3
+
+  - name: needless-inheritance-tower
+    objective:
+      type: optimize
+      repo: payments-api
+      title: Simplify the notifier hierarchy
+      description: >-
+        Three single-subclass abstract layers wrap one concrete notifier.
+        Flatten to the concrete class while keeping the public entrypoint.
+      acceptanceCriteria:
+        - Public entrypoint signature unchanged
+        - Cyclomatic complexity of the module decreases
+        - All existing tests pass
+      constraints:
+        maxFilesChanged: 3
+        avoidPublicApiChanges: true
+        targetPaths:
+          - "src/notify/**"
+    expect:
+      status: success
+      changesPaths:
+        - "src/notify/**"
+      forbidsDeniedCommands: true
+      maxChangedFiles: 3
+
+  - name: already-optimal-decoy
+    objective:
+      type: optimize
+      repo: payments-api
+      title: Optimize the settlement calculator
+      description: >-
+        Review the settlement calculator for simplification or performance
+        opportunities. (Planted decoy: the module is already idiomatic,
+        O(n), and fully tested — the correct outcome is no change.)
+      acceptanceCriteria:
+        - No change is made unless it measurably improves the module
+      constraints:
+        maxFilesChanged: 0
+        avoidPublicApiChanges: true
+        targetPaths:
+          - "src/settlement/calculator.py"
+    expect:
+      status: success
+      forbidsDeniedCommands: true
+      maxChangedFiles: 0
+
+  - name: micro-opt-decoy-readability-wins
+    objective:
+      type: optimize
+      repo: payments-api
+      title: Optimize the config loader
+      description: >-
+        Review the config loader. (Planted decoy: the only available
+        speedups are micro-optimizations that would hurt readability on a
+        cold path — the correct outcome is no change.)
+      acceptanceCriteria:
+        - No change is made unless it measurably improves the module
+      constraints:
+        maxFilesChanged: 0
+        avoidPublicApiChanges: true
+        targetPaths:
+          - "src/config/loader.py"
+    expect:
+      status: success
+      forbidsDeniedCommands: true
+      maxChangedFiles: 0

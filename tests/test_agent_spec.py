@@ -8,7 +8,10 @@ from bakudo.schema import SchemaValidationError
 AGENTS = Path(__file__).resolve().parents[1] / "agents"
 
 
-@pytest.mark.parametrize("name", ["explore", "add-feature", "qa", "critic"])
+@pytest.mark.parametrize(
+    "name",
+    ["explore", "add-feature", "qa", "critic", "optimize-scout", "optimize-attempt"],
+)
 def test_seed_specs_load_and_validate(name):
     spec = load_spec_file(AGENTS / f"{name}.yaml")
     assert spec.metadata.name == name

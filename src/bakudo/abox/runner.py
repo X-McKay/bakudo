@@ -78,6 +78,13 @@ PROFILES: dict[str, SandboxProfile] = {
     "restricted-network": SandboxProfile(
         name="restricted-network", network_mode="none", ephemeral=True
     ),
+    "optimize-python": SandboxProfile(
+        name="optimize-python",
+        network_bundles=("pypi-public", "vllm-gateway"),
+        max_changed_files=10,
+        can_merge=False,
+        ephemeral=False,
+    ),
 }
 
 
