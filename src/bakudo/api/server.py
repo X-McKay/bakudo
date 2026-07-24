@@ -76,6 +76,64 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     def get_logs(run_id: str) -> list[dict[str, Any]]:
         return tools.query_logs(run_id)
 
+    class OptimizeIn(BaseModel):
+        repo: str
+        title: str
+        description: str = ""
+        targetPaths: list[str] = []
+        benchCommand: str | None = None
+        maxFilesChanged: int | None = None
+        maxRounds: int = 2
+        maxApproaches: int = 3
+
+    @app.post("/optimize", dependencies=auth)
+    def optimize(body: OptimizeIn) -> dict[str, Any]:
+        """Drive one optimize objective through scout → attempts → selection.
+
+        v0.1 runs the in-process loop synchronously (like the rest of this
+        API); production submits ``OptimizationWorkflow`` via
+        :func:`bakudo.temporal.client.start_optimization` instead.
+        """
+        from .. import ids
+        from ..control.optimize import load_role_spec, run_optimize_loop
+        from ..curriculum import Objective
+
+        constraints: dict[str, Any] = {"avoidPublicApiChanges": True}
+        if body.targetPaths:
+            constraints["targetPaths"] = body.targetPaths
+        if body.benchCommand:
+            constraints["benchCommand"] = body.benchCommand
+        if body.maxFilesChanged is not None:
+            constraints["maxFilesChanged"] = body.maxFilesChanged
+
+        try:
+            objective = Objective.model_validate(
+                {
+                    "id": ids.objective_id(),
+                    "type": "optimize",
+                    "repo": body.repo,
+                    "title": body.title,
+                    "description": body.description,
+                    "acceptanceCriteria": [
+                        "All existing tests pass",
+                        "No change is made unless it measurably improves the target",
+                    ],
+                    "constraints": constraints,
+                }
+            )
+            objective.validate_against_schema()
+            outcome = run_optimize_loop(
+                objective,
+                load_role_spec("optimize-scout"),
+                load_role_spec("optimize-attempt"),
+                max_rounds=body.maxRounds,
+                max_approaches=body.maxApproaches,
+                ledger=tools.ledger,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"objective_id": objective.id, **outcome}
+
     @app.post("/promotions/approve", dependencies=auth)
     def approve_promotion(candidate: dict[str, Any], baseline: dict[str, Any] | None = None):
         return tools.promote_candidate(candidate, baseline)

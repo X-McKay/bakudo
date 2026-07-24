@@ -82,6 +82,12 @@ bakudo skills
 # bundle -> local sandbox -> result.json -> eval suite -> scorecard.
 bakudo demo
 
+# Run the optimization loop on a target: an optimize-scout proposes distinct
+# approaches, optimize-attempt runs implement one hypothesis each, and gated
+# selection returns the winner — or an honest no-change.
+bakudo optimize --repo bakudo --title "Optimize the schema validator" \
+  --target src/bakudo/schema.py --bench "pytest tests/test_schema.py -q"
+
 pytest
 ```
 

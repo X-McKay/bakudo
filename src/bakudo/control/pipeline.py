@@ -17,7 +17,7 @@ from ..abox.runner import AboxOutcome
 from ..agent_spec import AgentSpec
 from ..bundle import Budget, TaskBundle
 from ..curriculum.objective import Objective
-from ..evals import EvalContext, EvalResult, Scorecard, run_default_suite
+from ..evals import EvalContext, EvalResult, Scorecard, run_suite
 from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
 from ..registry.ledger import Ledger
 from ..runner.result import RunResult
@@ -93,7 +93,8 @@ def run_objective(
         runtime_seconds=outcome.runtime_seconds,
         tokens_used=outcome.tokens_used,
     )
-    eval_results = run_default_suite(ctx)
+    # Suite selection keys off the objective type, matching the Temporal path.
+    eval_results = run_suite(ctx)
     for r in eval_results:
         ledger.record_eval(r)
     scorecard = Scorecard.from_results(eval_results)

@@ -230,16 +230,23 @@ def test_round_feedback_names_each_failure():
 
 
 def test_optimize_corpus_loads_and_validates():
+    from bakudo.evals.promotion import PromotionPolicy
+
     suite_name, cases = load_corpus(CORPUS)
     assert suite_name == "optimize-regression"
-    assert len(cases) == 5
+    # The corpus must be large enough for promotion decisions to be eligible.
+    assert len(cases) >= PromotionPolicy().min_eval_cases
+    assert len({c.name for c in cases}) == len(cases), "case names must be unique"
     for case in cases:
         case.objective.validate_against_schema()
 
     decoys = [c for c in cases if c.expect.max_changed_files == 0]
-    assert len(decoys) == 2, "the corpus must reward leaving optimal code alone"
+    assert len(decoys) == 5, "the corpus must reward leaving optimal code alone"
     planted = [c for c in cases if (c.expect.max_changed_files or 0) > 0]
+    assert len(planted) == 20
     assert all(c.expect.changes_paths for c in planted)
+    # Every planted case constrains where the diff may land.
+    assert all(c.objective.constraints.target_paths for c in cases)
 
 
 def test_optimize_corpus_constraints_are_typed():

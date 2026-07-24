@@ -1,0 +1,159 @@
+"""The in-process optimization loop end-to-end with a scripted sandbox.
+
+Exercises the same round logic OptimizationWorkflow runs: scout proposes,
+attempts implement in isolation, gates select a winner or feed failure back
+into the next round — and "no safe improvement" is a first-class outcome.
+"""
+
+from __future__ import annotations
+
+from bakudo import ids
+from bakudo.abox.runner import AboxOutcome
+from bakudo.control.optimize import load_role_spec, run_optimize_loop
+from bakudo.curriculum.objective import Objective
+
+SCOUT = load_role_spec("optimize-scout")
+ATTEMPT = load_role_spec("optimize-attempt")
+
+
+def make_objective() -> Objective:
+    return Objective.model_validate(
+        {
+            "id": ids.objective_id(),
+            "type": "optimize",
+            "repo": "payments-api",
+            "title": "Optimize invoice listing",
+            "description": "The listing endpoint is slow.",
+            "acceptanceCriteria": ["All existing tests pass"],
+            "constraints": {
+                "maxFilesChanged": 4,
+                "benchCommand": "pytest tests/benchmarks -q",
+                "targetPaths": ["src/billing/**"],
+            },
+        }
+    )
+
+
+class ScriptedSandbox:
+    """Answers scout and attempt bundles from per-round scripts."""
+
+    def __init__(self, rounds: list[dict]) -> None:
+        # Each round: {"approaches": [...], "metrics": [{...} per approach]}
+        self.rounds = rounds
+        self.scout_calls = 0
+        self.attempt_calls = 0
+        self.scout_descriptions: list[str] = []
+
+    def __call__(self, bundle) -> AboxOutcome:
+        name = bundle.agent_spec.metadata.name
+        base = {
+            "run_id": bundle.run_id,
+            "agent": f"{name}@1",
+            "objective_id": bundle.objective_id,
+            "summary": f"{name} run",
+        }
+        if name == "optimize-scout":
+            script = self.rounds[self.scout_calls]
+            self.scout_calls += 1
+            self.scout_descriptions.append(bundle.objective.description)
+            result = {
+                **base,
+                "status": "success",
+                "proposed_followups": script["approaches"],
+            }
+        else:
+            script = self.rounds[self.scout_calls - 1]
+            index = self.attempt_calls % max(len(script["approaches"]), 1)
+            self.attempt_calls += 1
+            result = {
+                **base,
+                "status": "success",
+                "changed_files": ["src/billing/listing.py"],
+                "tests_run": [{"command": "pytest -q", "status": "passed"}],
+                "metrics": script["metrics"][index],
+            }
+        return AboxOutcome(
+            run_id=bundle.run_id,
+            abox_task_id=bundle.run_id,
+            exit_code=0,
+            git_branch=f"bakudo/{bundle.run_id}",
+            result=result,
+        )
+
+
+IMPROVED = {"bench_seconds_before": 10.0, "bench_seconds_after": 6.0}
+REGRESSED = {"bench_seconds_before": 10.0, "bench_seconds_after": 14.0}
+NEUTRAL: dict = {}
+
+
+def test_loop_selects_best_attempt_in_one_round():
+    sandbox = ScriptedSandbox(
+        [{"approaches": ["batch queries", "cache totals"], "metrics": [
+            {"bench_seconds_before": 10.0, "bench_seconds_after": 8.0},
+            IMPROVED,
+        ]}]
+    )
+    outcome = run_optimize_loop(
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=2
+    )
+    assert outcome["status"] == "improved"
+    assert outcome["rounds_used"] == 1
+    assert outcome["scorecard"]["suites"]["perf"] == 0.9  # 40% improvement
+    assert outcome["git_branch"].startswith("bakudo/")
+    assert sandbox.attempt_calls == 2
+
+
+def test_loop_reports_no_change_when_scout_finds_nothing():
+    sandbox = ScriptedSandbox([{"approaches": [], "metrics": []}])
+    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    assert outcome == {
+        "status": "no-change",
+        "rounds_used": 1,
+        "reason": "scout proposed no approaches",
+    }
+    assert sandbox.attempt_calls == 0
+
+
+def test_loop_iterates_with_feedback_then_succeeds():
+    sandbox = ScriptedSandbox(
+        [
+            {"approaches": ["inline the ORM"], "metrics": [REGRESSED]},
+            {"approaches": ["batch queries"], "metrics": [IMPROVED]},
+        ]
+    )
+    outcome = run_optimize_loop(
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=2
+    )
+    assert outcome["status"] == "improved"
+    assert outcome["rounds_used"] == 2
+    # Round 2's scout saw round 1's failure feedback in its objective.
+    assert "regressed perf or simplicity" in sandbox.scout_descriptions[1]
+    assert "regressed" not in sandbox.scout_descriptions[0]
+
+
+def test_loop_gives_up_honestly_after_round_budget():
+    sandbox = ScriptedSandbox(
+        [
+            {"approaches": ["idea one"], "metrics": [REGRESSED]},
+            {"approaches": ["idea two"], "metrics": [NEUTRAL]},
+        ]
+    )
+    outcome = run_optimize_loop(
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=2
+    )
+    assert outcome["status"] == "no-change"
+    assert outcome["rounds_used"] == 2
+    assert outcome["reason"] == "no attempt cleared the gates"
+    # Neutral metrics = churn without measured benefit; named in feedback.
+    assert any("no measured improvement" in line for line in outcome["feedback"])
+
+
+def test_loop_caps_approaches_per_round():
+    sandbox = ScriptedSandbox(
+        [{"approaches": ["a", "b", "c", "d", "e"], "metrics": [IMPROVED] * 5}]
+    )
+    outcome = run_optimize_loop(
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_approaches=2
+    )
+    assert outcome["status"] == "improved"
+    assert sandbox.attempt_calls == 2

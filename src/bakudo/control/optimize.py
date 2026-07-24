@@ -153,3 +153,108 @@ def round_feedback(candidates: list[dict[str, Any]]) -> list[str]:
         if not ok:
             feedback.append(f"'{title}': {reason}")
     return feedback
+
+
+# --- in-process loop driver (CLI/API; mirrors OptimizationWorkflow) ---
+
+
+def load_role_spec(name: str, path: str | None = None) -> Any:
+    """Load a seed AgentSpec by role name, or from an explicit path."""
+    from pathlib import Path
+
+    from ..agent_spec import load_spec_file
+
+    spec_path = (
+        Path(path)
+        if path
+        else Path(__file__).resolve().parents[3] / "agents" / f"{name}.yaml"
+    )
+    return load_spec_file(spec_path)
+
+
+def run_optimize_loop(
+    objective: Any,
+    scout_spec: Any,
+    attempt_spec: Any,
+    *,
+    max_rounds: int = 2,
+    max_approaches: int = 3,
+    ledger: Any = None,
+    sandbox: Any = None,
+) -> dict[str, Any]:
+    """Run the scout → attempts → selection loop in-process.
+
+    The synchronous mirror of ``OptimizationWorkflow`` (the same relationship
+    ``run_objective`` has to ``AgentRunWorkflow``): identical round logic and
+    gates, sequential attempts instead of parallel child workflows. Used by
+    the CLI and the v0.1 control API; production submits the Temporal
+    workflow instead.
+    """
+    from ..curriculum.objective import Objective
+    from ..registry import InMemoryLedger
+    from .pipeline import run_objective
+
+    ledger = ledger or InMemoryLedger()
+    base = objective.to_dict()
+    feedback: list[str] = []
+    rounds = 0
+
+    while rounds < max_rounds:
+        rounds += 1
+
+        scout = run_objective(
+            Objective.model_validate(scout_objective(base, feedback=feedback)),
+            scout_spec,
+            ledger=ledger,
+            sandbox=sandbox,
+        )
+        followups = scout.result.proposed_followups if scout.result else []
+        approaches = list(followups)[:max_approaches]
+        if not approaches:
+            return {
+                "status": "no-change",
+                "rounds_used": rounds,
+                "reason": "scout proposed no approaches",
+            }
+
+        candidates: list[dict[str, Any]] = []
+        for index, approach in enumerate(approaches):
+            attempt = run_objective(
+                Objective.model_validate(
+                    attempt_objective(base, approach=approach, index=index)
+                ),
+                attempt_spec,
+                ledger=ledger,
+                sandbox=sandbox,
+            )
+            candidates.append(
+                {
+                    "run_id": attempt.run_id,
+                    "git_branch": attempt.outcome.git_branch,
+                    "result": attempt.result.to_dict() if attempt.result else None,
+                    "scorecard": (
+                        attempt.scorecard.model_dump(mode="json")
+                        if attempt.scorecard
+                        else None
+                    ),
+                }
+            )
+
+        winner = select_winner(candidates)
+        if winner is not None:
+            return {
+                "status": "improved",
+                "rounds_used": rounds,
+                "winner_run_id": winner.get("run_id"),
+                "git_branch": winner.get("git_branch"),
+                "scorecard": winner.get("scorecard"),
+                "result": winner.get("result"),
+            }
+        feedback = round_feedback(candidates)
+
+    return {
+        "status": "no-change",
+        "rounds_used": rounds,
+        "reason": "no attempt cleared the gates",
+        "feedback": feedback,
+    }

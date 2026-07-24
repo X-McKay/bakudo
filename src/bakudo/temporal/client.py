@@ -41,3 +41,21 @@ async def get_status(client: Any) -> dict[str, Any]:
     from .workflows import MetaAgentWorkflow
 
     return await handle.query(MetaAgentWorkflow.get_status)
+
+
+async def start_optimization(client: Any, inp: Any) -> Any:
+    """Start an OptimizationWorkflow for one optimize objective.
+
+    ``inp`` is a :class:`~bakudo.temporal.shared.OptimizeInput`; the workflow
+    id is derived from the objective id so resubmitting the same objective
+    dedupes instead of racing itself.
+    """
+    from .shared import TASK_QUEUE_RUNS
+    from .workflows import OptimizationWorkflow
+
+    return await client.start_workflow(
+        OptimizationWorkflow.run,
+        inp,
+        id=f"optimize-{inp.objective['id']}",
+        task_queue=TASK_QUEUE_RUNS,
+    )

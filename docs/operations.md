@@ -96,7 +96,10 @@ eval-corpus runner + LLM critic grader, the optimization loop
 (`OptimizationWorkflow`: an `optimize-scout` proposes approaches, parallel
 single-hypothesis `optimize-attempt` runs implement them in sibling sandboxes,
 perf/simplicity graders + hard behavior-preservation gates pick a winner or
-return no-change, looping with feedback across bounded rounds), semantic
+return no-change, looping with feedback across bounded rounds — submit via
+`bakudo optimize --repo ... --title ...` or `POST /optimize`, both driving the
+in-process mirror `run_optimize_loop`; production submits the Temporal
+workflow via `temporal.client.start_optimization`), semantic
 memory (including the durable
 `PgSemanticMemoryStore` over pgvector, auto-wired in the worker from
 `BAKUDO_POSTGRES_DSN` with an optional Neo4j graph mirror from
