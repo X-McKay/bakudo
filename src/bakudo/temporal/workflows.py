@@ -51,12 +51,13 @@ with workflow.unsafe.imports_passed_through():
     )
 
 # Activities that touch the network/model get generous timeouts; ledger writes
-# are quick. All are retried with backoff.
-_LONG = dict(
+# are quick. All are retried with backoff. Typed as dict[str, Any] so the
+# **-splat unifies with execute_activity's keyword overloads under mypy.
+_LONG: dict[str, Any] = dict(
     start_to_close_timeout=timedelta(hours=2),
     retry_policy=RetryPolicy(maximum_attempts=3),
 )
-_SHORT = dict(
+_SHORT: dict[str, Any] = dict(
     start_to_close_timeout=timedelta(seconds=30),
     retry_policy=RetryPolicy(maximum_attempts=5),
 )
@@ -419,15 +420,15 @@ class RepoObserverWorkflow:
     """
 
     @workflow.run
-    async def run(self, inp: ObserveInput, *, iterations: int = 0) -> None:
+    async def run(self, inp: ObserveInput) -> None:
         objectives = await workflow.execute_activity(collect_signals, inp, **_SHORT)
         meta = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
         for objective in objectives:
             await meta.signal("new_objective", objective)
 
-        # Poll on an interval; cap iterations per execution to keep history small.
+        # Poll on an interval; cap iterations per execution to keep history
+        # small. The counter rides on the input (continue_as_new takes exactly
+        # the workflow's run arguments) and resets when it rolls over.
         await workflow.sleep(timedelta(minutes=15))
-        if iterations >= 32:
-            workflow.continue_as_new(inp)
-        else:
-            workflow.continue_as_new(inp, iterations=iterations + 1)
+        next_iterations = 0 if inp.iterations >= 32 else inp.iterations + 1
+        workflow.continue_as_new(ObserveInput(repo=inp.repo, iterations=next_iterations))

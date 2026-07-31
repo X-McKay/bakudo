@@ -10,13 +10,37 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from pydantic import BaseModel
+
 from ..control import MetaAgentTools
+
+
+# Request models live at module scope: under `from __future__ import
+# annotations`, FastAPI resolves the (stringified) handler annotations against
+# module globals, so function-local models silently degrade to query params.
+class ObjectiveIn(BaseModel):
+    repo: str
+    type: str
+    title: str
+    description: str = ""
+    acceptanceCriteria: list[str] = []
+    constraints: dict[str, Any] = {}
+
+
+class OptimizeIn(BaseModel):
+    repo: str
+    title: str
+    description: str = ""
+    targetPaths: list[str] = []
+    benchCommand: str | None = None
+    maxFilesChanged: int | None = None
+    maxRounds: int = 2
+    maxApproaches: int = 3
 
 
 def build_app(tools: MetaAgentTools | None = None) -> Any:
     """Build the FastAPI app. Requires the ``api`` extra (fastapi, uvicorn)."""
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from pydantic import BaseModel
 
     tools = tools or MetaAgentTools()
     app = FastAPI(title="bakudo control plane", version="3.0.0")
@@ -32,14 +56,6 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
             raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
     auth = [Depends(require_auth)]
-
-    class ObjectiveIn(BaseModel):
-        repo: str
-        type: str
-        title: str
-        description: str = ""
-        acceptanceCriteria: list[str] = []
-        constraints: dict[str, Any] = {}
 
     @app.post("/objectives", dependencies=auth)
     def submit_objective(body: ObjectiveIn) -> dict[str, str]:
@@ -75,16 +91,6 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     @app.get("/runs/{run_id}/logs")
     def get_logs(run_id: str) -> list[dict[str, Any]]:
         return tools.query_logs(run_id)
-
-    class OptimizeIn(BaseModel):
-        repo: str
-        title: str
-        description: str = ""
-        targetPaths: list[str] = []
-        benchCommand: str | None = None
-        maxFilesChanged: int | None = None
-        maxRounds: int = 2
-        maxApproaches: int = 3
 
     @app.post("/optimize", dependencies=auth)
     def optimize(body: OptimizeIn) -> dict[str, Any]:

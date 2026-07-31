@@ -10,6 +10,9 @@ applies the ``@activity.defn`` decorators when the SDK is present.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from typing import Any
+
 from . import _impl
 from .shared import (
     AgentRunInput,
@@ -78,7 +81,7 @@ async def collect_signals(inp: ObserveInput) -> list[dict]:
     return _impl.collect_signals(inp)
 
 
-ALL_ACTIVITIES = [
+ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     create_run,
     render_bundle,
     run_sandbox,
