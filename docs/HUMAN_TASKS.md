@@ -21,9 +21,12 @@ Treat each task as: **do the action → verify the acceptance check → tick it.
 ## 1. Activate Python CI (cannot be automated — needs `workflows` permission)
 
 The generated Python CI lives at `ci/python-ci.yml` because the automation
-lacks GitHub's `workflows` permission. A human must move it into place:
+lacks GitHub's `workflows` permission (verified: both git push and the
+contents API return 403 for workflow paths). A human must move it into place,
+replacing the legacy Rust workflow:
 
 ```bash
+git rm .github/workflows/ci.yml
 git mv ci/python-ci.yml .github/workflows/ci.yml
 git commit -m "ci: replace Rust workflow with Python CI"
 git push

@@ -6,11 +6,13 @@ install:
 lint:
 	ruff check src tests
 
+# python -m avoids picking up a stale mypy/pytest that shadows the venv's on
+# PATH (observed with a ~/.local/bin mypy from another toolchain).
 type:
-	mypy src/bakudo
+	python3 -m mypy src/bakudo
 
 test:
-	pytest
+	python3 -m pytest
 
 # The full local gate, mirrored by CI (see ci/python-ci.yml).
 check: lint type test

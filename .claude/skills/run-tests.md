@@ -18,8 +18,8 @@ python3 -m mypy src/bakudo  # types
 python3 -m pytest           # full suite (fast, in-process)
 ```
 
-`make check` runs the same three steps (the mypy on PATH may be stale — prefer
-`python3 -m mypy`).
+`make check` runs the same three steps (via `python3 -m`, so a stale mypy or
+pytest shadowing the venv's on PATH is harmless).
 
 Smoke-check the operator surface and the offline run pipeline:
 
