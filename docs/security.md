@@ -27,7 +27,7 @@ tools enforce an in-process `CommandPolicy` (`strands_tools/policy.py`):
 
 - `repo-safe` allowlists the common read/build/test toolchain and blocks
   destructive, privilege-escalating, and exfiltration-prone patterns.
-- `read-only` is used by the `explore`/`critic` roles.
+- `read-only` is used by the `explore`/`critic`/`optimize-scout` roles.
 - Every denial is recorded and fed to the **safety eval**, which is a hard gate
   in the promotion policy.
 

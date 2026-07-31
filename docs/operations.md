@@ -10,6 +10,8 @@ The control-plane domain logic depends only on the light core deps (`pydantic`,
 - run an objective end-to-end via the **local sandbox** + **offline driver**
   (`bakudo demo`), which exercises the full lifecycle (bundle → sandbox →
   result → eval → scorecard),
+- run the optimization loop end-to-end (`bakudo optimize --repo ... --title
+  ...`) — scout → attempts → gated selection, offline by default,
 - run the control API in-process (`bakudo serve`),
 - run the test suite (`pytest`).
 
@@ -89,21 +91,27 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
 (3) abox activity, (4) Temporal workflows, (5) Postgres ledger, (6) first roles
 `explore`/`add-feature`/`qa` (+`critic`), (7) first evals, (8) skill registry,
 (9) memory pipeline, (10) candidate evolution (prompt-mutation + eval comparison
-+ canary). The curriculum `RepoObserver` (with live TODO/coverage/JUnit/GitHub
-collectors, configured via `BAKUDO_REPO_PATH`/`BAKUDO_COVERAGE_XML`/
-`BAKUDO_JUNIT_XML`/`GITHUB_TOKEN`), the evolution/compaction workflows, the
-eval-corpus runner + LLM critic grader, the optimization loop
-(`OptimizationWorkflow`: an `optimize-scout` proposes approaches, parallel
-single-hypothesis `optimize-attempt` runs implement them in sibling sandboxes,
-perf/simplicity graders + hard behavior-preservation gates pick a winner or
-return no-change, looping with feedback across bounded rounds — submit via
-`bakudo optimize --repo ... --title ...` or `POST /optimize`, both driving the
-in-process mirror `run_optimize_loop`; production submits the Temporal
-workflow via `temporal.client.start_optimization`), semantic
-memory (including the durable
-`PgSemanticMemoryStore` over pgvector, auto-wired in the worker from
-`BAKUDO_POSTGRES_DSN` with an optional Neo4j graph mirror from
-`NEO4J_URI`/`NEO4J_PASSWORD`), budget enforcement, observability counters, and
-API auth are implemented. Remaining work: growing the eval corpora past
-`minEvalCases` with real historical failures. See `docs/HUMAN_TASKS.md` for
-the operator handoff.
++ canary). Beyond that order, the following are implemented:
+
+- the curriculum `RepoObserver` with live TODO/coverage/JUnit/GitHub
+  collectors (configured via `BAKUDO_REPO_PATH` / `BAKUDO_COVERAGE_XML` /
+  `BAKUDO_JUNIT_XML` / `GITHUB_TOKEN`);
+- the evolution and memory-compaction workflows, the eval-corpus runner, and
+  the LLM critic grader;
+- **the optimization loop** — `OptimizationWorkflow`: an `optimize-scout`
+  proposes approaches, parallel single-hypothesis `optimize-attempt` runs
+  implement them in sibling sandboxes, and perf/simplicity graders plus hard
+  behavior-preservation gates pick a winner or return no-change, looping with
+  feedback across bounded rounds. Submit via `bakudo optimize` or
+  `POST /optimize` (both drive the in-process mirror `run_optimize_loop`);
+  production submits the Temporal workflow via
+  `temporal.client.start_optimization`;
+- **durable semantic memory** — `PgSemanticMemoryStore` over pgvector,
+  auto-wired in the worker from `BAKUDO_POSTGRES_DSN`, with an optional Neo4j
+  graph mirror from `NEO4J_URI`/`NEO4J_PASSWORD`;
+- budget enforcement, observability counters, and API auth.
+
+Remaining work: curating eval corpora from real historical failures — the
+optimize corpus meets the 25-case `minEvalCases` bar with synthetic planted
+cases, while `add-feature` is still a 2-case sample. See
+`docs/HUMAN_TASKS.md` for the operator handoff.

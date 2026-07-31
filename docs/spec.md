@@ -509,6 +509,8 @@ Start with a small set of sharply constrained roles.
 | `skill-curator` | Propose and test new Open Agent Skills | Yes, to skills repo | Skills branch |
 | `memory-curator` | Summarize logs into durable memories | No | Control plane |
 | `release-manager` | Decide whether candidate branches/specs are promotable | No | Control plane |
+| `optimize-scout` | Propose distinct optimization hypotheses for a target; may propose none | No | Ephemeral/read-only |
+| `optimize-attempt` | Implement exactly one optimization hypothesis, measuring before/after | Yes | Branch/worktree |
 
 ### 9.1 Example Multi-Agent Composition
 
@@ -602,6 +604,12 @@ MemoryCompactionWorkflow
 
 RepoObserverWorkflow
   Watches repos/issues/CI/test failures and emits candidate objectives.
+
+OptimizationWorkflow
+  Drives one optimize objective: a read-only scout proposes distinct
+  hypotheses, parallel single-hypothesis attempt runs implement them in
+  sibling sandboxes, and hard-gated selection picks a winner or returns
+  no-change, looping with failure feedback across bounded rounds.
 ```
 
 ### 11.2 Temporal Rules
@@ -866,7 +874,10 @@ promotion_decisions
 budgets
 ```
 
-Postgres can also support embedding search if pgvector is added.
+Postgres supports embedding search via pgvector: `memory_embeddings` holds a
+dimension-agnostic `vector` column queried server-side with the cosine
+operator (`PgSemanticMemoryStore`); retype to `vector(<dim>)` and add an HNSW
+index once a production embedder fixes the dimension.
 
 ### 14.2 Neo4j
 
@@ -1765,6 +1776,31 @@ Request:
   "comment": "Eval results look good. Promote to canary."
 }
 ```
+
+### 25.4 Run the Optimization Loop
+
+```http
+POST /optimize
+```
+
+Request:
+
+```json
+{
+  "repo": "payments-api",
+  "title": "Optimize invoice listing",
+  "description": "The listing endpoint issues one query per invoice line.",
+  "targetPaths": ["src/billing/**"],
+  "benchCommand": "python -m pytest tests/benchmarks/test_invoice_listing.py -q",
+  "maxFilesChanged": 4,
+  "maxRounds": 2,
+  "maxApproaches": 3
+}
+```
+
+Response: the loop outcome — `status` is `improved` (with the winning run id,
+branch, and scorecard) or `no-change` (with the reason). Declining to change
+already-optimal code is a success, not an error.
 
 ---
 

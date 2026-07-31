@@ -25,8 +25,11 @@ repository code. Components:
   (§15.2), and the promotion policy with hard safety gates and human gates
   (§15.3, §19.2).
 - **Memory services** (`memory/`) — evidence-backed memory items, the write
-  policy (§14.5), the in-memory/Postgres ledger of memories, and the Neo4j
-  graph adapter (§14.2, §21).
+  policy (§14.5), the in-process `SemanticMemoryStore` (embedding dedup +
+  retrieval) and its durable counterpart `PgSemanticMemoryStore` (pgvector
+  similarity server-side, auto-wired in the worker from
+  `BAKUDO_POSTGRES_DSN`), and the Neo4j graph adapter with an optional
+  memory-write mirror (§14.2, §21).
 - **Temporal** (`temporal/`) — durable orchestration (see below).
 - **Control API** (`api/`) — the HTTP surface (§25).
 
@@ -74,6 +77,24 @@ accepts validated **Updates** (`submit_objective`, `change_budget`,
 One canonical ULID flows through every system (§6.3): Temporal workflow id,
 abox task id, Postgres run id, the `agent/<run_id>` git branch, and the log
 correlation id. See `ids.py`.
+
+## The optimization loop
+
+`OptimizationWorkflow` applies the same judge-panel shape to *code* that
+evolution applies to agent specs. A read-only `optimize-scout` proposes
+distinct hypotheses; parallel single-hypothesis `optimize-attempt` child
+runs implement them in sibling sandboxes on their own branches; graders
+(`perf`/`simplicity` on self-reported before/after metrics, on top of the
+default suite) score each candidate; and a pure selection function
+(`control/optimize.py`) picks a winner or returns `no-change`, feeding
+failure summaries into the next scout round (bounded rounds). The fan-out
+lives in the trusted plane — workers never schedule their own sub-agents —
+and behavior preservation is a hard gate, not a weighted score. "No safe
+improvement found" is a success outcome; the optimize eval corpus plants
+no-change decoys so churn cannot be promoted. `run_optimize_loop` is the
+synchronous in-process mirror (used by `bakudo optimize` and
+`POST /optimize`), the same relationship `run_objective` has to
+`AgentRunWorkflow`.
 
 ## Eval-first evolution
 

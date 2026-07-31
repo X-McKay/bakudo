@@ -14,8 +14,12 @@ abox/vLLM are needed for the suite.
 ```bash
 pip install -e ".[dev]"     # first time only
 ruff check src tests        # lint
+python3 -m mypy src/bakudo  # types
 python3 -m pytest           # full suite (fast, in-process)
 ```
+
+`make check` runs the same three steps (the mypy on PATH may be stale — prefer
+`python3 -m mypy`).
 
 Smoke-check the operator surface and the offline run pipeline:
 
@@ -23,6 +27,7 @@ Smoke-check the operator surface and the offline run pipeline:
 bakudo validate-spec agents/add-feature.yaml
 bakudo skills
 bakudo demo                 # bundle -> local sandbox -> result.json -> eval -> scorecard
+bakudo optimize --repo bakudo --title "smoke" --rounds 1   # loop: honest no-change offline
 ```
 
 ## Notes

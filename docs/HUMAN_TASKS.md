@@ -77,7 +77,7 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
       https://github.com/X-McKay/abox).
 - [ ] Set `BAKUDO_SANDBOX=abox` (never `local` outside `BAKUDO_ENV=dev`).
 - [ ] Define the abox sandbox profiles named in `abox/runner.py::PROFILES`
-      (`explore-readonly`, `add-feature-python`, …) with the network bundles
+      (`explore-readonly`, `add-feature-python`, `optimize-python`, …) with the network bundles
       (`github-api`, `pypi-public`, `vllm-gateway`) and resource/diff limits.
 - [ ] Validate the real `abox run` flags against
       `AboxRunner.build_command` (the contract test pins the shape; confirm the
@@ -121,7 +121,9 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 ## 7. Grow the eval corpora (judgement work)
 
 Promotion requires `promotionPolicy.minEvalCases` (25) real cases. The sample
-`evals/corpora/add-feature.yaml` has two.
+`evals/corpora/add-feature.yaml` has two. `evals/corpora/optimize.yaml` meets
+the 25-case bar with synthetic planted inefficiencies + no-change decoys;
+replace/extend those with real history as it accumulates.
 
 - [ ] For each role, curate ≥25 cases from real objectives + historical
       failures (use the `eval-author` role to convert failures into cases).
@@ -170,9 +172,11 @@ mirror when `NEO4J_URI`/`NEO4J_PASSWORD` are set). What remains is judgement:
 ## Quick reference — what's already done (no human work)
 
 Schemas, AgentSpec model, curriculum + **live collectors**, the run pipeline,
-Temporal workflows (run/eval/meta/observer/evolution/compaction), scoped tools
-with command policy + budget + observability, skills registry, eval suite +
-corpus runner + critic, scorecard + promotion (safety/human gates), semantic
-memory + write policy + compaction, the in-memory and Postgres ledgers, the
-control API (+ auth), the CLI, and the Makefile/CI definition. All covered by
-`make check`.
+Temporal workflows (run/eval/meta/observer/evolution/compaction/optimization),
+scoped tools with command policy + budget + observability, skills registry,
+eval suite + corpus runner + critic (+ perf/simplicity graders), scorecard +
+promotion (safety/human gates), semantic memory + write policy + compaction
+(+ the durable pgvector store, worker-wired), the optimization loop with its
+25-case corpus and `bakudo optimize` / `POST /optimize` entrypoints, the
+in-memory and Postgres ledgers, the control API (+ auth), the CLI, and the
+Makefile/CI definition. All covered by `make check`.

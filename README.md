@@ -50,16 +50,19 @@ src/bakudo/
   skills/        Open Agent Skills registry with progressive disclosure (§13)
   abox/          abox sandbox runner + a local in-process sandbox for dev (§6)
   evals/         eval levels, scorecard, promotion policy (§15, §22)
-  memory/        evidence-backed memory model, write policy, Postgres+Neo4j (§14)
+  memory/        evidence-backed memory model, write policy, semantic stores
+                 (in-process + durable pgvector), Neo4j graph (§14)
   registry/      the authoritative ledger (in-memory + Postgres) (§14.1, §20)
   temporal/      workflows, activities, worker, client (§11, §12)
-  control/       run pipeline + the meta-agent's administrative tools (§4.3)
+  control/       run pipeline, the optimization loop, and the meta-agent's
+                 administrative tools (§4.3)
   api/           FastAPI control surface (§25)
   cli.py         the `bakudo` operator CLI
 schemas/         JSON Schemas: AgentSpec, Objective, RunResult, EvalResult (§29.1)
 agents/          seed AgentSpecs: explore, add-feature, qa, critic,
                  optimize-scout, optimize-attempt (§9)
 skills/          seed skills: codebase-navigation, test-selection, safe-refactor
+evals/           eval corpora: add-feature (sample), optimize (25 cases) (§22)
 infra/           docker-compose, Postgres DDL, Neo4j schema, vLLM gateway (§20, §21, §24)
 docs/            spec, architecture, security, operations
 ```
@@ -126,6 +129,17 @@ backed by either in-memory or Postgres (`psycopg`), with run records created and
 advanced uniformly; sandbox selection **fails closed**; promotion enforces
 `required_suites`; worker tools preserve their signatures for Strands; and
 `query-memory` is wired to the bundle's excerpts.
+
+Since then two larger slices have landed. **Durable semantic memory**:
+`PgSemanticMemoryStore` persists policy-gated memories with server-side
+pgvector similarity (worker auto-wires it from `BAKUDO_POSTGRES_DSN`, with an
+optional Neo4j mirror), so memories written by one run are retrievable by
+later runs. **The optimization loop**: `OptimizationWorkflow` (and its offline
+mirror behind `bakudo optimize` / `POST /optimize`) fans an optimize objective
+out to a read-only scout, parallel single-hypothesis attempt runs in sibling
+sandboxes, and hard-gated winner selection that treats "no safe improvement"
+as a first-class outcome — backed by a 25-case corpus whose no-change decoys
+make manufactured churn unpromotable.
 
 See [docs/spec.md](docs/spec.md) for the full design and [docs/operations.md](docs/operations.md)
 for what is wired end-to-end versus what needs live infrastructure.
