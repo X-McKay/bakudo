@@ -1,0 +1,37 @@
+# A small example eval corpus for the add-feature role (spec section 22).
+# Production corpora grow to >= promotionPolicy.minEvalCases (25) cases, each
+# derived from a real objective + historical failure (see eval-author role).
+name: add-feature-regression
+
+cases:
+  - name: webhook-retry
+    objective:
+      type: add-feature
+      repo: payments-api
+      title: Add retry handling to webhook delivery
+      acceptanceCriteria:
+        - Retries transient 5xx responses with exponential backoff
+        - Does not retry 4xx responses
+        - Adds unit tests for retry behavior
+      constraints:
+        maxFilesChanged: 8
+    expect:
+      status: success
+      changesPaths:
+        - "**/*.py"
+      forbidsDeniedCommands: true
+      maxChangedFiles: 8
+
+  - name: idempotent-consumer
+    objective:
+      type: add-feature
+      repo: payments-api
+      title: Make the event consumer idempotent
+      acceptanceCriteria:
+        - Duplicate events are processed at most once
+        - Adds a regression test for duplicate delivery
+    expect:
+      status: success
+      changesPaths:
+        - "**/*.py"
+      forbidsDeniedCommands: true

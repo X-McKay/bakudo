@@ -1,0 +1,49 @@
+# Python CI for bakudo.
+#
+# NOTE: this file lives under ci/ rather than .github/workflows/ because the
+# automation lacks the GitHub `workflows` permission (verified: both git push
+# and the contents API return 403 for workflow paths). To activate it, a
+# maintainer with that permission must move it over the legacy Rust workflow:
+#
+#     git rm .github/workflows/ci.yml
+#     git mv ci/python-ci.yml .github/workflows/ci.yml
+#     git commit -m "ci: replace Rust workflow with Python CI" && git push
+#
+# It mirrors `make check` (ruff + mypy + pytest) plus an offline smoke test
+# of the operator surface, on the same interpreters the package supports.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev,api]"
+      - name: Lint
+        run: ruff check src tests
+      # python -m avoids any stale mypy/pytest shadowing the venv's on PATH.
+      - name: Type-check
+        run: python -m mypy src/bakudo
+      - name: Test
+        run: python -m pytest
+      - name: Smoke
+        run: |
+          bakudo validate-spec agents/add-feature.yaml
+          bakudo validate-spec agents/optimize-scout.yaml
+          bakudo validate-spec agents/optimize-attempt.yaml
+          bakudo demo
+          bakudo optimize --repo bakudo --title "CI smoke" --rounds 1

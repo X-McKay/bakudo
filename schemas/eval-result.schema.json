@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bakudo.ai/schemas/eval-result.schema.json",
+  "title": "EvalResult",
+  "description": "The outcome of running an eval suite against a subject. See spec section 22.3.",
+  "type": "object",
+  "required": ["subject_type", "subject_id", "suite_name", "score", "passed"],
+  "additionalProperties": false,
+  "properties": {
+    "subject_type": {
+      "enum": [
+        "run", "agent_spec_version", "skill_version",
+        "prompt_candidate", "tool_policy_candidate",
+        "model_config_candidate", "sandbox_policy_candidate"
+      ]
+    },
+    "subject_id": { "type": "string" },
+    "suite_name": { "type": "string" },
+    "score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "passed": { "type": "boolean" },
+    "details": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "cases_total": { "type": "integer", "minimum": 0 },
+        "cases_passed": { "type": "integer", "minimum": 0 },
+        "critical_failures": { "type": "integer", "minimum": 0 },
+        "safety_regressions": { "type": "integer", "minimum": 0 },
+        "median_runtime_seconds": { "type": "number", "minimum": 0 },
+        "median_tokens": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

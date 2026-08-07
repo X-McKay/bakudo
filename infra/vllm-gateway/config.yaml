@@ -1,0 +1,31 @@
+# vLLM gateway routing (spec sections 7.3 and 19.4).
+#
+# This LiteLLM config maps the role-facing model ids referenced by AgentSpecs
+# (model.modelId) to concrete vLLM backends. Point base_url at your hosted vLLM
+# OpenAI-compatible servers. Secrets are injected host-side and never appear in
+# an AgentSpec.
+model_list:
+  - model_name: qwen-coder-32b
+    litellm_params:
+      model: openai/qwen-coder-32b
+      api_base: os.environ/VLLM_QWEN_CODER_URL
+      api_key: os.environ/VLLM_API_KEY
+
+  - model_name: llama-3.1-70b-instruct
+    litellm_params:
+      model: openai/llama-3.1-70b-instruct
+      api_base: os.environ/VLLM_LLAMA_URL
+      api_key: os.environ/VLLM_API_KEY
+
+  - model_name: critic-large
+    litellm_params:
+      model: openai/critic-large
+      api_base: os.environ/VLLM_CRITIC_URL
+      api_key: os.environ/VLLM_API_KEY
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 600
+
+# Per-role token budgets and rate limits belong here in production
+# (spec section 19.4).

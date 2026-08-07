@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bakudo.ai/schemas/agent-spec.schema.json",
+  "title": "AgentSpec",
+  "description": "A versioned, declarative specification of a worker agent. See spec section 8.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "role", "model", "sandbox", "prompt", "outputContract"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": { "const": "meta-agent.ai/v1alpha1" },
+    "kind": { "const": "AgentSpec" },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "version", "status"],
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["candidate", "canary", "active", "archived"] },
+        "owner": { "type": "string" },
+        "parentVersion": { "type": ["integer", "null"], "minimum": 1 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "role": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "explore", "add-feature", "qa", "critic", "eval-author",
+            "skill-curator", "memory-curator", "release-manager",
+            "optimize-scout", "optimize-attempt"
+          ]
+        },
+        "description": { "type": "string" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["provider", "modelId"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" },
+        "modelId": { "type": "string" },
+        "baseUrlRef": { "type": "string", "description": "Reference to a provider/secret config, never an inline secret." },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "maxTokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "required": ["provider", "profile"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "default": "abox" },
+        "profile": { "type": "string" },
+        "baseRef": { "type": "string", "default": "main" },
+        "networkMode": { "enum": ["none", "scoped", "open"], "default": "scoped" },
+        "networkBundles": { "type": "array", "items": { "type": "string" } },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "default": 3600 },
+        "ephemeral": { "type": "boolean", "default": false },
+        "maxChangedFiles": { "type": "integer", "minimum": 0 },
+        "maxDiffBytes": { "type": "integer", "minimum": 0 },
+        "canMerge": { "type": "boolean", "default": false }
+      }
+    },
+    "prompt": {
+      "type": "object",
+      "required": ["system"],
+      "additionalProperties": false,
+      "properties": {
+        "system": { "type": "string", "minLength": 1 },
+        "fragments": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "policy": { "type": "string" }
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "items": { "type": "string", "description": "name@semver-range, e.g. test-selection@^1.0" }
+    },
+    "mcpServers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "transport"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "transport": { "enum": ["stdio", "streamable-http", "sse"] },
+          "command": { "type": "string" },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "urlRef": { "type": "string" },
+          "allowedTools": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "outputContract": {
+      "type": "object",
+      "required": ["requiredFiles"],
+      "additionalProperties": false,
+      "properties": {
+        "requiredFiles": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "resultSchema": { "type": "object" }
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+apiVersion: meta-agent.ai/v1alpha1
+kind: AgentSpec
+
+metadata:
+  name: explore
+  version: 1
+  status: active
+  owner: meta-agent
+  createdAt: "2026-06-13T00:00:00Z"
+
+role:
+  type: explore
+  description: >-
+    Maps the codebase, finds opportunities, and produces facts and candidate
+    tasks. Never writes code.
+
+model:
+  provider: openai-compatible
+  modelId: qwen-coder-32b
+  baseUrlRef: vllm/qwen-coder
+  temperature: 0.1
+  maxTokens: 8192
+
+sandbox:
+  provider: abox
+  profile: explore-readonly
+  baseRef: main
+  networkMode: none
+  timeoutSeconds: 1800
+  ephemeral: true
+  canMerge: false
+
+prompt:
+  system: |
+    You are an exploration agent. Map the repository, identify high-value
+    opportunities, and surface verifiable facts. Do not modify any files.
+    Inspect code before drawing conclusions. Cite file paths as evidence for
+    every claim. Return a structured result.json.
+
+tools:
+  - name: read-file
+  - name: run-command
+    policy: read-only
+  - name: git-diff
+  - name: load-skill
+  - name: query-memory
+
+skills:
+  - codebase-navigation@^1.0
+
+outputContract:
+  requiredFiles:
+    - result.json
+  resultSchema:
+    status: ["success", "blocked", "failed"]
+    summary: string
+    changedFiles: list
+    proposedFollowups: list
+    memoriesToWrite: list

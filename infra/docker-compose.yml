@@ -1,0 +1,97 @@
+# Local development stack for the bakudo control plane (spec section 24).
+#
+#   cd infra && docker compose up -d
+#
+# Brings up Postgres (ledger), Neo4j (graph memory), the Temporal cluster + UI,
+# a vLLM gateway placeholder, and the bakudo worker + control API. Worker agents
+# run in abox microVMs out-of-band; abox is not part of this compose file.
+
+name: bakudo
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: bakudo
+      POSTGRES_PASSWORD: bakudo
+      POSTGRES_DB: bakudo
+    ports: ["5432:5432"]
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bakudo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/bakudo-dev-password
+    ports: ["7474:7474", "7687:7687"]
+    volumes:
+      - neo4j-data:/data
+
+  # Temporal needs its own Postgres database; reuse the same server.
+  temporal:
+    image: temporalio/auto-setup:1.24
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: bakudo
+      POSTGRES_PWD: bakudo
+      POSTGRES_SEEDS: postgres
+    ports: ["7233:7233"]
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    depends_on: [temporal]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports: ["8080:8080"]
+
+  # Placeholder for the internal vLLM OpenAI-compatible gateway (section 19.4).
+  # Replace with your hosted vLLM deployment; the worker reaches it only through
+  # the abox network allowlist bundle named "vllm-gateway".
+  vllm-gateway:
+    image: ghcr.io/berriai/litellm:main-latest
+    profiles: ["models"]
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    volumes:
+      - ./vllm-gateway/config.yaml:/etc/litellm/config.yaml:ro
+    ports: ["4000:4000"]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    command: ["bakudo-worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      BAKUDO_POSTGRES_DSN: postgresql://bakudo:bakudo@postgres:5432/bakudo
+      BAKUDO_SANDBOX: abox
+      VLLM_BASE_URL: http://vllm-gateway:4000/v1
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    command: ["bakudo-api"]
+    depends_on: [worker]
+    environment:
+      BAKUDO_API_HOST: 0.0.0.0
+      TEMPORAL_ADDRESS: temporal:7233
+    ports: ["8000:8000"]
+
+volumes:
+  pg-data:
+  neo4j-data:
