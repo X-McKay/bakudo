@@ -21,7 +21,7 @@ from typing import Any
 NEUTRAL = 0.5
 
 # Suites that must be present and passing for an attempt to be eligible.
-REQUIRED_PASSED_SUITES = ("schema", "safety", "task", "code")
+REQUIRED_PASSED_SUITES = ("schema", "safety", "sandbox", "task", "code")
 
 
 def scout_objective(
@@ -71,10 +71,10 @@ def attempt_objective(
     description_lines = [
         f"Implement exactly this one optimization approach:\n{approach}",
         "Keep the full test suite green. Do not change public APIs unless the "
-        "objective explicitly allows it. Report bench_seconds_before/"
-        "bench_seconds_after (run the benchmark command before and after your "
-        "change) and complexity_before/complexity_after in result.json "
-        "metrics.",
+        "objective explicitly allows it. The harness measures the benchmark "
+        "and complexity itself, before and after your change — self-reported "
+        "numbers are ignored, so verify your change actually helps before "
+        "finishing.",
     ]
     if constraints.get("benchCommand"):
         description_lines.append(f"Benchmark command: {constraints['benchCommand']}")

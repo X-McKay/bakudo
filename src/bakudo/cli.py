@@ -121,6 +121,46 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_eval_corpus(args: argparse.Namespace) -> int:
+    """Execute an eval corpus against its fixture repo and print the scorecard."""
+    import os
+    from pathlib import Path
+
+    from .agent_spec import load_spec_file
+    from .evals.corpus import load_corpus
+    from .evals.harness import run_corpus_against_fixture
+    from .evals.scorecard import Scorecard
+
+    os.environ.setdefault("BAKUDO_OFFLINE", "1")
+
+    fixture = args.fixture
+    if fixture is None:
+        _, cases = load_corpus(args.corpus)
+        fixture = Path("evals") / "fixtures" / cases[0].objective.repo
+    if not Path(fixture).is_dir():
+        print(f"Fixture repository not found: {fixture}", file=sys.stderr)
+        return 1
+
+    spec = load_spec_file(args.agent_spec)
+    report = run_corpus_against_fixture(
+        args.corpus, spec, fixture, limit=args.limit
+    )
+    card = Scorecard.from_results(report.results)
+
+    print(f"agent    : {spec.ref}")
+    print(f"cases    : {card.cases_total}")
+    print(f"overall  : {card.overall_score:.3f}")
+    for suite, score in sorted(card.suites.items()):
+        marker = "pass" if suite in card.passed_suites else "FAIL"
+        print(f"  {suite:<14} {score:.3f}  {marker}")
+    failed_cases = sorted(name for name, ok in report.case_passes.items() if not ok)
+    if failed_cases:
+        print(f"failed   : {len(failed_cases)}/{card.cases_total} case expectations")
+        for name in failed_cases:
+            print(f"  - {name}")
+    return 0
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     """Show the configuration surface: every env var, its value, its meaning."""
     from .config import Settings
@@ -188,6 +228,23 @@ def main(argv: list[str] | None = None) -> int:
     p_opt.add_argument("--scout-spec", default=None, help="Override optimize-scout spec path.")
     p_opt.add_argument("--attempt-spec", default=None, help="Override optimize-attempt spec path.")
     p_opt.set_defaults(func=_cmd_optimize)
+
+    p_corpus = sub.add_parser(
+        "eval-corpus",
+        help="Execute an eval corpus against its fixture repo (offline by default).",
+    )
+    p_corpus.add_argument("corpus", help="Corpus YAML, e.g. evals/corpora/optimize.yaml")
+    p_corpus.add_argument(
+        "--agent-spec", required=True, help="AgentSpec YAML to run the cases with."
+    )
+    p_corpus.add_argument(
+        "--fixture", default=None,
+        help="Fixture repo path (default: evals/fixtures/<corpus repo>).",
+    )
+    p_corpus.add_argument(
+        "--limit", type=int, default=None, help="Run only the first N cases."
+    )
+    p_corpus.set_defaults(func=_cmd_eval_corpus)
 
     p_config = sub.add_parser(
         "config", help="Show configuration (all env vars, or one in detail)."

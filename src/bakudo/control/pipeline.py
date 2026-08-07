@@ -117,6 +117,8 @@ def grade_run(
     runtime_seconds: float = 0.0,
     tokens_used: int = 0,
     schema_valid_hint: bool = True,
+    token_budget: int | None = None,
+    time_budget_s: float | None = None,
 ) -> GradedRun:
     """Grade one run: schema-validate, normalise, run the suite, record.
 
@@ -140,6 +142,8 @@ def grade_run(
         runtime_seconds=runtime_seconds,
         tokens_used=tokens_used,
         schema_valid=schema_valid,
+        token_budget=token_budget,
+        time_budget_s=time_budget_s,
     )
     # Suite selection keys off the objective type (optimize adds perf/simplicity).
     eval_results = run_suite(ctx)
@@ -209,6 +213,8 @@ def run_objective(
         denied_commands=outcome.denied_commands,
         runtime_seconds=outcome.runtime_seconds,
         tokens_used=outcome.tokens_used,
+        token_budget=bundle.budget.max_tokens,
+        time_budget_s=float(bundle.budget.timeout_seconds),
     )
 
     ledger.finish_run(run_id, RunPhase.completed, outcome.result)

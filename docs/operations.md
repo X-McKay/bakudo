@@ -85,7 +85,30 @@ run with a `budget:*` blocked reason rather than running away.
 
 `make check` runs the full local gate (`ruff` + `mypy` + `pytest`). The Python
 CI workflow is active at `.github/workflows/ci.yml` and mirrors `make check`
-plus an offline smoke of the operator surface.
+plus an offline smoke of the operator surface and the **eval gate**
+(`scripts/eval_gate.py`): a deterministic FauxDriver corpus through the real
+pipeline, snapshot-compared against `evals/baselines/eval-gate.json`. Any
+grader-behaviour drift fails CI until a human reviews it and refreshes the
+baseline with `--update` — you cannot silently defang an eval.
+
+The test suite includes real Temporal workflow tests
+(`tests/test_workflows_temporal.py`) under the SDK's time-skipping test
+environment; they skip gracefully where the test server cannot be downloaded.
+
+## Eval corpora and fixtures
+
+The optimize corpus (`evals/corpora/optimize.yaml`) executes against its
+fixture repository `evals/fixtures/payments-api` (20 planted inefficiencies +
+5 no-change decoys, with per-case benchmarks):
+
+    bakudo eval-corpus evals/corpora/optimize.yaml \
+        --agent-spec agents/optimize-attempt.yaml [--limit N]
+
+Benchmarks and complexity are measured by the **harness**, not the agent
+(`bakudo.evals.measure`): median-of-N wall clock with a warm-up run, before
+and after the change, overwriting any agent-claimed metrics. Promotion now
+also requires the `regression` suite — a corpus comparison in which no
+baseline-passing case fails (`bakudo.evals.evolution.regression_result`).
 
 ## Build order (spec §29)
 

@@ -37,10 +37,12 @@ class PromotionPolicy:
     """Mirrors the ``promotionPolicy`` YAML in spec section 15.3."""
 
     min_eval_cases: int = 25
-    # Suites that must be present *and* passing for a candidate to be eligible.
-    # Defaults to the always-on critical suites; production policies add
-    # "regression" and a role-specific suite once those corpora exist.
-    required_suites: tuple[str, ...] = ("schema", "safety")
+    # Suites that must be present *and* passing for a candidate to be
+    # eligible. "regression" means a corpus comparison ran and no
+    # baseline-passing case failed (evolution.regression_result) — a
+    # candidate cannot be promoted without ever seeing a regression check.
+    # Production policies add a role-specific suite as those corpora mature.
+    required_suites: tuple[str, ...] = ("schema", "safety", "regression")
     min_score_improvement: float = 0.05  # ">= 5%"
     max_safety_regressions: int = 0
     max_critical_failures: int = 0

@@ -89,7 +89,7 @@ def _run_output(followups=None, score=0.9, status="success"):
         },
         "scorecard": {
             "overall_score": score,
-            "passed_suites": ["schema", "safety", "task", "code"],
+            "passed_suites": ["schema", "safety", "sandbox", "task", "code"],
             "suites": {"perf": 0.8, "simplicity": 0.5},
             "safety_regressions": 0,
             "critical_failures": 0,
@@ -181,7 +181,7 @@ def test_in_memory_ledger_promotions_roundtrip():
         "subject_id": "add-feature@2",
         "overall_score": 0.9,
         "suites": {"schema": 1.0, "safety": 1.0},
-        "passed_suites": ["schema", "safety"],
+        "passed_suites": ["schema", "safety", "regression"],
         "failed_suites": [],
         "safety_regressions": 0,
         "critical_failures": 0,

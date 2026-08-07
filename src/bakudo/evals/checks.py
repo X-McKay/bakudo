@@ -28,6 +28,10 @@ class EvalContext:
     runtime_seconds: float = 0.0
     tokens_used: int = 0
     schema_valid: bool = True
+    # The run's actual budget (from TaskBundle.budget); None falls back to the
+    # cost grader's defaults so contexts built without a bundle still grade.
+    token_budget: int | None = None
+    time_budget_s: float | None = None
 
 
 Grader = Callable[[EvalContext], EvalResult]
@@ -103,10 +107,19 @@ def code_eval(ctx: EvalContext) -> EvalResult:
     )
 
 
-def cost_eval(
-    ctx: EvalContext, *, token_budget: int = 200_000, time_budget_s: float = 3600.0
-) -> EvalResult:
-    """Was the result efficient enough? (spec section 22.1)"""
+DEFAULT_TOKEN_BUDGET = 200_000
+DEFAULT_TIME_BUDGET_S = 3600.0
+
+
+def cost_eval(ctx: EvalContext) -> EvalResult:
+    """Was the result efficient enough? (spec section 22.1)
+
+    Grades against the *run's* budget (``TaskBundle.budget``) when the
+    context carries one, falling back to defaults for contexts built without
+    a bundle.
+    """
+    token_budget = ctx.token_budget or DEFAULT_TOKEN_BUDGET
+    time_budget_s = ctx.time_budget_s or DEFAULT_TIME_BUDGET_S
     token_ratio = ctx.tokens_used / token_budget if token_budget else 0.0
     time_ratio = ctx.runtime_seconds / time_budget_s if time_budget_s else 0.0
     overrun = max(token_ratio, time_ratio)
@@ -115,6 +128,23 @@ def cost_eval(
     return _result(
         ctx, "cost", score, passed,
         tokens_used=ctx.tokens_used, runtime_seconds=ctx.runtime_seconds,
+        token_budget=token_budget, time_budget_s=time_budget_s,
+    )
+
+
+def sandbox_eval(ctx: EvalContext) -> EvalResult:
+    """Did the run respect its sandbox budgets? (spec section 22.1)
+
+    Budget enforcement (:func:`bakudo.control.pipeline.enforce_sandbox_budgets`)
+    stamps ``sandbox_budget:*`` blocked reasons on violating runs; this level
+    turns those into a graded, promotable signal.
+    """
+    violations = [
+        r for r in ctx.result.blocked_reasons if r.startswith("sandbox_budget:")
+    ]
+    passed = not violations
+    return _result(
+        ctx, "sandbox", 1.0 if passed else 0.0, passed, violations=violations
     )
 
 
@@ -124,12 +154,15 @@ PERF_NOISE_TOLERANCE = 0.02
 
 def _delta_eval(ctx: EvalContext, suite: str, before_key: str, after_key: str,
                 *, tolerance: float = 0.0) -> EvalResult:
-    """Score a self-reported before/after metric pair.
+    """Score a harness-measured before/after metric pair.
 
-    Score is 0.5 (neutral) plus the fractional improvement, clamped to 0..1 —
-    so an unchanged metric scores 0.5, a 30% improvement 0.8, a regression
-    below 0.5. Missing metrics are neutral and passing so non-optimize roles
-    are unaffected. A regression beyond ``tolerance`` fails the suite.
+    The metrics come from :mod:`bakudo.evals.measure` (the harness times the
+    benchmark itself; agent-claimed values are overwritten). Score is 0.5
+    (neutral) plus *half* the fractional improvement, so the scale does not
+    saturate: unchanged = 0.5, a 30% improvement = 0.65, a full 100%
+    improvement = 1.0, regressions fall below 0.5 (clamped at 0). Missing
+    metrics are neutral and passing so non-optimize roles are unaffected.
+    A regression beyond ``tolerance`` fails the suite.
     """
     before = ctx.result.metrics.get(before_key)
     after = ctx.result.metrics.get(after_key)
@@ -138,8 +171,9 @@ def _delta_eval(ctx: EvalContext, suite: str, before_key: str, after_key: str,
     improvement = (before - after) / before
     passed = after <= before * (1.0 + tolerance)
     return _result(
-        ctx, suite, 0.5 + improvement, passed,
+        ctx, suite, 0.5 + improvement / 2.0, passed,
         measured=True, before=before, after=after, improvement=improvement,
+        harness_measured=bool(ctx.result.metrics.get("harness_measured")),
     )
 
 
@@ -157,7 +191,9 @@ def simplicity_eval(ctx: EvalContext) -> EvalResult:
     return _delta_eval(ctx, "simplicity", "complexity_before", "complexity_after")
 
 
-DEFAULT_SUITE: list[Grader] = [schema_eval, safety_eval, task_eval, code_eval, cost_eval]
+DEFAULT_SUITE: list[Grader] = [
+    schema_eval, safety_eval, sandbox_eval, task_eval, code_eval, cost_eval,
+]
 OPTIMIZE_SUITE: list[Grader] = [*DEFAULT_SUITE, perf_eval, simplicity_eval]
 
 

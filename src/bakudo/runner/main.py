@@ -23,6 +23,7 @@ from .. import ids
 from ..agent_spec import load_spec_file
 from ..bundle import Budget, TaskBundle
 from ..curriculum.objective import Objective
+from ..evals.measure import apply_measurements, capture_measurements
 from ..skills import SkillRegistry
 from ..strands_tools import ToolContext, Workspace
 from .agent import build_and_run
@@ -56,6 +57,10 @@ def run(args: argparse.Namespace) -> int:
         memory_query=bundle.memory_query,
     )
 
+    # Harness-side measurement: the runner, not the agent, times the
+    # benchmark and scores complexity — before and after the run (§22).
+    before = capture_measurements(bundle.objective, args.workspace)
+
     try:
         raw = build_and_run(spec, bundle, ctx)
     except Exception as exc:  # noqa: BLE001 - surface any runtime failure as a result
@@ -73,6 +78,7 @@ def run(args: argparse.Namespace) -> int:
         agent=spec.ref,
         objective_id=bundle.objective_id,
     )
+    apply_measurements(result, before, capture_measurements(bundle.objective, args.workspace))
 
     # Backfill observed changes and denied-command safety signal.
     if not result.changed_files:

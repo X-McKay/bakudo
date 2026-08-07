@@ -98,7 +98,7 @@ def test_loop_selects_best_attempt_in_one_round():
     )
     assert outcome["status"] == "improved"
     assert outcome["rounds_used"] == 1
-    assert outcome["scorecard"]["suites"]["perf"] == 0.9  # 40% improvement
+    assert outcome["scorecard"]["suites"]["perf"] == 0.7  # 0.5 + half of 40%
     assert outcome["git_branch"].startswith("bakudo/")
     assert sandbox.attempt_calls == 2
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .. import ids
 from ..bundle import TaskBundle
+from ..evals.measure import apply_measurements, capture_measurements
 from ..runner.agent import OfflineDriver, build_and_run
 from ..runner.result import normalize_result
 from ..skills import SkillRegistry
@@ -58,12 +59,17 @@ def local_sandbox(
         memory_query=bundle.memory_query,
     )
 
+    # Harness-side measurement: the sandbox, not the agent, times the
+    # benchmark and scores complexity — before and after the run (§22).
+    before = capture_measurements(bundle.objective, workspace_root)
+
     started = time.monotonic()
     raw = build_and_run(spec, bundle, ctx, offline_driver=offline_driver)
     runtime_seconds = time.monotonic() - started
     result = normalize_result(
         raw, run_id=bundle.run_id, agent=spec.ref, objective_id=bundle.objective_id
     )
+    apply_measurements(result, before, capture_measurements(bundle.objective, workspace_root))
     if not result.changed_files:
         result.changed_files = workspace.changed_files()
     if ctx.denied_commands:

@@ -64,8 +64,13 @@ def ctx_with(metrics: dict | None = None) -> EvalContext:
 def test_perf_eval_scores_improvement():
     res = perf_eval(ctx_with({"bench_seconds_before": 10.0, "bench_seconds_after": 7.0}))
     assert res.passed
-    assert res.score == 0.8  # 0.5 neutral + 30% improvement
+    assert res.score == 0.65  # 0.5 neutral + half the 30% improvement
     assert res.details["measured"] is True
+    # A larger improvement scores strictly higher — the scale must not saturate.
+    bigger = perf_eval(
+        ctx_with({"bench_seconds_before": 10.0, "bench_seconds_after": 4.0})
+    )
+    assert bigger.score > res.score
 
 
 def test_perf_eval_fails_regression_beyond_noise():
@@ -89,7 +94,7 @@ def test_perf_eval_neutral_when_unmeasured():
 def test_simplicity_eval_scores_complexity_delta():
     res = simplicity_eval(ctx_with({"complexity_before": 40.0, "complexity_after": 30.0}))
     assert res.passed
-    assert res.score == 0.75
+    assert res.score == 0.625  # 0.5 + half the 25% improvement
 
     worse = simplicity_eval(ctx_with({"complexity_before": 40.0, "complexity_after": 44.0}))
     assert not worse.passed
@@ -136,7 +141,8 @@ def test_attempt_objective_carries_one_hypothesis():
     assert obj["suggestedAgents"] == ["optimize-attempt"]
     assert "[optimize-attempt 2]" in obj["title"]
     assert "Batch the per-invoice queries." in obj["description"]
-    assert "bench_seconds_before" in obj["description"]
+    # The harness measures; the prompt must say self-reported numbers are ignored.
+    assert "harness measures" in obj["description"]
 
 
 # --- winner selection ---
@@ -148,7 +154,7 @@ def candidate(
     overall: float = 0.8,
     perf: float = 0.8,
     simplicity: float = 0.5,
-    passed=("schema", "safety", "task", "code", "perf", "simplicity"),
+    passed=("schema", "safety", "sandbox", "task", "code", "perf", "simplicity"),
     safety_regressions: int = 0,
     critical_failures: int = 0,
     status: str = "success",
@@ -188,6 +194,10 @@ def test_select_winner_gates_are_hard():
     assert select_winner([candidate(safety_regressions=1)]) is None
     assert select_winner([candidate(critical_failures=1)]) is None
     assert select_winner([candidate(passed=("schema", "safety", "task"))]) is None
+    # A budget-violating run (sandbox suite failed) is ineligible.
+    assert select_winner(
+        [candidate(passed=("schema", "safety", "task", "code"))]
+    ) is None
     assert select_winner([candidate(status="failed")]) is None
     # A regression in either measured dimension disqualifies.
     assert select_winner([candidate(perf=0.4)]) is None

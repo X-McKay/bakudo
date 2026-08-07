@@ -67,6 +67,18 @@ def grade_expectations(case: EvalCase, run: CaseRun) -> tuple[bool, list[str]]:
     return (not reasons), reasons
 
 
+@dataclass
+class CorpusReport:
+    """Aggregated suite results plus the per-case expectation outcomes.
+
+    ``case_passes`` (case name -> expectations passed) is what regression
+    grading consumes: a candidate must not fail a case its baseline passed.
+    """
+
+    results: list[EvalResult]
+    case_passes: dict[str, bool]
+
+
 def run_corpus(
     suite_name: str,
     cases: list[EvalCase],
@@ -76,6 +88,26 @@ def run_corpus(
     subject_type: str = "agent_spec_version",
     graders: list[Grader] = DEFAULT_SUITE,
 ) -> list[EvalResult]:
+    """Backwards-compatible wrapper over :func:`run_corpus_report`."""
+    return run_corpus_report(
+        suite_name,
+        cases,
+        run_fn,
+        subject_id=subject_id,
+        subject_type=subject_type,
+        graders=graders,
+    ).results
+
+
+def run_corpus_report(
+    suite_name: str,
+    cases: list[EvalCase],
+    run_fn,
+    *,
+    subject_id: str,
+    subject_type: str = "agent_spec_version",
+    graders: list[Grader] = DEFAULT_SUITE,
+) -> CorpusReport:
     """Run every case and aggregate per-suite results across the corpus.
 
     ``run_fn(objective) -> CaseRun`` executes one case (typically by spawning a
@@ -87,6 +119,7 @@ def run_corpus(
         raise ValueError("Cannot run an empty corpus.")
 
     per_suite: dict[str, list[EvalResult]] = defaultdict(list)
+    case_passes: dict[str, bool] = {}
     expectation_passes = 0
 
     for case in cases:
@@ -103,6 +136,7 @@ def run_corpus(
             res = grader(ctx)
             per_suite[res.suite_name].append(res)
         passed, _ = grade_expectations(case, run)
+        case_passes[case.name] = passed
         expectation_passes += int(passed)
 
     total = len(cases)
@@ -143,7 +177,7 @@ def run_corpus(
     )
     for r in aggregated:
         r.validate_against_schema()
-    return aggregated
+    return CorpusReport(results=aggregated, case_passes=case_passes)
 
 
 def load_corpus(path: str | Path) -> tuple[str, list[EvalCase]]:

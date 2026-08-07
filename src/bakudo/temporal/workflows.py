@@ -135,6 +135,7 @@ class AgentRunWorkflow:
             )
 
         await self._advance(inp.run_id, "evaluating")
+        budget = bundle.get("budget", {})
         eval_out = await workflow.execute_child_workflow(
             EvalWorkflow.run,
             EvalInput(
@@ -145,6 +146,10 @@ class AgentRunWorkflow:
                 denied_commands=sandbox.get("denied_commands", []),
                 runtime_seconds=sandbox.get("runtime_seconds", 0.0),
                 tokens_used=sandbox.get("tokens_used", 0),
+                token_budget=budget.get("maxTokens"),
+                time_budget_s=float(budget["timeoutSeconds"])
+                if budget.get("timeoutSeconds")
+                else None,
             ),
             id=f"eval-{inp.run_id}",
         )

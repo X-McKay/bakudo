@@ -49,6 +49,10 @@ class EvalInput:
     runtime_seconds: float = 0.0
     tokens_used: int = 0
     schema_valid: bool = True
+    # The run's budget (TaskBundle.budget), so the cost gate grades against
+    # what the run was actually allowed, not a hardcoded default.
+    token_budget: int | None = None
+    time_budget_s: float | None = None
 
 
 @dataclass

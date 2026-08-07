@@ -200,6 +200,8 @@ def run_eval_suite(inp: EvalInput) -> dict:
         runtime_seconds=inp.runtime_seconds,
         tokens_used=inp.tokens_used,
         schema_valid_hint=inp.schema_valid,
+        token_budget=inp.token_budget,
+        time_budget_s=inp.time_budget_s,
     )
     return {
         "eval_results": [r.to_dict() for r in graded.eval_results],

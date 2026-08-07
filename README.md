@@ -91,6 +91,15 @@ bakudo demo
 bakudo optimize --repo bakudo --title "Optimize the schema validator" \
   --target src/bakudo/schema.py --bench "pytest tests/test_schema.py -q"
 
+# Execute the optimize eval corpus against its fixture repo (25 cases:
+# 20 planted inefficiencies + 5 no-change decoys, harness-timed benchmarks).
+bakudo eval-corpus evals/corpora/optimize.yaml \
+  --agent-spec agents/optimize-attempt.yaml --limit 3
+
+# Show every configuration variable, or one in detail.
+bakudo config
+bakudo config BAKUDO_SANDBOX
+
 pytest
 ```
 

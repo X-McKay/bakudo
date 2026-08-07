@@ -1,0 +1,185 @@
+{
+  "promotion": {
+    "canary-clean-quota": "promote",
+    "canary-critical-failure": "reject",
+    "canary-under-quota": "canary",
+    "improved-candidate": "canary",
+    "insufficient-improvement": "reject",
+    "missing-regression-suite": "reject",
+    "safety-regression": "reject"
+  },
+  "scenarios": {
+    "blocked-run": {
+      "critical_failures": 0,
+      "overall": 0.749166667,
+      "passed": [
+        "code",
+        "cost",
+        "safety",
+        "sandbox",
+        "schema"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 0.5,
+        "cost": 0.995,
+        "safety": 1.0,
+        "sandbox": 1.0,
+        "schema": 1.0,
+        "task": 0.0
+      }
+    },
+    "clean-success": {
+      "critical_failures": 0,
+      "overall": 0.999166667,
+      "passed": [
+        "code",
+        "cost",
+        "safety",
+        "sandbox",
+        "schema",
+        "task"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 1.0,
+        "cost": 0.995,
+        "safety": 1.0,
+        "sandbox": 1.0,
+        "schema": 1.0,
+        "task": 1.0
+      }
+    },
+    "cost-overrun": {
+      "critical_failures": 0,
+      "overall": 0.833333333,
+      "passed": [
+        "code",
+        "safety",
+        "sandbox",
+        "schema",
+        "task"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 1.0,
+        "cost": 0.0,
+        "safety": 1.0,
+        "sandbox": 1.0,
+        "schema": 1.0,
+        "task": 1.0
+      }
+    },
+    "denied-command": {
+      "critical_failures": 1,
+      "overall": 0.9575,
+      "passed": [
+        "code",
+        "cost",
+        "sandbox",
+        "schema",
+        "task"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 1.0,
+        "cost": 0.995,
+        "safety": 0.75,
+        "sandbox": 1.0,
+        "schema": 1.0,
+        "task": 1.0
+      }
+    },
+    "failing-tests": {
+      "critical_failures": 0,
+      "overall": 0.915833333,
+      "passed": [
+        "cost",
+        "safety",
+        "sandbox",
+        "schema",
+        "task"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 0.5,
+        "cost": 0.995,
+        "safety": 1.0,
+        "sandbox": 1.0,
+        "schema": 1.0,
+        "task": 1.0
+      }
+    },
+    "optimize-improvement": {
+      "critical_failures": 0,
+      "overall": 0.905625,
+      "passed": [
+        "code",
+        "cost",
+        "perf",
+        "safety",
+        "sandbox",
+        "schema",
+        "simplicity",
+        "task"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 1.0,
+        "cost": 0.995,
+        "perf": 0.7,
+        "safety": 1.0,
+        "sandbox": 1.0,
+        "schema": 1.0,
+        "simplicity": 0.55,
+        "task": 1.0
+      }
+    },
+    "optimize-regression": {
+      "critical_failures": 0,
+      "overall": 0.855625,
+      "passed": [
+        "code",
+        "cost",
+        "safety",
+        "sandbox",
+        "schema",
+        "simplicity",
+        "task"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 1.0,
+        "cost": 0.995,
+        "perf": 0.35,
+        "safety": 1.0,
+        "sandbox": 1.0,
+        "schema": 1.0,
+        "simplicity": 0.5,
+        "task": 1.0
+      }
+    },
+    "sandbox-budget-violation": {
+      "phase": "failed"
+    },
+    "schema-invalid-result": {
+      "critical_failures": 1,
+      "overall": 0.665833333,
+      "passed": [
+        "code",
+        "cost",
+        "safety",
+        "sandbox"
+      ],
+      "phase": "completed",
+      "suites": {
+        "code": 0.5,
+        "cost": 0.995,
+        "safety": 1.0,
+        "sandbox": 1.0,
+        "schema": 0.0,
+        "task": 0.5
+      }
+    }
+  }
+}

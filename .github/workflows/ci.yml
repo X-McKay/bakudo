@@ -23,7 +23,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
-        run: pip install -e ".[dev,api]"
+        run: pip install -e ".[dev,api,temporal]"
       - name: Lint
         run: ruff check src tests
       # python -m avoids any stale mypy/pytest shadowing the venv's on PATH.
@@ -31,6 +31,11 @@ jobs:
         run: python -m mypy src/bakudo
       - name: Test
         run: python -m pytest
+      # The graders grading themselves: a deterministic FauxDriver corpus
+      # through the real pipeline, compared against the committed baseline.
+      # Drift fails the build until reviewed (scripts/eval_gate.py --update).
+      - name: Eval gate
+        run: python scripts/eval_gate.py
       - name: Smoke
         run: |
           bakudo validate-spec agents/add-feature.yaml
