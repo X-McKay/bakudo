@@ -79,6 +79,10 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
             run_id = tools.spawn_agent_run(objective_id, agent)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            # Sandbox selection fails closed when BAKUDO_SANDBOX is not
+            # configured; report a service misconfiguration, not a 500.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"run_id": run_id}
 
     @app.get("/runs/{run_id}")

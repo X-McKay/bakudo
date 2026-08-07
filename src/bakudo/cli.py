@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from . import __version__
 
@@ -41,11 +40,11 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     from .agent_spec import load_spec_file
     from .control import run_objective
     from .curriculum import Objective
+    from .paths import agents_dir
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
-    repo_root = Path(__file__).resolve().parents[2]
-    spec = load_spec_file(repo_root / "agents" / "explore.yaml")
+    spec = load_spec_file(agents_dir() / "explore.yaml")
     objective = Objective.model_validate(
         {
             "id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ0",

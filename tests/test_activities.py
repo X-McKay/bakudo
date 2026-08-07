@@ -55,10 +55,10 @@ def test_persist_run_routes_non_terminal_and_terminal(spy):
     assert spy.finished and spy.finished[0][2] == {"ok": True}
 
 
-# --- A4: fail-closed sandbox selection ---
+# --- A4: fail-closed sandbox selection (shared resolver in abox.select) ---
 
 def _clear_sandbox_env(monkeypatch):
-    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV", "BAKUDO_OFFLINE"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -68,12 +68,22 @@ def test_sandbox_fn_raises_when_unset(monkeypatch):
         Deps().sandbox_fn()
 
 
-def test_sandbox_local_requires_dev(monkeypatch):
+def test_sandbox_local_requires_dev_or_offline(monkeypatch):
     _clear_sandbox_env(monkeypatch)
     monkeypatch.setenv("BAKUDO_SANDBOX", "local")
     with pytest.raises(RuntimeError, match="dev"):
         Deps().sandbox_fn()
     monkeypatch.setenv("BAKUDO_ENV", "dev")
+    assert callable(Deps().sandbox_fn())
+    monkeypatch.delenv("BAKUDO_ENV")
+    monkeypatch.setenv("BAKUDO_OFFLINE", "1")
+    assert callable(Deps().sandbox_fn())
+
+
+def test_sandbox_offline_alone_selects_local(monkeypatch):
+    # Offline mode never invokes a model or tools, so local is safe there.
+    _clear_sandbox_env(monkeypatch)
+    monkeypatch.setenv("BAKUDO_OFFLINE", "1")
     assert callable(Deps().sandbox_fn())
 
 
@@ -81,3 +91,10 @@ def test_sandbox_abox_selected(monkeypatch):
     _clear_sandbox_env(monkeypatch)
     monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
     assert callable(Deps().sandbox_fn())
+
+
+def test_sandbox_unknown_value_rejected(monkeypatch):
+    _clear_sandbox_env(monkeypatch)
+    monkeypatch.setenv("BAKUDO_SANDBOX", "yolo")
+    with pytest.raises(RuntimeError, match="yolo"):
+        Deps().sandbox_fn()

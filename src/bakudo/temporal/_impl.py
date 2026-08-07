@@ -7,13 +7,12 @@ ledger and sandbox driver; tests use the in-memory defaults.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import yaml
+
 from .. import ids
-from ..abox.local import local_sandbox
-from ..abox.runner import AboxOutcome, AboxRunner
+from ..abox.select import SandboxFn, resolve_sandbox
 from ..agent_spec import AgentSpec, parse_spec
 from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum import build_default_collector, generate_objectives
@@ -24,10 +23,13 @@ from ..evals.corpus import CaseRun, load_corpus
 from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy
 from ..memory.compaction import compact
+from ..memory.retrieval import retrieve_excerpts
 from ..memory.semantic import SemanticMemoryStore
+from ..paths import agents_dir
 from ..registry import InMemoryLedger, RunPhase, RunRecord
 from ..registry.ledger import Ledger
-from ..runner.result import RunResult, RunStatus
+from ..runner.result import RunResult, RunStatus, normalize_result
+from ..schema import is_valid
 from .shared import (
     AgentRunInput,
     CompactionInput,
@@ -36,8 +38,6 @@ from .shared import (
     ObserveInput,
     PromotionInput,
 )
-
-SandboxFn = Callable[[TaskBundle], AboxOutcome]
 
 
 @dataclass
@@ -52,32 +52,10 @@ class Deps:
     def sandbox_fn(self) -> SandboxFn:
         """Resolve the sandbox driver, failing *closed*.
 
-        The in-process ``local_sandbox`` is not an isolation boundary, so it is
-        never selected implicitly: ``BAKUDO_SANDBOX`` must be ``abox`` or
-        ``local``, and ``local`` is only permitted when ``BAKUDO_ENV=dev``.
+        Delegates to :func:`bakudo.abox.select.resolve_sandbox`, the single
+        selection policy shared with the synchronous pipeline.
         """
-        if self.sandbox is not None:
-            return self.sandbox
-
-        mode = os.environ.get("BAKUDO_SANDBOX")
-        if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
-            mode = "abox"  # backwards-compatible alias
-
-        if mode == "abox":
-            return AboxRunner().run
-        if mode == "local":
-            if os.environ.get("BAKUDO_ENV") != "dev":
-                raise RuntimeError(
-                    "BAKUDO_SANDBOX=local requires BAKUDO_ENV=dev; the local "
-                    "sandbox is not an isolation boundary."
-                )
-            return local_sandbox
-        if mode is None:
-            raise RuntimeError(
-                "BAKUDO_SANDBOX must be set to 'abox' or 'local' "
-                "(local is dev-only). Refusing to pick a sandbox implicitly."
-            )
-        raise RuntimeError(f"Unknown BAKUDO_SANDBOX value: {mode!r}")
+        return resolve_sandbox(self.sandbox)
 
 
 DEPS = Deps()
@@ -132,7 +110,50 @@ def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
 
 def render_bundle(inp: AgentRunInput) -> dict:
     bundle = _bundle_from_input(inp)
+    if not bundle.memory_excerpts:
+        # The memory read path: ship the relevant memories with the bundle so
+        # the sandboxed worker's query-memory tool has something to search.
+        bundle.memory_excerpts = retrieve_excerpts(DEPS.memory, bundle.objective)
     return bundle.model_dump(by_alias=True, mode="json")
+
+
+# Default seed agent for each objective type when neither the objective nor
+# the curriculum names one (§9). Dispatching an optimize objective as a plain
+# run gets the read-only scout; the full loop is OptimizationWorkflow's job.
+DEFAULT_AGENT_FOR_TYPE = {
+    "explore": "explore",
+    "add-feature": "add-feature",
+    "qa": "qa",
+    "critic": "critic",
+    "maintenance": "add-feature",
+    "optimize": "optimize-scout",
+}
+
+
+def resolve_agent_spec(agent: str | None, objective_type: str) -> dict | None:
+    """Resolve the AgentSpec document to run for an objective.
+
+    Prefers the ledger's active version of the named (or type-default) agent,
+    falling back to the bundled seed specs. Returns ``None`` when no agent can
+    be resolved, so the caller can dead-letter the objective instead of
+    crashing the dispatch loop.
+    """
+    name = agent or DEFAULT_AGENT_FOR_TYPE.get(objective_type)
+    if name is None:
+        return None
+
+    record = DEPS.ledger.active_version(name)
+    if record is not None:
+        document = yaml.safe_load(record.spec_yaml)
+        if isinstance(document, dict):
+            return document
+
+    seed = agents_dir() / f"{name}.yaml"
+    if seed.is_file():
+        document = yaml.safe_load(seed.read_text())
+        if isinstance(document, dict):
+            return document
+    return None
 
 
 def run_sandbox(bundle_dict: dict) -> dict:
@@ -173,14 +194,25 @@ def persist_run(run_id: str, phase: str, payload: dict) -> None:
 
 
 def run_eval_suite(inp: EvalInput) -> dict:
+    objective = Objective.model_validate(inp.objective)
+    # Grade the *raw* worker output against the JSON Schema — the schema gate
+    # must be able to fail. Normalisation below is deliberately forgiving so
+    # the rest of the suite still runs on a malformed result.
+    schema_valid = inp.schema_valid and is_valid(inp.result, "result.schema.json")
+    result = normalize_result(
+        inp.result,
+        run_id=inp.run_id,
+        agent=str(inp.result.get("agent") or "unknown"),
+        objective_id=objective.id,
+    )
     ctx = EvalContext(
-        result=RunResult.model_validate(inp.result),
-        objective=Objective.model_validate(inp.objective),
+        result=result,
+        objective=objective,
         diff=inp.diff,
         denied_commands=inp.denied_commands,
         runtime_seconds=inp.runtime_seconds,
         tokens_used=inp.tokens_used,
-        schema_valid=inp.schema_valid,
+        schema_valid=schema_valid,
     )
     # Suite selection keys off the objective: optimize runs add perf/simplicity.
     results = run_suite(ctx)

@@ -1,8 +1,9 @@
-"""Resolution of bundled data directories (schemas and skills).
+"""Resolution of bundled data directories (schemas, skills, and agents).
 
-When bakudo runs from a source checkout, ``schemas/`` and ``skills/`` live at
-the repository root. When installed as a wheel, they are force-included under
-``bakudo/_data/`` (see ``pyproject.toml``). This module hides that difference.
+When bakudo runs from a source checkout, ``schemas/``, ``skills/``, and
+``agents/`` live at the repository root. When installed as a wheel, they are
+force-included under ``bakudo/_data/`` (see ``pyproject.toml``). This module
+hides that difference.
 """
 
 from __future__ import annotations
@@ -37,3 +38,8 @@ def schemas_dir() -> Path:
 def skills_dir() -> Path:
     """Directory containing the Open Agent Skills packages."""
     return _resolve("skills")
+
+
+def agents_dir() -> Path:
+    """Directory containing the seed AgentSpec YAML documents."""
+    return _resolve("agents")

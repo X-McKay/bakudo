@@ -14,7 +14,7 @@ from typing import Any
 
 from ..agent_spec import AgentSpec, parse_spec
 from ..curriculum import Objective, ObjectiveQueues, QueueName
-from ..evals import EvalContext, Scorecard, decide, run_default_suite
+from ..evals import EvalContext, Scorecard, decide, evaluate_canary, run_default_suite
 from ..evals.promotion import PromotionPolicy
 from ..memory import InMemoryStore, MemoryItem, MemoryRejected, MemoryStore
 from ..registry import InMemoryLedger, RunPhase
@@ -88,7 +88,7 @@ class MetaAgentTools:
     def spawn_agent_run(self, objective_id: str, agent: str) -> str:
         objective = self._objectives[objective_id]
         spec = self._resolve_spec(agent)
-        pipeline = run_objective(objective, spec, ledger=self.ledger)
+        pipeline = run_objective(objective, spec, ledger=self.ledger, memory=self.memory)
         self._runs[pipeline.run_id] = pipeline
         return pipeline.run_id
 
@@ -156,6 +156,23 @@ class MetaAgentTools:
         decision = decide(
             candidate, baseline, policy=PromotionPolicy(), mutation_kinds=mutation_kinds or []
         )
+        self.ledger.record_promotion(decision)
+        return decision.to_dict()
+
+    def advance_canary(
+        self,
+        candidate_scorecard: dict[str, Any],
+        canary_run_scorecards: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Advance (or fail) a canaried candidate from its observed runs.
+
+        The terminal half of the promotion flow: :meth:`promote_candidate`
+        routes eligible candidates to canary, and this decides promote /
+        keep-observing / reject from the canary runs' scorecards.
+        """
+        candidate = Scorecard.model_validate(candidate_scorecard)
+        runs = [Scorecard.model_validate(s) for s in canary_run_scorecards]
+        decision = evaluate_canary(candidate, runs, policy=PromotionPolicy())
         self.ledger.record_promotion(decision)
         return decision.to_dict()
 

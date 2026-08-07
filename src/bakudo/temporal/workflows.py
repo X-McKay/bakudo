@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         create_run,
         persist_run,
         render_bundle,
+        resolve_agent_spec,
         run_agent_evolution,
         run_eval_suite,
         run_sandbox,
@@ -53,8 +54,12 @@ with workflow.unsafe.imports_passed_through():
 # Activities that touch the network/model get generous timeouts; ledger writes
 # are quick. All are retried with backoff. Typed as dict[str, Any] so the
 # **-splat unifies with execute_activity's keyword overloads under mypy.
+# Long activities heartbeat every HEARTBEAT_INTERVAL_SECONDS (activities.py),
+# so a lost worker is detected within heartbeat_timeout — not the 2h cap —
+# and the retry can land on a healthy worker promptly.
 _LONG: dict[str, Any] = dict(
     start_to_close_timeout=timedelta(hours=2),
+    heartbeat_timeout=timedelta(minutes=2),
     retry_policy=RetryPolicy(maximum_attempts=3),
 )
 _SHORT: dict[str, Any] = dict(
@@ -92,6 +97,17 @@ class AgentRunWorkflow:
             persist_run, args=[run_id, phase, payload or {}], **_SHORT
         )
 
+    async def _notify_meta(self, run_id: str) -> None:
+        """Signal run completion back to the meta-agent, if it dispatched us.
+
+        Only the meta-agent handles ``run_completed``; other parents (e.g.
+        OptimizationWorkflow) await the child handle directly.
+        """
+        parent = workflow.info().parent
+        if parent is not None and parent.workflow_id == META_WORKFLOW_ID:
+            handle = workflow.get_external_workflow_handle(parent.workflow_id)
+            await handle.signal("run_completed", run_id)
+
     @workflow.run
     async def run(self, inp: AgentRunInput) -> AgentRunOutput:
         workflow_id = workflow.info().workflow_id
@@ -105,6 +121,7 @@ class AgentRunWorkflow:
 
         if self._cancelled:
             await self._advance(inp.run_id, "cancelled")
+            await self._notify_meta(inp.run_id)
             return AgentRunOutput(inp.run_id, "cancelled", "", "")
 
         await self._advance(inp.run_id, "sandbox_starting")
@@ -115,6 +132,7 @@ class AgentRunWorkflow:
         result = sandbox.get("result")
         if not sandbox.get("succeeded") or result is None:
             await self._advance(inp.run_id, "failed", {"result": result})
+            await self._notify_meta(inp.run_id)
             return AgentRunOutput(
                 inp.run_id, "failed",
                 bundle["agent_spec"]["metadata"]["name"], sandbox.get("git_branch", ""),
@@ -132,12 +150,12 @@ class AgentRunWorkflow:
                 denied_commands=sandbox.get("denied_commands", []),
                 runtime_seconds=sandbox.get("runtime_seconds", 0.0),
                 tokens_used=sandbox.get("tokens_used", 0),
-                schema_valid=True,
             ),
             id=f"eval-{inp.run_id}",
         )
 
         await self._advance(inp.run_id, "completed", {"result": result})
+        await self._notify_meta(inp.run_id)
         return AgentRunOutput(
             run_id=inp.run_id,
             phase="completed",
@@ -270,6 +288,8 @@ class MetaState:
     role_concurrency: dict[str, int] = field(default_factory=lambda: {"add-feature": 2})
     budget_usd_remaining: float = 100.0
     processed_objectives: int = 0
+    # Objective ids that could not be matched to any agent spec (dead-letter).
+    unassignable: list[str] = field(default_factory=list)
     # Undispatched backlog carried across Continue-As-New boundaries.
     pending_backlog: list[dict[str, Any]] = field(default_factory=list)
 
@@ -318,6 +338,7 @@ class MetaAgentWorkflow:
             "pending_promotions": len(self._state.pending_promotions),
             "budget_usd_remaining": self._state.budget_usd_remaining,
             "processed_objectives": self._state.processed_objectives,
+            "unassignable": list(self._state.unassignable),
         }
 
     @workflow.query
@@ -373,20 +394,43 @@ class MetaAgentWorkflow:
                 workflow.continue_as_new(self._state)
 
             objective = self._backlog.pop(0)
-            run_id = objective.get("run_id") or workflow.uuid4().hex
-            self._state.active_runs.append(run_id)
             self._handled += 1
 
+            # Resolve which agent runs this objective: an inline spec wins,
+            # then the curriculum's suggestion, then the type default.
+            spec = objective.get("agent_spec")
+            if spec is None:
+                suggested = (
+                    objective.get("suggestedAgents")
+                    or objective.get("suggested_agents")
+                    or []
+                )
+                spec = await workflow.execute_activity(
+                    resolve_agent_spec,
+                    args=[suggested[0] if suggested else None, objective.get("type", "")],
+                    **_SHORT,
+                )
+            if spec is None:
+                # Dead-letter rather than crash the dispatch loop; visible in
+                # get_status() for the operator to triage.
+                self._state.unassignable.append(objective.get("id", "<no-id>"))
+                continue
+
+            run_id = objective.get("run_id") or workflow.uuid4().hex
+            self._state.active_runs.append(run_id)
+
             # Dispatch the run as a child workflow; the meta-agent does not block
-            # on it — completion arrives via the run_completed signal.
+            # on it — completion arrives via the run_completed signal. ABANDON
+            # keeps in-flight runs alive across this workflow's Continue-As-New.
             await workflow.start_child_workflow(
                 AgentRunWorkflow.run,
                 AgentRunInput(
                     run_id=run_id,
                     objective=objective,
-                    agent_spec=objective["agent_spec"],
+                    agent_spec=spec,
                 ),
                 id=f"run-{run_id}",
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
             )
 
 

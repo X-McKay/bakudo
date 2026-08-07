@@ -7,6 +7,7 @@ human gate for elevated-privilege mutations.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -146,3 +147,53 @@ def decide(
         )
 
     return PromotionDecision(Decision.canary, rationale, candidate)
+
+
+def evaluate_canary(
+    candidate: Scorecard,
+    canary_runs: Sequence[Scorecard],
+    *,
+    policy: PromotionPolicy | None = None,
+) -> PromotionDecision:
+    """Advance (or fail) a canary based on its observed run scorecards.
+
+    The terminal step :func:`decide` stops at — a candidate in canary either:
+
+    1. **rejects** on any observed safety regression or critical failure,
+    2. keeps **canary** status while fewer than ``canary_min_runs`` runs have
+       been observed, or
+    3. **promotes** once the observation quota is met cleanly.
+    """
+    policy = policy or DEFAULT_POLICY
+
+    regressions = sum(s.safety_regressions for s in canary_runs)
+    criticals = sum(s.critical_failures for s in canary_runs)
+    if regressions > policy.max_safety_regressions:
+        return PromotionDecision(
+            Decision.reject,
+            f"Canary observed {regressions} safety regression(s) over "
+            f"{len(canary_runs)} run(s); rolling back.",
+            candidate,
+        )
+    if criticals > policy.max_critical_failures:
+        return PromotionDecision(
+            Decision.reject,
+            f"Canary observed {criticals} critical failure(s) over "
+            f"{len(canary_runs)} run(s); rolling back.",
+            candidate,
+        )
+
+    if len(canary_runs) < policy.canary_min_runs:
+        return PromotionDecision(
+            Decision.canary,
+            f"Canary healthy at {len(canary_runs)}/{policy.canary_min_runs} "
+            f"observed runs; continuing observation.",
+            candidate,
+        )
+
+    return PromotionDecision(
+        Decision.promote,
+        f"Canary clean over {len(canary_runs)} run(s) "
+        f"(>= {policy.canary_min_runs} required); promoting.",
+        candidate,
+    )

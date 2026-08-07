@@ -14,7 +14,7 @@ from .checks import (
     suite_for,
     task_eval,
 )
-from .promotion import PromotionDecision, PromotionPolicy, decide
+from .promotion import PromotionDecision, PromotionPolicy, decide, evaluate_canary
 from .result import EvalResult
 from .scorecard import Scorecard
 
@@ -36,4 +36,5 @@ __all__ = [
     "PromotionDecision",
     "PromotionPolicy",
     "decide",
+    "evaluate_canary",
 ]

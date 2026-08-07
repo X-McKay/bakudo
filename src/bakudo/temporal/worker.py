@@ -7,6 +7,7 @@ graph into the activity layer, and serves the control and run task queues.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 
 
@@ -18,10 +19,13 @@ async def _run() -> None:
     from .activities import ALL_ACTIVITIES
     from .shared import TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS
     from .workflows import (
+        AgentEvolutionWorkflow,
         AgentRunWorkflow,
         EvalWorkflow,
+        MemoryCompactionWorkflow,
         MetaAgentWorkflow,
         OptimizationWorkflow,
+        RepoObserverWorkflow,
     )
 
     # Wire the durable ledger + memory if a DSN is configured (otherwise
@@ -55,19 +59,45 @@ async def _run() -> None:
     namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
     client = await Client.connect(address, namespace=namespace)
 
-    workflows = [MetaAgentWorkflow, AgentRunWorkflow, EvalWorkflow, OptimizationWorkflow]
+    # Every registered workflow, including the evolution, compaction, and
+    # observer workflows — unregistered they are unreachable dead code.
+    control_workflows = [
+        MetaAgentWorkflow,
+        AgentRunWorkflow,
+        EvalWorkflow,
+        OptimizationWorkflow,
+        AgentEvolutionWorkflow,
+        MemoryCompactionWorkflow,
+        RepoObserverWorkflow,
+    ]
+    run_workflows = [
+        AgentRunWorkflow,
+        EvalWorkflow,
+        OptimizationWorkflow,
+        AgentEvolutionWorkflow,
+        MemoryCompactionWorkflow,
+    ]
+
+    # Activities are synchronous (they block on subprocesses and DB drivers),
+    # so the SDK dispatches them to this executor instead of the event loop.
+    activity_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=int(os.environ.get("BAKUDO_ACTIVITY_THREADS", "8")),
+        thread_name_prefix="bakudo-activity",
+    )
 
     control = Worker(
         client,
         task_queue=TASK_QUEUE_CONTROL,
-        workflows=workflows,
+        workflows=control_workflows,
         activities=ALL_ACTIVITIES,
+        activity_executor=activity_executor,
     )
     runs = Worker(
         client,
         task_queue=TASK_QUEUE_RUNS,
-        workflows=[AgentRunWorkflow, EvalWorkflow, OptimizationWorkflow],
+        workflows=run_workflows,
         activities=ALL_ACTIVITIES,
+        activity_executor=activity_executor,
     )
     print(f"[bakudo-worker] serving {TASK_QUEUE_CONTROL} + {TASK_QUEUE_RUNS} at {address}")
     await asyncio.gather(control.run(), runs.run())
