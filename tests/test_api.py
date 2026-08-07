@@ -35,7 +35,9 @@ def test_read_routes_open_and_pending_promotions_empty(monkeypatch):
     assert client.get("/promotions/pending").json() == []
 
 
-def test_optimize_route_builds_objective_and_runs_loop(monkeypatch):
+def test_optimize_route_accepts_and_reports_result(monkeypatch):
+    import time
+
     monkeypatch.delenv("BAKUDO_API_TOKEN", raising=False)
     captured: dict = {}
 
@@ -57,16 +59,30 @@ def test_optimize_route_builds_objective_and_runs_loop(monkeypatch):
             "maxRounds": 4,
         },
     )
-    assert resp.status_code == 200
-    body = resp.json()
+    # The API accepts and hands back a poll URL instead of blocking (202).
+    assert resp.status_code == 202
+    accepted = resp.json()
+    assert accepted["objective_id"].startswith("obj_")
+    assert accepted["status_url"] == f"/optimize/{accepted['objective_id']}"
+
+    deadline = time.monotonic() + 10
+    body = {"status": "running"}
+    while body.get("status") == "running" and time.monotonic() < deadline:
+        body = client.get(accepted["status_url"]).json()
+        time.sleep(0.02)
     assert body["status"] == "no-change"
-    assert body["objective_id"].startswith("obj_")
 
     objective = captured["objective"]
     assert objective.type.value == "optimize"
     assert objective.constraints.bench_command == "pytest tests/benchmarks -q"
     assert objective.constraints.target_paths == ["src/ledger/**"]
     assert captured["kwargs"]["max_rounds"] == 4
+
+
+def test_optimize_status_unknown_job_is_404(monkeypatch):
+    monkeypatch.delenv("BAKUDO_API_TOKEN", raising=False)
+    client = TestClient(build_app())
+    assert client.get("/optimize/obj_nope").status_code == 404
 
 
 def test_optimize_route_requires_token_when_configured(monkeypatch):

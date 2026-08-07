@@ -1,6 +1,6 @@
 """The Temporal worker process entrypoint (``bakudo-worker``).
 
-Connects to Temporal, optionally wires the durable Postgres ledger + Neo4j
+Connects to Temporal, optionally wires the durable Postgres ledger + FalkorDB
 graph into the activity layer, and serves the control and run task queues.
 """
 
@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+
+from ..log import configure_logging, get_logger
+
+log = get_logger(__name__)
 
 
 async def _run() -> None:
@@ -31,22 +35,18 @@ async def _run() -> None:
     settings = Settings.from_env()
 
     # Wire the durable ledger + memory if a DSN is configured (otherwise
-    # in-memory). The Neo4j graph mirror rides along when NEO4J_URI is set.
+    # in-memory). The FalkorDB graph mirror rides along when FALKORDB_URL is
+    # set (credentials, if any, ride inside the URL).
     if settings.postgres_dsn:
         from ..memory.store_pg import PgSemanticMemoryStore
         from ..registry.postgres_ledger import PostgresLedger
 
         graph = None
-        if settings.neo4j_uri:
-            from ..memory.graph import Neo4jGraphMemory
+        if settings.falkordb_url:
+            from ..memory.graph import FalkorGraphMemory
 
-            if not settings.neo4j_password:
-                raise RuntimeError(
-                    "NEO4J_URI is set but NEO4J_PASSWORD is not; refusing to "
-                    "guess credentials for the graph memory mirror."
-                )
-            graph = Neo4jGraphMemory.connect(
-                settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password
+            graph = FalkorGraphMemory.connect(
+                settings.falkordb_url, graph_name=settings.falkordb_graph
             )
 
         _impl.configure(
@@ -98,14 +98,20 @@ async def _run() -> None:
         activities=ALL_ACTIVITIES,
         activity_executor=activity_executor,
     )
-    print(
-        f"[bakudo-worker] serving {TASK_QUEUE_CONTROL} + {TASK_QUEUE_RUNS} "
-        f"at {settings.temporal_address}"
+    log.info(
+        "worker serving",
+        extra={
+            "context": {
+                "task_queues": [TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS],
+                "temporal_address": settings.temporal_address,
+            }
+        },
     )
     await asyncio.gather(control.run(), runs.run())
 
 
 def main() -> None:
+    configure_logging()
     asyncio.run(_run())
 
 

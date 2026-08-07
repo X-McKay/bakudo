@@ -25,7 +25,7 @@ dependencies = [
 # Durable orchestration backbone (Temporal workflows + activities).
 temporal = ["temporalio>=1.7"]
 # Authoritative ledger + relationship memory.
-db = ["psycopg[binary]>=3.1", "neo4j>=5.19"]
+db = ["psycopg[binary]>=3.1", "falkordb>=1.0"]
 # Worker-plane agent runtime + model access.
 runtime = ["strands-agents>=0.1", "httpx>=0.27", "openai>=1.30"]
 # Control-plane HTTP/dashboard surface.
@@ -34,7 +34,7 @@ api = ["fastapi>=0.110", "uvicorn>=0.29"]
 all = [
   "temporalio>=1.7",
   "psycopg[binary]>=3.1",
-  "neo4j>=5.19",
+  "falkordb>=1.0",
   "strands-agents>=0.1",
   "httpx>=0.27",
   "openai>=1.30",

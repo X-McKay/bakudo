@@ -73,17 +73,26 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     def list_objectives(queue: str = "ready") -> list[dict[str, Any]]:
         return tools.list_objectives(queue)
 
-    @app.post("/runs", dependencies=auth)
+    @app.post("/runs", dependencies=auth, status_code=202)
     def spawn_run(objective_id: str, agent: str) -> dict[str, str]:
+        """Accept a run and return immediately; poll GET /runs/{id} for phase.
+
+        A real sandboxed run takes minutes to hours — holding the HTTP
+        connection for its duration exhausted the threadpool under any
+        concurrency, so acceptance and execution are decoupled (202 pattern).
+        """
+        # Resolve the sandbox up front so a misconfigured service rejects at
+        # accept time (503) instead of failing invisibly in the background.
+        from ..abox.select import resolve_sandbox
+
         try:
-            run_id = tools.spawn_agent_run(objective_id, agent)
+            resolve_sandbox()
+            run_id = tools.spawn_agent_run_async(objective_id, agent)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
-            # Sandbox selection fails closed when BAKUDO_SANDBOX is not
-            # configured; report a service misconfiguration, not a 500.
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return {"run_id": run_id}
+        return {"run_id": run_id, "status_url": f"/runs/{run_id}"}
 
     @app.get("/runs/{run_id}")
     def get_run(run_id: str) -> dict[str, Any]:
@@ -96,14 +105,14 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     def get_logs(run_id: str) -> list[dict[str, Any]]:
         return tools.query_logs(run_id)
 
-    @app.post("/optimize", dependencies=auth)
-    def optimize(body: OptimizeIn) -> dict[str, Any]:
-        """Drive one optimize objective through scout → attempts → selection.
+    # Background optimize jobs: objective_id -> future. A multi-round loop
+    # with real models runs for hours; the API accepts and hands back a poll
+    # URL instead of holding the connection (202 pattern).
+    optimize_jobs: dict[str, Any] = {}
 
-        v0.1 runs the in-process loop synchronously (like the rest of this
-        API); production submits ``OptimizationWorkflow`` via
-        :func:`bakudo.temporal.client.start_optimization` instead.
-        """
+    @app.post("/optimize", dependencies=auth, status_code=202)
+    def optimize(body: OptimizeIn) -> dict[str, Any]:
+        """Accept one optimize objective; poll GET /optimize/{objective_id}."""
         from .. import ids
         from ..control.optimize import load_role_spec, run_optimize_loop
         from ..curriculum import Objective
@@ -132,17 +141,39 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
                 }
             )
             objective.validate_against_schema()
-            outcome = run_optimize_loop(
+            scout_spec = load_role_spec("optimize-scout")
+            attempt_spec = load_role_spec("optimize-attempt")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        def execute() -> dict[str, Any]:
+            return run_optimize_loop(
                 objective,
-                load_role_spec("optimize-scout"),
-                load_role_spec("optimize-attempt"),
+                scout_spec,
+                attempt_spec,
                 max_rounds=body.maxRounds,
                 max_approaches=body.maxApproaches,
                 ledger=tools.ledger,
             )
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"objective_id": objective.id, **outcome}
+
+        optimize_jobs[objective.id] = tools._jobs().submit(execute)
+        return {
+            "objective_id": objective.id,
+            "status_url": f"/optimize/{objective.id}",
+        }
+
+    @app.get("/optimize/{objective_id}")
+    def optimize_status(objective_id: str) -> dict[str, Any]:
+        job = optimize_jobs.get(objective_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Unknown job: {objective_id}")
+        if not job.done():
+            return {"objective_id": objective_id, "status": "running"}
+        try:
+            outcome = job.result()
+        except Exception as exc:  # noqa: BLE001 - surface the job's failure
+            return {"objective_id": objective_id, "status": "error", "error": str(exc)}
+        return {"objective_id": objective_id, **outcome}
 
     @app.post("/promotions/approve", dependencies=auth)
     def approve_promotion(candidate: dict[str, Any], baseline: dict[str, Any] | None = None):

@@ -19,6 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .. import ids
+from ..abox.gate import sandbox_slot
 from ..abox.local import _git_init, local_sandbox
 from ..agent_spec import AgentSpec
 from ..bundle import Budget, TaskBundle
@@ -60,9 +61,10 @@ def make_fixture_case_runner(
                 agent_spec=spec,
                 budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
             )
-            outcome = local_sandbox(
-                bundle, offline_driver=offline_driver, workspace_root=workdir
-            )
+            with sandbox_slot():
+                outcome = local_sandbox(
+                    bundle, offline_driver=offline_driver, workspace_root=workdir
+                )
             if outcome.result:
                 result = RunResult.model_validate(outcome.result)
             else:

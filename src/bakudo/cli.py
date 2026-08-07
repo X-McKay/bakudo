@@ -161,6 +161,22 @@ def _cmd_eval_corpus(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Check every configured dependency; exit non-zero if anything fails."""
+    from .doctor import run_checks
+
+    results = run_checks()
+    width = max(len(r.name) for r in results)
+    failed = 0
+    for r in results:
+        marker = {"ok": " ok ", "skip": "skip", "fail": "FAIL"}[r.status]
+        print(f"[{marker}] {r.name:<{width}}  {r.detail}")
+        failed += r.status == "fail"
+    if failed:
+        print(f"\n{failed} check(s) failed.", file=sys.stderr)
+    return 1 if failed else 0
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     """Show the configuration surface: every env var, its value, its meaning."""
     from .config import Settings
@@ -245,6 +261,11 @@ def main(argv: list[str] | None = None) -> int:
         "--limit", type=int, default=None, help="Run only the first N cases."
     )
     p_corpus.set_defaults(func=_cmd_eval_corpus)
+
+    p_doctor = sub.add_parser(
+        "doctor", help="Check every configured dependency (temporal/db/graph/model/abox)."
+    )
+    p_doctor.set_defaults(func=_cmd_doctor)
 
     p_config = sub.add_parser(
         "config", help="Show configuration (all env vars, or one in detail)."

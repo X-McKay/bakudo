@@ -85,13 +85,16 @@ class CompactionInput:
 class ObserveInput:
     """Collect repository signals and emit candidate objectives.
 
-    ``iterations`` counts Continue-As-New rollovers of the observer loop; it
-    lives here because ``continue_as_new`` takes exactly the workflow's run
-    arguments.
+    ``iterations`` counts Continue-As-New rollovers of the observer loop, and
+    ``seen`` carries the (type::title) keys of objectives already emitted so
+    an unchanged repo does not refill the meta-agent backlog every cycle;
+    both live here because ``continue_as_new`` takes exactly the workflow's
+    run arguments.
     """
 
     repo: str
     iterations: int = 0
+    seen: list[str] = field(default_factory=list)
 
 
 @dataclass

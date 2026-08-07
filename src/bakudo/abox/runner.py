@@ -92,9 +92,10 @@ class AboxRunner:
         self._scratch_root = scratch_root
 
     def _write_bundle(self, bundle: TaskBundle, meta_dir: Path) -> None:
+        # bundle.json is the only artifact agent-runner consumes (--bundle);
+        # it already embeds the spec and objective, so writing them separately
+        # would just serialise the same data twice more.
         meta_dir.mkdir(parents=True, exist_ok=True)
-        (meta_dir / "agent.yaml").write_text(bundle.agent_yaml())
-        (meta_dir / "objective.json").write_text(json.dumps(bundle.objective_json(), indent=2))
         (meta_dir / "bundle.json").write_text(
             json.dumps(bundle.model_dump(by_alias=True, mode="json"), indent=2)
         )

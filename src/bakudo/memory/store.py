@@ -1,4 +1,4 @@
-"""Memory stores: an in-memory reference plus a Postgres+Neo4j adapter.
+"""Memory stores: an in-memory reference plus a Postgres+FalkorDB adapter.
 
 The :class:`MemoryStore` protocol is what the control plane depends on. The
 in-memory implementation is used by tests and for control-plane reasoning; the

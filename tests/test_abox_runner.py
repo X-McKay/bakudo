@@ -60,8 +60,10 @@ def test_runner_writes_bundle_and_collects_result():
     runner = AboxRunner(executor=fake_abox)
     outcome = runner.run(_bundle())
 
-    # The task bundle parts were materialised into the mount.
-    assert {"agent.yaml", "bundle.json", "objective.json"} <= set(written["files"])
+    # The bundle was materialised into the mount — once. bundle.json embeds
+    # the spec and objective, so nothing else is written.
+    assert "bundle.json" in written["files"]
+    assert {"agent.yaml", "objective.json"}.isdisjoint(written["files"])
     # The result was collected and surfaced.
     assert outcome.succeeded
     assert outcome.result["status"] == "success"

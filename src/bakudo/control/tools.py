@@ -10,8 +10,10 @@ memory store, and delegates run execution to :func:`run_objective`.
 
 from __future__ import annotations
 
+import concurrent.futures
 from typing import Any
 
+from .. import ids
 from ..agent_spec import AgentSpec, parse_spec
 from ..curriculum import Objective, ObjectiveQueues, QueueName
 from ..evals import Scorecard, decide, evaluate_canary
@@ -38,6 +40,9 @@ class MetaAgentTools:
         self._specs: dict[str, dict[int, AgentSpec]] = {}
         self._objectives: dict[str, Objective] = {}
         self._runs: dict[str, PipelineResult] = {}
+        # Background execution for the async API path (202 + poll).
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._pending: dict[str, concurrent.futures.Future] = {}
 
     # --- objectives ---
     def create_objective(self, objective: dict[str, Any], queue: str = "ready") -> str:
@@ -92,9 +97,41 @@ class MetaAgentTools:
         self._runs[pipeline.run_id] = pipeline
         return pipeline.run_id
 
+    def _jobs(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="bakudo-api-run"
+            )
+        return self._executor
+
+    def spawn_agent_run_async(self, objective_id: str, agent: str) -> str:
+        """Start a run in the background and return its pre-allocated run id.
+
+        The async half of the API's 202-Accepted pattern: the run id is handed
+        out immediately, execution happens on the tools executor, and
+        :meth:`query_agent_run` reports live phase throughout.
+        """
+        objective = self._objectives[objective_id]  # KeyError -> 404 upstream
+        spec = self._resolve_spec(agent)
+        run_id = ids.run_id()
+
+        def execute() -> PipelineResult:
+            pipeline = run_objective(
+                objective, spec, ledger=self.ledger, memory=self.memory, run_id=run_id
+            )
+            self._runs[run_id] = pipeline
+            return pipeline
+
+        self._pending[run_id] = self._jobs().submit(execute)
+        return run_id
+
     def query_agent_run(self, run_id: str) -> dict[str, Any]:
         record = self.ledger.get_run(run_id)
         if record is None:
+            # A just-accepted async run may not have reached the ledger yet.
+            pending = self._pending.get(run_id)
+            if pending is not None and not pending.done():
+                return {"id": run_id, "phase": "created", "scorecard": None}
             raise KeyError(f"Unknown run: {run_id}")
         pipeline = self._runs.get(run_id)
         return {

@@ -2,7 +2,14 @@
 
 **Version:** v0.1 draft  
 **Date:** 2026-06-13  
-**Primary technologies:** abox, Temporal, Strands Agents, vLLM, Postgres, Neo4j, Open Agent Skills, MCP
+**Primary technologies:** abox, Temporal, Strands Agents, vLLM, Postgres, FalkorDB, Open Agent Skills, MCP
+
+> **Technology note (v3.1):** the graph memory store is **FalkorDB** (a
+> Redis-module property graph, queried with Cypher) rather than the Neo4j this
+> spec was originally written against. The graph model, Cypher examples, and
+> §21 carry over unchanged; only the deployment (single Redis-protocol
+> service, `FALKORDB_URL`) and the optional vector-index syntax differ — see
+> `infra/falkordb/README.md`.
 
 ---
 

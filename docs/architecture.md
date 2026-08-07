@@ -28,7 +28,7 @@ repository code. Components:
   policy (§14.5), the in-process `SemanticMemoryStore` (embedding dedup +
   retrieval) and its durable counterpart `PgSemanticMemoryStore` (pgvector
   similarity server-side, auto-wired in the worker from
-  `BAKUDO_POSTGRES_DSN`), and the Neo4j graph adapter with an optional
+  `BAKUDO_POSTGRES_DSN`), and the FalkorDB graph adapter with an optional
   memory-write mirror (§14.2, §21).
 - **Temporal** (`temporal/`) — durable orchestration (see below).
 - **Control API** (`api/`) — the HTTP surface (§25).

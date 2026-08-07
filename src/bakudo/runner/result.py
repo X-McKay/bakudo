@@ -70,16 +70,51 @@ class RunResult(BaseModel):
         validate_result(self.to_dict())
 
 
+def _balanced_object(text: str) -> str | None:
+    """The first balanced ``{...}`` span, tracking strings/escapes.
+
+    A single linear scan — the greedy ``\\{.*\\}`` regex it replaces was
+    quadratic on large model outputs and matched from first ``{`` to *last*
+    ``}`` across unrelated braces.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _extract_json_blob(text: str) -> dict[str, Any] | None:
     """Best-effort recovery of a JSON object embedded in free-form model text."""
-    # Prefer a fenced ```json block, then fall back to the first {...} span.
+    # Prefer a fenced ```json block, then fall back to the first balanced
+    # {...} span.
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     candidates = []
     if fence:
         candidates.append(fence.group(1))
-    brace = re.search(r"\{.*\}", text, re.DOTALL)
-    if brace:
-        candidates.append(brace.group(0))
+    balanced = _balanced_object(text)
+    if balanced:
+        candidates.append(balanced)
     for blob in candidates:
         try:
             parsed = json.loads(blob)

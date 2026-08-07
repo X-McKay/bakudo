@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import yaml
 
 from .. import ids
+from ..abox.gate import sandbox_slot
 from ..abox.select import SandboxFn, resolve_sandbox
 from ..agent_spec import AgentSpec, parse_spec
 from ..bundle import Budget, MemoryExcerpt, TaskBundle
@@ -153,7 +154,10 @@ def resolve_agent_spec(agent: str | None, objective_type: str) -> dict | None:
 
 def run_sandbox(bundle_dict: dict) -> dict:
     bundle = TaskBundle.model_validate(bundle_dict)
-    outcome = enforce_sandbox_budgets(bundle.agent_spec, DEPS.sandbox_fn()(bundle))
+    # Admission-gate the boot: parallel attempt fan-outs queue here instead
+    # of stampeding the microVM host (§3).
+    with sandbox_slot():
+        outcome = enforce_sandbox_budgets(bundle.agent_spec, DEPS.sandbox_fn()(bundle))
     return {
         "run_id": outcome.run_id,
         "abox_task_id": outcome.abox_task_id,

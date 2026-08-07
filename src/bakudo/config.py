@@ -63,20 +63,17 @@ class Settings(BaseModel):
         "Unset = in-memory (dev only).",
         json_schema_extra=_env("BAKUDO_POSTGRES_DSN", secret=True),
     )
-    neo4j_uri: str | None = Field(
+    falkordb_url: str | None = Field(
         default=None,
-        description="Neo4j bolt URI for the optional graph memory mirror.",
-        json_schema_extra=_env("NEO4J_URI"),
+        description="FalkorDB URL (redis://[:password@]host:port) for the "
+        "optional graph memory mirror. May embed credentials, so it is "
+        "masked in display.",
+        json_schema_extra=_env("FALKORDB_URL", secret=True),
     )
-    neo4j_user: str = Field(
-        default="neo4j",
-        description="Neo4j username.",
-        json_schema_extra=_env("NEO4J_USER"),
-    )
-    neo4j_password: str | None = Field(
-        default=None,
-        description="Neo4j password; required when NEO4J_URI is set (never guessed).",
-        json_schema_extra=_env("NEO4J_PASSWORD", secret=True),
+    falkordb_graph: str = Field(
+        default="bakudo",
+        description="FalkorDB graph name the memory mirror writes to.",
+        json_schema_extra=_env("FALKORDB_GRAPH"),
     )
 
     # --- Model gateway ---
@@ -125,6 +122,14 @@ class Settings(BaseModel):
         default=False,
         description="Legacy alias: '1' behaves like BAKUDO_SANDBOX=abox.",
         json_schema_extra=_env("BAKUDO_USE_ABOX"),
+    )
+    sandbox_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        le=64,
+        description="Max concurrent sandbox executions (admission gate). "
+        "Unset = min(16, max(2, cores*2)).",
+        json_schema_extra=_env("BAKUDO_SANDBOX_CONCURRENCY"),
     )
     env: str | None = Field(
         default=None,

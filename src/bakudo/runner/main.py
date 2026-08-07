@@ -24,10 +24,13 @@ from ..agent_spec import load_spec_file
 from ..bundle import Budget, TaskBundle
 from ..curriculum.objective import Objective
 from ..evals.measure import apply_measurements, capture_measurements
+from ..log import bound_run, configure_logging, get_logger
 from ..skills import SkillRegistry
 from ..strands_tools import ToolContext, Workspace
 from .agent import build_and_run
 from .result import normalize_result
+
+log = get_logger(__name__)
 
 
 def _load_bundle(args: argparse.Namespace) -> TaskBundle:
@@ -92,11 +95,22 @@ def run(args: argparse.Namespace) -> int:
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(result.to_dict(), indent=2))
 
-    print(f"[agent-runner] {spec.ref} -> {result.status.value}: {result.summary}")
+    with bound_run(bundle.run_id):
+        log.info(
+            "runner finished",
+            extra={
+                "context": {
+                    "agent": spec.ref,
+                    "status": result.status.value,
+                    "summary": result.summary,
+                }
+            },
+        )
     return 0 if result.status.value != "failed" else 1
 
 
 def cli(argv: list[str] | None = None) -> int:
+    configure_logging()
     parser = argparse.ArgumentParser(prog="agent-runner", description=__doc__)
     parser.add_argument("--bundle", help="Path to a pre-rendered TaskBundle JSON.")
     parser.add_argument("--spec", help="Path to the AgentSpec YAML.")

@@ -26,11 +26,14 @@ from ..agent_spec import AgentSpec
 from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, EvalResult, Scorecard, run_suite
+from ..log import bound_run, get_logger
 from ..memory.retrieval import retrieve_excerpts
 from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
 from ..registry.ledger import Ledger
 from ..runner.result import RunResult, normalize_result
 from ..schema import is_valid
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -165,17 +168,41 @@ def run_objective(
     sandbox: SandboxFn | None = None,
     memory: Any | None = None,
     workflow_id: str | None = None,
+    run_id: str | None = None,
 ) -> PipelineResult:
     """Run one objective with one agent spec, end to end.
 
     Sandbox selection fails closed: without an explicit ``sandbox`` callable,
     :func:`~bakudo.abox.select.resolve_sandbox` requires ``BAKUDO_SANDBOX``
-    (or offline mode) rather than silently running in-process.
+    (or offline mode) rather than silently running in-process. ``run_id`` may
+    be pre-allocated by callers that need to hand it out before the run
+    starts (the async API path).
     """
     ledger = ledger or InMemoryLedger()
     sandbox = resolve_sandbox(sandbox)
-    run_id = ids.run_id()
+    run_id = run_id or ids.run_id()
 
+    with bound_run(run_id):
+        return _run_objective_bound(
+            objective, spec, ledger=ledger, sandbox=sandbox, memory=memory,
+            workflow_id=workflow_id, run_id=run_id,
+        )
+
+
+def _run_objective_bound(
+    objective: Objective,
+    spec: AgentSpec,
+    *,
+    ledger: Ledger,
+    sandbox: SandboxFn,
+    memory: Any | None,
+    workflow_id: str | None,
+    run_id: str,
+) -> PipelineResult:
+    log.info(
+        "run started",
+        extra={"context": {"agent": spec.ref, "objective_id": objective.id}},
+    )
     bundle = build_bundle(objective, spec, run_id=run_id, memory=memory)
 
     ledger.create_run(
@@ -196,6 +223,10 @@ def run_objective(
 
     if not outcome.succeeded or outcome.result is None:
         ledger.finish_run(run_id, RunPhase.failed, outcome.result)
+        log.warning(
+            "run failed",
+            extra={"context": {"exit_code": outcome.exit_code}},
+        )
         return PipelineResult(run_id, RunPhase.failed, None, [], None, outcome)
 
     ledger.set_phase(run_id, RunPhase.evaluating)
@@ -218,6 +249,10 @@ def run_objective(
     )
 
     ledger.finish_run(run_id, RunPhase.completed, outcome.result)
+    log.info(
+        "run completed",
+        extra={"context": {"overall_score": graded.scorecard.overall_score}},
+    )
     return PipelineResult(
         run_id,
         RunPhase.completed,

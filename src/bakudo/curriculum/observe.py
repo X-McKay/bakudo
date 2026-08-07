@@ -151,3 +151,33 @@ def generate_objectives(signals: RepoSignals) -> list[Objective]:
             best[key] = obj
 
     return rank(list(best.values()))
+
+
+def objective_key(objective: dict) -> str:
+    """The cross-cycle identity of an emitted objective document.
+
+    Used by the repo observer to remember what it already sent to the
+    meta-agent — an unchanged repo must not refill the backlog every cycle.
+    """
+    return f"{objective.get('type', '')}::{objective.get('title', '')}"
+
+
+def fresh_objectives(
+    objectives: list[dict], seen: list[str]
+) -> tuple[list[dict], list[str]]:
+    """Split collected objectives against previously-emitted keys.
+
+    Returns ``(new_objectives, updated_seen)``; ordering is deterministic
+    (list-based) so it is safe inside a Temporal workflow replay.
+    """
+    seen_keys = set(seen)
+    updated = list(seen)
+    fresh: list[dict] = []
+    for objective in objectives:
+        key = objective_key(objective)
+        if key in seen_keys:
+            continue
+        fresh.append(objective)
+        seen_keys.add(key)
+        updated.append(key)
+    return fresh, updated

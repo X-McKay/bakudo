@@ -150,6 +150,8 @@ def _warn_offline_once() -> None:
     _offline_warned = True
     import sys
 
+    # Deliberately print rather than log: the CLI does not configure the JSON
+    # logger, and this notice must reach an operator's terminal regardless.
     print(
         "[bakudo] BAKUDO_OFFLINE=1 — no model is invoked; runs return the "
         "offline driver's placeholder result.",

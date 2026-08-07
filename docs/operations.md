@@ -3,7 +3,7 @@
 ## What runs without infrastructure
 
 The control-plane domain logic depends only on the light core deps (`pydantic`,
-`pyyaml`, `jsonschema`). With no Temporal/Postgres/Neo4j/abox/vLLM you can:
+`pyyaml`, `jsonschema`). With no Temporal/Postgres/FalkorDB/abox/vLLM you can:
 
 - validate AgentSpecs (`bakudo validate-spec`),
 - list skills (`bakudo skills`),
@@ -33,7 +33,7 @@ to the local sandbox because the offline driver never invokes a model or tools.
 |---|---|---|
 | Durable orchestration, signals/queries/updates, Continue-As-New | Temporal cluster | `temporal` |
 | Authoritative ledger across processes | Postgres | `db` |
-| Relationship/graph memory queries | Neo4j | `db` |
+| Relationship/graph memory queries | FalkorDB | `db` |
 | Real model inference | vLLM gateway | `runtime` |
 | MicroVM isolation, scoped network, audit logs | abox | (external binary) |
 | HTTP control surface | FastAPI/uvicorn | `api` |
@@ -59,10 +59,27 @@ cd infra && docker compose up -d
 
 The worker connects to Temporal and, if `BAKUDO_POSTGRES_DSN` is set, wires the
 Postgres ledger and the durable `PgSemanticMemoryStore` into the activity layer
-(`temporal/worker.py`); if `NEO4J_URI` is also set, accepted memory writes are
+(`temporal/worker.py`); if `FALKORDB_URL` is also set, accepted memory writes are
 mirrored into the graph. Model traffic is
 routed through the vLLM gateway; bring it up with the `models` compose profile
 once you have hosted vLLM backends configured in `infra/vllm-gateway/config.yaml`.
+
+**`bakudo doctor`** checks each configured dependency (config validity,
+sandbox resolution, abox binary, Temporal, Postgres+pgvector, FalkorDB, the
+model gateway) with 2-second timeouts — unset optional dependencies are
+skips, configured-but-broken ones fail the exit status. Run it first when
+anything misbehaves.
+
+Concurrent sandbox executions pass an **admission gate**
+(`bakudo.abox.gate`, width `min(16, max(2, cores*2))`, override with
+`BAKUDO_SANDBOX_CONCURRENCY`) so attempt fan-outs and corpus runs queue
+instead of stampeding the microVM host.
+
+Every process logs **structured JSON lines** to stderr (`bakudo.log`), with
+the canonical run id attached to records inside a run — the log stream is
+parseable analytics substrate, not prose. The API's `POST /runs` and
+`POST /optimize` return **202 Accepted** with a status URL and execute in the
+background; poll `GET /runs/{id}` / `GET /optimize/{objective_id}`.
 
 ## Observability (spec §18)
 
@@ -132,8 +149,8 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
   production submits the Temporal workflow via
   `temporal.client.start_optimization`;
 - **durable semantic memory** — `PgSemanticMemoryStore` over pgvector,
-  auto-wired in the worker from `BAKUDO_POSTGRES_DSN`, with an optional Neo4j
-  graph mirror from `NEO4J_URI`/`NEO4J_PASSWORD`;
+  auto-wired in the worker from `BAKUDO_POSTGRES_DSN`, with an optional FalkorDB
+  graph mirror from `FALKORDB_URL`;
 - budget enforcement, observability counters, and API auth.
 
 Remaining work: curating eval corpora from real historical failures — the

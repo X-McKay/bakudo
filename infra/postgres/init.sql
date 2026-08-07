@@ -133,16 +133,20 @@ create table if not exists memory_items (
   created_at timestamptz not null default now()
 );
 
--- Embedding search support (PgSemanticMemoryStore). The column is
--- dimension-agnostic so the embedder is swappable (the default
--- HashingEmbedder emits 256 dims); once a production embedder is fixed,
--- retype to vector(<dim>) and add an HNSW index for scale:
+-- Embedding search support (PgSemanticMemoryStore). Typed to the default
+-- HashingEmbedder's 256 dims so the HNSW index below applies; a different
+-- embedder needs a matching retype:
 --   alter table memory_embeddings alter column embedding type vector(<dim>);
---   create index on memory_embeddings using hnsw (embedding vector_cosine_ops);
 create table if not exists memory_embeddings (
   memory_id text references memory_items(id) on delete cascade,
-  embedding vector not null
+  embedding vector(256) not null
 );
+-- Without this every <=> similarity query is a sequential scan.
+create index if not exists memory_embeddings_hnsw
+  on memory_embeddings using hnsw (embedding vector_cosine_ops);
+-- The write policy's exact-repeat check predicates on lower(trim(content)).
+create index if not exists memory_items_content_key
+  on memory_items (lower(trim(content)));
 
 create table if not exists promotion_decisions (
   id uuid primary key default gen_random_uuid(),

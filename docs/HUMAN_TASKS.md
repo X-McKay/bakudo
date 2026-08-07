@@ -38,7 +38,7 @@ cd infra && docker compose up -d
 
 - [ ] **Postgres** reachable; `infra/postgres/init.sql` applied (the ledger
       tables exist). Set `BAKUDO_POSTGRES_DSN`.
-- [ ] **Neo4j** reachable; `infra/neo4j/init.cypher` applied (constraints exist).
+- [ ] **FalkorDB** reachable (`redis-cli ping`); optional constraints/vector index per `infra/falkordb/README.md`.
 - [ ] **Temporal** cluster reachable at `TEMPORAL_ADDRESS`; namespace created.
 - [ ] **Acceptance:** `bakudo-worker` connects and serves the task queues; the
       Temporal UI lists the worker.
@@ -68,9 +68,12 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 - [ ] Install the `abox` binary on the worker host (see
       https://github.com/X-McKay/abox).
 - [ ] Set `BAKUDO_SANDBOX=abox` (never `local` outside `BAKUDO_ENV=dev`).
-- [ ] Define the abox sandbox profiles named in `abox/runner.py::PROFILES`
-      (`explore-readonly`, `add-feature-python`, `optimize-python`, …) with the network bundles
-      (`github-api`, `pypi-public`, `vllm-gateway`) and resource/diff limits.
+- [ ] Define the abox sandbox templates named by the seed specs'
+      `sandbox.profile` (`explore-readonly`, `add-feature-python`,
+      `optimize-python`, …) with the network bundles (`github-api`,
+      `pypi-public`, `vllm-gateway`) and resource limits. Per-spec diff
+      budgets are enforced by bakudo itself
+      (`control/pipeline.enforce_sandbox_budgets`).
 - [ ] Validate the real `abox run` flags against
       `AboxRunner.build_command` (the contract test pins the shape; confirm the
       installed abox CLI accepts `--task/--base/--branch/--timeout/--template/
@@ -133,16 +136,16 @@ replace/extend those with real history as it accumulates.
 The durable store is implemented: `PgSemanticMemoryStore`
 (`src/bakudo/memory/store_pg.py`) persists memories in `memory_items` +
 `memory_embeddings` with server-side pgvector similarity, and the worker wires
-it automatically whenever `BAKUDO_POSTGRES_DSN` is set (with a Neo4j graph
-mirror when `NEO4J_URI`/`NEO4J_PASSWORD` are set). What remains is judgement:
+it automatically whenever `BAKUDO_POSTGRES_DSN` is set (with a FalkorDB graph
+mirror when `FALKORDB_URL` is set). What remains is judgement:
 
 - [ ] Decide repo-scoped vs org-wide memory (spec open question §28.10) —
       writes are currently scoped `{"repo": ...}` by compaction.
 - [ ] Once a production embedder is fixed (the default `HashingEmbedder` is
       256-dim and lexical), retype `memory_embeddings.embedding` to
       `vector(<dim>)` and add the HNSW index (see the comment in
-      `infra/postgres/init.sql`), and optionally enable the Neo4j vector index
-      in `infra/neo4j/init.cypher` with matching dimensions.
+      `infra/postgres/init.sql`), and optionally enable the FalkorDB vector index
+      per `infra/falkordb/README.md` with matching dimensions.
 - [ ] **Acceptance:** memories written by one run are retrievable by a later
       run (semantic `query-memory` returns them across processes).
 

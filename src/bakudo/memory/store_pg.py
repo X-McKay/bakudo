@@ -7,10 +7,10 @@ embedding-based dedup/retrieval, but persisted in the ``memory_items`` +
 later runs across processes. Similarity runs server-side via the pgvector
 ``<=>`` (cosine distance) operator; the DDL lives in ``infra/postgres/init.sql``.
 
-An optional :class:`~bakudo.memory.graph.Neo4jGraphMemory` mirror receives a
+An optional :class:`~bakudo.memory.graph.FalkorGraphMemory` mirror receives a
 ``PRODUCED_MEMORY`` edge (with the embedding attached) for every accepted
-write, which is what the commented Neo4j vector index in
-``infra/neo4j/init.cypher`` indexes when an operator enables it.
+write, which is what the optional FalkorDB vector index in
+``infra/falkordb/README.md`` indexes when an operator enables it.
 
 ``psycopg`` is imported lazily so the rest of bakudo imports without the ``db``
 extra, mirroring :class:`~bakudo.registry.postgres_ledger.PostgresLedger`.
@@ -23,7 +23,7 @@ import re
 from typing import Any
 
 from .embeddings import Embedder, HashingEmbedder
-from .graph import Neo4jGraphMemory
+from .graph import FalkorGraphMemory
 from .models import MemoryItem
 from .policy import MemoryRejected, validate_memory_candidate
 from .semantic import DEFAULT_DEDUP_THRESHOLD
@@ -61,7 +61,7 @@ class PgSemanticMemoryStore:
         *,
         embedder: Embedder | None = None,
         dedup_threshold: float = DEFAULT_DEDUP_THRESHOLD,
-        graph: Neo4jGraphMemory | None = None,
+        graph: FalkorGraphMemory | None = None,
     ) -> None:
         self._conn = conn
         self.embedder = embedder or HashingEmbedder()
@@ -76,7 +76,7 @@ class PgSemanticMemoryStore:
         *,
         embedder: Embedder | None = None,
         dedup_threshold: float = DEFAULT_DEDUP_THRESHOLD,
-        graph: Neo4jGraphMemory | None = None,
+        graph: FalkorGraphMemory | None = None,
         **kwargs: Any,
     ) -> PgSemanticMemoryStore:
         import psycopg  # lazy
@@ -131,12 +131,20 @@ class PgSemanticMemoryStore:
             return [self._item_from_row(row) for row in rows]
 
         q = vector_literal(self.embedder.embed(text))
+        # min_similarity filters server-side BEFORE the limit — otherwise the
+        # limit truncates first and the filter silently under-fills the
+        # result. The client-side check stays as a belt over fakes/older rows.
+        sim_clause = (
+            (" and " if where else " where ")
+            + "1 - (e.embedding <=> %s::vector) >= %s"
+        )
         rows = self._all_rows(
             f"select {_ITEM_COLUMNS}, 1 - (e.embedding <=> %s::vector) as similarity "
             "from memory_items "
-            f"join memory_embeddings e on e.memory_id = memory_items.id{where} "
+            f"join memory_embeddings e on e.memory_id = memory_items.id{where}"
+            f"{sim_clause} "
             "order by e.embedding <=> %s::vector limit %s",
-            (q, *params, q, limit),
+            (q, *params, q, min_similarity, q, limit),
         )
         return [
             self._item_from_row(row)
@@ -144,9 +152,12 @@ class PgSemanticMemoryStore:
             if float(row[-1]) >= min_similarity
         ]
 
-    def all(self) -> list[MemoryItem]:
+    def all(self, *, limit: int = 1000) -> list[MemoryItem]:
+        """Every stored item, oldest first, bounded (an unbounded scan over a
+        production memory store is an operator footgun)."""
         rows = self._all_rows(
-            f"select {_ITEM_COLUMNS} from memory_items order by created_at", ()
+            f"select {_ITEM_COLUMNS} from memory_items order by created_at limit %s",
+            (limit,),
         )
         return [self._item_from_row(row) for row in rows]
 

@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .agent_spec import AgentSpec, dump_yaml
+from .agent_spec import AgentSpec
 from .curriculum.objective import Objective
 
 
@@ -54,12 +54,6 @@ class TaskBundle(BaseModel):
     @property
     def allowed_skills(self) -> list[str]:
         return list(self.agent_spec.skills)
-
-    def agent_yaml(self) -> str:
-        return dump_yaml(self.agent_spec)
-
-    def objective_json(self) -> dict[str, Any]:
-        return self.objective.to_dict()
 
     def memory_query(self, query: str) -> list[dict[str, Any]]:
         """Retrieve from the excerpts pre-loaded into this bundle.

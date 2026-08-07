@@ -24,6 +24,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from ..control.optimize import drive_optimize
+    from ..curriculum.observe import fresh_objectives
     from .activities import (
         collect_signals,
         compact_memories,
@@ -427,16 +428,30 @@ class RepoObserverWorkflow:
     history.
     """
 
+    # Objective keys remembered across Continue-As-New; bounds the carried
+    # argument while covering far more objectives than one repo emits.
+    _SEEN_CAP = 512
+
     @workflow.run
     async def run(self, inp: ObserveInput) -> None:
         objectives = await workflow.execute_activity(collect_signals, inp, **_SHORT)
+
+        # Signal only objectives not emitted in previous cycles — an
+        # unchanged repo must not refill the backlog every 15 minutes.
+        fresh, seen = fresh_objectives(objectives, inp.seen)
         meta = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
-        for objective in objectives:
+        for objective in fresh:
             await meta.signal("new_objective", objective)
 
         # Poll on an interval; cap iterations per execution to keep history
-        # small. The counter rides on the input (continue_as_new takes exactly
-        # the workflow's run arguments) and resets when it rolls over.
+        # small. The counter and seen-set ride on the input (continue_as_new
+        # takes exactly the workflow's run arguments).
         await workflow.sleep(timedelta(minutes=15))
         next_iterations = 0 if inp.iterations >= 32 else inp.iterations + 1
-        workflow.continue_as_new(ObserveInput(repo=inp.repo, iterations=next_iterations))
+        workflow.continue_as_new(
+            ObserveInput(
+                repo=inp.repo,
+                iterations=next_iterations,
+                seen=seen[-self._SEEN_CAP:],
+            )
+        )
