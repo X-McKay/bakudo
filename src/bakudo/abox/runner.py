@@ -36,56 +36,11 @@ class ExecResult:
     stderr: str = ""
 
 
-@dataclass(frozen=True)
-class SandboxProfile:
-    """An abox sandbox policy profile (spec section 6.4)."""
-
-    name: str
-    network_mode: str = "scoped"
-    network_bundles: tuple[str, ...] = ()
-    allowed_commands: tuple[str, ...] = ()
-    max_changed_files: int | None = None
-    max_diff_bytes: int | None = None
-    can_merge: bool = False
-    ephemeral: bool = True
-    max_runtime_seconds: int = 3600
-
-
-# The starter profiles named in the spec (section 6.4).
-PROFILES: dict[str, SandboxProfile] = {
-    "explore-readonly": SandboxProfile(
-        name="explore-readonly", network_mode="none", can_merge=False, ephemeral=True
-    ),
-    "add-feature-python": SandboxProfile(
-        name="add-feature-python",
-        network_bundles=("github-api", "pypi-public", "vllm-gateway"),
-        max_changed_files=20,
-        can_merge=False,
-        ephemeral=False,
-    ),
-    "qa-candidate-branch": SandboxProfile(
-        name="qa-candidate-branch",
-        network_bundles=("vllm-gateway",),
-        can_merge=False,
-        ephemeral=False,
-    ),
-    "skill-author": SandboxProfile(
-        name="skill-author",
-        network_bundles=("vllm-gateway",),
-        can_merge=False,
-        ephemeral=False,
-    ),
-    "restricted-network": SandboxProfile(
-        name="restricted-network", network_mode="none", ephemeral=True
-    ),
-    "optimize-python": SandboxProfile(
-        name="optimize-python",
-        network_bundles=("pypi-public", "vllm-gateway"),
-        max_changed_files=10,
-        can_merge=False,
-        ephemeral=False,
-    ),
-}
+# Sandbox policy profiles (spec section 6.4) are defined and enforced by abox
+# itself: the spec's ``sandbox.profile`` string is passed straight through as
+# the abox template (see build_command). bakudo enforces the per-spec budgets
+# (maxChangedFiles/maxDiffBytes) at result collection instead — see
+# bakudo.control.pipeline.enforce_sandbox_budgets.
 
 
 @dataclass

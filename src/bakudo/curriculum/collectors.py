@@ -16,7 +16,6 @@ collector lazily imports ``httpx`` and is constructed from env in
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import xml.etree.ElementTree as ET
@@ -194,15 +193,18 @@ def build_default_collector(repo: str) -> SignalCollector | None:
     Returns ``None`` when nothing is configured (the observer then emits no
     objectives rather than guessing).
     """
+    from ..config import Settings
+
+    settings = Settings.from_env()
     collectors: list[SignalCollector] = []
-    if repo_path := os.environ.get("BAKUDO_REPO_PATH"):
-        collectors.append(TodoCollector(repo_path))
-    if coverage := os.environ.get("BAKUDO_COVERAGE_XML"):
-        collectors.append(CoverageXmlCollector(coverage))
-    if junit := os.environ.get("BAKUDO_JUNIT_XML"):
-        collectors.append(JUnitCollector(junit))
-    if (token := os.environ.get("GITHUB_TOKEN")) and "/" in repo:
-        collectors.append(GitHubIssuesCollector(repo, token))
+    if settings.repo_path:
+        collectors.append(TodoCollector(settings.repo_path))
+    if settings.coverage_xml:
+        collectors.append(CoverageXmlCollector(settings.coverage_xml))
+    if settings.junit_xml:
+        collectors.append(JUnitCollector(settings.junit_xml))
+    if settings.github_token and "/" in repo:
+        collectors.append(GitHubIssuesCollector(repo, settings.github_token))
 
     if not collectors:
         return None

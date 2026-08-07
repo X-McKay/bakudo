@@ -1,5 +1,5 @@
 """abox integration: the isolation/execution substrate for worker agents (spec section 6)."""
 
-from .runner import PROFILES, AboxOutcome, AboxRunner, SandboxProfile
+from .runner import AboxOutcome, AboxRunner
 
-__all__ = ["AboxRunner", "AboxOutcome", "SandboxProfile", "PROFILES"]
+__all__ = ["AboxRunner", "AboxOutcome"]

@@ -8,7 +8,6 @@ available the critic abstains (passes with a note) rather than blocking.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Callable
 
 from .checks import EvalContext
@@ -63,11 +62,12 @@ def llm_judge(model_id: str, base_url_ref: str | None = None) -> Judge:
     """Build a vLLM-backed judge (OpenAI-compatible). Requires the runtime extra."""
     from openai import OpenAI  # lazy
 
+    from ..config import Settings
     from ..runner.agent import _resolve_base_url
 
     client = OpenAI(
         base_url=_resolve_base_url(base_url_ref),
-        api_key=os.environ.get("VLLM_API_KEY", "not-needed"),
+        api_key=Settings.from_env().vllm_api_key or "not-needed",
     )
 
     def _judge(prompt: str) -> dict:

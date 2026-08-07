@@ -121,6 +121,33 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_config(args: argparse.Namespace) -> int:
+    """Show the configuration surface: every env var, its value, its meaning."""
+    from .config import Settings
+
+    settings = Settings.from_env()
+    rows = Settings.describe()
+
+    if args.key:
+        wanted = args.key.strip()
+        matches = [r for r in rows if wanted in (r["env"], r["field"])]
+        if not matches:
+            known = ", ".join(r["env"] for r in rows)
+            print(f"Unknown setting {wanted!r}. Known: {known}", file=sys.stderr)
+            return 1
+        for r in matches:
+            print(f"{r['env']} ({r['field']})")
+            print(f"  current : {settings.display_value(r['field'])}")
+            print(f"  default : {r['default']!r}")
+            print(f"  {r['description']}")
+        return 0
+
+    width = max(len(r["env"]) for r in rows)
+    for r in rows:
+        print(f"{r['env']:<{width}}  {settings.display_value(r['field'])}")
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:  # pragma: no cover - entrypoint
     from .api.server import main as serve
 
@@ -162,11 +189,23 @@ def main(argv: list[str] | None = None) -> int:
     p_opt.add_argument("--attempt-spec", default=None, help="Override optimize-attempt spec path.")
     p_opt.set_defaults(func=_cmd_optimize)
 
+    p_config = sub.add_parser(
+        "config", help="Show configuration (all env vars, or one in detail)."
+    )
+    p_config.add_argument(
+        "key", nargs="?", default=None,
+        help="Env var or field name to describe (omit to list everything).",
+    )
+    p_config.set_defaults(func=_cmd_config)
+
     p_serve = sub.add_parser("serve", help="Run the control API.")
     p_serve.set_defaults(func=_cmd_serve)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except BrokenPipeError:  # e.g. `bakudo config | head` closing the pipe
+        return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

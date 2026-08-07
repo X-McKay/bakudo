@@ -7,11 +7,11 @@ the durable :class:`MetaAgentWorkflow` via :mod:`bakudo.temporal.client`.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from pydantic import BaseModel
 
+from ..config import Settings
 from ..control import MetaAgentTools
 
 
@@ -47,7 +47,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 
     # Optional bearer-token auth on mutating routes. When BAKUDO_API_TOKEN is
     # unset, auth is disabled (dev only); set it in any shared environment.
-    api_token = os.environ.get("BAKUDO_API_TOKEN")
+    api_token = Settings.from_env().api_token
 
     def require_auth(authorization: str | None = Header(default=None)) -> None:
         if not api_token:
@@ -151,8 +151,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     @app.get("/promotions/pending")
     def pending_promotions() -> list[dict[str, Any]]:
         """Promotion decisions awaiting a human gate (spec sections 19.2, 26)."""
-        promotions: list = getattr(tools.ledger, "promotions", lambda: [])()
-        return [p.to_dict() for p in promotions if p.requires_human]
+        return [p.to_dict() for p in tools.ledger.promotions() if p.requires_human]
 
     @app.get("/status")
     def status() -> dict[str, Any]:
@@ -164,6 +163,5 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 def main() -> None:  # pragma: no cover - entrypoint
     import uvicorn
 
-    host = os.environ.get("BAKUDO_API_HOST", "127.0.0.1")
-    port = int(os.environ.get("BAKUDO_API_PORT", "8000"))
-    uvicorn.run(build_app(), host=host, port=port)
+    settings = Settings.from_env()
+    uvicorn.run(build_app(), host=settings.api_host, port=settings.api_port)

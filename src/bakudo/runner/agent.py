@@ -32,8 +32,10 @@ def build_model(spec: AgentSpec) -> Any:
     """
     from strands.models.openai import OpenAIModel  # type: ignore
 
+    from ..config import Settings
+
     base_url = _resolve_base_url(spec.model.base_url_ref)
-    api_key = os.environ.get("VLLM_API_KEY", "not-needed")
+    api_key = Settings.from_env().vllm_api_key or "not-needed"
     return OpenAIModel(
         client_args={"base_url": base_url, "api_key": api_key},
         model_id=spec.model.model_id,
@@ -45,16 +47,33 @@ def build_model(spec: AgentSpec) -> Any:
 
 
 def _resolve_base_url(base_url_ref: str | None) -> str:
-    """Resolve a provider reference to a concrete base URL.
+    """Resolve a provider reference to a concrete base URL, failing loudly.
 
-    Looks up ``BAKUDO_VLLM_<REF>`` (ref upper-cased, non-alphanumerics to ``_``),
-    then falls back to ``VLLM_BASE_URL``, then the internal gateway default.
+    Looks up ``BAKUDO_VLLM_<REF>`` (ref upper-cased, non-alphanumerics to
+    ``_``), then falls back to ``VLLM_BASE_URL``. There is deliberately no
+    hardcoded default: a run against a phantom gateway host is a debugging
+    trap, so an unconfigured gateway is a startup error instead.
     """
-    default = os.environ.get("VLLM_BASE_URL", "https://vllm-gateway.internal/v1")
-    if not base_url_ref:
+    from ..config import Settings
+
+    key = None
+    if base_url_ref:
+        key = (
+            "BAKUDO_VLLM_"
+            + "".join(c if c.isalnum() else "_" for c in base_url_ref).upper()
+        )
+        ref_url = os.environ.get(key)
+        if ref_url:
+            return ref_url
+
+    default = Settings.from_env().vllm_base_url
+    if default:
         return default
-    key = "BAKUDO_VLLM_" + "".join(c if c.isalnum() else "_" for c in base_url_ref).upper()
-    return os.environ.get(key, default)
+    raise RuntimeError(
+        "No model gateway configured: set VLLM_BASE_URL"
+        + (f" or {key}" if key else "")
+        + " (or run offline with BAKUDO_OFFLINE=1)."
+    )
 
 
 def to_strands_tools(callables: dict[str, Callable[..., Any]]) -> list[Any]:
@@ -91,6 +110,7 @@ def build_and_run(
     )
 
     if offline_driver is None and os.environ.get("BAKUDO_OFFLINE") == "1":
+        _warn_offline_once()
         offline_driver = _default_offline_driver
 
     try:
@@ -117,6 +137,24 @@ def build_and_run(
                 "blocked_reasons": [f"budget:{exc.reason}"],
             }
         )
+
+
+_offline_warned = False
+
+
+def _warn_offline_once() -> None:
+    """Make the offline fallback visible instead of silently faking results."""
+    global _offline_warned
+    if _offline_warned:
+        return
+    _offline_warned = True
+    import sys
+
+    print(
+        "[bakudo] BAKUDO_OFFLINE=1 — no model is invoked; runs return the "
+        "offline driver's placeholder result.",
+        file=sys.stderr,
+    )
 
 
 def _capture_usage(ctx: ToolContext, response: Any) -> None:

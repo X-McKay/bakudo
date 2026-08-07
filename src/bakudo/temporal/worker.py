@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import os
 
 
 async def _run() -> None:
     from temporalio.client import Client
     from temporalio.worker import Worker
 
+    from ..config import Settings
     from . import _impl
     from .activities import ALL_ACTIVITIES
     from .shared import TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS
@@ -28,36 +28,35 @@ async def _run() -> None:
         RepoObserverWorkflow,
     )
 
+    settings = Settings.from_env()
+
     # Wire the durable ledger + memory if a DSN is configured (otherwise
     # in-memory). The Neo4j graph mirror rides along when NEO4J_URI is set.
-    dsn = os.environ.get("BAKUDO_POSTGRES_DSN")
-    if dsn:
+    if settings.postgres_dsn:
         from ..memory.store_pg import PgSemanticMemoryStore
         from ..registry.postgres_ledger import PostgresLedger
 
         graph = None
-        neo4j_uri = os.environ.get("NEO4J_URI")
-        if neo4j_uri:
+        if settings.neo4j_uri:
             from ..memory.graph import Neo4jGraphMemory
 
-            password = os.environ.get("NEO4J_PASSWORD")
-            if not password:
+            if not settings.neo4j_password:
                 raise RuntimeError(
                     "NEO4J_URI is set but NEO4J_PASSWORD is not; refusing to "
                     "guess credentials for the graph memory mirror."
                 )
             graph = Neo4jGraphMemory.connect(
-                neo4j_uri, os.environ.get("NEO4J_USER", "neo4j"), password
+                settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password
             )
 
         _impl.configure(
-            ledger=PostgresLedger.connect(dsn),
-            memory=PgSemanticMemoryStore.connect(dsn, graph=graph),
+            ledger=PostgresLedger.connect(settings.postgres_dsn),
+            memory=PgSemanticMemoryStore.connect(settings.postgres_dsn, graph=graph),
         )
 
-    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
-    client = await Client.connect(address, namespace=namespace)
+    client = await Client.connect(
+        settings.temporal_address, namespace=settings.temporal_namespace
+    )
 
     # Every registered workflow, including the evolution, compaction, and
     # observer workflows — unregistered they are unreachable dead code.
@@ -81,7 +80,7 @@ async def _run() -> None:
     # Activities are synchronous (they block on subprocesses and DB drivers),
     # so the SDK dispatches them to this executor instead of the event loop.
     activity_executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=int(os.environ.get("BAKUDO_ACTIVITY_THREADS", "8")),
+        max_workers=settings.activity_threads,
         thread_name_prefix="bakudo-activity",
     )
 
@@ -99,7 +98,10 @@ async def _run() -> None:
         activities=ALL_ACTIVITIES,
         activity_executor=activity_executor,
     )
-    print(f"[bakudo-worker] serving {TASK_QUEUE_CONTROL} + {TASK_QUEUE_RUNS} at {address}")
+    print(
+        f"[bakudo-worker] serving {TASK_QUEUE_CONTROL} + {TASK_QUEUE_RUNS} "
+        f"at {settings.temporal_address}"
+    )
     await asyncio.gather(control.run(), runs.run())
 
 

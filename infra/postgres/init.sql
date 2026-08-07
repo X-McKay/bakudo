@@ -1,6 +1,14 @@
 -- bakudo authoritative ledger (spec sections 14.1 and 20).
 -- Postgres is the source of truth for agent specs, objectives, runs, the run
 -- event log, eval results, memories, and promotion decisions.
+--
+-- Table status: agent_spec_versions, runs, run_events, eval_results,
+-- memory_items, memory_embeddings, and promotion_decisions are read/written
+-- by PostgresLedger / PgSemanticMemoryStore today. The remaining tables
+-- (agent_specs, objectives, run_artifacts, eval_suites, eval_cases, skills,
+-- skill_versions, outbox) are FORWARD-LOOKING: they implement spec section 20
+-- ahead of the code that will use them, and no current code path touches
+-- them. Grep for the table name before assuming a table is populated.
 
 create extension if not exists "pgcrypto";   -- gen_random_uuid()
 -- pgvector for embedding search (spec section 14.1); the compose image is

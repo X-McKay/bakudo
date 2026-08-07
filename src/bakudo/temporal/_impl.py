@@ -15,21 +15,21 @@ from .. import ids
 from ..abox.select import SandboxFn, resolve_sandbox
 from ..agent_spec import AgentSpec, parse_spec
 from ..bundle import Budget, MemoryExcerpt, TaskBundle
+from ..control.pipeline import build_bundle, enforce_sandbox_budgets, grade_run
 from ..curriculum import build_default_collector, generate_objectives
 from ..curriculum.collectors import SignalCollector
 from ..curriculum.objective import Objective
-from ..evals import EvalContext, Scorecard, decide, run_suite
+from ..evals import Scorecard, decide
 from ..evals.corpus import CaseRun, load_corpus
 from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy
 from ..memory.compaction import compact
-from ..memory.retrieval import retrieve_excerpts
 from ..memory.semantic import SemanticMemoryStore
+from ..memory.store import MemoryStore
 from ..paths import agents_dir
 from ..registry import InMemoryLedger, RunPhase, RunRecord
 from ..registry.ledger import Ledger
-from ..runner.result import RunResult, RunStatus, normalize_result
-from ..schema import is_valid
+from ..runner.result import RunResult, RunStatus
 from .shared import (
     AgentRunInput,
     CompactionInput,
@@ -42,11 +42,16 @@ from .shared import (
 
 @dataclass
 class Deps:
-    """Injectable dependencies for the activity implementations."""
+    """Injectable dependencies for the activity implementations.
+
+    This is the worker-level injection seam: :func:`configure` wires the real
+    ledger/memory/sandbox at process start, tests swap fields directly. All
+    fields are typed against their Protocols — no duck-typing downstream.
+    """
 
     ledger: Ledger = field(default_factory=InMemoryLedger)
     sandbox: SandboxFn | None = None
-    memory: object = field(default_factory=SemanticMemoryStore)
+    memory: MemoryStore = field(default_factory=SemanticMemoryStore)
     collector: SignalCollector | None = None
 
     def sandbox_fn(self) -> SandboxFn:
@@ -65,7 +70,7 @@ def configure(
     *,
     ledger: Ledger | None = None,
     sandbox: SandboxFn | None = None,
-    memory: object | None = None,
+    memory: MemoryStore | None = None,
     collector: SignalCollector | None = None,
 ) -> None:
     """Inject real dependencies (called by the worker entrypoint)."""
@@ -79,18 +84,6 @@ def configure(
         DEPS.collector = collector
 
 
-def _bundle_from_input(inp: AgentRunInput) -> TaskBundle:
-    return TaskBundle(
-        run_id=inp.run_id,
-        objective_id=inp.objective["id"],
-        objective=Objective.model_validate(inp.objective),
-        agent_spec=parse_spec(inp.agent_spec),
-        memory_excerpts=[MemoryExcerpt.model_validate(m) for m in inp.memory_excerpts],
-        eval_rubric=inp.eval_rubric,
-        budget=Budget(timeoutSeconds=inp.timeout_seconds),
-    )
-
-
 def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
     """Create the run ledger record (called once at workflow start)."""
     meta = inp.agent_spec["metadata"]
@@ -102,18 +95,20 @@ def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
         agent_ref=f"{meta['name']}@{meta['version']}",
         git_branch=ids.git_branch_for(inp.run_id),
     )
-    ledger = DEPS.ledger
-    if hasattr(ledger, "create_run"):
-        ledger.create_run(record)
+    DEPS.ledger.create_run(record)
     return {"run_id": record.id, "git_branch": record.git_branch}
 
 
 def render_bundle(inp: AgentRunInput) -> dict:
-    bundle = _bundle_from_input(inp)
-    if not bundle.memory_excerpts:
-        # The memory read path: ship the relevant memories with the bundle so
-        # the sandboxed worker's query-memory tool has something to search.
-        bundle.memory_excerpts = retrieve_excerpts(DEPS.memory, bundle.objective)
+    """Render the task bundle via the shared pipeline core (memory included)."""
+    bundle = build_bundle(
+        Objective.model_validate(inp.objective),
+        parse_spec(inp.agent_spec),
+        run_id=inp.run_id,
+        memory=DEPS.memory,
+        memory_excerpts=[MemoryExcerpt.model_validate(m) for m in inp.memory_excerpts],
+        timeout_seconds=inp.timeout_seconds,
+    )
     return bundle.model_dump(by_alias=True, mode="json")
 
 
@@ -158,7 +153,7 @@ def resolve_agent_spec(agent: str | None, objective_type: str) -> dict | None:
 
 def run_sandbox(bundle_dict: dict) -> dict:
     bundle = TaskBundle.model_validate(bundle_dict)
-    outcome = DEPS.sandbox_fn()(bundle)
+    outcome = enforce_sandbox_budgets(bundle.agent_spec, DEPS.sandbox_fn()(bundle))
     return {
         "run_id": outcome.run_id,
         "abox_task_id": outcome.abox_task_id,
@@ -194,36 +189,21 @@ def persist_run(run_id: str, phase: str, payload: dict) -> None:
 
 
 def run_eval_suite(inp: EvalInput) -> dict:
-    objective = Objective.model_validate(inp.objective)
-    # Grade the *raw* worker output against the JSON Schema — the schema gate
-    # must be able to fail. Normalisation below is deliberately forgiving so
-    # the rest of the suite still runs on a malformed result.
-    schema_valid = inp.schema_valid and is_valid(inp.result, "result.schema.json")
-    result = normalize_result(
+    """Grade one run via the shared pipeline core (single EvalContext site)."""
+    graded = grade_run(
+        Objective.model_validate(inp.objective),
         inp.result,
+        ledger=DEPS.ledger,
         run_id=inp.run_id,
-        agent=str(inp.result.get("agent") or "unknown"),
-        objective_id=objective.id,
-    )
-    ctx = EvalContext(
-        result=result,
-        objective=objective,
         diff=inp.diff,
         denied_commands=inp.denied_commands,
         runtime_seconds=inp.runtime_seconds,
         tokens_used=inp.tokens_used,
-        schema_valid=schema_valid,
+        schema_valid_hint=inp.schema_valid,
     )
-    # Suite selection keys off the objective: optimize runs add perf/simplicity.
-    results = run_suite(ctx)
-    scorecard = Scorecard.from_results(results)
-    record_eval = getattr(DEPS.ledger, "record_eval", None)
-    if callable(record_eval):
-        for r in results:
-            record_eval(r)
     return {
-        "eval_results": [r.to_dict() for r in results],
-        "scorecard": scorecard.model_dump(mode="json"),
+        "eval_results": [r.to_dict() for r in graded.eval_results],
+        "scorecard": graded.scorecard.model_dump(mode="json"),
     }
 
 
@@ -266,9 +246,7 @@ def run_agent_evolution(inp: EvolutionInput) -> dict:
     _, cases = load_corpus(inp.corpus_path)
     outcome = evolve_agent(baseline, candidate, cases, _run_case)
 
-    record_promotion = getattr(DEPS.ledger, "record_promotion", None)
-    if callable(record_promotion):
-        record_promotion(outcome.decision)
+    DEPS.ledger.record_promotion(outcome.decision)
     return {
         "decision": outcome.decision.to_dict(),
         "baseline_scorecard": outcome.baseline.model_dump(mode="json"),

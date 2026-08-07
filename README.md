@@ -144,6 +144,29 @@ make manufactured churn unpromotable.
 See [docs/spec.md](docs/spec.md) for the full design and [docs/operations.md](docs/operations.md)
 for what is wired end-to-end versus what needs live infrastructure.
 
+## What bakudo deliberately doesn't do yet
+
+Declared scope beats silent half-features. Each of these is specified (or
+schema-visible) but intentionally unwired until something real consumes it:
+
+- **MCP servers** — `AgentSpec.mcpServers` validates against the schema but no
+  MCP client is started for the worker. Wiring lands with the first role that
+  needs an external tool surface beyond scoped tools + skills.
+- **Worker-initiated merges** — `sandbox.canMerge` is reserved; no merge
+  machinery exists, so a worker can never merge regardless of the flag.
+  Winning optimize branches are merged by the operator (or a future
+  release-manager role) after review.
+- **Canary run scheduling** — promotion decisions advance through canary via
+  `evaluate_canary()` on observed scorecards, but nothing routes a percentage
+  of live traffic to canaried versions automatically yet.
+- **Graph queries** — Neo4j mirrors memory writes; the richer run/skill graph
+  queries from spec §14.2 wait until the curriculum actually reads them.
+- **Half the DDL** — several Postgres tables implement spec §20 ahead of the
+  code that will use them; `infra/postgres/init.sql` labels which.
+- **LLM critic in the default suite** — `critic_eval` exists but is not part
+  of any suite until it is benchmarked against human judgement (eval roadmap
+  in [docs/improvement-proposals.md](docs/improvement-proposals.md) §6).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

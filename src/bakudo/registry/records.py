@@ -34,6 +34,43 @@ class RunPhase(str, Enum):
             RunPhase.archived,
         }
 
+    @property
+    def order(self) -> int:
+        """Position in the forward lifecycle (terminal phases share the end)."""
+        return _RUN_PHASE_ORDER[self]
+
+    def can_transition_to(self, other: RunPhase) -> bool:
+        """Whether ``self -> other`` is a legal lifecycle move.
+
+        Rules: the run only moves *forward* through the pipeline phases
+        (skipping intermediates is fine — the sync driver skips
+        ``sandbox_starting``); ``failed``/``cancelled`` are reachable from any
+        non-terminal phase; ``archived`` only from another terminal phase; and
+        terminal phases never move except into ``archived``.
+        """
+        if self.is_terminal:
+            return other is RunPhase.archived and self is not RunPhase.archived
+        if other in (RunPhase.failed, RunPhase.cancelled):
+            return True
+        if other is RunPhase.archived:
+            return False
+        return other.order > self.order
+
+
+# Forward lifecycle positions used by can_transition_to.
+_RUN_PHASE_ORDER: dict[RunPhase, int] = {
+    RunPhase.created: 0,
+    RunPhase.bundle_rendered: 1,
+    RunPhase.sandbox_starting: 2,
+    RunPhase.agent_running: 3,
+    RunPhase.collecting_artifacts: 4,
+    RunPhase.evaluating: 5,
+    RunPhase.completed: 6,
+    RunPhase.failed: 6,
+    RunPhase.cancelled: 6,
+    RunPhase.archived: 7,
+}
+
 
 def _now() -> datetime:
     return datetime.now(UTC)

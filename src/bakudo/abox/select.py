@@ -20,20 +20,13 @@ so the guarantee holds on the CLI/API path, not just under Temporal.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 
 from ..bundle import TaskBundle
+from ..config import Settings
 from .runner import AboxOutcome, AboxRunner
 
 SandboxFn = Callable[[TaskBundle], AboxOutcome]
-
-
-def _local_allowed() -> bool:
-    return (
-        os.environ.get("BAKUDO_ENV") == "dev"
-        or os.environ.get("BAKUDO_OFFLINE") == "1"
-    )
 
 
 def resolve_sandbox(explicit: SandboxFn | None = None) -> SandboxFn:
@@ -41,14 +34,17 @@ def resolve_sandbox(explicit: SandboxFn | None = None) -> SandboxFn:
     if explicit is not None:
         return explicit
 
-    mode = os.environ.get("BAKUDO_SANDBOX")
-    if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
+    settings = Settings.from_env()
+    mode = settings.sandbox_mode
+    if mode is None and settings.use_abox:
         mode = "abox"  # backwards-compatible alias
+
+    local_allowed = settings.env == "dev" or settings.offline
 
     if mode == "abox":
         return AboxRunner().run
     if mode == "local":
-        if not _local_allowed():
+        if not local_allowed:
             raise RuntimeError(
                 "BAKUDO_SANDBOX=local requires BAKUDO_ENV=dev or "
                 "BAKUDO_OFFLINE=1; the local sandbox is not an isolation "
@@ -58,7 +54,7 @@ def resolve_sandbox(explicit: SandboxFn | None = None) -> SandboxFn:
 
         return local_sandbox
     if mode is None:
-        if os.environ.get("BAKUDO_OFFLINE") == "1":
+        if settings.offline:
             from .local import local_sandbox
 
             return local_sandbox

@@ -45,7 +45,6 @@ class TaskBundle(BaseModel):
     objective: Objective
     agent_spec: AgentSpec
     memory_excerpts: list[MemoryExcerpt] = Field(default_factory=list)
-    eval_rubric: dict[str, Any] = Field(default_factory=dict)
     budget: Budget = Field(default_factory=Budget)
 
     @property
@@ -55,10 +54,6 @@ class TaskBundle(BaseModel):
     @property
     def allowed_skills(self) -> list[str]:
         return list(self.agent_spec.skills)
-
-    @property
-    def allowed_mcp_servers(self) -> list[str]:
-        return [m.name for m in self.agent_spec.mcp_servers]
 
     def agent_yaml(self) -> str:
         return dump_yaml(self.agent_spec)

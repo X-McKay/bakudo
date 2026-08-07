@@ -18,22 +18,11 @@ Treat each task as: **do the action → verify the acceptance check → tick it.
 
 ---
 
-## 1. Activate Python CI (cannot be automated — needs `workflows` permission)
+## 1. Python CI — done
 
-The generated Python CI lives at `ci/python-ci.yml` because the automation
-lacks GitHub's `workflows` permission (verified: both git push and the
-contents API return 403 for workflow paths). A human must move it into place,
-replacing the legacy Rust workflow:
-
-```bash
-git rm .github/workflows/ci.yml
-git mv ci/python-ci.yml .github/workflows/ci.yml
-git commit -m "ci: replace Rust workflow with Python CI"
-git push
-```
-
-- [ ] **Acceptance:** the PR shows the new `CI` workflow (ruff + mypy + pytest +
-      smoke) running and green; the legacy Rust job is gone.
+The Python CI workflow is live at `.github/workflows/ci.yml` (ruff + mypy +
+pytest + offline smoke, on Python 3.11 and 3.12); the legacy Rust workflow is
+gone. Nothing to do here.
 
 ---
 
@@ -174,8 +163,10 @@ mirror when `NEO4J_URI`/`NEO4J_PASSWORD` are set). What remains is judgement:
 
 ## Quick reference — what's already done (no human work)
 
-Schemas, AgentSpec model, curriculum + **live collectors**, the run pipeline,
-Temporal workflows (run/eval/meta/observer/evolution/compaction/optimization),
+Schemas, AgentSpec model, curriculum + **live collectors**, the run pipeline
+(one shared core for the sync and Temporal paths), Temporal workflows —
+run/eval/meta/observer/evolution/compaction/optimization, all registered on
+the worker —
 scoped tools with command policy + budget + observability, skills registry,
 eval suite + corpus runner + critic (+ perf/simplicity graders), scorecard +
 promotion (safety/human gates), semantic memory + write policy + compaction

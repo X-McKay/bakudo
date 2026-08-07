@@ -73,8 +73,12 @@ class SandboxConfig(_Strict):
     network_bundles: list[str] = Field(default_factory=list, alias="networkBundles")
     timeout_seconds: int = Field(default=3600, alias="timeoutSeconds", ge=1)
     ephemeral: bool = False
+    # Hard budgets enforced on every finished run — see
+    # bakudo.control.pipeline.enforce_sandbox_budgets.
     max_changed_files: int | None = Field(default=None, alias="maxChangedFiles", ge=0)
     max_diff_bytes: int | None = Field(default=None, alias="maxDiffBytes", ge=0)
+    # RESERVED: no merge machinery exists yet; a worker can never merge today
+    # regardless of this flag. See the "not yet" list in the README.
     can_merge: bool = Field(default=False, alias="canMerge")
 
 
@@ -112,6 +116,9 @@ class AgentSpec(_Strict):
     prompt: Prompt
     tools: list[ToolRef] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    # RESERVED: declared per the schema but not yet wired to a runtime MCP
+    # client — a spec listing mcpServers validates, but no server is started
+    # for the worker. See the "not yet" list in the README.
     mcp_servers: list[McpServer] = Field(default_factory=list, alias="mcpServers")
     output_contract: OutputContract = Field(alias="outputContract")
 

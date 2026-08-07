@@ -23,12 +23,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from ..control.optimize import (
-        attempt_objective,
-        round_feedback,
-        scout_objective,
-        select_winner,
-    )
+    from ..control.optimize import drive_optimize
     from .activities import (
         collect_signals,
         compact_memories,
@@ -205,62 +200,26 @@ class OptimizationWorkflow:
 
     @workflow.run
     async def run(self, inp: OptimizeInput) -> dict:
-        feedback: list[str] = []
-        while self._round < inp.max_rounds:
-            self._round += 1
+        # The round logic and gates live in drive_optimize, shared verbatim
+        # with the in-process run_optimize_loop; this workflow contributes only
+        # durable child-workflow execution and parallel attempt fan-out.
+        def on_phase(round_number: int, phase: str) -> None:
+            self._round = round_number
+            self._phase = phase
 
-            self._phase = "scouting"
-            scout = await self._child_run(
-                scout_objective(inp.objective, feedback=feedback),
-                inp.scout_spec,
-                inp.timeout_seconds,
-            )
-            scout_result = scout.get("result") or {}
-            approaches = list(
-                scout_result.get("proposed_followups", [])
-            )[: inp.max_approaches]
-            if not approaches:
-                # The scout found nothing worth trying — a valid outcome.
-                self._phase = "no-change"
-                return {
-                    "status": "no-change",
-                    "rounds_used": self._round,
-                    "reason": "scout proposed no approaches",
-                }
-
-            self._phase = "attempting"
-            attempts = await asyncio.gather(
-                *(
-                    self._child_run(
-                        attempt_objective(inp.objective, approach=a, index=i),
-                        inp.attempt_spec,
-                        inp.timeout_seconds,
-                    )
-                    for i, a in enumerate(approaches)
-                )
-            )
-
-            self._phase = "selecting"
-            winner = select_winner(list(attempts))
-            if winner is not None:
-                self._phase = "improved"
-                return {
-                    "status": "improved",
-                    "rounds_used": self._round,
-                    "winner_run_id": winner.get("run_id"),
-                    "git_branch": winner.get("git_branch"),
-                    "scorecard": winner.get("scorecard"),
-                    "result": winner.get("result"),
-                }
-            feedback = round_feedback(list(attempts))
-
-        self._phase = "no-change"
-        return {
-            "status": "no-change",
-            "rounds_used": self._round,
-            "reason": "no attempt cleared the gates",
-            "feedback": feedback,
-        }
+        return await drive_optimize(
+            inp.objective,
+            run_scout=lambda doc: self._child_run(
+                doc, inp.scout_spec, inp.timeout_seconds
+            ),
+            run_attempt=lambda doc: self._child_run(
+                doc, inp.attempt_spec, inp.timeout_seconds
+            ),
+            gather=asyncio.gather,
+            max_rounds=inp.max_rounds,
+            max_approaches=inp.max_approaches,
+            on_phase=on_phase,
+        )
 
 
 def _as_dict(out: AgentRunOutput) -> dict:

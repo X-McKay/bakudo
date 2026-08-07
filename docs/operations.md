@@ -84,9 +84,8 @@ run with a `budget:*` blocked reason rather than running away.
 ## CI and types
 
 `make check` runs the full local gate (`ruff` + `mypy` + `pytest`). The Python
-CI workflow lives at `ci/python-ci.yml`; a maintainer should
-`git mv ci/python-ci.yml .github/workflows/ci.yml` to activate it (the
-automation cannot modify `.github/workflows/` itself).
+CI workflow is active at `.github/workflows/ci.yml` and mirrors `make check`
+plus an offline smoke of the operator surface.
 
 ## Build order (spec §29)
 

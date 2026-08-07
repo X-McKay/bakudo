@@ -14,7 +14,7 @@ from typing import Any
 
 from ..agent_spec import AgentSpec, parse_spec
 from ..curriculum import Objective, ObjectiveQueues, QueueName
-from ..evals import EvalContext, Scorecard, decide, evaluate_canary, run_default_suite
+from ..evals import Scorecard, decide, evaluate_canary
 from ..evals.promotion import PromotionPolicy
 from ..memory import InMemoryStore, MemoryItem, MemoryRejected, MemoryStore
 from ..registry import InMemoryLedger, RunPhase
@@ -131,19 +131,8 @@ class MetaAgentTools:
         return sorted(rows, key=lambda r: r["overall_score"], reverse=True)
 
     # --- evals & promotion ---
-    def run_eval_suite(self, run_id: str) -> dict[str, Any]:
-        pipeline = self._runs[run_id]
-        if pipeline.result is None:
-            raise ValueError("Run produced no result to evaluate.")
-        ctx = EvalContext(
-            result=pipeline.result, objective=self._objectives[pipeline.result.objective_id]
-        )
-        results = run_default_suite(ctx)
-        scorecard = Scorecard.from_results(results)
-        return {
-            "eval_results": [r.to_dict() for r in results],
-            "scorecard": scorecard.model_dump(mode="json"),
-        }
+    # (Per-run evaluation happens inside run_objective via the shared
+    # pipeline core — there is deliberately no second eval entry point here.)
 
     def promote_candidate(
         self,
@@ -203,13 +192,3 @@ class MetaAgentTools:
             {"ts": e.ts.isoformat(), "event_type": e.event_type, "payload": e.payload}
             for e in self.ledger.events(run_id)
         ]
-
-    def query_temporal_workflow(self, run_id: str) -> dict[str, Any]:
-        record = self.ledger.get_run(run_id)
-        if record is None:
-            raise KeyError(f"Unknown run: {run_id}")
-        return {
-            "workflow_id": record.temporal_workflow_id,
-            "phase": record.phase.value,
-            "events": len(self.ledger.events(run_id)),
-        }

@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..evals.promotion import PromotionDecision
+from ..evals.promotion import Decision, PromotionDecision
 from ..evals.result import EvalResult
+from ..evals.scorecard import Scorecard
 from .records import AgentVersionRecord, RunEvent, RunPhase, RunRecord
 
 
@@ -201,3 +202,23 @@ class PostgresLedger:
             (card.subject_type, card.subject_id, decision.decision.value,
              decision.rationale, json.dumps(card.model_dump(mode="json"))),
         )
+
+    def promotions(self) -> list[PromotionDecision]:
+        rows = self._all(
+            "select decision, rationale, scorecard from promotion_decisions order by created_at"
+        )
+        out: list[PromotionDecision] = []
+        for r in rows:
+            decision = Decision(r[0])
+            card = Scorecard.model_validate(
+                r[2] if isinstance(r[2], dict) else json.loads(r[2])
+            )
+            out.append(
+                PromotionDecision(
+                    decision,
+                    r[1],
+                    card,
+                    requires_human=decision is Decision.needs_human,
+                )
+            )
+        return out

@@ -23,7 +23,6 @@ class AgentRunInput:
     objective: dict[str, Any]      # Objective.to_dict()
     agent_spec: dict[str, Any]     # AgentSpec schema document
     memory_excerpts: list[dict[str, Any]] = field(default_factory=list)
-    eval_rubric: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: int = 3600
 
 

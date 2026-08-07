@@ -32,6 +32,35 @@ class ObjectiveStatus(str, Enum):
     archived = "archived"
     needs_human = "needs_human"
 
+    def can_transition_to(self, other: ObjectiveStatus) -> bool:
+        """Whether ``self -> other`` is a legal objective lifecycle move."""
+        return other in _OBJECTIVE_TRANSITIONS[self]
+
+
+# The explicit objective state machine (spec section 16.2). needs_human is an
+# escalation reachable from any live state; a human resolves it back to ready
+# (retry) or archived (drop).
+_OBJECTIVE_TRANSITIONS: dict[ObjectiveStatus, frozenset[ObjectiveStatus]] = {
+    ObjectiveStatus.ready: frozenset(
+        {ObjectiveStatus.running, ObjectiveStatus.blocked,
+         ObjectiveStatus.needs_human, ObjectiveStatus.archived}
+    ),
+    ObjectiveStatus.blocked: frozenset(
+        {ObjectiveStatus.ready, ObjectiveStatus.needs_human, ObjectiveStatus.archived}
+    ),
+    ObjectiveStatus.running: frozenset(
+        {ObjectiveStatus.completed, ObjectiveStatus.failed, ObjectiveStatus.needs_human}
+    ),
+    ObjectiveStatus.failed: frozenset(
+        {ObjectiveStatus.ready, ObjectiveStatus.needs_human, ObjectiveStatus.archived}
+    ),
+    ObjectiveStatus.needs_human: frozenset(
+        {ObjectiveStatus.ready, ObjectiveStatus.archived}
+    ),
+    ObjectiveStatus.completed: frozenset({ObjectiveStatus.archived}),
+    ObjectiveStatus.archived: frozenset(),
+}
+
 
 @dataclass(frozen=True)
 class PriorityWeights:

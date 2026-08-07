@@ -13,6 +13,7 @@ reject churn, and the corpus rewards leaving already-optimal code untouched.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 # An attempt must actually improve at least one measured dimension (score
@@ -155,7 +156,89 @@ def round_feedback(candidates: list[dict[str, Any]]) -> list[str]:
     return feedback
 
 
-# --- in-process loop driver (CLI/API; mirrors OptimizationWorkflow) ---
+# --- the shared round driver ---
+
+# A role runner takes an objective document and yields an AgentRunOutput-shaped
+# dict. The gather callable awaits a batch of attempt coroutines — asyncio.gather
+# in the Temporal workflow (parallel child workflows), sequential in-process
+# awaiting in the CLI loop.
+RunRole = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+GatherFn = Callable[..., Awaitable[Iterable[dict[str, Any]]]]
+OnPhase = Callable[[int, str], None]
+
+
+async def drive_optimize(
+    base: dict[str, Any],
+    *,
+    run_scout: RunRole,
+    run_attempt: RunRole,
+    gather: GatherFn,
+    max_rounds: int = 2,
+    max_approaches: int = 3,
+    on_phase: OnPhase | None = None,
+) -> dict[str, Any]:
+    """The scout -> attempts -> selection round loop, shared by both drivers.
+
+    :class:`~bakudo.temporal.workflows.OptimizationWorkflow` and
+    :func:`run_optimize_loop` differ only in how they execute a role run and
+    how they await a batch — the round logic, gates, and outcome shapes live
+    here exactly once. Deterministic (no I/O, no clock), so it is safe inside
+    the Temporal workflow sandbox.
+    """
+    notify = on_phase or (lambda _round, _phase: None)
+    feedback: list[str] = []
+    rounds = 0
+
+    while rounds < max_rounds:
+        rounds += 1
+
+        notify(rounds, "scouting")
+        scout = await run_scout(scout_objective(base, feedback=feedback))
+        scout_result = scout.get("result") or {}
+        approaches = list(scout_result.get("proposed_followups", []))[:max_approaches]
+        if not approaches:
+            # The scout found nothing worth trying — a valid outcome.
+            notify(rounds, "no-change")
+            return {
+                "status": "no-change",
+                "rounds_used": rounds,
+                "reason": "scout proposed no approaches",
+            }
+
+        notify(rounds, "attempting")
+        attempts = list(
+            await gather(
+                *(
+                    run_attempt(attempt_objective(base, approach=a, index=i))
+                    for i, a in enumerate(approaches)
+                )
+            )
+        )
+
+        notify(rounds, "selecting")
+        winner = select_winner(attempts)
+        if winner is not None:
+            notify(rounds, "improved")
+            return {
+                "status": "improved",
+                "rounds_used": rounds,
+                "winner_run_id": winner.get("run_id"),
+                "git_branch": winner.get("git_branch"),
+                "scorecard": winner.get("scorecard"),
+                "result": winner.get("result"),
+            }
+        feedback = round_feedback(attempts)
+
+    notify(rounds, "no-change")
+    return {
+        "status": "no-change",
+        "rounds_used": rounds,
+        "reason": "no attempt cleared the gates",
+        "feedback": feedback,
+    }
+
+
+# --- in-process loop driver (CLI/API; thin shell over drive_optimize) ---
 
 
 def load_role_spec(name: str, path: str | None = None) -> Any:
@@ -181,77 +264,43 @@ def run_optimize_loop(
 ) -> dict[str, Any]:
     """Run the scout → attempts → selection loop in-process.
 
-    The synchronous mirror of ``OptimizationWorkflow`` (the same relationship
+    The synchronous shell over :func:`drive_optimize` (the same relationship
     ``run_objective`` has to ``AgentRunWorkflow``): identical round logic and
     gates, sequential attempts instead of parallel child workflows. Used by
     the CLI and the v0.1 control API; production submits the Temporal
     workflow instead.
     """
+    import asyncio
+
     from ..curriculum.objective import Objective
     from ..registry import InMemoryLedger
     from .pipeline import run_objective
 
     ledger = ledger or InMemoryLedger()
-    base = objective.to_dict()
-    feedback: list[str] = []
-    rounds = 0
 
-    while rounds < max_rounds:
-        rounds += 1
-
-        scout = run_objective(
-            Objective.model_validate(scout_objective(base, feedback=feedback)),
-            scout_spec,
-            ledger=ledger,
-            sandbox=sandbox,
+    async def run_role(objective_doc: dict[str, Any], spec: Any) -> dict[str, Any]:
+        pipeline = run_objective(
+            Objective.model_validate(objective_doc), spec, ledger=ledger, sandbox=sandbox
         )
-        followups = scout.result.proposed_followups if scout.result else []
-        approaches = list(followups)[:max_approaches]
-        if not approaches:
-            return {
-                "status": "no-change",
-                "rounds_used": rounds,
-                "reason": "scout proposed no approaches",
-            }
+        return {
+            "run_id": pipeline.run_id,
+            "git_branch": pipeline.outcome.git_branch,
+            "result": pipeline.result.to_dict() if pipeline.result else None,
+            "scorecard": (
+                pipeline.scorecard.model_dump(mode="json") if pipeline.scorecard else None
+            ),
+        }
 
-        candidates: list[dict[str, Any]] = []
-        for index, approach in enumerate(approaches):
-            attempt = run_objective(
-                Objective.model_validate(
-                    attempt_objective(base, approach=approach, index=index)
-                ),
-                attempt_spec,
-                ledger=ledger,
-                sandbox=sandbox,
-            )
-            candidates.append(
-                {
-                    "run_id": attempt.run_id,
-                    "git_branch": attempt.outcome.git_branch,
-                    "result": attempt.result.to_dict() if attempt.result else None,
-                    "scorecard": (
-                        attempt.scorecard.model_dump(mode="json")
-                        if attempt.scorecard
-                        else None
-                    ),
-                }
-            )
+    async def gather_sequential(*coros: Any) -> list[dict[str, Any]]:
+        return [await coro for coro in coros]
 
-        winner = select_winner(candidates)
-        if winner is not None:
-            return {
-                "status": "improved",
-                "rounds_used": rounds,
-                "winner_run_id": winner.get("run_id"),
-                "git_branch": winner.get("git_branch"),
-                "scorecard": winner.get("scorecard"),
-                "result": winner.get("result"),
-            }
-        feedback = round_feedback(candidates)
-
-    return {
-        "status": "no-change",
-        "rounds_used": rounds,
-        "reason": "no attempt cleared the gates",
-        "feedback": feedback,
-    }
+    return asyncio.run(
+        drive_optimize(
+            objective.to_dict(),
+            run_scout=lambda doc: run_role(doc, scout_spec),
+            run_attempt=lambda doc: run_role(doc, attempt_spec),
+            gather=gather_sequential,
+            max_rounds=max_rounds,
+            max_approaches=max_approaches,
+        )
+    )

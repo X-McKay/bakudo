@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 META_WORKFLOW_ID = "bakudo-meta-agent"
@@ -11,9 +10,12 @@ META_WORKFLOW_ID = "bakudo-meta-agent"
 async def connect() -> Any:
     from temporalio.client import Client
 
-    address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
-    namespace = os.environ.get("TEMPORAL_NAMESPACE", "default")
-    return await Client.connect(address, namespace=namespace)
+    from ..config import Settings
+
+    settings = Settings.from_env()
+    return await Client.connect(
+        settings.temporal_address, namespace=settings.temporal_namespace
+    )
 
 
 async def ensure_meta_agent(client: Any) -> Any:

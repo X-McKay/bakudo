@@ -1,21 +1,29 @@
-"""A synchronous run pipeline mirroring :class:`AgentRunWorkflow`.
+"""The run-pipeline core, plus the synchronous in-process driver (§12.1).
 
-This executes the full lifecycle (section 12.1) in-process: render bundle ->
-run sandbox -> collect -> evaluate. It is what the CLI/demo use and what the
-Temporal workflow's activities ultimately call, so the behaviour is identical
-whether or not a Temporal cluster is present.
+The lifecycle phases — build bundle -> run sandbox -> enforce budgets ->
+grade -> record — live here as single-site functions. Two drivers sequence
+them:
+
+* :func:`run_objective` (this module) runs everything in-process; used by the
+  CLI, the API, and :class:`~bakudo.control.tools.MetaAgentTools`.
+* The Temporal activities (:mod:`bakudo.temporal._impl`) call the same
+  functions one phase at a time, adding durability between phases.
+
+Because both drivers share these functions, the eval context, the schema
+gate, and the sandbox-budget enforcement cannot diverge between the offline
+and durable paths.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .. import ids
 from ..abox.runner import AboxOutcome
 from ..abox.select import SandboxFn, resolve_sandbox
 from ..agent_spec import AgentSpec
-from ..bundle import Budget, TaskBundle
+from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, EvalResult, Scorecard, run_suite
 from ..memory.retrieval import retrieve_excerpts
@@ -33,6 +41,116 @@ class PipelineResult:
     eval_results: list[EvalResult]
     scorecard: Scorecard | None
     outcome: AboxOutcome
+
+
+@dataclass
+class GradedRun:
+    """The output of :func:`grade_run`: normalised result + suite verdicts."""
+
+    result: RunResult
+    eval_results: list[EvalResult]
+    scorecard: Scorecard
+    schema_valid: bool
+
+
+def build_bundle(
+    objective: Objective,
+    spec: AgentSpec,
+    *,
+    run_id: str,
+    memory: Any | None = None,
+    memory_excerpts: list[MemoryExcerpt] | None = None,
+    timeout_seconds: int | None = None,
+) -> TaskBundle:
+    """Render the task bundle for one run (§5.3), including the memory read
+    path: unless excerpts were supplied, relevant memories are retrieved and
+    shipped inside the bundle for the sandboxed worker's query-memory tool."""
+    excerpts = memory_excerpts or retrieve_excerpts(memory, objective)
+    return TaskBundle(
+        run_id=run_id,
+        objective_id=objective.id,
+        objective=objective,
+        agent_spec=spec,
+        memory_excerpts=excerpts,
+        budget=Budget(timeoutSeconds=timeout_seconds or spec.sandbox.timeout_seconds),
+    )
+
+
+def enforce_sandbox_budgets(spec: AgentSpec, outcome: AboxOutcome) -> AboxOutcome:
+    """Enforce the spec's declared sandbox budgets on a finished run (§8).
+
+    ``sandbox.maxChangedFiles`` and ``sandbox.maxDiffBytes`` are hard limits,
+    not suggestions: a run that exceeds them is marked failed with explicit
+    blocked reasons, on both the sync and Temporal paths.
+    """
+    limits = spec.sandbox
+    changed = outcome.changed_files or (outcome.result or {}).get("changed_files", [])
+    diff_bytes = len(outcome.diff.encode("utf-8", errors="replace"))
+
+    violations: list[str] = []
+    if limits.max_changed_files is not None and len(changed) > limits.max_changed_files:
+        violations.append(
+            f"sandbox_budget:changed_files {len(changed)} > {limits.max_changed_files}"
+        )
+    if limits.max_diff_bytes is not None and diff_bytes > limits.max_diff_bytes:
+        violations.append(
+            f"sandbox_budget:diff_bytes {diff_bytes} > {limits.max_diff_bytes}"
+        )
+    if not violations:
+        return outcome
+
+    result = dict(outcome.result or {})
+    result["status"] = "failed"
+    result["blocked_reasons"] = [*result.get("blocked_reasons", []), *violations]
+    return replace(outcome, exit_code=1, result=result)
+
+
+def grade_run(
+    objective: Objective,
+    raw_result: dict,
+    *,
+    ledger: Ledger,
+    run_id: str,
+    agent: str = "",
+    diff: str = "",
+    denied_commands: list[dict[str, str]] | None = None,
+    runtime_seconds: float = 0.0,
+    tokens_used: int = 0,
+    schema_valid_hint: bool = True,
+) -> GradedRun:
+    """Grade one run: schema-validate, normalise, run the suite, record.
+
+    The *only* place an :class:`EvalContext` is constructed for a run — the
+    raw worker output is validated against ``result.schema.json`` at the
+    trust boundary (so the schema gate can fail), then normalised forgivingly
+    so the rest of the suite still grades malformed output.
+    """
+    schema_valid = schema_valid_hint and is_valid(raw_result, "result.schema.json")
+    result = normalize_result(
+        raw_result,
+        run_id=run_id,
+        agent=agent or str(raw_result.get("agent") or "unknown"),
+        objective_id=objective.id,
+    )
+    ctx = EvalContext(
+        result=result,
+        objective=objective,
+        diff=diff,
+        denied_commands=denied_commands or [],
+        runtime_seconds=runtime_seconds,
+        tokens_used=tokens_used,
+        schema_valid=schema_valid,
+    )
+    # Suite selection keys off the objective type (optimize adds perf/simplicity).
+    eval_results = run_suite(ctx)
+    for r in eval_results:
+        ledger.record_eval(r)
+    return GradedRun(
+        result=result,
+        eval_results=eval_results,
+        scorecard=Scorecard.from_results(eval_results),
+        schema_valid=schema_valid,
+    )
 
 
 def run_objective(
@@ -54,14 +172,7 @@ def run_objective(
     sandbox = resolve_sandbox(sandbox)
     run_id = ids.run_id()
 
-    bundle = TaskBundle(
-        run_id=run_id,
-        objective_id=objective.id,
-        objective=objective,
-        agent_spec=spec,
-        memory_excerpts=retrieve_excerpts(memory, objective),
-        budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
-    )
+    bundle = build_bundle(objective, spec, run_id=run_id, memory=memory)
 
     ledger.create_run(
         RunRecord(
@@ -76,44 +187,36 @@ def run_objective(
 
     ledger.set_phase(run_id, RunPhase.bundle_rendered)
     ledger.set_phase(run_id, RunPhase.agent_running)
-    outcome = sandbox(bundle)
+    outcome = enforce_sandbox_budgets(spec, sandbox(bundle))
     ledger.set_phase(run_id, RunPhase.collecting_artifacts)
 
     if not outcome.succeeded or outcome.result is None:
         ledger.finish_run(run_id, RunPhase.failed, outcome.result)
         return PipelineResult(run_id, RunPhase.failed, None, [], None, outcome)
 
-    # Validate the *raw* worker output against the JSON Schema at the trust
-    # boundary; normalisation below is forgiving, so this is what the schema
-    # eval gate actually grades.
-    schema_valid = is_valid(outcome.result, "result.schema.json")
-    result = normalize_result(
-        outcome.result, run_id=run_id, agent=spec.ref, objective_id=objective.id
-    )
-
     ledger.set_phase(run_id, RunPhase.evaluating)
     if outcome.observability:
         ledger.append_event(
             RunEvent(run_id=run_id, event_type="observability", payload=outcome.observability)
         )
-    # Thread the safety signal (denied commands) and cost signals (tokens,
-    # runtime) into the eval context so the safety and cost gates are meaningful.
-    ctx = EvalContext(
-        result=result,
-        objective=objective,
+    graded = grade_run(
+        objective,
+        outcome.result,
+        ledger=ledger,
+        run_id=run_id,
+        agent=spec.ref,
         diff=outcome.diff,
         denied_commands=outcome.denied_commands,
         runtime_seconds=outcome.runtime_seconds,
         tokens_used=outcome.tokens_used,
-        schema_valid=schema_valid,
     )
-    # Suite selection keys off the objective type, matching the Temporal path.
-    eval_results = run_suite(ctx)
-    for r in eval_results:
-        ledger.record_eval(r)
-    scorecard = Scorecard.from_results(eval_results)
 
     ledger.finish_run(run_id, RunPhase.completed, outcome.result)
     return PipelineResult(
-        run_id, RunPhase.completed, result, eval_results, scorecard, outcome
+        run_id,
+        RunPhase.completed,
+        graded.result,
+        graded.eval_results,
+        graded.scorecard,
+        outcome,
     )
