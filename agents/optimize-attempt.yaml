@@ -17,7 +17,7 @@ role:
 
 model:
   provider: openai-compatible
-  modelId: qwen-coder-32b
+  modelId: Qwen3.6-35B-A3B-FP8
   baseUrlRef: vllm/qwen-coder
   temperature: 0.2
   maxTokens: 8192

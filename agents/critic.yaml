@@ -16,7 +16,7 @@ role:
 
 model:
   provider: openai-compatible
-  modelId: critic-large
+  modelId: Qwen3.6-35B-A3B-FP8
   baseUrlRef: vllm/critic-large
   temperature: 0.2
   maxTokens: 8192
