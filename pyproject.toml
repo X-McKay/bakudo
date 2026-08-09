@@ -28,8 +28,10 @@ temporal = ["temporalio>=1.7"]
 db = ["psycopg[binary]>=3.1", "neo4j>=5.19"]
 # Worker-plane agent runtime + model access.
 runtime = ["strands-agents>=0.1", "httpx>=0.27", "openai>=1.30"]
-# Control-plane HTTP/dashboard surface.
-api = ["fastapi>=0.110", "uvicorn>=0.29"]
+# Control-plane HTTP/dashboard surface. httpx is required by the API test
+# client and by fastapi's TestClient-adjacent tooling; keeping it here (as
+# well as in `runtime`) means `[api]` alone is enough to run the API tests.
+api = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27"]
 # Everything, for a full local stack.
 all = [
   "temporalio>=1.7",
