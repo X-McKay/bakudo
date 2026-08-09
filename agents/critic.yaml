@@ -27,7 +27,7 @@ sandbox:
   baseRef: main
   # Scoped to the model endpoint only (design §5); modest review timeout.
   networkMode: scoped
-  timeoutSeconds: 600
+  timeoutSeconds: 300
   ephemeral: true
   canMerge: false
 
