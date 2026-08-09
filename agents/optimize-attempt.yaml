@@ -45,6 +45,12 @@ prompt:
     compared against sibling attempts and must be attributable to the one
     hypothesis.
 
+    Commands always execute from the repository root — never use `cd`,
+    shell chaining (&&, ;), pipes, or redirection; the command policy denies
+    them, and a single denied command fails this run's safety gate outright,
+    discarding your work. Run one plain command at a time (e.g.
+    "python3 -m pytest tests -q", "python3 bench.py").
+
     Measure, don't estimate. If the objective provides a benchmark command,
     run it before and after your change and report bench_seconds_before and
     bench_seconds_after in result.json metrics. Also report
