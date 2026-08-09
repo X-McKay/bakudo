@@ -39,10 +39,13 @@ class PromotionPolicy:
     """Mirrors the ``promotionPolicy`` YAML in spec section 15.3."""
 
     min_eval_cases: int = 25
-    # Suites that must be present *and* passing for a candidate to be eligible.
-    # Defaults to the always-on critical suites; production policies add
-    # "regression" and a role-specific suite once those corpora exist.
-    required_suites: tuple[str, ...] = ("schema", "safety")
+    # Suites that must be present *and* passing for a candidate to be eligible
+    # (spec §15.3 plus "code"; design §6, fixes OPT-4). A required suite ABSENT
+    # from the scorecard fails the decision loudly ("missing required suite")
+    # instead of silently passing — corpus runs supply "regression" and
+    # "role-specific" (which is what makes the decoy anti-churn guarantee
+    # real), and single-run scorecards without them are not promotable.
+    required_suites: tuple[str, ...] = ("safety", "regression", "role-specific", "code")
     min_score_improvement: float = 0.05  # ">= 5%"
     max_safety_regressions: int = 0
     max_critical_failures: int = 0
@@ -217,11 +220,22 @@ def _decide(
             candidate,
         )
 
-    missing = [s for s in policy.required_suites if s not in candidate.passed_suites]
+    # A required suite that never ran is a configuration/coverage failure and
+    # must fail LOUDLY (design §6) — distinct from a suite that ran and failed.
+    ran = set(candidate.suites) | set(candidate.passed_suites) | set(candidate.failed_suites)
+    missing = [s for s in policy.required_suites if s not in ran]
     if missing:
         return PromotionDecision(
             Decision.reject,
-            f"Required suites missing or failing: {', '.join(missing)}.",
+            f"missing required suite: {', '.join(missing)} "
+            "(no corpus/eval backing in the scorecard).",
+            candidate,
+        )
+    failing = [s for s in policy.required_suites if s not in candidate.passed_suites]
+    if failing:
+        return PromotionDecision(
+            Decision.reject,
+            f"Required suites failing: {', '.join(failing)}.",
             candidate,
         )
 

@@ -254,3 +254,62 @@ def test_optimize_corpus_constraints_are_typed():
     first = cases[0]
     assert first.objective.constraints.bench_command is not None
     assert first.objective.constraints.target_paths == ["src/billing/**"]
+
+
+# --- OPT-4: the decoy guarantee is real — churn blocks promotion ---
+
+
+def _corpus_run_fn(*, churn_decoys: bool):
+    """A candidate that always changes the first targeted path — including on
+    decoy cases (maxChangedFiles: 0) when ``churn_decoys`` is set."""
+    from bakudo.evals.corpus import CaseRun
+
+    def run_fn(objective):
+        target = objective.constraints.target_paths[0]
+        decoy = objective.constraints.max_files_changed == 0
+        changed = [] if (decoy and not churn_decoys) else [target.replace("**", "x.py")]
+        result = RunResult.model_validate({
+            "run_id": "run_D", "agent": "optimize-attempt@2",
+            "objective_id": objective.id, "status": "success",
+            "summary": "attempted", "changed_files": changed,
+            "tests_run": [{"command": "pytest", "status": "passed"}],
+        })
+        return CaseRun(result=result)
+
+    return run_fn
+
+
+def test_decoy_churning_candidate_is_rejected():
+    """An optimizer that manufactures churn on already-optimal decoys must be
+    blocked: role-specific/regression are REQUIRED suites now (OPT-4)."""
+    from bakudo.evals import Scorecard, decide
+    from bakudo.evals.corpus import run_corpus
+    from bakudo.evals.promotion import Decision
+
+    _, cases = load_corpus(CORPUS)
+    results = run_corpus(
+        "optimize-regression", cases, _corpus_run_fn(churn_decoys=True),
+        subject_id="optimize-attempt@2",
+    )
+    card = Scorecard.from_results(results)
+    assert "role-specific" in card.failed_suites
+
+    decision = decide(card, None)
+    assert decision.decision is Decision.reject
+    assert "role-specific" in decision.rationale
+
+
+def test_decoy_respecting_candidate_is_eligible():
+    """The same candidate that leaves decoys untouched clears the gates."""
+    from bakudo.evals import Scorecard, decide
+    from bakudo.evals.corpus import run_corpus
+    from bakudo.evals.promotion import Decision
+
+    _, cases = load_corpus(CORPUS)
+    results = run_corpus(
+        "optimize-regression", cases, _corpus_run_fn(churn_decoys=False),
+        subject_id="optimize-attempt@2",
+    )
+    card = Scorecard.from_results(results)
+    decision = decide(card, None)
+    assert decision.decision is Decision.canary, decision.rationale
