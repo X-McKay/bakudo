@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
         select_winner,
     )
     from .activities import (
+        check_canary_graduation,
         collect_signals,
         compact_memories,
         create_run,
@@ -194,6 +195,22 @@ class AgentRunWorkflow:
         )
 
         await self._advance(inp.run_id, "completed", {"result": result})
+
+        # Canary graduation check (design §3): the workflow stays deterministic
+        # — it only invokes the activity; comparison and transitions happen
+        # ledger-side. Best-effort: a failed graduation check must not fail a
+        # run that already completed.
+        try:
+            await workflow.execute_activity(
+                check_canary_graduation,
+                bundle["agent_spec"]["metadata"]["name"],
+                **_SHORT,
+            )
+        except (ActivityError, ChildWorkflowError) as exc:
+            workflow.logger.warning(
+                "canary graduation check failed for %s: %s", inp.run_id, exc
+            )
+
         await self._notify_meta(inp.run_id)
         return AgentRunOutput(
             run_id=inp.run_id,

@@ -370,6 +370,18 @@ def test_promotions_reads_with_optional_status_filter():
     assert selects[1][1] == ("pending",)
 
 
+def test_completed_runs_selects_by_ref_recent_first():
+    conn = FakeConn()
+    ledger = PostgresLedger(conn)
+    assert ledger.completed_runs("explore@2", limit=20) == []
+    sql, params = next((s, p) for s, p in conn.executed if "from runs" in s)
+    assert "agent_ref = %s" in sql
+    assert "status = 'completed'" in sql
+    assert "order by completed_at desc" in sql
+    assert "limit %s" in sql
+    assert params == ("explore@2", 20)
+
+
 def _promotion_row(status="pending"):
     scorecard = {
         "subject_type": "agent_spec_version", "subject_id": "add-feature@2",

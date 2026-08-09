@@ -287,6 +287,32 @@ def test_resolve_promotion_twice_raises_value_error():
         ledger.resolve_promotion(decision.id, approved=False, approved_by="al")
 
 
+# --- completed_runs: the graduation window read (design §3) ---
+
+
+def test_completed_runs_filters_by_ref_and_orders_recent_first():
+    from bakudo.registry.records import RunPhase, RunRecord
+
+    ledger = InMemoryLedger()
+    for i, (ref, finish) in enumerate(
+        [("explore@2", True), ("explore@1", True), ("explore@2", True),
+         ("explore@2", False)]
+    ):
+        run_id = f"run_CR{i}"
+        ledger.create_run(
+            RunRecord(
+                id=run_id, temporal_workflow_id=f"wf-{i}", abox_task_id=run_id,
+                objective_id="obj_CR", agent_ref=ref,
+            )
+        )
+        if finish:
+            ledger.finish_run(run_id, RunPhase.completed, {})
+
+    runs = ledger.completed_runs("explore@2")
+    assert [r.id for r in runs] == ["run_CR2", "run_CR0"], "recent first, completed only"
+    assert [r.id for r in ledger.completed_runs("explore@2", limit=1)] == ["run_CR2"]
+
+
 # --- deterministic canary routing (design §2) ---
 
 

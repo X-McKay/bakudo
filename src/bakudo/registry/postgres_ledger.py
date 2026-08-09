@@ -270,6 +270,36 @@ class PostgresLedger:
             result=result,
         )
 
+    def completed_runs(
+        self, agent_ref: str, limit: int | None = None
+    ) -> list[RunRecord]:
+        """Completed runs of one agent version, most recent first (design §3)."""
+        sql = (
+            "select id, temporal_workflow_id, abox_task_id, objective_id, "
+            "agent_ref, status, git_branch, started_at, completed_at, result "
+            "from runs where agent_ref = %s and status = 'completed' "
+            "order by completed_at desc"
+        )
+        params: tuple = (agent_ref,)
+        if limit is not None:
+            sql += " limit %s"
+            params = (agent_ref, limit)
+        rows = self._all(sql, params)
+        runs = []
+        for row in rows:
+            result = row[9]
+            if isinstance(result, str):
+                result = json.loads(result)
+            runs.append(
+                RunRecord(
+                    id=row[0], temporal_workflow_id=row[1], abox_task_id=row[2],
+                    objective_id=row[3], agent_ref=row[4], phase=RunPhase(row[5]),
+                    git_branch=row[6], started_at=row[7], completed_at=row[8],
+                    result=result,
+                )
+            )
+        return runs
+
     def set_phase(self, run_id: str, phase: RunPhase) -> None:
         with self._connection() as conn:
             if phase == RunPhase.agent_running:

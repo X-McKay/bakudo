@@ -128,6 +128,127 @@ def test_load_agent_spec_never_returns_non_canary_candidates(monkeypatch):
     assert _impl.load_agent_spec("explore", "run_CANARYB")["metadata"]["version"] == 7
 
 
+# --- canary graduation (design §3, OPT-6) ---
+
+
+def _graduation_ledger(monkeypatch, *, min_runs=3):
+    from bakudo.evals.promotion import PromotionPolicy
+    from bakudo.registry import InMemoryLedger
+    from bakudo.registry.records import AgentVersionRecord
+
+    ledger = InMemoryLedger()
+    for version, status in ((1, "active"), (2, "candidate")):
+        ledger.upsert_agent_version(
+            AgentVersionRecord(
+                name="explore", version=version, status=status,
+                spec_yaml=f"metadata:\n  name: explore\n  version: {version}\n",
+            )
+        )
+    ledger.set_version_status("explore", 2, "canary", reason="auto-pass")
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    monkeypatch.setattr(
+        _impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=min_runs)
+    )
+    return ledger
+
+
+def _completed_run(ledger, ref, run_id, score, *, safety_regressions=0):
+    from bakudo.evals.result import EvalResult
+    from bakudo.registry.records import RunPhase, RunRecord
+
+    ledger.create_run(
+        RunRecord(
+            id=run_id, temporal_workflow_id=f"wf-{run_id}", abox_task_id=run_id,
+            objective_id="obj_GRAD", agent_ref=ref,
+        )
+    )
+    ledger.finish_run(run_id, RunPhase.completed, {})
+    ledger.record_eval(
+        EvalResult(
+            subject_type="run", subject_id=run_id, suite_name="task",
+            score=score, passed=True,
+            details={"safety_regressions": safety_regressions},
+        )
+    )
+
+
+def test_graduation_no_canary_is_a_noop(monkeypatch):
+    from bakudo.registry import InMemoryLedger
+
+    monkeypatch.setattr(_impl.DEPS, "ledger", InMemoryLedger())
+    assert _impl.check_canary_graduation("explore")["status"] == "no-canary"
+
+
+def test_graduation_waits_for_min_runs(monkeypatch):
+    ledger = _graduation_ledger(monkeypatch, min_runs=3)
+    _completed_run(ledger, "explore@2", "run_G1", 0.9)
+    out = _impl.check_canary_graduation("explore")
+    assert out["status"] == "insufficient-runs"
+    assert ledger.get_agent_version("explore", 2).status == "canary", "no transition yet"
+
+
+def test_graduation_promotes_better_canary_and_archives_old_active(monkeypatch):
+    ledger = _graduation_ledger(monkeypatch, min_runs=3)
+    for i in range(3):
+        _completed_run(ledger, "explore@1", f"run_A{i}", 0.6)
+        _completed_run(ledger, "explore@2", f"run_C{i}", 0.9)
+
+    out = _impl.check_canary_graduation("explore")
+    assert out["status"] == "graduated"
+    assert ledger.get_agent_version("explore", 2).status == "active"
+    assert ledger.get_agent_version("explore", 1).status == "archived"
+    assert ledger.active_version("explore").version == 2
+    # The transition was recorded as a promote decision with events.
+    decisions = ledger.promotions()
+    assert any(d.decision.value == "promote" for d in decisions)
+    assert any(
+        e.event_type == "version_status"
+        for e in ledger.events("agent:explore@2")
+    )
+
+
+def test_graduation_equal_scores_still_graduate(monkeypatch):
+    """Better-OR-EQUAL graduates (design §3)."""
+    ledger = _graduation_ledger(monkeypatch, min_runs=2)
+    for i in range(2):
+        _completed_run(ledger, "explore@1", f"run_A{i}", 0.8)
+        _completed_run(ledger, "explore@2", f"run_C{i}", 0.8)
+    assert _impl.check_canary_graduation("explore")["status"] == "graduated"
+
+
+def test_graduation_rolls_back_worse_canary(monkeypatch):
+    ledger = _graduation_ledger(monkeypatch, min_runs=2)
+    for i in range(2):
+        _completed_run(ledger, "explore@1", f"run_A{i}", 0.9)
+        _completed_run(ledger, "explore@2", f"run_C{i}", 0.6)
+
+    out = _impl.check_canary_graduation("explore")
+    assert out["status"] == "rolled-back"
+    assert ledger.get_agent_version("explore", 2).status == "rejected"
+    assert ledger.active_version("explore").version == 1
+    assert any(d.decision.value == "reject" for d in ledger.promotions())
+
+
+def test_graduation_rolls_back_on_safety_regression_despite_score(monkeypatch):
+    ledger = _graduation_ledger(monkeypatch, min_runs=2)
+    for i in range(2):
+        _completed_run(ledger, "explore@1", f"run_A{i}", 0.5)
+        _completed_run(
+            ledger, "explore@2", f"run_C{i}", 0.95, safety_regressions=1
+        )
+
+    out = _impl.check_canary_graduation("explore")
+    assert out["status"] == "rolled-back"
+    assert ledger.get_agent_version("explore", 2).status == "rejected"
+
+
+def test_graduation_without_active_baseline_runs_graduates_clean_canary(monkeypatch):
+    ledger = _graduation_ledger(monkeypatch, min_runs=2)
+    for i in range(2):
+        _completed_run(ledger, "explore@2", f"run_C{i}", 0.9)
+    assert _impl.check_canary_graduation("explore")["status"] == "graduated"
+
+
 # --- integration hook: budget_from_spec (abox agent's contract) ---
 
 def test_render_bundle_uses_budget_from_spec_when_available(monkeypatch, spy):

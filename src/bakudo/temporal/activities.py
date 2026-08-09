@@ -120,6 +120,11 @@ def decide_promotion(inp: PromotionInput) -> dict:
     return _impl.decide_promotion(inp)
 
 
+@_DEFN(name="check_canary_graduation")
+def check_canary_graduation(name: str) -> dict:
+    return _impl.check_canary_graduation(name)
+
+
 @_DEFN(name="run_agent_evolution")
 def run_agent_evolution(inp: EvolutionInput) -> dict:
     return _impl.run_agent_evolution(inp)
@@ -143,6 +148,7 @@ ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     persist_run,
     run_eval_suite,
     decide_promotion,
+    check_canary_graduation,
     run_agent_evolution,
     compact_memories,
     collect_signals,

@@ -38,6 +38,9 @@ class Ledger(Protocol):
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None: ...
     def append_event(self, event: RunEvent) -> None: ...
     def events(self, run_id: str) -> list[RunEvent]: ...
+    def completed_runs(
+        self, agent_ref: str, limit: int | None = None
+    ) -> list[RunRecord]: ...
 
     # Evals & promotions
     def record_eval(self, result: EvalResult) -> None: ...
@@ -185,6 +188,22 @@ class InMemoryLedger:
 
     def events(self, run_id: str) -> list[RunEvent]:
         return list(self._events.get(run_id, []))
+
+    def completed_runs(
+        self, agent_ref: str, limit: int | None = None
+    ) -> list[RunRecord]:
+        """Completed runs of one agent version, most recent first (design §3)."""
+        runs = sorted(
+            (
+                r for r in self._runs.values()
+                if r.agent_ref == agent_ref
+                and r.phase == RunPhase.completed
+                and r.completed_at is not None
+            ),
+            key=lambda r: r.completed_at,  # type: ignore[arg-type, return-value]
+            reverse=True,
+        )
+        return runs[:limit] if limit is not None else runs
 
     # --- evals & promotions ---
     def record_eval(self, result: EvalResult) -> None:

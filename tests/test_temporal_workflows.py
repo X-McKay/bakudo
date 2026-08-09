@@ -146,6 +146,53 @@ async def test_agent_run_workflow_happy_path_writes_full_event_log(env, deps):
     assert deps.eval_results("run_HAPPY1")
 
 
+# --- canary graduation is wired into the completion path (design §3) ---
+
+
+async def test_completed_canary_run_triggers_graduation(env, deps, monkeypatch):
+    """AgentRunWorkflow's completion path invokes check_canary_graduation:
+    once the canary has enough completed runs it graduates to active and the
+    old active is archived — all as ledger writes with events."""
+    from bakudo.evals.promotion import PromotionPolicy
+    from bakudo.registry.records import AgentVersionRecord
+    from bakudo.temporal.shared import AgentRunInput
+
+    spec = _impl.load_agent_spec("explore")
+    canary_spec = {**spec, "metadata": {**spec["metadata"], "version": 2}}
+
+    import yaml
+
+    for version, status, doc in ((1, "active", spec), (2, "candidate", canary_spec)):
+        deps.upsert_agent_version(
+            AgentVersionRecord(
+                name="explore", version=version, status=status,
+                spec_yaml=yaml.safe_dump(doc),
+            )
+        )
+    deps.set_version_status("explore", 2, "canary", reason="auto-pass")
+    monkeypatch.setattr(
+        _impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=1)
+    )
+
+    async with make_worker(env, [AgentRunWorkflow, EvalWorkflow]):
+        out = await env.client.execute_workflow(
+            AgentRunWorkflow.run,
+            AgentRunInput(
+                run_id="run_GRAD1",
+                objective={"id": "obj_GRAD1", "type": "explore", "repo": "bakudo",
+                           "title": "canary run"},
+                agent_spec=canary_spec,
+            ),
+            id="run-run_GRAD1",
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert out.phase == "completed"
+    assert deps.get_agent_version("explore", 2).status == "active"
+    assert deps.get_agent_version("explore", 1).status == "archived"
+    assert any(d.decision.value == "promote" for d in deps.promotions())
+
+
 # --- singleton startup (TMP-7) ---
 
 

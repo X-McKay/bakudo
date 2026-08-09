@@ -83,6 +83,10 @@ class Deps:
 
 DEPS = Deps()
 
+# The promotion policy consulted by the graduation/decision activities.
+# Module-level so operators/tests can swap it without patching call sites.
+PROMOTION_POLICY = PromotionPolicy()
+
 
 def configure(
     *,
@@ -268,6 +272,141 @@ def decide_promotion(inp: PromotionInput) -> dict:
     # Record + transition the candidate version through the §1 state machine.
     apply_decision(DEPS.ledger, decision)
     return decision.to_dict()
+
+
+def _window_stats(ledger: Ledger, runs: list) -> dict | None:
+    """Aggregate scorecard stats over a window of completed runs.
+
+    Runs whose eval results were never recorded are skipped; returns ``None``
+    when nothing is measurable.
+    """
+    scores: list[float] = []
+    safety_regressions = 0
+    critical_failures = 0
+    for run in runs:
+        results = ledger.eval_results(run.id)
+        if not results:
+            continue
+        card = Scorecard.from_results(results)
+        scores.append(card.overall_score)
+        safety_regressions += card.safety_regressions
+        critical_failures += card.critical_failures
+    if not scores:
+        return None
+    return {
+        "mean_score": sum(scores) / len(scores),
+        "runs": len(scores),
+        "safety_regressions": safety_regressions,
+        "critical_failures": critical_failures,
+    }
+
+
+def check_canary_graduation(name: str) -> dict:
+    """Graduate or roll back a canary version after a finished run (design §3).
+
+    Invoked from AgentRunWorkflow's completion path; the workflow stays
+    deterministic because every read/compare/transition happens here, ledger-
+    side. Once the canary has ``policy.canary.minRuns`` completed runs, its
+    mean ``overall_score`` and hard counters (safety_regressions == 0,
+    critical_failures == 0) are compared against the active version's trailing
+    runs over the same window: better-or-equal graduates (canary -> active,
+    old active -> archived), worse rolls back (canary -> rejected). Every
+    transition is a ledger write with an event, plus a recorded decision.
+    """
+    from datetime import UTC, datetime
+
+    from ..evals.promotion import Decision, PromotionDecision
+
+    ledger = DEPS.ledger
+    policy = PROMOTION_POLICY
+
+    canary_version = getattr(ledger, "canary_version", None)
+    if not callable(canary_version):
+        return {"status": "no-canary", "agent": name}
+    canary = canary_version(name)
+    if canary is None:
+        return {"status": "no-canary", "agent": name}
+
+    canary_ref = f"{name}@{canary.version}"
+    window = policy.canary_min_runs
+    canary_runs = ledger.completed_runs(canary_ref, limit=window)
+    if len(canary_runs) < window:
+        return {
+            "status": "insufficient-runs", "agent": canary_ref,
+            "runs": len(canary_runs), "required": window,
+        }
+    canary_stats = _window_stats(ledger, canary_runs)
+    if canary_stats is None or canary_stats["runs"] < window:
+        return {
+            "status": "insufficient-runs", "agent": canary_ref,
+            "runs": 0 if canary_stats is None else canary_stats["runs"],
+            "required": window,
+        }
+
+    active = ledger.active_version(name)
+    active_stats = None
+    if active is not None:
+        active_stats = _window_stats(
+            ledger, ledger.completed_runs(f"{name}@{active.version}", limit=window)
+        )
+    baseline_mean = active_stats["mean_score"] if active_stats else None
+
+    card = Scorecard(
+        subject_type="agent_spec_version",
+        subject_id=canary_ref,
+        overall_score=max(0.0, min(1.0, canary_stats["mean_score"])),
+        safety_regressions=canary_stats["safety_regressions"],
+        critical_failures=canary_stats["critical_failures"],
+        cases_total=canary_stats["runs"],
+    )
+
+    hard_failure = (
+        canary_stats["safety_regressions"] > 0
+        or canary_stats["critical_failures"] > 0
+    )
+    worse = baseline_mean is not None and canary_stats["mean_score"] < baseline_mean
+
+    if hard_failure or worse:
+        reason = (
+            f"canary rollback: safety_regressions="
+            f"{canary_stats['safety_regressions']}, critical_failures="
+            f"{canary_stats['critical_failures']}"
+            if hard_failure
+            else (
+                f"canary rollback: mean score {canary_stats['mean_score']:.3f} "
+                f"below active baseline {baseline_mean:.3f}"
+            )
+        )
+        ledger.set_version_status(name, canary.version, "rejected", reason=reason)
+        ledger.record_promotion(
+            PromotionDecision(
+                Decision.reject, reason, card,
+                status="rejected", approved_by="canary-graduation",
+                resolved_at=datetime.now(UTC),
+            )
+        )
+        return {"status": "rolled-back", "agent": canary_ref, "reason": reason}
+
+    reason = (
+        f"canary graduated: mean score {canary_stats['mean_score']:.3f} over "
+        f"{canary_stats['runs']} runs"
+        + (f" >= active baseline {baseline_mean:.3f}" if baseline_mean is not None
+           else " with no active baseline runs")
+    )
+    ledger.set_version_status(name, canary.version, "active", reason=reason)
+    if active is not None:
+        ledger.set_version_status(
+            name, active.version, "archived",
+            reason=f"superseded by {canary_ref}",
+        )
+    ledger.record_promotion(
+        PromotionDecision(
+            Decision.promote, reason, card,
+            status="approved", approved_by="canary-graduation",
+            resolved_at=datetime.now(UTC),
+        )
+    )
+    return {"status": "graduated", "agent": canary_ref, "reason": reason}
 
 
 def _run_case(spec: AgentSpec, objective: Objective) -> CaseRun:
