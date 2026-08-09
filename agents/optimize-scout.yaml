@@ -21,6 +21,8 @@ model:
   baseUrlRef: vllm/qwen-coder
   temperature: 0.3
   maxTokens: 16384
+  # Structured-output role: answer directly, don't spend the budget thinking.
+  enableThinking: false
 
 sandbox:
   provider: abox

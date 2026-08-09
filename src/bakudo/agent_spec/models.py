@@ -63,6 +63,10 @@ class ModelConfig(_Strict):
     base_url_ref: str | None = Field(default=None, alias="baseUrlRef")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(default=8192, alias="maxTokens", ge=1)
+    # None = server default. False turns off the thinking stream for hybrid
+    # reasoning models (Qwen `chat_template_kwargs.enable_thinking`) — used by
+    # structured-output roles whose deliberation otherwise eats the budget.
+    enable_thinking: bool | None = Field(default=None, alias="enableThinking")
 
 
 class SandboxConfig(_Strict):

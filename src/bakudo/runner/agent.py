@@ -74,13 +74,21 @@ def build_model(spec: AgentSpec) -> Any:
 
     base_url = _resolve_base_url(spec.model.base_url_ref)
     api_key = os.environ.get("VLLM_API_KEY", "not-needed")
+    params: dict[str, Any] = {
+        "temperature": spec.model.temperature,
+        "max_tokens": spec.model.max_tokens,
+    }
+    if spec.model.enable_thinking is not None:
+        # Hybrid reasoning models (Qwen): per-request thinking toggle. The
+        # openai SDK forwards extra_body verbatim; vLLM applies it via
+        # chat_template_kwargs (verified against the live deployment).
+        params["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": spec.model.enable_thinking}
+        }
     return OpenAIModel(
         client_args={"base_url": base_url, "api_key": api_key},
         model_id=spec.model.model_id,
-        params={
-            "temperature": spec.model.temperature,
-            "max_tokens": spec.model.max_tokens,
-        },
+        params=params,
     )
 
 

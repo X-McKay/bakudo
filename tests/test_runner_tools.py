@@ -165,3 +165,27 @@ def test_partial_text_salvaged_on_max_tokens():
     class Empty:
         messages = []
     assert _partial_text_on_max_tokens(exc, Empty()) is None
+
+
+def test_build_model_maps_enable_thinking_to_extra_body(monkeypatch):
+    """enableThinking: false must reach the API as
+    extra_body.chat_template_kwargs.enable_thinking (verified supported by the
+    live vLLM deployment)."""
+    import yaml
+
+    pytest.importorskip("strands")
+    from bakudo.agent_spec import load_spec_file
+    from bakudo.runner.agent import build_model
+
+    monkeypatch.setenv("VLLM_BASE_URL", "https://llm.example/v1")
+    doc = yaml.safe_load((AGENTS / "optimize-scout.yaml").read_text())
+    spec = load_spec_file(AGENTS / "optimize-scout.yaml")
+    model = build_model(spec)
+    params = model.config.get("params", {})
+    if doc["model"].get("enableThinking") is False:
+        assert params["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    else:
+        assert "extra_body" not in params
+
+    spec_explore = load_spec_file(AGENTS / "explore.yaml")
+    assert "extra_body" not in build_model(spec_explore).config.get("params", {})

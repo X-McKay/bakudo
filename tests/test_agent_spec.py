@@ -39,3 +39,26 @@ outputContract: {requiredFiles: [result.json]}
 """
     with pytest.raises(SchemaValidationError):
         load_spec(bad)
+
+
+def test_model_enable_thinking_knob_parses(tmp_path):
+    """enableThinking: false is a per-role model knob for structured-output
+    roles on thinking models (scout/critic burn their output budget on
+    deliberation otherwise)."""
+    import yaml
+
+    from bakudo.agent_spec import load_spec_file
+
+    doc = yaml.safe_load((AGENTS / "optimize-scout.yaml").read_text())
+    doc["model"]["enableThinking"] = False
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    spec = load_spec_file(p)
+    assert spec.model.enable_thinking is False
+
+
+def test_model_enable_thinking_defaults_to_none():
+    from bakudo.agent_spec import load_spec_file
+
+    spec = load_spec_file(AGENTS / "explore.yaml")
+    assert spec.model.enable_thinking is None
