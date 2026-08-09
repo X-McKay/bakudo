@@ -12,11 +12,13 @@ class SpyLedger:
 
     def __init__(self):
         self.created = []
+        self.objectives = []
         self.phases = []
         self.finished = []
 
-    def create_run(self, record):
+    def create_run(self, record, objective=None):
         self.created.append(record)
+        self.objectives.append(objective)
         return record
 
     def set_phase(self, run_id, phase):
@@ -46,6 +48,12 @@ def test_create_run_routes_to_configured_ledger(spy):
     assert out["run_id"] == "run_X"
     assert spy.created and spy.created[0].temporal_workflow_id == "wf-1"
     assert spy.created[0].agent_ref == "explore@1"
+
+
+def test_create_run_passes_objective_for_upsert(spy):
+    """TMP-2: the ledger needs the objective document so the runs FK holds."""
+    _impl.create_run(_input(), workflow_id="wf-1")
+    assert spy.objectives == [{"id": "obj_X", "type": "explore"}]
 
 
 def test_persist_run_routes_non_terminal_and_terminal(spy):

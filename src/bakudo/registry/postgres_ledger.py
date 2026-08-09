@@ -134,8 +134,33 @@ class PostgresLedger:
         )
 
     # --- runs ---
-    def create_run(self, record: RunRecord) -> RunRecord:
-        with self._connection() as conn:
+    def create_run(self, record: RunRecord, objective: dict | None = None) -> RunRecord:
+        """Create the run row, upserting its objective first (TMP-2).
+
+        ``runs.objective_id`` has a FK on ``objectives``; nothing else is
+        guaranteed to have inserted the objective, so the upsert happens here,
+        idempotently, in the same transaction as the run insert. Without an
+        objective document a stub row is written so the FK still holds.
+        """
+        obj = objective or {}
+        with self._connection() as conn, conn.transaction():
+            self._do(
+                conn,
+                """
+                insert into objectives (id, repo, type, title, objective_json, status, priority)
+                values (%s,%s,%s,%s,%s,%s,%s)
+                on conflict (id) do nothing
+                """,
+                (
+                    record.objective_id,
+                    obj.get("repo", "unknown"),
+                    obj.get("type", "unknown"),
+                    obj.get("title", ""),
+                    json.dumps(obj),
+                    obj.get("status", "ready"),
+                    (obj.get("priority") or {}).get("score"),
+                ),
+            )
             self._do(
                 conn,
                 """

@@ -126,7 +126,9 @@ def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
     )
     ledger = DEPS.ledger
     if hasattr(ledger, "create_run"):
-        ledger.create_run(record)
+        # Pass the objective document so durable ledgers can upsert the
+        # objectives row the runs FK points at (TMP-2).
+        ledger.create_run(record, objective=inp.objective)
     return {"run_id": record.id, "git_branch": record.git_branch}
 
 
