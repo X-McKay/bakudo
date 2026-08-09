@@ -70,6 +70,33 @@ class RunResult(BaseModel):
         validate_result(self.to_dict())
 
 
+def _looks_like_verdict(data: dict[str, Any]) -> bool:
+    """A bare critic verdict per the pinned contract: {score, passed[, issues]}."""
+    return (
+        "score" in data
+        and "passed" in data
+        and "status" not in data
+        and isinstance(data.get("score"), (int, float))
+    )
+
+
+def _fold_verdict(data: dict[str, Any]) -> dict[str, Any]:
+    """Fold a bare verdict into the RunResult envelope (design §5).
+
+    The critic *run* succeeded — it produced a verdict; whether the verdict is
+    positive lives in ``metrics.passed`` for ``critic_eval`` to grade.
+    """
+    issues = [str(i) for i in data.get("issues") or []]
+    score = float(data["score"])
+    return {
+        "status": "success",
+        "summary": f"Critic verdict: score {score}, passed {bool(data['passed'])}."
+        + (f" Issues: {'; '.join(issues[:3])}" if issues else ""),
+        "metrics": {"score": score, "passed": 1.0 if data["passed"] else 0.0},
+        "proposed_followups": issues,
+    }
+
+
 def _extract_json_blob(text: str) -> dict[str, Any] | None:
     """Best-effort recovery of a JSON object embedded in free-form model text."""
     # Prefer a fenced ```json block, then fall back to the first {...} span.
@@ -123,6 +150,8 @@ def normalize_result(
             "summary": "Agent did not produce a parseable result.json.",
             "blocked_reasons": ["unparseable_output"],
         }
+    elif _looks_like_verdict(data):
+        data = _fold_verdict(data)
 
     data.setdefault("run_id", run_id)
     data.setdefault("agent", agent)

@@ -33,3 +33,30 @@ def test_result_always_validates_against_schema():
     r = normalize_result({"status": "success", "summary": "s"}, **CTX)
     r.validate_against_schema()  # raises if invalid
     assert r.to_dict()["run_id"] == "run_X"
+
+
+# --- critic verdict folding (design §5: verdict rides the result envelope) ---
+
+def test_normalize_folds_bare_verdict_into_envelope():
+    """A critic that answers with the pinned verdict object {score, passed,
+    issues} gets folded into a schema-valid RunResult (metrics.score /
+    metrics.passed, issues -> proposed_followups) instead of defaulting to a
+    summaryless failure."""
+    from bakudo.runner.result import normalize_result
+
+    raw = 'Review done.\n```json\n{"score": 0.75, "passed": true, "issues": ["missing tests"]}\n```'
+    out = normalize_result(raw, run_id="run_C", agent="critic@1", objective_id="obj_C")
+    assert out.status.value == "success"
+    assert out.metrics["score"] == 0.75
+    assert out.metrics["passed"] == 1.0
+    assert out.proposed_followups == ["missing tests"]
+    assert "0.75" in out.summary
+
+
+def test_normalize_verdict_failed_review():
+    from bakudo.runner.result import normalize_result
+
+    out = normalize_result({"score": 0.1, "passed": False, "issues": ["broken"]},
+                           run_id="run_C", agent="critic@1", objective_id="obj_C")
+    assert out.status.value == "success"  # the critic RUN succeeded; the verdict is negative
+    assert out.metrics["passed"] == 0.0

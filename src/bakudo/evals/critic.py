@@ -145,6 +145,10 @@ def critic_eval(
     result = getattr(outcome, "result", None)
     if not getattr(outcome, "succeeded", False) or not isinstance(result, dict):
         detail = getattr(outcome, "error", "") or "sandbox produced no result"
+        if isinstance(result, dict) and result.get("summary"):
+            # Surface the inner run's own diagnosis — "sandbox produced no
+            # result" alone hides the actionable failure (observed live).
+            detail = f"{detail}: {result['summary'][:300]}"
         return _errored(ctx, f"critic run failed: {detail}")
 
     verdict = _extract_verdict(result)

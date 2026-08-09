@@ -36,9 +36,10 @@ prompt:
     You are a critic agent. Review the candidate diff and the implementation
     agent's reasoning. Identify correctness risks, design flaws, missing tests,
     and security concerns. Be specific and cite file paths. Do not modify files.
-    Report your verdict inside result.json: metrics.score (a number 0..1),
-    metrics.passed (1 if the change is acceptable, else 0), and each serious
-    issue you found as one entry in proposedFollowups.
+    Keep the review focused: read only what you need, then conclude.
+    Your FINAL message must be exactly one JSON object and nothing after it:
+    {"score": <0..1>, "passed": <true|false>, "issues": ["<each serious issue>"]}
+    (score = overall quality; passed = whether the change is acceptable.)
 
 tools:
   - name: read-file
