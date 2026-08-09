@@ -1,0 +1,27 @@
+# Repo-owned abox 0.6.0 configuration (review finding ABOX-4).
+#
+# Schema ground truth: abox-core/src/project.rs (validated with
+# `abox project validate` / `abox project explain`). Changes to this file (or
+# the prepare script) change the approval fingerprint and require a fresh
+# `abox project trust` by the operator.
+
+[project]
+id = "bakudo"
+
+[network]
+# Scoped egress: package installs during prepare + the vLLM ingress endpoints
+# the worker forwards via VLLM_BASE_URL / BAKUDO_VLLM_* (direct keyless path).
+# Spec-level networkMode still narrows per run via `abox run --network`
+# (none -> safe), so explore runs get a loopback-only guest regardless.
+mode = "scoped"
+bundles = ["pypi-public"]
+domains = ["llm.almckay.io", "llm-fast.almckay.io", "embeddings.almckay.io"]
+
+[environment]
+# Official glibc Python guest profile: manylinux wheels (pydantic-core etc.)
+# install cleanly, unlike the musl base image.
+profile = "python-glibc"
+caches = ["pip"]
+# Installs this package inside the guest so the `agent-runner` entrypoint
+# exists for `abox run ... -- agent-runner ...`.
+prepare = ".abox/prepare.sh"
