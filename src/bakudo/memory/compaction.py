@@ -47,7 +47,15 @@ class CompactionReport:
 
 
 def compact(result: RunResult, store, *, repo: str) -> CompactionReport:
-    """Write a run's memory candidates, recording acceptances and rejections."""
+    """Write a run's memory candidates, recording acceptances and rejections.
+
+    Stores that expose ``purge_expired()`` (the durable Pg store) get their
+    TTL-expired rows deleted first (MEM-5) — compaction is the natural
+    janitor moment, running after every run.
+    """
+    purge = getattr(store, "purge_expired", None)
+    if callable(purge):
+        purge()
     written: list[str] = []
     rejected: list[dict[str, str]] = []
     for item in memories_from_result(result, repo=repo):

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import timedelta
 from typing import Any
 
 from .embeddings import Embedder, HashingEmbedder
@@ -31,7 +32,10 @@ from .semantic import DEFAULT_DEDUP_THRESHOLD
 _TTL_RE = re.compile(r"^\s*(\d+)\s*([dhwm])\s*$", re.IGNORECASE)
 _TTL_UNITS = {"d": "days", "h": "hours", "w": "weeks", "m": "minutes"}
 
-_ITEM_COLUMNS = "id, memory_type, scope, content, evidence, confidence, created_by"
+_ITEM_COLUMNS = "id, memory_type, scope, content, evidence, confidence, ttl, created_by"
+
+# A row is live when it has no TTL or its TTL has not elapsed (MEM-5).
+_TTL_LIVE = "(ttl is null or created_at + ttl > now())"
 
 
 def ttl_to_interval(ttl: str | None) -> str | None:
@@ -45,6 +49,29 @@ def ttl_to_interval(ttl: str | None) -> str | None:
     if match is None:
         return ttl
     return f"{match.group(1)} {_TTL_UNITS[match.group(2).lower()]}"
+
+
+def interval_to_ttl(value: Any) -> str | None:
+    """Convert a Postgres interval column value back to the TTL shorthand.
+
+    psycopg returns intervals as :class:`datetime.timedelta`. The round trip
+    is semantically equal, not textually: Postgres stores days+seconds, so
+    ``"2w"`` comes back as ``"14d"``. Text-mode values and shapes we cannot
+    map cleanly pass through as their string form.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, timedelta):
+        if value.microseconds == 0:
+            if value.seconds == 0 and value.days:
+                return f"{value.days}d"
+            if value.seconds % 3600 == 0:
+                return f"{value.days * 24 + value.seconds // 3600}h"
+            if value.seconds % 60 == 0:
+                return f"{value.days * 1440 + value.seconds // 60}m"
+    return str(value)
 
 
 def vector_literal(embedding: list[float]) -> str:
@@ -127,7 +154,8 @@ class PgSemanticMemoryStore:
         limit: int = 10,
         min_similarity: float = 0.0,
     ) -> list[MemoryItem]:
-        where, params = self._scope_clause(scope)
+        """Retrieve live memories; TTL-expired rows are filtered server-side."""
+        where, params = self._live_where(scope)
         if text is None:
             rows = self._all_rows(
                 f"select {_ITEM_COLUMNS} from memory_items{where} "
@@ -151,10 +179,22 @@ class PgSemanticMemoryStore:
         ]
 
     def all(self) -> list[MemoryItem]:
+        """Dump every stored row, including TTL-expired ones (debug/admin
+        surface; retrieval paths all filter expiry)."""
         rows = self._all_rows(
             f"select {_ITEM_COLUMNS} from memory_items order by created_at", ()
         )
         return [self._item_from_row(row) for row in rows]
+
+    def purge_expired(self) -> int:
+        """Delete TTL-expired rows (cascade removes their embeddings) and
+        return how many were purged. Called from compaction (MEM-5)."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "delete from memory_items "
+                "where ttl is not null and created_at + ttl <= now()"
+            )
+            return max(int(cur.rowcount), 0)
 
     # --- internals ---
 
@@ -213,7 +253,8 @@ class PgSemanticMemoryStore:
         """
         rows = self._all_rows(
             f"select {_ITEM_COLUMNS} from memory_items "
-            "where lower(trim(content)) = lower(trim(%s))",
+            "where lower(trim(content)) = lower(trim(%s)) "
+            f"and {_TTL_LIVE}",
             (item.content,),
         )
         return [self._item_from_row(row) for row in rows]
@@ -221,7 +262,7 @@ class PgSemanticMemoryStore:
     def _nearest(
         self, embedding: list[float], *, scope: dict
     ) -> tuple[MemoryItem, float] | None:
-        where, params = self._scope_clause(scope)
+        where, params = self._live_where(scope)
         q = vector_literal(embedding)
         row = self._one_row(
             f"select {_ITEM_COLUMNS}, 1 - (e.embedding <=> %s::vector) as similarity "
@@ -289,6 +330,14 @@ class PgSemanticMemoryStore:
             return "", ()
         return " where scope @> %s::jsonb", (json.dumps(scope),)
 
+    @classmethod
+    def _live_where(cls, scope: dict | None) -> tuple[str, tuple]:
+        """Scope filter plus the TTL-liveness predicate (MEM-5)."""
+        where, params = cls._scope_clause(scope)
+        if where:
+            return f"{where} and {_TTL_LIVE}", params
+        return f" where {_TTL_LIVE}", params
+
     @staticmethod
     def _item_from_row(row: tuple) -> MemoryItem:
         scope = row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}")
@@ -300,7 +349,8 @@ class PgSemanticMemoryStore:
             content=row[3],
             evidence=evidence,
             confidence=float(row[5]),
-            created_by=row[6],
+            ttl=interval_to_ttl(row[6]),
+            created_by=row[7],
         )
 
     def _exec(self, sql: str, params: tuple) -> None:

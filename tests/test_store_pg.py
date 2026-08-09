@@ -7,18 +7,26 @@ logic, and SQL parameterisation are exercised without a live Postgres.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from bakudo.memory.models import Evidence, MemoryItem
 from bakudo.memory.policy import MemoryRejected
 from bakudo.memory.store_pg import (
     PgSemanticMemoryStore,
+    interval_to_ttl,
     ttl_to_interval,
     vector_literal,
 )
 
 
-def item_row(item: MemoryItem, similarity: float | None = None) -> tuple:
+def item_row(
+    item: MemoryItem,
+    similarity: float | None = None,
+    *,
+    ttl: timedelta | None = None,
+) -> tuple:
     row: tuple = (
         item.id,
         item.type,
@@ -26,6 +34,7 @@ def item_row(item: MemoryItem, similarity: float | None = None) -> tuple:
         item.content,
         [e.model_dump(mode="json", exclude_none=True) for e in item.evidence],
         item.confidence,
+        ttl,  # psycopg returns interval columns as timedelta
         item.created_by,
     )
     if similarity is not None:
@@ -37,10 +46,13 @@ class FakeCursor:
     def __init__(self, conn: FakeConn) -> None:
         self._conn = conn
         self._rows: list[tuple] = []
+        self.rowcount = 0
 
     def execute(self, sql: str, params: tuple = ()) -> None:
         if self._conn.fail_on and self._conn.fail_on in sql:
             raise RuntimeError(f"injected failure on: {self._conn.fail_on}")
+        if sql.lstrip().startswith("delete") and "created_at + ttl" in sql:
+            self.rowcount = self._conn.purge_count
         self._conn.executed.append((sql, params))
         if self._conn.transactions and self._conn.transactions[-1]["outcome"] is None:
             self._conn.transactions[-1]["stmts"].append(sql)
@@ -90,6 +102,8 @@ class FakeConn:
         # atttypmod of memory_embeddings.embedding: -1 = untyped 'vector',
         # N > 0 = 'vector(N)', None = table missing.
         self.embedding_typmod: int | None = -1
+        # rowcount reported for the purge_expired delete.
+        self.purge_count = 0
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -354,6 +368,76 @@ def test_supersede_rolls_back_delete_when_insert_fails() -> None:
     tx = conn.transactions[-1]
     assert tx["outcome"] == "rollback"
     assert any("delete from memory_items" in s for s in tx["stmts"])
+
+
+_TTL_LIVE_PREDICATE = "ttl is null or created_at + ttl > now()"
+
+
+def test_query_by_text_excludes_expired_rows_server_side() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+
+    store.query(text="anything")
+
+    (sql, _) = conn.statements("<=>")[-1]
+    assert _TTL_LIVE_PREDICATE in sql
+
+
+def test_query_without_text_excludes_expired_rows_server_side() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+
+    store.query(scope={"repo": "payments-api"})
+
+    (sql, _) = conn.statements("order by confidence desc")[0]
+    assert _TTL_LIVE_PREDICATE in sql
+    assert "scope @> %s::jsonb" in sql
+
+
+def test_repeat_check_and_dedup_ignore_expired_rows() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+
+    store.write_candidate(make_item())
+
+    (repeat_sql, _) = conn.statements("lower(trim(content))")[0]
+    assert _TTL_LIVE_PREDICATE in repeat_sql
+    (nearest_sql, _) = conn.statements("limit 1")[-1]
+    assert _TTL_LIVE_PREDICATE in nearest_sql
+
+
+def test_query_round_trips_ttl() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+    item = make_item()
+    conn.query_rows = [item_row(item, 0.9, ttl=timedelta(days=180))]
+
+    got = store.query(text="webhook retries")
+
+    assert got[0].ttl == "180d"
+
+
+def test_purge_expired_deletes_only_expired_rows() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+    conn.purge_count = 3
+
+    assert store.purge_expired() == 3
+
+    (sql, _) = conn.statements("delete from memory_items")[0]
+    assert "ttl is not null" in sql
+    assert "created_at + ttl <= now()" in sql
+
+
+def test_interval_to_ttl_round_trip() -> None:
+    assert interval_to_ttl(None) is None
+    assert interval_to_ttl(timedelta(days=180)) == "180d"
+    assert interval_to_ttl(timedelta(hours=12)) == "12h"
+    assert interval_to_ttl(timedelta(minutes=30)) == "30m"
+    # Weeks collapse to days (Postgres stores intervals as days+seconds).
+    assert interval_to_ttl(timedelta(weeks=2)) == "14d"
+    # Text-mode connections hand back the interval as text; pass it through.
+    assert interval_to_ttl("180 days") == "180 days"
 
 
 def test_ttl_to_interval_shorthand() -> None:
