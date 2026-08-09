@@ -27,17 +27,25 @@ def worker_configs() -> list[dict[str, Any]]:
     from .activities import ALL_ACTIVITIES
     from .shared import TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS
     from .workflows import (
+        AgentEvolutionWorkflow,
         AgentRunWorkflow,
         EvalWorkflow,
+        MemoryCompactionWorkflow,
         MetaAgentWorkflow,
         OptimizationWorkflow,
+        RepoObserverWorkflow,
     )
 
+    # Every control-plane workflow type must be registered here, or client
+    # starts hang with "workflow type not registered" (TMP-4).
     control_workflows: list[type] = [
         MetaAgentWorkflow,
         AgentRunWorkflow,
         EvalWorkflow,
         OptimizationWorkflow,
+        AgentEvolutionWorkflow,
+        MemoryCompactionWorkflow,
+        RepoObserverWorkflow,
     ]
     run_workflows: list[type] = [AgentRunWorkflow, EvalWorkflow, OptimizationWorkflow]
 

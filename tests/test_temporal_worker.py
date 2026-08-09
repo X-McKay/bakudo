@@ -21,6 +21,38 @@ def test_all_activities_are_sync():
     assert offenders == [], f"activities must be sync def: {offenders}"
 
 
+def test_control_queue_registers_every_control_plane_workflow():
+    """TMP-4: unregistered workflow types hang with 'workflow type not
+    registered' — evolution/compaction/observer must be on the control queue."""
+    from bakudo.temporal.worker import worker_configs
+    from bakudo.temporal.workflows import (
+        AgentEvolutionWorkflow,
+        AgentRunWorkflow,
+        EvalWorkflow,
+        MemoryCompactionWorkflow,
+        MetaAgentWorkflow,
+        OptimizationWorkflow,
+        RepoObserverWorkflow,
+    )
+
+    configs = {cfg["task_queue"]: cfg for cfg in worker_configs()}
+    control = configs[TASK_QUEUE_CONTROL]["workflows"]
+    for wf in (
+        MetaAgentWorkflow,
+        AgentRunWorkflow,
+        EvalWorkflow,
+        OptimizationWorkflow,
+        AgentEvolutionWorkflow,
+        MemoryCompactionWorkflow,
+        RepoObserverWorkflow,
+    ):
+        assert wf in control, f"{wf.__name__} missing from the control queue"
+
+    runs = configs[TASK_QUEUE_RUNS]["workflows"]
+    for wf in (AgentRunWorkflow, EvalWorkflow, OptimizationWorkflow):
+        assert wf in runs, f"{wf.__name__} missing from the runs queue"
+
+
 def test_worker_configs_use_thread_pool_executor():
     from bakudo.temporal.worker import worker_configs
 
