@@ -91,6 +91,11 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
       profile, and scoped network domains for the model endpoints — then
       `abox project trust` + `abox env warm` per repo. See
       `.abox/` in this repo and the optfix fixture pattern for templates.
+      **⚠ Refresh the vendored wheel (and re-warm) whenever the control plane
+      changes** — a stale worker-plane wheel can't parse newer bundles
+      (observed live 2026-08-09; the runner now reports it as a failed result
+      with `bundle_incompatible` instead of dying silently, but the run still
+      fails). A future improvement: automated version handshake at bundle load.
 - [ ] Define the abox sandbox profiles named in `abox/runner.py::PROFILES`
       (`explore-readonly`, `add-feature-python`, `optimize-python`, …) with the network bundles
       (`github-api`, `pypi-public`, `vllm-gateway`) and resource/diff limits.

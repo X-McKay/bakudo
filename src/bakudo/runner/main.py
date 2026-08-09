@@ -62,7 +62,36 @@ def _load_bundle(args: argparse.Namespace) -> TaskBundle:
 
 
 def run(args: argparse.Namespace) -> int:
-    bundle = _load_bundle(args)
+    try:
+        bundle = _load_bundle(args)
+    except Exception as exc:  # noqa: BLE001 - version skew must be diagnosable
+        # A bundle this runner can't parse (typically control-plane/worker-plane
+        # version skew: the worker vendored an older bakudo than the control
+        # plane that rendered the bundle) still gets a failed result.json —
+        # identity fields recovered best-effort from the raw document.
+        raw_ids: dict[str, str] = {}
+        if args.bundle:
+            try:
+                doc = json.loads(Path(args.bundle).read_text())
+                raw_ids = {
+                    k: doc[k] for k in ("run_id", "objective_id") if isinstance(doc.get(k), str)
+                }
+            except Exception:  # noqa: BLE001 - identity recovery is best-effort
+                pass
+        failure = {
+            "run_id": raw_ids.get("run_id", "run_" + "0" * 26),
+            "agent": "unknown@0",
+            "objective_id": raw_ids.get("objective_id", "obj_" + "0" * 26),
+            "status": "failed",
+            "summary": (
+                "Runner could not load the task bundle (control/worker version "
+                f"skew?): {_exception_chain(exc)}"
+            ),
+            "blocked_reasons": ["bundle_incompatible"],
+        }
+        Path(args.result).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.result).write_text(json.dumps(failure, indent=2))
+        return 1
     spec = bundle.agent_spec
 
     workspace = Workspace(Path(args.workspace))
