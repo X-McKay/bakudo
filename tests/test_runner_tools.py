@@ -55,3 +55,49 @@ def test_bound_tools_preserve_parameter_signature(tmp_path):
     params = inspect.signature(tools["read-file"]).parameters
     assert "ctx" not in params
     assert "path" in params
+
+
+# ---------------------------------------------------------------------------
+# ABOX-9: git_diff/changed_files must see untracked (create-only) changes
+# ---------------------------------------------------------------------------
+
+
+def _git_workspace(tmp_path):
+    import subprocess
+
+    def git(*args):
+        subprocess.run(
+            ["git", *args], check=True, cwd=tmp_path, capture_output=True, text=True
+        )
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("config", "commit.gpgsign", "false")
+    (tmp_path / "existing.py").write_text("original\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    return Workspace(tmp_path)
+
+
+def test_changed_files_includes_untracked(tmp_path):
+    ws = _git_workspace(tmp_path)
+    (tmp_path / "existing.py").write_text("modified\n")
+    (tmp_path / "brand_new.py").write_text("created\n")
+    files = ws.changed_files()
+    assert "existing.py" in files
+    assert "brand_new.py" in files
+
+
+def test_git_diff_includes_untracked_content(tmp_path):
+    ws = _git_workspace(tmp_path)
+    (tmp_path / "brand_new.py").write_text("created content\n")
+    diff = ws.git_diff()
+    assert "brand_new.py" in diff
+    assert "created content" in diff
+
+
+def test_clean_workspace_reports_no_changes(tmp_path):
+    ws = _git_workspace(tmp_path)
+    assert ws.changed_files() == []
+    assert ws.git_diff() == ""
