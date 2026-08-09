@@ -42,11 +42,16 @@ def run_objective(
     ledger: Ledger | None = None,
     sandbox: SandboxFn | None = None,
     workflow_id: str | None = None,
+    run_id: str | None = None,
 ) -> PipelineResult:
-    """Run one objective with one agent spec, end to end."""
+    """Run one objective with one agent spec, end to end.
+
+    ``run_id`` may be supplied by the caller (the spawn path mints it before
+    spec resolution so canary routing is deterministic per run, design §2).
+    """
     ledger = ledger or InMemoryLedger()
     sandbox = sandbox or local_sandbox
-    run_id = ids.run_id()
+    run_id = run_id or ids.run_id()
 
     bundle = TaskBundle(
         run_id=run_id,

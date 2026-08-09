@@ -498,8 +498,13 @@ class MetaAgentWorkflow:
             self._handled += 1
             self._mark_processed(objective)
 
+            # The run id is minted before spec resolution so canary routing is
+            # deterministic per run (design §2).
+            run_id = objective.get("run_id") or workflow.uuid4().hex
+
             # Resolve the agent spec (TMP-3): an inline agent_spec wins, then
-            # suggestedAgents[0] / the per-type default, loaded via activity.
+            # suggestedAgents[0] / the per-type default, loaded via activity
+            # (which enforces active-only resolution + canary routing, OPT-5).
             # Unresolvable objectives are dead-lettered, never crash the task.
             spec = objective.get("agent_spec")
             if not isinstance(spec, dict):
@@ -507,7 +512,7 @@ class MetaAgentWorkflow:
                 agent_name = resolve_agent_name(objective)
                 if agent_name is not None:
                     spec = await workflow.execute_activity(
-                        load_agent_spec, agent_name, **_SHORT
+                        load_agent_spec, args=[agent_name, run_id], **_SHORT
                     )
                 if not isinstance(spec, dict):
                     reason = (
@@ -523,7 +528,6 @@ class MetaAgentWorkflow:
                     )
                     continue
 
-            run_id = objective.get("run_id") or workflow.uuid4().hex
             self._state.active_runs.append(run_id)
 
             # Dispatch the run as a child workflow; the meta-agent does not block

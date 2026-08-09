@@ -63,8 +63,8 @@ def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
 
 
 @_DEFN(name="load_agent_spec")
-def load_agent_spec(name: str) -> dict | None:
-    return _impl.load_agent_spec(name)
+def load_agent_spec(name: str, run_id: str | None = None) -> dict | None:
+    return _impl.load_agent_spec(name, run_id)
 
 
 @_DEFN(name="render_bundle")

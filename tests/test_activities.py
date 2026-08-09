@@ -95,6 +95,39 @@ def test_load_agent_spec_prefers_ledger_active_version(monkeypatch):
     assert doc == {"metadata": {"name": "explore", "version": 7}}
 
 
+def _seed_versions(monkeypatch):
+    from bakudo.registry import InMemoryLedger
+    from bakudo.registry.records import AgentVersionRecord
+
+    ledger = InMemoryLedger()
+    for version, status in ((7, "active"), (8, "candidate")):
+        ledger.upsert_agent_version(
+            AgentVersionRecord(
+                name="explore", version=version,
+                spec_yaml=f"metadata:\n  name: explore\n  version: {version}\n",
+                status=status,
+            )
+        )
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    return ledger
+
+
+def test_load_agent_spec_routes_to_canary_deterministically(monkeypatch):
+    """Design §2 in the Temporal dispatch path: sha256('run_CANARYB') % 100 == 3
+    (< 10 -> canary), sha256('run_CANARYA') % 100 == 79 (>= 10 -> active)."""
+    ledger = _seed_versions(monkeypatch)
+    ledger.set_version_status("explore", 8, "canary")
+    assert _impl.load_agent_spec("explore", "run_CANARYB")["metadata"]["version"] == 8
+    assert _impl.load_agent_spec("explore", "run_CANARYA")["metadata"]["version"] == 7
+
+
+def test_load_agent_spec_never_returns_non_canary_candidates(monkeypatch):
+    ledger = _seed_versions(monkeypatch)
+    assert _impl.load_agent_spec("explore", "run_CANARYB")["metadata"]["version"] == 7
+    ledger.set_version_status("explore", 8, "rejected")
+    assert _impl.load_agent_spec("explore", "run_CANARYB")["metadata"]["version"] == 7
+
+
 # --- integration hook: budget_from_spec (abox agent's contract) ---
 
 def test_render_bundle_uses_budget_from_spec_when_available(monkeypatch, spy):

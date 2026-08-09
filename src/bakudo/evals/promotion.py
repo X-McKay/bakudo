@@ -7,6 +7,7 @@ human gate for elevated-privilege mutations.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -85,6 +86,17 @@ class PromotionDecision:
 
 
 DEFAULT_POLICY = PromotionPolicy()
+
+
+def routes_to_canary(run_id: str, percent: int) -> bool:
+    """Deterministic canary routing (design 2026-08-09 §2, fixes OPT-6).
+
+    ``hash(run_id) % 100 < percent`` routes a run to the canary version.
+    Hash-based rather than random so the decision is replay-safe inside a
+    Temporal workflow and trivially testable — the same run id always routes
+    the same way.
+    """
+    return int(hashlib.sha256(run_id.encode()).hexdigest(), 16) % 100 < percent
 
 
 # decide() outcome -> recorded decision status (design 2026-08-09 §1):

@@ -175,3 +175,18 @@ def test_decision_to_dict_includes_lifecycle_fields():
 def test_promotion_decision_defaults_are_pending():
     d = PromotionDecision(Decision.canary, "r", _card())
     assert d.status == "pending"
+
+
+# --- deterministic canary routing (design §2) ---
+
+
+def test_routes_to_canary_is_deterministic_and_percent_bounded():
+    from bakudo.evals.promotion import routes_to_canary
+
+    # sha256("run_CANARYB") % 100 == 3; sha256("run_CANARYA") % 100 == 79.
+    assert routes_to_canary("run_CANARYB", 10) is True
+    assert routes_to_canary("run_CANARYA", 10) is False
+    assert routes_to_canary("run_CANARYA", 100) is True
+    assert routes_to_canary("run_CANARYB", 0) is False
+    # Same run id, same answer, every time (replay-safe inside Temporal).
+    assert all(routes_to_canary("run_CANARYB", 10) for _ in range(5))

@@ -56,3 +56,95 @@ def test_write_memory_candidate_rejects_unevidenced(tools):
         {"type": "repo_fact", "content": "speculation without evidence", "scope": {}}
     )
     assert out["accepted"] is False
+
+
+# --- OPT-5 / design §2: only active (or routed canary) versions spawn ---
+
+
+def _version(tools, version, status="candidate"):
+    """Register an explore spec version and return its spec object."""
+    from bakudo.agent_spec.models import SpecStatus
+
+    base = load_spec_file(AGENTS / "explore.yaml")
+    spec = base.model_copy(
+        update={
+            "metadata": base.metadata.model_copy(
+                update={"version": version, "status": SpecStatus.candidate}
+            )
+        }
+    )
+    tools.register_agent_spec(spec)
+    if status != "candidate":
+        tools.ledger.set_version_status("explore", version, status)
+    return spec
+
+
+def test_resolve_spec_returns_active_version_not_latest(tools):
+    _version(tools, 2, "candidate")  # a newer candidate must not shadow active
+    assert tools._resolve_spec("explore").metadata.version == 1
+
+
+def test_resolve_spec_ignores_rejected_and_archived_versions(tools):
+    _version(tools, 2, "rejected")
+    _version(tools, 3, "archived")
+    assert tools._resolve_spec("explore").metadata.version == 1
+
+
+def test_pinned_candidate_version_is_not_spawnable(tools):
+    _version(tools, 2, "candidate")
+    with pytest.raises(KeyError, match="not spawnable"):
+        tools._resolve_spec("explore@2")
+
+
+def test_pinned_rejected_version_is_not_spawnable(tools):
+    _version(tools, 2, "rejected")
+    with pytest.raises(KeyError, match="not spawnable"):
+        tools._resolve_spec("explore@2")
+
+
+def test_pinned_archived_version_is_not_spawnable(tools):
+    _version(tools, 2, "archived")
+    with pytest.raises(KeyError, match="not spawnable"):
+        tools._resolve_spec("explore@2")
+
+
+def test_pinned_active_and_canary_versions_resolve(tools):
+    _version(tools, 2, "canary")
+    assert tools._resolve_spec("explore@1").metadata.version == 1
+    assert tools._resolve_spec("explore@2").metadata.version == 2
+
+
+def test_canary_routing_is_deterministic_per_run_id(tools):
+    """hash(run_id) % 100 < percent routes to the canary (design §2).
+
+    Pinned both ways: sha256('run_CANARYB') % 100 == 3 (< 10 -> canary),
+    sha256('run_CANARYA') % 100 == 79 (>= 10 -> active).
+    """
+    _version(tools, 2, "canary")
+    assert tools._resolve_spec("explore", run_id="run_CANARYB").metadata.version == 2
+    assert tools._resolve_spec("explore", run_id="run_CANARYA").metadata.version == 1
+
+
+def test_no_canary_means_every_run_gets_active(tools):
+    _version(tools, 2, "candidate")
+    assert tools._resolve_spec("explore", run_id="run_CANARYB").metadata.version == 1
+
+
+def test_resolve_spec_without_active_version_raises(tools):
+    tools.ledger.set_version_status("explore", 1, "archived")
+    with pytest.raises(KeyError, match="[Nn]o active version"):
+        tools._resolve_spec("explore")
+
+
+def test_spawn_agent_run_records_the_routed_agent_ref(tools):
+    _version(tools, 2, "canary")
+    oid = tools.create_objective(
+        {"id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ2", "type": "explore",
+         "repo": "bakudo", "title": "route me"}
+    )
+    run_id = tools.spawn_agent_run(oid, "explore")
+    record = tools.ledger.get_run(run_id)
+    from bakudo.evals.promotion import routes_to_canary
+
+    expected = 2 if routes_to_canary(run_id, 10) else 1
+    assert record.agent_ref == f"explore@{expected}"

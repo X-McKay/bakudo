@@ -79,24 +79,6 @@ def _register_repo_agent_specs(tools: MetaAgentTools) -> None:
         tools.register_agent_spec(load_spec_file(spec_path))
 
 
-def _spawn_agent_run(
-    tools: MetaAgentTools, objective_id: str, agent: str, sandbox: Callable[..., Any]
-) -> str:
-    """Mirror :meth:`MetaAgentTools.spawn_agent_run` with an explicit sandbox.
-
-    The tools method defaults to the in-process ``local_sandbox``; the API must
-    instead honour the fail-closed ``BAKUDO_SANDBOX`` policy (OPT-10), so it
-    threads the resolved sandbox into the pipeline itself.
-    """
-    from ..control.pipeline import run_objective
-
-    objective = tools._objectives[objective_id]
-    spec = tools._resolve_spec(agent)
-    pipeline = run_objective(objective, spec, ledger=tools.ledger, sandbox=sandbox)
-    tools._runs[pipeline.run_id] = pipeline
-    return pipeline.run_id
-
-
 def build_app(tools: MetaAgentTools | None = None) -> Any:
     """Build the FastAPI app. Requires the ``api`` extra (fastapi, uvicorn)."""
     from fastapi import Depends, FastAPI, Header, HTTPException
@@ -157,9 +139,11 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 
     @app.post("/runs")
     def spawn_run(body: RunIn) -> dict[str, str]:
+        # The explicit sandbox honours the fail-closed BAKUDO_SANDBOX policy
+        # (OPT-10) instead of the tools default in-process local_sandbox.
         sandbox = resolve_sandbox()
         try:
-            run_id = _spawn_agent_run(tools, body.objective_id, body.agent, sandbox)
+            run_id = tools.spawn_agent_run(body.objective_id, body.agent, sandbox=sandbox)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"run_id": run_id}

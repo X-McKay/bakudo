@@ -23,7 +23,7 @@ from ..curriculum.objective import Objective
 from ..evals import EvalContext, Scorecard, decide, run_suite
 from ..evals.corpus import CaseRun, load_corpus
 from ..evals.evolution import evolve_agent
-from ..evals.promotion import PromotionPolicy
+from ..evals.promotion import PromotionPolicy, routes_to_canary
 from ..memory.compaction import compact
 from ..memory.semantic import SemanticMemoryStore
 from ..registry import InMemoryLedger, RunPhase, RunRecord
@@ -145,24 +145,42 @@ def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
     return {"run_id": record.id, "git_branch": record.git_branch}
 
 
-def load_agent_spec(name: str) -> dict | None:
+def load_agent_spec(name: str, run_id: str | None = None) -> dict | None:
     """Load an agent spec document by name for meta-agent dispatch (TMP-3).
 
-    Prefers the ledger's active version; falls back to the repo's seed
-    ``agents/<name>.yaml``. Returns ``None`` when nothing resolves — the
+    Prefers the ledger's ACTIVE version — never candidates, rejected, or
+    archived versions (design §2, fixes OPT-5). When a canary version exists
+    and ``run_id`` is given, ``hash(run_id) % 100 < canary_percent``
+    deterministically routes that run to the canary. Falls back to the repo's
+    seed ``agents/<name>.yaml``. Returns ``None`` when nothing resolves — the
     workflow dead-letters the objective rather than crashing.
     """
     import yaml
 
-    active = getattr(DEPS.ledger, "active_version", None)
+    def _doc(record) -> dict | None:
+        try:
+            doc = yaml.safe_load(record.spec_yaml)
+        except yaml.YAMLError:
+            return None
+        return doc if isinstance(doc, dict) else None
+
+    ledger = DEPS.ledger
+    canary_version = getattr(ledger, "canary_version", None)
+    if run_id is not None and callable(canary_version):
+        canary = canary_version(name)
+        if canary is not None and routes_to_canary(
+            run_id, PromotionPolicy().canary_percent
+        ):
+            doc = _doc(canary)
+            if doc is not None:
+                return doc
+
+    active = getattr(ledger, "active_version", None)
     if callable(active):
         record = active(name)
         if record is not None:
-            try:
-                doc = yaml.safe_load(record.spec_yaml)
-            except yaml.YAMLError:
-                doc = None
-            if isinstance(doc, dict):
+            doc = _doc(record)
+            if doc is not None:
                 return doc
 
     # Repo seed specs; reject anything that is not a bare agent name.
