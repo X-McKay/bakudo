@@ -198,6 +198,12 @@ class PgSemanticMemoryStore:
         return self._item_from_row(row), float(row[-1])
 
     def _insert(self, item: MemoryItem, embedding: list[float]) -> None:
+        """Insert item + embedding atomically: a split write leaves a zombie
+        row that blocks re-writes forever (MEM-2)."""
+        with self._conn.transaction():
+            self._insert_rows(item, embedding)
+
+    def _insert_rows(self, item: MemoryItem, embedding: list[float]) -> None:
         self._exec(
             "insert into memory_items "
             "(id, memory_type, scope, content, evidence, confidence, ttl, created_by) "
@@ -222,9 +228,15 @@ class PgSemanticMemoryStore:
         self, old_id: str, item: MemoryItem, embedding: list[float]
     ) -> None:
         """Replace a less-confident near-duplicate in place (cascade cleans
-        the old embedding row)."""
-        self._exec("delete from memory_items where id = %s", (old_id,))
-        self._insert(item, embedding)
+        the old embedding row).
+
+        Delete + replacement insert run in one transaction: the old memory is
+        never destroyed unless the new item and its embedding both land
+        (MEM-2).
+        """
+        with self._conn.transaction():
+            self._exec("delete from memory_items where id = %s", (old_id,))
+            self._insert_rows(item, embedding)
 
     def _mirror(self, item: MemoryItem, embedding: list[float]) -> None:
         if self._graph is None:

@@ -39,7 +39,11 @@ class FakeCursor:
         self._rows: list[tuple] = []
 
     def execute(self, sql: str, params: tuple = ()) -> None:
+        if self._conn.fail_on and self._conn.fail_on in sql:
+            raise RuntimeError(f"injected failure on: {self._conn.fail_on}")
         self._conn.executed.append((sql, params))
+        if self._conn.transactions and self._conn.transactions[-1]["outcome"] is None:
+            self._conn.transactions[-1]["stmts"].append(sql)
         self._rows = self._conn.respond(sql)
 
     def fetchone(self) -> tuple | None:
@@ -55,6 +59,23 @@ class FakeCursor:
         return None
 
 
+class FakeTransaction:
+    """Records psycopg3-style ``with conn.transaction():`` blocks."""
+
+    def __init__(self, conn: FakeConn) -> None:
+        self._conn = conn
+
+    def __enter__(self) -> FakeTransaction:
+        self._conn.transactions.append({"stmts": [], "outcome": None})
+        return self
+
+    def __exit__(self, exc_type: object, *exc: object) -> None:
+        self._conn.transactions[-1]["outcome"] = (
+            "rollback" if exc_type is not None else "commit"
+        )
+        return None
+
+
 class FakeConn:
     """Answers the store's SQL shapes from canned rows."""
 
@@ -64,9 +85,14 @@ class FakeConn:
         self.content_rows: list[tuple] = []
         self.nearest_row: tuple | None = None
         self.query_rows: list[tuple] = []
+        self.transactions: list[dict] = []
+        self.fail_on: str | None = None
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
+
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self)
 
     def respond(self, sql: str) -> list[tuple]:
         if "pg_extension" in sql:
@@ -242,6 +268,56 @@ def test_graph_mirror_skipped_without_run_evidence() -> None:
 
     store.write_candidate(make_item(run_id=None))
     assert graph.calls == []
+
+
+def test_insert_writes_item_and_embedding_in_one_transaction() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+
+    store.write_candidate(make_item())
+
+    assert len(conn.transactions) == 1
+    tx = conn.transactions[0]
+    assert tx["outcome"] == "commit"
+    assert any("insert into memory_items" in s for s in tx["stmts"])
+    assert any("insert into memory_embeddings" in s for s in tx["stmts"])
+
+
+def test_supersede_delete_and_insert_share_one_transaction() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+    prior = make_item(
+        content="webhook retries any transient 5xx with backoff", confidence=0.6
+    )
+    conn.nearest_row = item_row(prior, similarity=0.97)
+
+    store.write_candidate(make_item(confidence=0.9))
+
+    assert len(conn.transactions) == 1
+    tx = conn.transactions[0]
+    assert tx["outcome"] == "commit"
+    assert any("delete from memory_items" in s for s in tx["stmts"])
+    assert any("insert into memory_items" in s for s in tx["stmts"])
+    assert any("insert into memory_embeddings" in s for s in tx["stmts"])
+
+
+def test_supersede_rolls_back_delete_when_insert_fails() -> None:
+    """The old memory must never be destroyed unless the replacement (item +
+    embedding) lands in the same transaction (MEM-2)."""
+    conn = FakeConn()
+    store = make_store(conn)
+    prior = make_item(
+        content="webhook retries any transient 5xx with backoff", confidence=0.6
+    )
+    conn.nearest_row = item_row(prior, similarity=0.97)
+    conn.fail_on = "insert into memory_embeddings"
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        store.write_candidate(make_item(confidence=0.9))
+
+    tx = conn.transactions[-1]
+    assert tx["outcome"] == "rollback"
+    assert any("delete from memory_items" in s for s in tx["stmts"])
 
 
 def test_ttl_to_interval_shorthand() -> None:
