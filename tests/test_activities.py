@@ -95,6 +95,74 @@ def test_load_agent_spec_prefers_ledger_active_version(monkeypatch):
     assert doc == {"metadata": {"name": "explore", "version": 7}}
 
 
+# --- TMP-12: run_sandbox heartbeats from its worker thread ---
+
+def test_run_sandbox_heartbeats_while_the_sandbox_runs(monkeypatch):
+    """A silent worker crash during a 2h sandbox run must be detectable via
+    heartbeat_timeout, so the sync activity heartbeats on a side thread."""
+    import time
+
+    from temporalio.testing import ActivityEnvironment
+
+    from bakudo.abox.runner import AboxOutcome
+    from bakudo.temporal import activities
+
+    def slow_sandbox(bundle):
+        time.sleep(0.15)
+        return AboxOutcome(
+            run_id=bundle.run_id, abox_task_id=bundle.run_id,
+            exit_code=0, git_branch="agent/run_HB",
+            result={"run_id": bundle.run_id, "agent": "explore@1",
+                    "objective_id": bundle.objective_id,
+                    "status": "success", "summary": "ok"},
+        )
+
+    monkeypatch.setattr(activities, "_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(_impl.DEPS, "sandbox", slow_sandbox)
+
+    spec = _impl.load_agent_spec("explore")
+    bundle = _impl.render_bundle(
+        AgentRunInput(
+            run_id="run_HB",
+            objective={"id": "obj_HB", "type": "explore", "repo": "r", "title": "t"},
+            agent_spec=spec,
+        )
+    )
+
+    beats = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *args: beats.append(args)
+    out = env.run(activities.run_sandbox, bundle)
+    assert out["succeeded"] is True
+    assert len(beats) >= 3, f"expected periodic heartbeats, got {len(beats)}"
+
+
+def test_run_sandbox_works_outside_an_activity_context(monkeypatch):
+    """Direct calls (unit tests, tooling) must not require a Temporal context."""
+    from bakudo.abox.runner import AboxOutcome
+    from bakudo.temporal import activities
+
+    def sandbox(bundle):
+        return AboxOutcome(
+            run_id=bundle.run_id, abox_task_id=bundle.run_id,
+            exit_code=0, git_branch="agent/run_HB2",
+            result={"run_id": bundle.run_id, "agent": "explore@1",
+                    "objective_id": bundle.objective_id,
+                    "status": "success", "summary": "ok"},
+        )
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", sandbox)
+    spec = _impl.load_agent_spec("explore")
+    bundle = _impl.render_bundle(
+        AgentRunInput(
+            run_id="run_HB2",
+            objective={"id": "obj_HB2", "type": "explore", "repo": "r", "title": "t"},
+            agent_spec=spec,
+        )
+    )
+    assert activities.run_sandbox(bundle)["succeeded"] is True
+
+
 # --- A4: fail-closed sandbox selection ---
 
 def _clear_sandbox_env(monkeypatch):

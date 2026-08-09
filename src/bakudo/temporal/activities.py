@@ -15,6 +15,8 @@ applies the ``@activity.defn`` decorators when the SDK is present.
 
 from __future__ import annotations
 
+import contextvars
+import threading
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -33,12 +35,26 @@ try:  # pragma: no cover - exercised only with the temporal extra installed
 
     _DEFN = activity.defn
 except Exception:  # noqa: BLE001 - SDK optional
+    activity = None  # type: ignore[assignment]
 
     def _DEFN(fn=None, **_kwargs):  # type: ignore
         def wrap(f):
             return f
 
         return wrap(fn) if fn else wrap
+
+
+# How often run_sandbox heartbeats while the sandbox subprocess runs (TMP-12).
+# Module-level so tests can shrink it; keep it well under the workflow's
+# heartbeat_timeout.
+_HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+
+def _in_activity() -> bool:
+    try:
+        return activity is not None and activity.in_activity()
+    except Exception:  # noqa: BLE001 - context probe must never raise
+        return False
 
 
 @_DEFN(name="create_run")
@@ -58,7 +74,35 @@ def render_bundle(inp: AgentRunInput) -> dict:
 
 @_DEFN(name="run_sandbox")
 def run_sandbox(bundle: dict) -> dict:
-    return _impl.run_sandbox(bundle)
+    """Run the sandbox, heartbeating from a side thread while it blocks (TMP-12).
+
+    The sandbox call can block for hours; heartbeats let the server detect a
+    crashed worker via ``heartbeat_timeout`` in minutes instead of waiting out
+    the 2h start-to-close. The heartbeat thread runs inside a copy of the
+    activity's contextvars so ``activity.heartbeat()`` resolves the context.
+    Outside an activity (unit tests, tooling) no thread is started.
+    """
+    stop = threading.Event()
+    beat_thread: threading.Thread | None = None
+    if _in_activity():
+        ctx = contextvars.copy_context()
+
+        def _beat() -> None:
+            while not stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
+                activity.heartbeat()
+
+        beat_thread = threading.Thread(
+            target=lambda: ctx.run(_beat),
+            name="run-sandbox-heartbeat",
+            daemon=True,
+        )
+        beat_thread.start()
+    try:
+        return _impl.run_sandbox(bundle)
+    finally:
+        stop.set()
+        if beat_thread is not None:
+            beat_thread.join(timeout=2)
 
 
 @_DEFN(name="persist_run")

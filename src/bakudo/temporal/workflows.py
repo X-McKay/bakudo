@@ -64,6 +64,18 @@ _SHORT: dict[str, Any] = dict(
     start_to_close_timeout=timedelta(seconds=30),
     retry_policy=RetryPolicy(maximum_attempts=5),
 )
+# run_sandbox options (TMP-12). maximum_attempts=1 is deliberate: a retried
+# sandbox re-executes a non-idempotent agent run against the same
+# deterministic run_id/branch (worktree + branch collision, doubled model
+# spend), so failures surface as a terminal failed phase (TMP-10) for the
+# control plane to re-dispatch under a fresh run_id instead. The activity
+# heartbeats every 30s (activities.run_sandbox), so heartbeat_timeout detects
+# a crashed worker in minutes rather than after the 2h start-to-close.
+_SANDBOX: dict[str, Any] = dict(
+    start_to_close_timeout=timedelta(hours=2),
+    heartbeat_timeout=timedelta(minutes=5),
+    retry_policy=RetryPolicy(maximum_attempts=1),
+)
 
 
 @workflow.defn
@@ -152,7 +164,7 @@ class AgentRunWorkflow:
 
         await self._advance(inp.run_id, "sandbox_starting")
         await self._advance(inp.run_id, "agent_running")
-        sandbox = await workflow.execute_activity(run_sandbox, bundle, **_LONG)
+        sandbox = await workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
 
         await self._advance(inp.run_id, "collecting_artifacts")
         result = sandbox.get("result")

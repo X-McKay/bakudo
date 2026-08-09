@@ -53,6 +53,20 @@ def test_control_queue_registers_every_control_plane_workflow():
         assert wf in runs, f"{wf.__name__} missing from the runs queue"
 
 
+def test_run_sandbox_activity_options_pin_heartbeat_and_single_attempt():
+    """TMP-12: run_sandbox must carry a heartbeat_timeout (crash detection in
+    minutes, not 2h) and maximum_attempts=1 — a retried sandbox on the same
+    run_id/branch is not idempotent."""
+    from datetime import timedelta
+
+    from bakudo.temporal.workflows import _SANDBOX
+
+    assert _SANDBOX["retry_policy"].maximum_attempts == 1
+    assert _SANDBOX["heartbeat_timeout"] is not None
+    assert _SANDBOX["heartbeat_timeout"] <= timedelta(minutes=10)
+    assert _SANDBOX["start_to_close_timeout"] == timedelta(hours=2)
+
+
 def test_worker_configs_use_thread_pool_executor():
     from bakudo.temporal.worker import worker_configs
 
