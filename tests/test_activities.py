@@ -95,6 +95,50 @@ def test_load_agent_spec_prefers_ledger_active_version(monkeypatch):
     assert doc == {"metadata": {"name": "explore", "version": 7}}
 
 
+# --- integration hook: budget_from_spec (abox agent's contract) ---
+
+def test_render_bundle_uses_budget_from_spec_when_available(monkeypatch, spy):
+    import bakudo.bundle as bundle_mod
+    from bakudo.bundle import Budget
+
+    calls = []
+
+    def fake_budget_from_spec(spec):
+        calls.append(spec)
+        return Budget(timeoutSeconds=1234)
+
+    monkeypatch.setattr(
+        bundle_mod, "budget_from_spec", fake_budget_from_spec, raising=False
+    )
+    spec = _impl.load_agent_spec("explore")
+    out = _impl.render_bundle(
+        AgentRunInput(
+            run_id="run_BUD1",
+            objective={"id": "obj_BUD1", "type": "explore", "repo": "r", "title": "t"},
+            agent_spec=spec,
+            timeout_seconds=99,
+        )
+    )
+    assert calls, "budget_from_spec was not consulted"
+    assert out["budget"]["timeoutSeconds"] == 1234
+
+
+def test_render_bundle_falls_back_to_input_timeout(spy):
+    import bakudo.bundle as bundle_mod
+
+    assert not hasattr(bundle_mod, "budget_from_spec")  # not landed yet
+    spec = _impl.load_agent_spec("explore")
+    out = _impl.render_bundle(
+        AgentRunInput(
+            run_id="run_BUD2",
+            objective={"id": "obj_BUD2", "type": "explore", "repo": "r", "title": "t"},
+            agent_spec=spec,
+            timeout_seconds=555,
+        )
+    )
+    assert out["budget"]["timeoutSeconds"] == 555
+
+
 # --- TMP-12: run_sandbox heartbeats from its worker thread ---
 
 def test_run_sandbox_heartbeats_while_the_sandbox_runs(monkeypatch):

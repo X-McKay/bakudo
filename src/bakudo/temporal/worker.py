@@ -69,6 +69,30 @@ def worker_configs() -> list[dict[str, Any]]:
     ]
 
 
+def _resolve_embedder() -> Any | None:
+    """Resolve the production embedder for the durable memory store.
+
+    Called only when ``BAKUDO_POSTGRES_DSN`` is set. ``VLLM_EMBED_URL`` is
+    then mandatory: a durable store silently falling back to the lexical
+    HashingEmbedder is exactly the MEM-1 failure mode. ``OpenAIEmbedder`` is
+    resolved defensively — until it lands in ``bakudo.memory.embeddings``,
+    returns None and the store keeps its current default.
+    """
+    url = os.environ.get("VLLM_EMBED_URL")
+    if not url:
+        raise RuntimeError(
+            "BAKUDO_POSTGRES_DSN is set but VLLM_EMBED_URL is not. The durable "
+            "memory store requires the embeddings endpoint; set VLLM_EMBED_URL "
+            "(e.g. the vLLM /v1 base URL for the embedding model)."
+        )
+    from ..memory import embeddings
+
+    embedder_cls = getattr(embeddings, "OpenAIEmbedder", None)
+    if embedder_cls is None:
+        return None
+    return embedder_cls(base_url=url)
+
+
 def _wire_dependencies() -> None:
     """Wire the durable ledger + memory if a DSN is configured (otherwise
     in-memory). The Neo4j graph mirror rides along when NEO4J_URI is set."""
@@ -77,6 +101,8 @@ def _wire_dependencies() -> None:
     dsn = os.environ.get("BAKUDO_POSTGRES_DSN")
     if not dsn:
         return
+
+    embedder = _resolve_embedder()
 
     from ..memory.store_pg import PgSemanticMemoryStore
     from ..registry.postgres_ledger import PostgresLedger
@@ -98,7 +124,7 @@ def _wire_dependencies() -> None:
 
     _impl.configure(
         ledger=PostgresLedger.connect(dsn),
-        memory=PgSemanticMemoryStore.connect(dsn, graph=graph),
+        memory=PgSemanticMemoryStore.connect(dsn, graph=graph, embedder=embedder),
     )
 
 

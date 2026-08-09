@@ -75,3 +75,47 @@ def test_worker_configs_use_thread_pool_executor():
     for cfg in configs.values():
         assert isinstance(cfg["activity_executor"], ThreadPoolExecutor)
         assert list(cfg["activities"]) == list(ALL_ACTIVITIES)
+
+
+# --- integration hook: production embedder wiring (memory agent's contract) ---
+
+
+def test_resolve_embedder_fails_fast_without_vllm_embed_url(monkeypatch):
+    """A durable (DSN-backed) memory store must not silently fall back to the
+    lexical HashingEmbedder in production."""
+    import pytest
+
+    from bakudo.temporal import worker
+
+    monkeypatch.delenv("VLLM_EMBED_URL", raising=False)
+    with pytest.raises(RuntimeError, match="VLLM_EMBED_URL"):
+        worker._resolve_embedder()
+
+
+def test_resolve_embedder_constructs_openai_embedder_when_available(monkeypatch):
+    from bakudo.memory import embeddings
+    from bakudo.temporal import worker
+
+    class FakeOpenAIEmbedder:
+        dim = 4
+
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def embed(self, text):
+            return [0.0] * 4
+
+    monkeypatch.setenv("VLLM_EMBED_URL", "https://embeddings.example/v1")
+    monkeypatch.setattr(embeddings, "OpenAIEmbedder", FakeOpenAIEmbedder, raising=False)
+    emb = worker._resolve_embedder()
+    assert isinstance(emb, FakeOpenAIEmbedder)
+    assert emb.base_url == "https://embeddings.example/v1"
+
+
+def test_resolve_embedder_none_until_openai_embedder_lands(monkeypatch):
+    from bakudo.memory import embeddings
+    from bakudo.temporal import worker
+
+    monkeypatch.setenv("VLLM_EMBED_URL", "https://embeddings.example/v1")
+    assert not hasattr(embeddings, "OpenAIEmbedder")  # not landed yet
+    assert worker._resolve_embedder() is None
