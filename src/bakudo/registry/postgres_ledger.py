@@ -89,41 +89,108 @@ class PostgresLedger:
             return cur.fetchall()
 
     # --- agent versions ---
+    _VERSION_COLUMNS = (
+        "id, name, version, spec_yaml, status, status_reason, decided_at, "
+        "parent_version, created_by, created_at"
+    )
+
     def upsert_agent_version(self, record: AgentVersionRecord) -> AgentVersionRecord:
-        self._exec(
-            """
-            insert into agent_spec_versions
-                (id, name, version, spec_yaml, status, parent_version, created_by, created_at)
-            values (%s,%s,%s,%s,%s,%s,%s,%s)
-            on conflict (name, version) do update
-                set spec_yaml = excluded.spec_yaml, status = excluded.status
-            """,
-            (record.id, record.name, record.version, record.spec_yaml,
-             record.status, record.parent_version, record.created_by, record.created_at),
-        )
+        with self._connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select 1 from agent_spec_versions where name = %s limit 1",
+                    (record.name,),
+                )
+                first_of_name = cur.fetchone() is None
+            if first_of_name and record.status != "active":
+                # Design §1: the first version registered for a name activates.
+                record = record.model_copy(
+                    update={
+                        "status": "active",
+                        "status_reason": "first version registered for name",
+                    }
+                )
+            self._do(
+                conn,
+                """
+                insert into agent_spec_versions
+                    (id, name, version, spec_yaml, status, status_reason, decided_at,
+                     parent_version, created_by, created_at)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (name, version) do update
+                    set spec_yaml = excluded.spec_yaml, status = excluded.status,
+                        status_reason = excluded.status_reason,
+                        decided_at = excluded.decided_at
+                """,
+                (record.id, record.name, record.version, record.spec_yaml,
+                 record.status, record.status_reason, record.decided_at,
+                 record.parent_version, record.created_by, record.created_at),
+            )
         return record
 
-    def active_version(self, name: str) -> AgentVersionRecord | None:
+    def _latest_with_status(self, name: str, status: str) -> AgentVersionRecord | None:
+        # `status` is interpolated from a fixed internal vocabulary, never
+        # caller input.
+        assert status in ("active", "canary")
         row = self._one(
-            """
-            select id, name, version, spec_yaml, status, parent_version, created_by, created_at
+            f"""
+            select {self._VERSION_COLUMNS}
             from agent_spec_versions
-            where name = %s and status = 'active'
+            where name = %s and status = '{status}'
             order by version desc limit 1
             """,
             (name,),
         )
         return self._version_row(row)
 
+    def active_version(self, name: str) -> AgentVersionRecord | None:
+        return self._latest_with_status(name, "active")
+
+    def canary_version(self, name: str) -> AgentVersionRecord | None:
+        return self._latest_with_status(name, "canary")
+
     def get_agent_version(self, name: str, version: int) -> AgentVersionRecord | None:
         row = self._one(
-            """
-            select id, name, version, spec_yaml, status, parent_version, created_by, created_at
+            f"""
+            select {self._VERSION_COLUMNS}
             from agent_spec_versions where name = %s and version = %s
             """,
             (name, version),
         )
         return self._version_row(row)
+
+    def set_version_status(
+        self, name: str, version: int, status: str, *, reason: str | None = None
+    ) -> AgentVersionRecord | None:
+        """Transition a version through the §1 state machine.
+
+        The transition and its event are one ledger write: the row update and
+        the outbox event (topic ``agent_version_status``, spec section 17.1)
+        share a transaction.
+        """
+        from .records import VERSION_STATUSES
+
+        if status not in VERSION_STATUSES:
+            raise ValueError(f"unknown version status {status!r}")
+        with self._connection() as conn, conn.transaction():
+            self._do(
+                conn,
+                "update agent_spec_versions set status = %s, status_reason = %s, "
+                "decided_at = now() where name = %s and version = %s",
+                (status, reason, name, version),
+            )
+            self._do(
+                conn,
+                "insert into outbox (topic, payload) values (%s, %s)",
+                (
+                    "agent_version_status",
+                    json.dumps(
+                        {"name": name, "version": version,
+                         "status": status, "reason": reason}
+                    ),
+                ),
+            )
+        return self.get_agent_version(name, version)
 
     @staticmethod
     def _version_row(row: tuple | None) -> AgentVersionRecord | None:
@@ -131,7 +198,8 @@ class PostgresLedger:
             return None
         return AgentVersionRecord(
             id=str(row[0]), name=row[1], version=row[2], spec_yaml=row[3],
-            status=row[4], parent_version=row[5], created_by=row[6], created_at=row[7],
+            status=row[4], status_reason=row[5], decided_at=row[6],
+            parent_version=row[7], created_by=row[8], created_at=row[9],
         )
 
     # --- runs ---
@@ -320,9 +388,54 @@ class PostgresLedger:
         self._exec(
             """
             insert into promotion_decisions
-                (id, subject_type, subject_id, decision, rationale, scorecard, created_at)
-            values (gen_random_uuid(), %s,%s,%s,%s,%s, now())
+                (id, subject_type, subject_id, decision, rationale, scorecard,
+                 status, approved_by, comment, resolved_at, gated_mutations,
+                 requires_human, created_at)
+            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+            on conflict (id) do nothing
             """,
-            (card.subject_type, card.subject_id, decision.decision.value,
-             decision.rationale, json.dumps(card.model_dump(mode="json"))),
+            (decision.id, card.subject_type, card.subject_id,
+             decision.decision.value, decision.rationale,
+             json.dumps(card.model_dump(mode="json")), decision.status,
+             decision.approved_by, decision.comment, decision.resolved_at,
+             json.dumps(decision.gated_mutations), decision.requires_human),
         )
+
+    _PROMOTION_COLUMNS = (
+        "id, decision, rationale, scorecard, status, approved_by, comment, "
+        "resolved_at, gated_mutations, requires_human"
+    )
+
+    @classmethod
+    def _promotion_row(cls, row: tuple) -> PromotionDecision:
+        from ..evals.promotion import Decision
+        from ..evals.scorecard import Scorecard
+
+        scorecard = row[3] if isinstance(row[3], dict) else json.loads(row[3] or "{}")
+        gated = row[8] if isinstance(row[8], list) else json.loads(row[8] or "[]")
+        return PromotionDecision(
+            decision=Decision(row[1]),
+            rationale=row[2],
+            scorecard=Scorecard.model_validate(scorecard),
+            requires_human=bool(row[9]),
+            gated_mutations=list(gated),
+            id=row[0],
+            status=row[4],
+            approved_by=row[5],
+            comment=row[6],
+            resolved_at=row[7],
+        )
+
+    def promotions(self, status: str | None = None) -> list[PromotionDecision]:
+        if status is None:
+            rows = self._all(
+                f"select {self._PROMOTION_COLUMNS} from promotion_decisions "
+                "order by created_at",
+            )
+        else:
+            rows = self._all(
+                f"select {self._PROMOTION_COLUMNS} from promotion_decisions "
+                "where status = %s order by created_at",
+                (status,),
+            )
+        return [self._promotion_row(r) for r in rows]

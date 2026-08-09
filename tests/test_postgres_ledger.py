@@ -253,6 +253,117 @@ def test_run_events_carry_deterministic_idempotency_keys(record):
         assert "on conflict (run_id, idem_key) do nothing" in sql
 
 
+# --- promotion lifecycle: version status columns, transitions, reads (design §1) ---
+
+
+def _version_record(status="candidate"):
+    from bakudo.registry.records import AgentVersionRecord
+
+    return AgentVersionRecord(
+        name="add-feature", version=2, status=status,
+        spec_yaml="metadata:\n  name: add-feature\n  version: 2\n",
+    )
+
+
+def test_upsert_agent_version_writes_status_reason_and_decided_at():
+    conn = FakeConn()
+    PostgresLedger(conn).upsert_agent_version(_version_record())
+    insert_sql, _ = next(
+        (s, p) for s, p in conn.executed if "insert into agent_spec_versions" in s
+    )
+    assert "status_reason" in insert_sql
+    assert "decided_at" in insert_sql
+    assert "status_reason = excluded.status_reason" in insert_sql
+
+
+def test_upsert_agent_version_checks_for_first_version_of_name():
+    """The first version registered for a name becomes active (design §1);
+    the fake connection reports no existing rows, so the candidate is stored
+    active."""
+    conn = FakeConn()
+    stored = PostgresLedger(conn).upsert_agent_version(_version_record())
+    assert any(
+        "select 1 from agent_spec_versions" in s for s, _ in conn.executed
+    ), "must probe for existing versions of the name"
+    assert stored.status == "active"
+
+
+def test_set_version_status_updates_row_and_writes_outbox_event():
+    conn = FakeConn()
+    PostgresLedger(conn).set_version_status(
+        "add-feature", 2, "rejected", reason="safety regression"
+    )
+    update_sql, update_params = next(
+        (s, p) for s, p in conn.executed if "update agent_spec_versions" in s
+    )
+    assert "status = %s" in update_sql
+    assert "status_reason = %s" in update_sql
+    assert "decided_at = now()" in update_sql
+    assert update_params[:2] == ("rejected", "safety regression")
+
+    outbox_sql, outbox_params = next(
+        (s, p) for s, p in conn.executed if "insert into outbox" in s
+    )
+    assert outbox_params[0] == "agent_version_status"
+    import json as _json
+
+    payload = _json.loads(outbox_params[1])
+    assert payload == {
+        "name": "add-feature", "version": 2,
+        "status": "rejected", "reason": "safety regression",
+    }
+
+
+def test_set_version_status_rejects_unknown_status():
+    with pytest.raises(ValueError):
+        PostgresLedger(FakeConn()).set_version_status("add-feature", 2, "bogus")
+
+
+def test_canary_version_selects_canary_status():
+    conn = FakeConn()
+    PostgresLedger(conn).canary_version("add-feature")
+    select = next(s for s, _ in conn.executed if "from agent_spec_versions" in s)
+    assert "status = 'canary'" in select
+    assert "order by version desc" in select
+
+
+def test_record_promotion_writes_lifecycle_columns():
+    from bakudo.evals.promotion import Decision, PromotionDecision
+    from bakudo.evals.scorecard import Scorecard
+
+    decision = PromotionDecision(
+        Decision.needs_human, "needs a human", Scorecard(
+            subject_type="agent_spec_version", subject_id="add-feature@2",
+            overall_score=0.9,
+        ),
+        requires_human=True, gated_mutations=["new-secret-access"],
+    )
+    conn = FakeConn()
+    PostgresLedger(conn).record_promotion(decision)
+    sql, params = next(
+        (s, p) for s, p in conn.executed if "insert into promotion_decisions" in s
+    )
+    for column in ("status", "approved_by", "comment", "resolved_at",
+                   "gated_mutations", "requires_human"):
+        assert column in sql, f"promotion insert missing {column}"
+    assert "on conflict (id) do nothing" in sql
+    assert params[0] == decision.id, "the decision id must be the caller's, not a uuid"
+
+
+def test_promotions_reads_with_optional_status_filter():
+    conn = FakeConn()
+    ledger = PostgresLedger(conn)
+    assert ledger.promotions() == []
+    assert ledger.promotions(status="pending") == []
+    selects = [
+        (s, p) for s, p in conn.executed if "from promotion_decisions" in s
+    ]
+    assert len(selects) == 2
+    assert "where status = %s" not in selects[0][0]
+    assert "where status = %s" in selects[1][0]
+    assert selects[1][1] == ("pending",)
+
+
 def test_record_eval_id_is_deterministic_from_subject_and_suite():
     from bakudo.evals.result import EvalResult
 

@@ -19,7 +19,11 @@ create table if not exists agent_spec_versions (
   name text not null,
   version int not null,
   spec_yaml text not null,
-  status text not null,            -- candidate, canary, active, archived
+  -- Version lifecycle state machine (promotion design 2026-08-09 §1):
+  -- candidate, pending_human, canary, active, rejected, archived.
+  status text not null,
+  status_reason text,              -- why the last transition happened
+  decided_at timestamptz,          -- when the last transition happened
   parent_version int,
   created_by text not null,
   created_at timestamptz not null default now(),
@@ -161,14 +165,25 @@ create index if not exists memory_embeddings_embedding_hnsw
   on memory_embeddings using hnsw (embedding vector_cosine_ops);
 
 create table if not exists promotion_decisions (
-  id uuid primary key default gen_random_uuid(),
+  -- Canonical bakudo id (prom_<ULID>), supplied by the writer so activity
+  -- retries collide instead of duplicating rows.
+  id text primary key,
   subject_type text not null,
   subject_id text not null,
   decision text not null,          -- promote, reject, canary, needs_human
   rationale text not null,
   scorecard jsonb not null,
+  -- Decision lifecycle (design 2026-08-09 §1): human-gated decisions are
+  -- recorded pending and resolved via POST /promotions/{id}/approve|reject.
+  status text not null,            -- pending, approved, rejected, superseded
+  approved_by text,
+  comment text,
+  resolved_at timestamptz,
+  gated_mutations jsonb not null default '[]',
+  requires_human boolean not null default false,
   created_at timestamptz not null default now()
 );
+create index if not exists promotion_decisions_status on promotion_decisions (status);
 
 -- Integration-event outbox (section 17.1): durable handoff to projections.
 create table if not exists outbox (

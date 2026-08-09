@@ -12,14 +12,21 @@ from typing import Any, Protocol
 
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
-from .records import AgentVersionRecord, RunEvent, RunPhase, RunRecord
+from .records import VERSION_STATUSES, AgentVersionRecord, RunEvent, RunPhase, RunRecord
 
 
 class Ledger(Protocol):
-    # Agent versions
+    # Agent versions. The first version registered for a name becomes
+    # ``active``; later versions keep their submitted status and move through
+    # the design §1 state machine via :meth:`set_version_status`, each
+    # transition producing an event.
     def upsert_agent_version(self, record: AgentVersionRecord) -> AgentVersionRecord: ...
     def active_version(self, name: str) -> AgentVersionRecord | None: ...
+    def canary_version(self, name: str) -> AgentVersionRecord | None: ...
     def get_agent_version(self, name: str, version: int) -> AgentVersionRecord | None: ...
+    def set_version_status(
+        self, name: str, version: int, status: str, *, reason: str | None = None
+    ) -> AgentVersionRecord | None: ...
 
     # Runs. ``objective`` is the objective document backing the run: durable
     # backends upsert it first so the runs FK holds (TMP-2).
@@ -36,6 +43,7 @@ class Ledger(Protocol):
     def record_eval(self, result: EvalResult) -> None: ...
     def eval_results(self, subject_id: str) -> list[EvalResult]: ...
     def record_promotion(self, decision: PromotionDecision) -> None: ...
+    def promotions(self, status: str | None = None) -> list[PromotionDecision]: ...
 
 
 class InMemoryLedger:
@@ -55,18 +63,65 @@ class InMemoryLedger:
 
     # --- agent versions ---
     def upsert_agent_version(self, record: AgentVersionRecord) -> AgentVersionRecord:
-        self._versions[self._vkey(record.name, record.version)] = record
+        key = self._vkey(record.name, record.version)
+        first_of_name = key not in self._versions and not any(
+            v.name == record.name for v in self._versions.values()
+        )
+        if first_of_name and record.status != "active":
+            # Design §1: the first version registered for a name is the one
+            # runs resolve, so it activates immediately.
+            record = record.model_copy(
+                update={
+                    "status": "active",
+                    "status_reason": "first version registered for name",
+                }
+            )
+        self._versions[key] = record
         return record
 
-    def active_version(self, name: str) -> AgentVersionRecord | None:
-        actives = [
+    def _latest_with_status(self, name: str, status: str) -> AgentVersionRecord | None:
+        matches = [
             v for v in self._versions.values()
-            if v.name == name and v.status == "active"
+            if v.name == name and v.status == status
         ]
-        return max(actives, key=lambda v: v.version, default=None)
+        return max(matches, key=lambda v: v.version, default=None)
+
+    def active_version(self, name: str) -> AgentVersionRecord | None:
+        return self._latest_with_status(name, "active")
+
+    def canary_version(self, name: str) -> AgentVersionRecord | None:
+        return self._latest_with_status(name, "canary")
 
     def get_agent_version(self, name: str, version: int) -> AgentVersionRecord | None:
         return self._versions.get(self._vkey(name, version))
+
+    def set_version_status(
+        self, name: str, version: int, status: str, *, reason: str | None = None
+    ) -> AgentVersionRecord:
+        """Transition a version through the §1 state machine, with an event."""
+        if status not in VERSION_STATUSES:
+            raise ValueError(f"unknown version status {status!r}")
+        key = self._vkey(name, version)
+        record = self._versions[key]  # KeyError on unknown version
+        updated = record.model_copy(
+            update={
+                "status": status,
+                "status_reason": reason,
+                "decided_at": datetime.now(UTC),
+            }
+        )
+        self._versions[key] = updated
+        self.append_event(
+            RunEvent(
+                run_id=f"agent:{key}",
+                event_type="version_status",
+                payload={
+                    "name": name, "version": version,
+                    "status": status, "reason": reason,
+                },
+            )
+        )
+        return updated
 
     # --- runs ---
     def create_run(
@@ -133,5 +188,5 @@ class InMemoryLedger:
     def record_promotion(self, decision: PromotionDecision) -> None:
         self._promotions.append(decision)
 
-    def promotions(self) -> list[PromotionDecision]:
-        return list(self._promotions)
+    def promotions(self, status: str | None = None) -> list[PromotionDecision]:
+        return [p for p in self._promotions if status is None or p.status == status]

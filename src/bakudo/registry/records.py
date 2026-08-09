@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .. import ids
 
@@ -39,6 +39,23 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+# The version lifecycle state machine (promotion design 2026-08-09 §1):
+#
+#   candidate ──decide()──► rejected | pending_human | canary
+#   pending_human ──approve──► canary        ──reject──► rejected
+#   canary ──graduate──► active (old active → archived)
+#   canary ──rollback──► rejected
+#   active ──superseded──► archived
+VERSION_STATUSES: tuple[str, ...] = (
+    "candidate",
+    "pending_human",
+    "canary",
+    "active",
+    "rejected",
+    "archived",
+)
+
+
 class AgentVersionRecord(BaseModel):
     """A row of ``agent_spec_versions`` (spec section 20)."""
 
@@ -46,10 +63,21 @@ class AgentVersionRecord(BaseModel):
     name: str
     version: int
     spec_yaml: str
-    status: str  # candidate | canary | active | archived
+    status: str  # one of VERSION_STATUSES
+    status_reason: str | None = None
+    decided_at: datetime | None = None
     parent_version: int | None = None
     created_by: str = "meta-agent"
     created_at: datetime = Field(default_factory=_now)
+
+    @field_validator("status")
+    @classmethod
+    def _known_status(cls, value: str) -> str:
+        if value not in VERSION_STATUSES:
+            raise ValueError(
+                f"unknown version status {value!r}; expected one of {VERSION_STATUSES}"
+            )
+        return value
 
 
 class RunEvent(BaseModel):

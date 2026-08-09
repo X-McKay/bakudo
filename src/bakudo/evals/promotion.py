@@ -8,8 +8,10 @@ human gate for elevated-privilege mutations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import Enum
 
+from .. import ids
 from .scorecard import Scorecard
 
 
@@ -47,6 +49,10 @@ class PromotionPolicy:
     canary_min_runs: int = 20
 
 
+# Lifecycle states of a recorded promotion decision (design 2026-08-09 §1).
+PROMOTION_STATUSES: tuple[str, ...] = ("pending", "approved", "rejected", "superseded")
+
+
 @dataclass
 class PromotionDecision:
     decision: Decision
@@ -54,18 +60,42 @@ class PromotionDecision:
     scorecard: Scorecard
     requires_human: bool = False
     gated_mutations: list[str] = field(default_factory=list)
+    # Lifecycle columns (design §1): a human-gated decision is recorded
+    # ``pending`` and later resolved via POST /promotions/{id}/approve|reject;
+    # auto decisions are recorded already resolved.
+    id: str = field(default_factory=ids.promotion_id)
+    status: str = "pending"
+    approved_by: str | None = None
+    comment: str | None = None
+    resolved_at: datetime | None = None
 
     def to_dict(self) -> dict:
         return {
+            "id": self.id,
             "decision": self.decision.value,
             "rationale": self.rationale,
             "requires_human": self.requires_human,
             "gated_mutations": self.gated_mutations,
+            "status": self.status,
+            "approved_by": self.approved_by,
+            "comment": self.comment,
+            "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
             "scorecard": self.scorecard.model_dump(mode="json"),
         }
 
 
 DEFAULT_POLICY = PromotionPolicy()
+
+
+# decide() outcome -> recorded decision status (design 2026-08-09 §1):
+# rejects are resolved immediately, human gates stay pending, auto-passes
+# are auto-approved into canary.
+_DECISION_STATUS: dict[Decision, str] = {
+    Decision.reject: "rejected",
+    Decision.needs_human: "pending",
+    Decision.canary: "approved",
+    Decision.promote: "approved",
+}
 
 
 def decide(
@@ -84,6 +114,20 @@ def decide(
     3. Human-gated mutation kinds -> needs_human.
     4. Score improvement vs baseline -> canary (then promote) or reject.
     """
+    decision = _decide(candidate, baseline, policy=policy, mutation_kinds=mutation_kinds)
+    decision.status = _DECISION_STATUS[decision.decision]
+    if decision.status != "pending":
+        decision.resolved_at = datetime.now(UTC)
+    return decision
+
+
+def _decide(
+    candidate: Scorecard,
+    baseline: Scorecard | None = None,
+    *,
+    policy: PromotionPolicy | None = None,
+    mutation_kinds: list[str] | None = None,
+) -> PromotionDecision:
     policy = policy or DEFAULT_POLICY
     mutation_kinds = mutation_kinds or []
     gated = [m for m in mutation_kinds if m in HUMAN_GATED_MUTATIONS]
