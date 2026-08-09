@@ -62,3 +62,35 @@ def test_model_enable_thinking_defaults_to_none():
 
     spec = load_spec_file(AGENTS / "explore.yaml")
     assert spec.model.enable_thinking is None
+
+
+def test_spec_level_budget_parses(tmp_path):
+    """Issue #27: a per-role `budget` section (maxToolCalls ceiling and
+    optional run-level token/cost caps) is part of the spec schema."""
+    import yaml
+
+    doc = yaml.safe_load((AGENTS / "add-feature.yaml").read_text())
+    doc["budget"] = {"maxToolCalls": 25, "maxTokens": 200000, "maxUsd": 2.5}
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    spec = load_spec_file(p)
+    assert spec.budget is not None
+    assert spec.budget.max_tool_calls == 25
+    assert spec.budget.max_tokens == 200000
+    assert spec.budget.max_usd == 2.5
+
+
+def test_spec_budget_defaults_to_none():
+    spec = load_spec_file(AGENTS / "explore.yaml")
+    assert spec.budget is None
+
+
+def test_spec_budget_rejects_non_positive_ceiling(tmp_path):
+    import yaml
+
+    doc = yaml.safe_load((AGENTS / "add-feature.yaml").read_text())
+    doc["budget"] = {"maxToolCalls": 0}
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    with pytest.raises(SchemaValidationError):
+        load_spec_file(p)

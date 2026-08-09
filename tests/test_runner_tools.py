@@ -244,15 +244,16 @@ def test_denial_message_is_instructive(tmp_path):
 
 def test_denials_trip_the_circuit_breaker(tmp_path):
     """Observed live: a read-only scout burned 100+ tool calls retrying
-    denied writes (sed/awk workarounds). After the threshold, command
-    execution shuts off for the rest of the run with a hard directive."""
+    denied writes (sed/awk workarounds), then wandered within allowed
+    commands until wall-clock. After the threshold the *loop* halts —
+    the next tool call raises and the run transitions to the report phase
+    (issue #27), bounded deterministically rather than by prompt compliance."""
+    from bakudo.strands_tools import DenialsExhausted
+
     tools, ctx = _denying_tools(tmp_path)
     for _ in range(5):
         out = tools["run-command"](command="curl http://blocked.example")
         assert out["denied"] is True
-    tripped = tools["run-command"](command="echo hi")  # allowlisted, but too late
-    assert tripped.get("circuit_breaker") is True
-    assert "disabled" in tripped["reason"].lower()
-    # And it stays off, without executing anything.
-    again = tools["run-command"](command="echo hi")
-    assert again.get("circuit_breaker") is True
+    with pytest.raises(DenialsExhausted):
+        tools["run-command"](command="echo hi")  # allowlisted, but too late
+    assert len(ctx.denied_commands) == 5  # halt is not itself a denial

@@ -108,6 +108,16 @@
         }
       }
     },
+    "budget": {
+      "type": "object",
+      "description": "Per-role run budget: hard ceilings that force-transition the run into the report phase (issue #27).",
+      "additionalProperties": false,
+      "properties": {
+        "maxToolCalls": { "type": "integer", "minimum": 1 },
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "maxUsd": { "type": "number", "minimum": 0 }
+      }
+    },
     "outputContract": {
       "type": "object",
       "required": ["requiredFiles"],
