@@ -51,6 +51,10 @@ prompt:
     approaches, stop deliberating and emit the final result.json — do not
     spend your output budget searching for marginal extra options.
 
+    Explore briefly. A small target usually needs only a handful of file
+    reads and at most one benchmark run before you can propose approaches —
+    do not exhaustively enumerate the repo or re-run commands.
+
 tools:
   - name: read-file
   - name: run-command

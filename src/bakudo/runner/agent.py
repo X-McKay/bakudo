@@ -220,10 +220,22 @@ def _extract_report(agent: Any, fallback: str) -> str:
     from .result import AgentReport
 
     try:
-        report = agent.structured_output(AgentReport)
+        # The instructions matter: without them this model fills the scalar
+        # fields and leaves arrays empty (verified live against the vLLM
+        # deployment — two approaches in prose, followups []).
+        report = agent.structured_output(AgentReport, _EXTRACTION_PROMPT)
         return json.dumps(report.model_dump(mode="json"))
     except Exception:  # noqa: BLE001 - extraction is an upgrade, not a gate
         return fallback
+
+
+_EXTRACTION_PROMPT = (
+    "Fill out the run report for YOUR work above. Every distinct approach/"
+    "hypothesis you identified or proposed MUST be one self-contained entry in "
+    "proposed_followups (what to change, expected effect, how to verify) — an "
+    "approach mentioned only in prose does not exist. Leave proposed_followups "
+    "empty ONLY if you genuinely found nothing worth doing."
+)
 
 
 def _partial_text_on_max_tokens(exc: Exception, agent: Any) -> str | None:

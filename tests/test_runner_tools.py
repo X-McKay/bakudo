@@ -201,8 +201,9 @@ def test_extract_report_uses_structured_output():
     from bakudo.runner.result import AgentReport
 
     class GoodAgent:
-        def structured_output(self, model):
+        def structured_output(self, model, prompt=None):
             assert model is AgentReport
+            assert prompt and "proposed_followups" in prompt  # extraction guidance
             return AgentReport(
                 status="success", summary="found it",
                 proposed_followups=["Approach 1: use a set"],
@@ -217,7 +218,7 @@ def test_extract_report_falls_back_on_failure():
     from bakudo.runner.agent import _extract_report
 
     class BrokenAgent:
-        def structured_output(self, model):
+        def structured_output(self, model, prompt=None):
             raise RuntimeError("provider exploded")
 
     assert _extract_report(BrokenAgent(), fallback="the final text") == "the final text"
