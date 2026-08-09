@@ -112,10 +112,14 @@ def test_resolve_embedder_constructs_openai_embedder_when_available(monkeypatch)
     assert emb.base_url == "https://embeddings.example/v1"
 
 
-def test_resolve_embedder_none_until_openai_embedder_lands(monkeypatch):
+def test_resolve_embedder_builds_real_openai_embedder(monkeypatch):
+    """Integration seam: with the real ``OpenAIEmbedder`` landed, the worker
+    resolves it from ``VLLM_EMBED_URL`` (construction is lazy — no network
+    until the first embed call)."""
     from bakudo.memory import embeddings
     from bakudo.temporal import worker
 
     monkeypatch.setenv("VLLM_EMBED_URL", "https://embeddings.example/v1")
-    assert not hasattr(embeddings, "OpenAIEmbedder")  # not landed yet
-    assert worker._resolve_embedder() is None
+    emb = worker._resolve_embedder()
+    assert isinstance(emb, embeddings.OpenAIEmbedder)
+    assert emb._base_url == "https://embeddings.example/v1"

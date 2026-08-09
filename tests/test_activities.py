@@ -123,10 +123,13 @@ def test_render_bundle_uses_budget_from_spec_when_available(monkeypatch, spy):
     assert out["budget"]["timeoutSeconds"] == 1234
 
 
-def test_render_bundle_falls_back_to_input_timeout(spy):
+def test_render_bundle_uses_real_budget_from_spec(spy):
+    """Integration seam: with the real ``bakudo.bundle.budget_from_spec``
+    landed, the bundle budget comes from the spec's sandbox timeout, not the
+    workflow input's ``timeout_seconds`` fallback."""
     import bakudo.bundle as bundle_mod
 
-    assert not hasattr(bundle_mod, "budget_from_spec")  # not landed yet
+    assert hasattr(bundle_mod, "budget_from_spec")
     spec = _impl.load_agent_spec("explore")
     out = _impl.render_bundle(
         AgentRunInput(
@@ -136,7 +139,8 @@ def test_render_bundle_falls_back_to_input_timeout(spy):
             timeout_seconds=555,
         )
     )
-    assert out["budget"]["timeoutSeconds"] == 555
+    # agents/explore.yaml sandbox.timeoutSeconds — the single wall-clock number.
+    assert out["budget"]["timeoutSeconds"] == 1800
 
 
 # --- TMP-12: run_sandbox heartbeats from its worker thread ---
