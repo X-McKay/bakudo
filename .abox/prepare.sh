@@ -10,7 +10,9 @@
 # `python3 -m bakudo.runner.main` instead of the `agent-runner` script.
 set -eu
 cd /workspace
-python3 -m pip install --break-system-packages -e . 2>/dev/null \
-  || python3 -m pip install -e .
-python3 -c "import bakudo.runner.main"
-echo "prepare: bakudo runner importable in-guest"
+# [runtime] pulls strands-agents/httpx/openai — required for live-model runs
+# (the offline driver needs only the core deps, but prepare covers both).
+python3 -m pip install --break-system-packages -e ".[runtime]" 2>/dev/null \
+  || python3 -m pip install -e ".[runtime]"
+python3 -c "import bakudo.runner.main; import strands"
+echo "prepare: bakudo runner + strands runtime importable in-guest"
