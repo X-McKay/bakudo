@@ -125,16 +125,31 @@ create table if not exists memory_items (
   created_at timestamptz not null default now()
 );
 
--- Embedding search support (PgSemanticMemoryStore). The column is
--- dimension-agnostic so the embedder is swappable (the default
--- HashingEmbedder emits 256 dims); once a production embedder is fixed,
--- retype to vector(<dim>) and add an HNSW index for scale:
---   alter table memory_embeddings alter column embedding type vector(<dim>);
---   create index on memory_embeddings using hnsw (embedding vector_cosine_ops);
+-- Embedding search support (PgSemanticMemoryStore). The column is typed to
+-- the production embedder's dimension: Qwen/Qwen3-Embedding-0.6B emits 1024
+-- (pinned by the live probe test in tests/test_embeddings.py). Typing the
+-- column enables the HNSW index below, and PgSemanticMemoryStore reads the
+-- column typmod at connect time and rejects any embedder whose dimension
+-- does not match (MEM-4). Consequence, by design: the 256-dim dev
+-- HashingEmbedder cannot write to this schema.
 create table if not exists memory_embeddings (
   memory_id text references memory_items(id) on delete cascade,
-  embedding vector not null
+  embedding vector(1024) not null
 );
+-- Idempotent retype for databases created before the column was typed; the
+-- DO block skips the table rewrite when the column is already vector(1024).
+-- (Fails if pre-existing rows carry a different dimension — that data was
+-- written by a non-production embedder and must be migrated or dropped.)
+do $$
+begin
+  if (select atttypmod from pg_attribute
+      where attrelid = to_regclass('memory_embeddings')
+        and attname = 'embedding') is distinct from 1024 then
+    alter table memory_embeddings alter column embedding type vector(1024);
+  end if;
+end $$;
+create index if not exists memory_embeddings_embedding_hnsw
+  on memory_embeddings using hnsw (embedding vector_cosine_ops);
 
 create table if not exists promotion_decisions (
   id uuid primary key default gen_random_uuid(),

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import timedelta
 from typing import Any
 
 from .embeddings import Embedder, HashingEmbedder
@@ -31,7 +32,10 @@ from .semantic import DEFAULT_DEDUP_THRESHOLD
 _TTL_RE = re.compile(r"^\s*(\d+)\s*([dhwm])\s*$", re.IGNORECASE)
 _TTL_UNITS = {"d": "days", "h": "hours", "w": "weeks", "m": "minutes"}
 
-_ITEM_COLUMNS = "id, memory_type, scope, content, evidence, confidence, created_by"
+_ITEM_COLUMNS = "id, memory_type, scope, content, evidence, confidence, ttl, created_by"
+
+# A row is live when it has no TTL or its TTL has not elapsed (MEM-5).
+_TTL_LIVE = "(ttl is null or created_at + ttl > now())"
 
 
 def ttl_to_interval(ttl: str | None) -> str | None:
@@ -47,9 +51,37 @@ def ttl_to_interval(ttl: str | None) -> str | None:
     return f"{match.group(1)} {_TTL_UNITS[match.group(2).lower()]}"
 
 
+def interval_to_ttl(value: Any) -> str | None:
+    """Convert a Postgres interval column value back to the TTL shorthand.
+
+    psycopg returns intervals as :class:`datetime.timedelta`. The round trip
+    is semantically equal, not textually: Postgres stores days+seconds, so
+    ``"2w"`` comes back as ``"14d"``. Text-mode values and shapes we cannot
+    map cleanly pass through as their string form.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, timedelta):
+        if value.microseconds == 0:
+            if value.seconds == 0 and value.days:
+                return f"{value.days}d"
+            if value.seconds % 3600 == 0:
+                return f"{value.days * 24 + value.seconds // 3600}h"
+            if value.seconds % 60 == 0:
+                return f"{value.days * 1440 + value.seconds // 60}m"
+    return str(value)
+
+
 def vector_literal(embedding: list[float]) -> str:
-    """Format an embedding as a pgvector input literal (``[x,y,...]``)."""
-    return "[" + ",".join(repr(v) for v in embedding) + "]"
+    """Format an embedding as a pgvector input literal (``[x,y,...]``).
+
+    Values are coerced through ``float()`` first: real embedding pipelines
+    hand back numpy scalars whose ``repr()`` (``np.float32(0.25)``) is not
+    valid pgvector input (MEM-13).
+    """
+    return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
 
 
 class PgSemanticMemoryStore:
@@ -68,6 +100,7 @@ class PgSemanticMemoryStore:
         self.dedup_threshold = dedup_threshold
         self._graph = graph
         self._require_pgvector()
+        self._require_embedding_dim()
 
     @classmethod
     def connect(
@@ -121,7 +154,8 @@ class PgSemanticMemoryStore:
         limit: int = 10,
         min_similarity: float = 0.0,
     ) -> list[MemoryItem]:
-        where, params = self._scope_clause(scope)
+        """Retrieve live memories; TTL-expired rows are filtered server-side."""
+        where, params = self._live_where(scope)
         if text is None:
             rows = self._all_rows(
                 f"select {_ITEM_COLUMNS} from memory_items{where} "
@@ -145,10 +179,22 @@ class PgSemanticMemoryStore:
         ]
 
     def all(self) -> list[MemoryItem]:
+        """Dump every stored row, including TTL-expired ones (debug/admin
+        surface; retrieval paths all filter expiry)."""
         rows = self._all_rows(
             f"select {_ITEM_COLUMNS} from memory_items order by created_at", ()
         )
         return [self._item_from_row(row) for row in rows]
+
+    def purge_expired(self) -> int:
+        """Delete TTL-expired rows (cascade removes their embeddings) and
+        return how many were purged. Called from compaction (MEM-5)."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "delete from memory_items "
+                "where ttl is not null and created_at + ttl <= now()"
+            )
+            return max(int(cur.rowcount), 0)
 
     # --- internals ---
 
@@ -163,23 +209,63 @@ class PgSemanticMemoryStore:
                 "durable semantic memory requires it."
             )
 
+    def _require_embedding_dim(self) -> None:
+        """Fail fast when the embedder's dimension cannot fit the schema.
+
+        The production schema types ``memory_embeddings.embedding`` as
+        ``vector(1024)`` (Qwen/Qwen3-Embedding-0.6B); pgvector stores the
+        dimension in the column's ``atttypmod``. A mis-dimensioned embedder
+        would otherwise fail (or mix dimensions) on every write and query,
+        so we reject it at connect time (MEM-4). Consequence, by design: the
+        256-dim :class:`HashingEmbedder` dev fallback cannot be used against
+        the typed production schema.
+
+        Untyped dev columns (typmod ``-1``) and a not-yet-created table skip
+        the check — there is no server-side dimension to enforce yet.
+        """
+        row = self._one_row(
+            "select atttypmod from pg_attribute "
+            "where attrelid = to_regclass('memory_embeddings') "
+            "and attname = 'embedding'",
+            (),
+        )
+        if row is None:
+            return
+        typmod = row[0]
+        if typmod is None or int(typmod) <= 0:
+            return
+        if int(typmod) != self.embedder.dim:
+            raise RuntimeError(
+                f"memory_embeddings.embedding is vector({int(typmod)}) but the "
+                f"configured embedder ({type(self.embedder).__name__}) emits "
+                f"{self.embedder.dim}-dim vectors; configure an embedder matching "
+                "the schema (production: OpenAIEmbedder with "
+                "Qwen/Qwen3-Embedding-0.6B, 1024 dims). The 256-dim "
+                "HashingEmbedder is a dev/test fallback and cannot write to the "
+                "typed production schema."
+            )
+
     def _same_content_items(self, item: MemoryItem) -> list[MemoryItem]:
         """Fetch stored items with identical normalised content.
 
         The write policy only consults ``existing`` for its exact-repeat check,
         so this is a faithful, bounded stand-in for "all existing memories".
+        Scoped to the candidate's scope (MEM-11): the same fact recorded for a
+        different repo must not block this one — scope-filtered recall would
+        never return the other row anyway. Expired rows are ignored (MEM-5).
         """
+        where, params = self._live_where(item.scope)
         rows = self._all_rows(
-            f"select {_ITEM_COLUMNS} from memory_items "
-            "where lower(trim(content)) = lower(trim(%s))",
-            (item.content,),
+            f"select {_ITEM_COLUMNS} from memory_items"
+            f"{where} and lower(trim(content)) = lower(trim(%s))",
+            (*params, item.content),
         )
         return [self._item_from_row(row) for row in rows]
 
     def _nearest(
         self, embedding: list[float], *, scope: dict
     ) -> tuple[MemoryItem, float] | None:
-        where, params = self._scope_clause(scope)
+        where, params = self._live_where(scope)
         q = vector_literal(embedding)
         row = self._one_row(
             f"select {_ITEM_COLUMNS}, 1 - (e.embedding <=> %s::vector) as similarity "
@@ -193,6 +279,12 @@ class PgSemanticMemoryStore:
         return self._item_from_row(row), float(row[-1])
 
     def _insert(self, item: MemoryItem, embedding: list[float]) -> None:
+        """Insert item + embedding atomically: a split write leaves a zombie
+        row that blocks re-writes forever (MEM-2)."""
+        with self._conn.transaction():
+            self._insert_rows(item, embedding)
+
+    def _insert_rows(self, item: MemoryItem, embedding: list[float]) -> None:
         self._exec(
             "insert into memory_items "
             "(id, memory_type, scope, content, evidence, confidence, ttl, created_by) "
@@ -217,9 +309,15 @@ class PgSemanticMemoryStore:
         self, old_id: str, item: MemoryItem, embedding: list[float]
     ) -> None:
         """Replace a less-confident near-duplicate in place (cascade cleans
-        the old embedding row)."""
-        self._exec("delete from memory_items where id = %s", (old_id,))
-        self._insert(item, embedding)
+        the old embedding row).
+
+        Delete + replacement insert run in one transaction: the old memory is
+        never destroyed unless the new item and its embedding both land
+        (MEM-2).
+        """
+        with self._conn.transaction():
+            self._exec("delete from memory_items where id = %s", (old_id,))
+            self._insert_rows(item, embedding)
 
     def _mirror(self, item: MemoryItem, embedding: list[float]) -> None:
         if self._graph is None:
@@ -235,6 +333,14 @@ class PgSemanticMemoryStore:
             return "", ()
         return " where scope @> %s::jsonb", (json.dumps(scope),)
 
+    @classmethod
+    def _live_where(cls, scope: dict | None) -> tuple[str, tuple]:
+        """Scope filter plus the TTL-liveness predicate (MEM-5)."""
+        where, params = cls._scope_clause(scope)
+        if where:
+            return f"{where} and {_TTL_LIVE}", params
+        return f" where {_TTL_LIVE}", params
+
     @staticmethod
     def _item_from_row(row: tuple) -> MemoryItem:
         scope = row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}")
@@ -246,7 +352,8 @@ class PgSemanticMemoryStore:
             content=row[3],
             evidence=evidence,
             confidence=float(row[5]),
-            created_by=row[6],
+            ttl=interval_to_ttl(row[6]),
+            created_by=row[7],
         )
 
     def _exec(self, sql: str, params: tuple) -> None:

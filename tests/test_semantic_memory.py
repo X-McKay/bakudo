@@ -53,6 +53,29 @@ def test_compaction_writes_evidenced_memories_and_skips_bad_ones():
     assert len(report.rejected) == 1
 
 
+def test_compaction_purges_expired_rows_when_store_supports_it():
+    """Compaction is the natural janitor moment: stores exposing
+    purge_expired() (the Pg store) get expired rows cleaned up (MEM-5)."""
+    result = RunResult.model_validate({
+        "run_id": "run_X", "agent": "explore@1", "objective_id": "obj_X",
+        "status": "success", "summary": "s", "memories_to_write": [],
+    })
+
+    class PurgingStore(SemanticMemoryStore):
+        purged = 0
+
+        def purge_expired(self) -> int:
+            self.purged += 1
+            return 0
+
+    store = PurgingStore()
+    compact(result, store, repo="r")
+    assert store.purged == 1
+
+    # Stores without purge_expired (the in-memory one) still work.
+    compact(result, SemanticMemoryStore(), repo="r")
+
+
 def test_memories_from_result_attaches_run_provenance():
     result = RunResult.model_validate({
         "run_id": "run_42", "agent": "explore@1", "objective_id": "obj_X",

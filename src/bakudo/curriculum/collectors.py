@@ -16,6 +16,7 @@ collector lazily imports ``httpx`` and is constructed from env in
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .observe import CoverageGap, FailingTest, Issue, RepoSignals, Todo
+
+_log = logging.getLogger(__name__)
 
 _TODO_RE = re.compile(r"\b(TODO|FIXME)\b[:\s]\s*(.+)")
 # Files we will scan for TODOs when no git index is available.
@@ -46,13 +49,28 @@ def _merge(repo: str, snapshots: list[RepoSignals]) -> RepoSignals:
 
 
 class CompositeCollector:
-    """Run several collectors and merge their signals."""
+    """Run several collectors and merge their signals.
+
+    Collectors are isolated from each other (MEM-14): one failing collector
+    (e.g. a GitHub 403) is logged and skipped, and the rest still contribute
+    to the snapshot.
+    """
 
     def __init__(self, collectors: list[SignalCollector]) -> None:
         self._collectors = collectors
 
     def collect(self, repo: str) -> RepoSignals:
-        return _merge(repo, [c.collect(repo) for c in self._collectors])
+        snapshots: list[RepoSignals] = []
+        for collector in self._collectors:
+            try:
+                snapshots.append(collector.collect(repo))
+            except Exception:
+                _log.exception(
+                    "signal collector %s failed for repo %s; skipping it",
+                    type(collector).__name__,
+                    repo,
+                )
+        return _merge(repo, snapshots)
 
 
 class TodoCollector:

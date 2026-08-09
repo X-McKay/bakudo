@@ -53,3 +53,31 @@ def test_dedupe_keeps_highest_value():
     same = [o for o in objectives if o.title == "Same title"]
     assert len(same) == 1
     assert same[0].priority.value == 0.9  # the higher-labelled one won
+
+
+def test_two_observe_cycles_over_unchanged_signals_yield_identical_ids():
+    """MEM-6: the same TODO/issue/test must map to the SAME objective id every
+    observer cycle, so dedupe-by-id in the meta workflow can hold."""
+    def snapshot():
+        return RepoSignals(
+            repo="payments-api",
+            issues=[Issue(7, "Add retry handling", labels=["bug"])],
+            failing_tests=[FailingTest("test_webhook", "AssertionError")],
+            todos=[Todo("src/x.py", "handle timeout")],
+            coverage_gaps=[CoverageGap("src/y.py", covered_pct=0.2)],
+            advisories=[Advisory("requests", "critical")],
+        )
+
+    first = {o.title: o.id for o in generate_objectives(snapshot())}
+    second = {o.title: o.id for o in generate_objectives(snapshot())}
+    assert first == second
+    assert all(oid.startswith("objd_") for oid in first.values())
+
+
+def test_observer_objective_ids_differ_across_repos():
+    def snapshot(repo):
+        return RepoSignals(repo=repo, todos=[Todo("src/x.py", "handle timeout")])
+
+    (a,) = generate_objectives(snapshot("repo-a"))
+    (b,) = generate_objectives(snapshot("repo-b"))
+    assert a.id != b.id
