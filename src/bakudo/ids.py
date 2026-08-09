@@ -14,6 +14,7 @@ time, and URL/branch-safe.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 
@@ -54,6 +55,22 @@ def run_id() -> str:
 
 def objective_id() -> str:
     return new_id("obj")
+
+
+def deterministic_objective_id(seed: str) -> str:
+    """A stable, content-derived objective id (``objd_`` + 26 Crockford chars).
+
+    Same format family as the other canonical ids, but hash-based instead of
+    random: the same seed always yields the same id. The observer uses this so
+    an unchanged repo signal (the same TODO, issue, failing test) maps to the
+    SAME objective id every cycle, letting the meta workflow dedupe by id
+    instead of dispatching duplicates forever (MEM-6). The distinct ``objd``
+    prefix keeps observer-derived objectives distinguishable from operator/API
+    ones (``obj_``).
+    """
+    digest = hashlib.sha256(seed.encode()).digest()
+    value = int.from_bytes(digest, "big") % (32**_ENCODE_LEN)
+    return f"objd_{_encode(value, _ENCODE_LEN)}"
 
 
 def agent_version_id() -> str:
