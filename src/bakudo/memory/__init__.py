@@ -1,6 +1,6 @@
 """Memory architecture: evidence-backed, policy-gated memory (spec section 14)."""
 
-from .embeddings import Embedder, HashingEmbedder, cosine
+from .embeddings import Embedder, EmbeddingError, HashingEmbedder, OpenAIEmbedder, cosine
 from .models import Evidence, MemoryItem, MemoryType
 from .policy import MemoryRejected, validate_memory_candidate
 from .semantic import SemanticMemoryStore
@@ -18,6 +18,8 @@ __all__ = [
     "SemanticMemoryStore",
     "PgSemanticMemoryStore",
     "Embedder",
+    "EmbeddingError",
     "HashingEmbedder",
+    "OpenAIEmbedder",
     "cosine",
 ]
