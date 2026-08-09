@@ -189,3 +189,35 @@ def test_build_model_maps_enable_thinking_to_extra_body(monkeypatch):
 
     spec_explore = load_spec_file(AGENTS / "explore.yaml")
     assert "extra_body" not in build_model(spec_explore).config.get("params", {})
+
+
+def test_extract_report_uses_structured_output():
+    """The result contract rides strands structured output (schema-enforced),
+    with the final text only as fallback — observed live: a scout narrating
+    approaches in prose while proposed_followups stayed empty."""
+    import json
+
+    from bakudo.runner.agent import _extract_report
+    from bakudo.runner.result import AgentReport
+
+    class GoodAgent:
+        def structured_output(self, model):
+            assert model is AgentReport
+            return AgentReport(
+                status="success", summary="found it",
+                proposed_followups=["Approach 1: use a set"],
+            )
+
+    out = json.loads(_extract_report(GoodAgent(), fallback="ignored"))
+    assert out["proposed_followups"] == ["Approach 1: use a set"]
+    assert out["status"] == "success"
+
+
+def test_extract_report_falls_back_on_failure():
+    from bakudo.runner.agent import _extract_report
+
+    class BrokenAgent:
+        def structured_output(self, model):
+            raise RuntimeError("provider exploded")
+
+    assert _extract_report(BrokenAgent(), fallback="the final text") == "the final text"

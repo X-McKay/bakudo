@@ -43,6 +43,23 @@ class SkillSuggestion(BaseModel):
     why: str
 
 
+class AgentReport(BaseModel):
+    """What the *model* authors about its run — extracted via strands
+    structured output (schema-enforced tool-use), so payload fields like
+    ``proposed_followups`` cannot end up narrated in the summary instead.
+    Identity and observability fields are runner-owned and excluded."""
+
+    status: RunStatus
+    summary: str
+    changed_files: list[str] = Field(default_factory=list)
+    tests_run: list[TestRun] = Field(default_factory=list)
+    metrics: dict[str, float] = Field(default_factory=dict)
+    blocked_reasons: list[str] = Field(default_factory=list)
+    proposed_followups: list[str] = Field(default_factory=list)
+    memories_to_write: list[MemoryToWrite] = Field(default_factory=list)
+    skill_suggestions: list[SkillSuggestion] = Field(default_factory=list)
+
+
 class RunResult(BaseModel):
     """The structured output every worker run writes to ``result.json``."""
 

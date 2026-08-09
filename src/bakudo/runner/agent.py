@@ -194,7 +194,7 @@ def build_and_run(
         if ctx.tokens_used == 0:
             # Fallback when the hooks API yielded no usage (provider variance).
             _capture_usage(ctx, response)
-        return str(response)
+        return _extract_report(agent, fallback=str(response))
     except BudgetExceeded as exc:
         return _blocked_by_budget(exc)
     except Exception as exc:
@@ -204,8 +204,26 @@ def build_and_run(
             return _blocked_by_budget(budget_exc)
         partial = _partial_text_on_max_tokens(exc, agent)
         if partial is not None:
-            return partial
+            # Even a clipped conversation usually holds enough for a report.
+            return _extract_report(agent, fallback=partial)
         raise
+
+
+def _extract_report(agent: Any, fallback: str) -> str:
+    """Extract the run report via strands structured output, from history.
+
+    Schema-enforced tool-use makes the result contract non-negotiable (a
+    scout narrating approaches in prose while leaving ``proposed_followups``
+    empty was observed live). Any failure falls back to the final text, which
+    ``normalize_result`` best-effort parses as before.
+    """
+    from .result import AgentReport
+
+    try:
+        report = agent.structured_output(AgentReport)
+        return json.dumps(report.model_dump(mode="json"))
+    except Exception:  # noqa: BLE001 - extraction is an upgrade, not a gate
+        return fallback
 
 
 def _partial_text_on_max_tokens(exc: Exception, agent: Any) -> str | None:
