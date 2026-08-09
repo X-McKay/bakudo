@@ -15,7 +15,7 @@ from .. import ids
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome
 from ..agent_spec import AgentSpec
-from ..bundle import Budget, TaskBundle
+from ..bundle import TaskBundle, budget_from_spec
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, EvalResult, Scorecard, run_suite
 from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
@@ -53,7 +53,7 @@ def run_objective(
         objective_id=objective.id,
         objective=objective,
         agent_spec=spec,
-        budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
+        budget=budget_from_spec(spec),
     )
 
     ledger.create_run(
