@@ -189,6 +189,37 @@ async def test_meta_dead_letters_unresolvable_objective(env, deps):
         assert deps._runs == {}
 
 
+# --- run-completion loop (TMP-5) ---
+
+
+async def test_completed_child_run_drains_meta_active_runs(env, deps):
+    """AgentRunWorkflow signals run_completed back to the meta workflow, so
+    active_runs drains instead of growing forever across Continue-As-New."""
+    async with make_worker(env, [MetaAgentWorkflow, AgentRunWorkflow, EvalWorkflow]):
+        handle = await env.client.start_workflow(
+            MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
+        )
+        await handle.signal(
+            MetaAgentWorkflow.new_objective,
+            {
+                "id": "obj_DRAIN1",
+                "type": "explore",
+                "repo": "bakudo",
+                "title": "drain test",
+                "suggestedAgents": ["explore"],
+            },
+        )
+
+        async def drained():
+            status = await handle.query(MetaAgentWorkflow.get_status)
+            return status["active_runs"] == [] and status["processed_objectives"] == 1
+
+        assert await _poll(drained), "active_runs never drained after child completion"
+        # And the child really ran to completion through the ledger.
+        run = next(iter(deps._runs.values()))
+        assert run.phase.value == "completed"
+
+
 # --- Continue-As-New must not kill in-flight runs (TMP-6) ---
 
 

@@ -94,6 +94,27 @@ class AgentRunWorkflow:
             persist_run, args=[run_id, phase, payload or {}], **_SHORT
         )
 
+    async def _notify_meta(self, run_id: str) -> None:
+        """Signal run_completed to the meta workflow so active_runs drains (TMP-5).
+
+        Guard: only when this run was dispatched *by* the meta workflow — the
+        parent workflow id is deterministic workflow state, so this needs no
+        input flag and cannot misfire for CLI/API-started runs. Best-effort:
+        a missing/closed meta singleton must not fail a finished run.
+        """
+        parent = workflow.info().parent
+        if parent is None or parent.workflow_id != META_WORKFLOW_ID:
+            return
+        try:
+            handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
+            await handle.signal("run_completed", run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - best-effort notification
+            workflow.logger.warning(
+                "run_completed signal to %s failed: %s", META_WORKFLOW_ID, exc
+            )
+
     @workflow.run
     async def run(self, inp: AgentRunInput) -> AgentRunOutput:
         workflow_id = workflow.info().workflow_id
@@ -107,6 +128,7 @@ class AgentRunWorkflow:
 
         if self._cancelled:
             await self._advance(inp.run_id, "cancelled")
+            await self._notify_meta(inp.run_id)
             return AgentRunOutput(inp.run_id, "cancelled", "", "")
 
         await self._advance(inp.run_id, "sandbox_starting")
@@ -117,6 +139,7 @@ class AgentRunWorkflow:
         result = sandbox.get("result")
         if not sandbox.get("succeeded") or result is None:
             await self._advance(inp.run_id, "failed", {"result": result})
+            await self._notify_meta(inp.run_id)
             return AgentRunOutput(
                 inp.run_id, "failed",
                 bundle["agent_spec"]["metadata"]["name"], sandbox.get("git_branch", ""),
@@ -140,6 +163,7 @@ class AgentRunWorkflow:
         )
 
         await self._advance(inp.run_id, "completed", {"result": result})
+        await self._notify_meta(inp.run_id)
         return AgentRunOutput(
             run_id=inp.run_id,
             phase="completed",
