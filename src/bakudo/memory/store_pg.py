@@ -73,6 +73,7 @@ class PgSemanticMemoryStore:
         self.dedup_threshold = dedup_threshold
         self._graph = graph
         self._require_pgvector()
+        self._require_embedding_dim()
 
     @classmethod
     def connect(
@@ -166,6 +167,42 @@ class PgSemanticMemoryStore:
                 "the pgvector extension is not enabled in this database; run "
                 "`create extension vector;` (see infra/postgres/init.sql) — "
                 "durable semantic memory requires it."
+            )
+
+    def _require_embedding_dim(self) -> None:
+        """Fail fast when the embedder's dimension cannot fit the schema.
+
+        The production schema types ``memory_embeddings.embedding`` as
+        ``vector(1024)`` (Qwen/Qwen3-Embedding-0.6B); pgvector stores the
+        dimension in the column's ``atttypmod``. A mis-dimensioned embedder
+        would otherwise fail (or mix dimensions) on every write and query,
+        so we reject it at connect time (MEM-4). Consequence, by design: the
+        256-dim :class:`HashingEmbedder` dev fallback cannot be used against
+        the typed production schema.
+
+        Untyped dev columns (typmod ``-1``) and a not-yet-created table skip
+        the check — there is no server-side dimension to enforce yet.
+        """
+        row = self._one_row(
+            "select atttypmod from pg_attribute "
+            "where attrelid = to_regclass('memory_embeddings') "
+            "and attname = 'embedding'",
+            (),
+        )
+        if row is None:
+            return
+        typmod = row[0]
+        if typmod is None or int(typmod) <= 0:
+            return
+        if int(typmod) != self.embedder.dim:
+            raise RuntimeError(
+                f"memory_embeddings.embedding is vector({int(typmod)}) but the "
+                f"configured embedder ({type(self.embedder).__name__}) emits "
+                f"{self.embedder.dim}-dim vectors; configure an embedder matching "
+                "the schema (production: OpenAIEmbedder with "
+                "Qwen/Qwen3-Embedding-0.6B, 1024 dims). The 256-dim "
+                "HashingEmbedder is a dev/test fallback and cannot write to the "
+                "typed production schema."
             )
 
     def _same_content_items(self, item: MemoryItem) -> list[MemoryItem]:

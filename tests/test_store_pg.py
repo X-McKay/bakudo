@@ -87,6 +87,9 @@ class FakeConn:
         self.query_rows: list[tuple] = []
         self.transactions: list[dict] = []
         self.fail_on: str | None = None
+        # atttypmod of memory_embeddings.embedding: -1 = untyped 'vector',
+        # N > 0 = 'vector(N)', None = table missing.
+        self.embedding_typmod: int | None = -1
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -97,6 +100,8 @@ class FakeConn:
     def respond(self, sql: str) -> list[tuple]:
         if "pg_extension" in sql:
             return [(1,)] if self.pgvector_enabled else []
+        if "atttypmod" in sql:
+            return [] if self.embedding_typmod is None else [(self.embedding_typmod,)]
         if "lower(trim(content))" in sql:
             return list(self.content_rows)
         if "similarity" in sql and sql.rstrip().endswith("limit 1"):
@@ -141,6 +146,37 @@ def make_store(conn: FakeConn, **kwargs) -> PgSemanticMemoryStore:
 def test_missing_pgvector_fails_closed() -> None:
     with pytest.raises(RuntimeError, match="pgvector"):
         make_store(FakeConn(pgvector_enabled=False))
+
+
+def test_typed_embedding_column_rejects_mismatched_embedder_dim() -> None:
+    """Against the production vector(1024) column, a 256-dim HashingEmbedder
+    must fail fast at connect time, not corrupt/fail every write (MEM-4)."""
+    conn = FakeConn()
+    conn.embedding_typmod = 1024
+
+    with pytest.raises(RuntimeError, match="vector\\(1024\\)"):
+        make_store(conn)  # default HashingEmbedder emits 256 dims
+
+
+def test_typed_embedding_column_accepts_matching_embedder_dim() -> None:
+    from bakudo.memory.embeddings import HashingEmbedder
+
+    conn = FakeConn()
+    conn.embedding_typmod = 256
+    store = make_store(conn, embedder=HashingEmbedder(dim=256))
+    assert store.embedder.dim == 256
+
+
+def test_untyped_embedding_column_skips_dim_guard() -> None:
+    conn = FakeConn()
+    conn.embedding_typmod = -1  # dev schema: plain 'vector'
+    make_store(conn)  # no raise
+
+
+def test_missing_embeddings_table_skips_dim_guard() -> None:
+    conn = FakeConn()
+    conn.embedding_typmod = None  # to_regclass -> null, probe returns no row
+    make_store(conn)  # no raise
 
 
 def test_write_inserts_item_and_embedding() -> None:
