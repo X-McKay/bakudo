@@ -14,7 +14,7 @@ type:
 test:
 	python3 -m pytest
 
-# The full local gate, mirrored by CI (see ci/python-ci.yml).
+# The full local gate, mirrored by CI (see .github/workflows/ci.yml).
 check: lint type test
 
 demo:
