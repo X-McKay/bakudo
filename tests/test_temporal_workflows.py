@@ -9,6 +9,7 @@ the sandbox stubbed and the InMemoryLedger injected — no live services.
 from __future__ import annotations
 
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -25,6 +26,7 @@ from bakudo.temporal.workflows import (
     AgentRunWorkflow,
     EvalWorkflow,
     MetaAgentWorkflow,
+    MetaState,
 )
 
 # --- deterministic agent-name resolution (TMP-3) ---
@@ -185,3 +187,72 @@ async def test_meta_dead_letters_unresolvable_objective(env, deps):
         status = await handle.query(MetaAgentWorkflow.get_status)
         assert status["backlog"] == 0
         assert deps._runs == {}
+
+
+# --- Continue-As-New must not kill in-flight runs (TMP-6) ---
+
+
+async def test_continue_as_new_abandons_in_flight_children(env, deps, monkeypatch):
+    """Children are started with ParentClosePolicy.ABANDON, so the meta
+    workflow rolling its history does not terminate a sandbox mid-run."""
+    from temporalio.client import WorkflowExecutionStatus
+
+    def slow_sandbox(bundle):
+        time.sleep(1.5)
+        return stub_sandbox(bundle)
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", slow_sandbox)
+
+    async with make_worker(env, [MetaAgentWorkflow, AgentRunWorkflow, EvalWorkflow]):
+        handle = await env.client.start_workflow(
+            MetaAgentWorkflow.run,
+            MetaState(continue_as_new_threshold=1),
+            id=META_WORKFLOW_ID,
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+        first_run_id = (await handle.describe()).run_id
+        await handle.signal(
+            MetaAgentWorkflow.new_objective,
+            {
+                "id": "obj_CAN1",
+                "type": "explore",
+                "repo": "bakudo",
+                "title": "in-flight during continue-as-new",
+                "suggestedAgents": ["explore"],
+            },
+        )
+
+        # Wait until the first meta run has rolled over via Continue-As-New.
+        pinned = env.client.get_workflow_handle(META_WORKFLOW_ID, run_id=first_run_id)
+
+        async def rolled_over():
+            desc = await pinned.describe()
+            return desc.status == WorkflowExecutionStatus.CONTINUED_AS_NEW
+
+        assert await _poll(rolled_over), "meta workflow never continued-as-new"
+
+        # The dispatched child must have survived the parent's rollover.
+        status = await handle.query(MetaAgentWorkflow.get_status)
+        assert len(status["active_runs"]) == 1
+        child = env.client.get_workflow_handle(f"run-{status['active_runs'][0]}")
+        desc = await child.describe()
+        assert desc.status in (
+            WorkflowExecutionStatus.RUNNING,
+            WorkflowExecutionStatus.COMPLETED,
+        ), f"child was {desc.status.name} — killed by parent close policy"
+
+        # The test server is lenient about parent-close semantics, so also pin
+        # the policy the child was actually started with at the history level.
+        from temporalio.api.enums.v1 import ParentClosePolicy as ProtoPolicy
+
+        history = await pinned.fetch_history()
+        initiated = [
+            e.start_child_workflow_execution_initiated_event_attributes
+            for e in history.events
+            if e.HasField("start_child_workflow_execution_initiated_event_attributes")
+        ]
+        assert initiated, "no child workflow was initiated by the meta run"
+        assert all(
+            attrs.parent_close_policy == ProtoPolicy.PARENT_CLOSE_POLICY_ABANDON
+            for attrs in initiated
+        ), "children must be started with ParentClosePolicy.ABANDON (TMP-6)"

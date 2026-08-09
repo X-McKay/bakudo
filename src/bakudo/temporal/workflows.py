@@ -261,6 +261,10 @@ def _as_dict(out: AgentRunOutput) -> dict:
 
 # --- Long-running meta-agent entity workflow (section 11.3) ---
 
+# Continue-As-New after this many handled events keeps history bounded.
+_CONTINUE_AS_NEW_THRESHOLD = 500
+
+
 @dataclass
 class MetaState:
     """Durable high-level state (section 11.3)."""
@@ -277,10 +281,9 @@ class MetaState:
     # Objectives that could not be dispatched (no resolvable agent spec):
     # parked with a reason instead of crashing the workflow task (TMP-3).
     dead_letter: list[dict[str, Any]] = field(default_factory=list)
-
-
-# Continue-As-New after this many handled events keeps history bounded.
-_CONTINUE_AS_NEW_THRESHOLD = 500
+    # History-roll threshold; part of the carried state so tests (and
+    # operators) can lower it without patching module globals.
+    continue_as_new_threshold: int = _CONTINUE_AS_NEW_THRESHOLD
 
 
 @workflow.defn
@@ -375,9 +378,10 @@ class MetaAgentWorkflow:
             # Wake only when there is dispatchable work or it is time to roll
             # history. Backlog is never dropped while paused/observing.
             await workflow.wait_condition(
-                lambda: self._can_dispatch() or self._handled >= _CONTINUE_AS_NEW_THRESHOLD
+                lambda: self._can_dispatch()
+                or self._handled >= self._state.continue_as_new_threshold
             )
-            if self._handled >= _CONTINUE_AS_NEW_THRESHOLD:
+            if self._handled >= self._state.continue_as_new_threshold:
                 # Carry the full state, including any undispatched backlog.
                 self._state.pending_backlog = list(self._backlog)
                 workflow.continue_as_new(self._state)
@@ -414,7 +418,9 @@ class MetaAgentWorkflow:
             self._state.active_runs.append(run_id)
 
             # Dispatch the run as a child workflow; the meta-agent does not block
-            # on it — completion arrives via the run_completed signal.
+            # on it — completion arrives via the run_completed signal. ABANDON
+            # keeps in-flight runs alive across Continue-As-New (TMP-6): the
+            # parent "closing" to roll history must not kill a 2h sandbox run.
             await workflow.start_child_workflow(
                 AgentRunWorkflow.run,
                 AgentRunInput(
@@ -423,6 +429,7 @@ class MetaAgentWorkflow:
                     agent_spec=spec,
                 ),
                 id=f"run-{run_id}",
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
             )
 
 
