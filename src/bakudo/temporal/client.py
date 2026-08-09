@@ -17,7 +17,13 @@ async def connect() -> Any:
 
 
 async def ensure_meta_agent(client: Any) -> Any:
-    """Start the singleton MetaAgentWorkflow if it is not already running."""
+    """Start the singleton MetaAgentWorkflow if it is not already running.
+
+    ``USE_EXISTING`` makes this idempotent (TMP-7): a second call attaches to
+    the running singleton instead of raising WorkflowAlreadyStartedError.
+    """
+    from temporalio.common import WorkflowIDConflictPolicy
+
     from .shared import TASK_QUEUE_CONTROL
     from .workflows import MetaAgentWorkflow
 
@@ -25,7 +31,7 @@ async def ensure_meta_agent(client: Any) -> Any:
         MetaAgentWorkflow.run,
         id=META_WORKFLOW_ID,
         task_queue=TASK_QUEUE_CONTROL,
-        # id_reuse_policy avoids duplicate singletons; the SDK no-ops if running.
+        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
     )
 
 

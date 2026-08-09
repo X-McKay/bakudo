@@ -100,6 +100,24 @@ async def _poll(predicate, timeout=15.0, interval=0.1):
     return False
 
 
+# --- singleton startup (TMP-7) ---
+
+
+async def test_ensure_meta_agent_double_call_is_a_noop(env):
+    """The second ensure must attach to the running singleton, not raise
+    WorkflowAlreadyStartedError."""
+    from temporalio.client import WorkflowExecutionStatus
+
+    from bakudo.temporal.client import ensure_meta_agent
+
+    first = await ensure_meta_agent(env.client)
+    second = await ensure_meta_agent(env.client)
+    assert first.id == second.id == META_WORKFLOW_ID
+
+    desc = await env.client.get_workflow_handle(META_WORKFLOW_ID).describe()
+    assert desc.status == WorkflowExecutionStatus.RUNNING
+
+
 # --- meta-agent dispatch (TMP-3) ---
 
 
