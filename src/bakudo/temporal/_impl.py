@@ -251,6 +251,23 @@ def run_eval_suite(inp: EvalInput) -> dict:
     )
     # Suite selection keys off the objective: optimize runs add perf/simplicity.
     results = run_suite(ctx)
+
+    # Sandboxed critic (design §5, OPT-8): reviewed by a real read-only agent
+    # through the same sandbox driver as the run itself. With no sandbox
+    # available (offline/dev) the suite is omitted; a policy requiring
+    # `critic` then fails loudly at decision time. Sandbox/schema failures
+    # surface as an ERRORED critic suite, never a silent pass.
+    from ..evals.critic import critic_eval
+
+    try:
+        critic_sandbox: SandboxFn | None = DEPS.sandbox_fn()
+    except RuntimeError:
+        critic_sandbox = None
+    critic = critic_eval(ctx, critic_sandbox)
+    if critic is not None:
+        critic.validate_against_schema()
+        results.append(critic)
+
     scorecard = Scorecard.from_results(results)
     record_eval = getattr(DEPS.ledger, "record_eval", None)
     if callable(record_eval):

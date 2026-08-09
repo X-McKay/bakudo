@@ -25,8 +25,9 @@ sandbox:
   provider: abox
   profile: explore-readonly
   baseRef: main
-  networkMode: none
-  timeoutSeconds: 1800
+  # Scoped to the model endpoint only (design §5); modest review timeout.
+  networkMode: scoped
+  timeoutSeconds: 600
   ephemeral: true
   canMerge: false
 
@@ -35,7 +36,9 @@ prompt:
     You are a critic agent. Review the candidate diff and the implementation
     agent's reasoning. Identify correctness risks, design flaws, missing tests,
     and security concerns. Be specific and cite file paths. Do not modify files.
-    Return a structured result.json.
+    Report your verdict inside result.json: metrics.score (a number 0..1),
+    metrics.passed (1 if the change is acceptable, else 0), and each serious
+    issue you found as one entry in proposedFollowups.
 
 tools:
   - name: read-file
@@ -48,7 +51,10 @@ skills:
 outputContract:
   requiredFiles:
     - result.json
+  # The pinned critic verdict (design §5), subsumed into the result.json
+  # envelope: score -> metrics.score, passed -> metrics.passed (1|0),
+  # issues -> proposedFollowups entries.
   resultSchema:
-    status: ["success", "blocked", "failed"]
-    summary: string
-    proposedFollowups: list
+    score: number     # 0..1
+    passed: bool
+    issues: list      # of strings
