@@ -48,8 +48,13 @@ def ttl_to_interval(ttl: str | None) -> str | None:
 
 
 def vector_literal(embedding: list[float]) -> str:
-    """Format an embedding as a pgvector input literal (``[x,y,...]``)."""
-    return "[" + ",".join(repr(v) for v in embedding) + "]"
+    """Format an embedding as a pgvector input literal (``[x,y,...]``).
+
+    Values are coerced through ``float()`` first: real embedding pipelines
+    hand back numpy scalars whose ``repr()`` (``np.float32(0.25)``) is not
+    valid pgvector input (MEM-13).
+    """
+    return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
 
 
 class PgSemanticMemoryStore:

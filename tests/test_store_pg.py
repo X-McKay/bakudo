@@ -256,3 +256,21 @@ def test_ttl_to_interval_shorthand() -> None:
 
 def test_vector_literal_shape() -> None:
     assert vector_literal([0.0, 1.0, -0.5]) == "[0.0,1.0,-0.5]"
+
+
+def test_vector_literal_coerces_numpy_style_scalars() -> None:
+    """Real pipelines hand back numpy scalars whose repr() is not a plain
+    number (e.g. ``np.float32(0.25)``); the literal must coerce via float()."""
+
+    class NumpyStyleScalar:
+        def __init__(self, value: float) -> None:
+            self._value = value
+
+        def __float__(self) -> float:
+            return self._value
+
+        def __repr__(self) -> str:
+            return f"np.float32({self._value})"
+
+    literal = vector_literal([NumpyStyleScalar(0.25), NumpyStyleScalar(-1.0)])
+    assert literal == "[0.25,-1.0]"
