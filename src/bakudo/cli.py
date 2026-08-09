@@ -77,6 +77,19 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
+    # Live runs (BAKUDO_OFFLINE=0) go through the same fail-closed sandbox
+    # resolution as the API and the Temporal activity layer — model-driven
+    # agent code must never implicitly execute in this process (cf. OPT-10).
+    sandbox = None
+    if os.environ.get("BAKUDO_OFFLINE") == "0":
+        from .temporal._impl import Deps
+
+        try:
+            sandbox = Deps(memory=None).sandbox_fn()
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
     constraints: dict = {"avoidPublicApiChanges": True}
     if args.target:
         constraints["targetPaths"] = args.target
@@ -107,6 +120,7 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
         load_role_spec("optimize-attempt", args.attempt_spec),
         max_rounds=args.rounds,
         max_approaches=args.approaches,
+        sandbox=sandbox,
     )
 
     print(f"status      : {outcome['status']}")
