@@ -143,3 +143,25 @@ def test_exception_chain_includes_root_cause():
         chain = _exception_chain(exc)
     assert "RuntimeError: Connection error." in chain
     assert "ConnectionRefusedError" in chain and "refused" in chain
+
+
+def test_partial_text_salvaged_on_max_tokens():
+    """A generation clipped by maxTokens must yield the partial assistant
+    text (strands appends it to the history before raising), not a dead run."""
+    from bakudo.runner.agent import _partial_text_on_max_tokens
+
+    class MaxTokensReachedException(Exception):
+        pass
+
+    class FakeAgent:
+        messages = [
+            {"role": "user", "content": [{"text": "review this"}]},
+            {"role": "assistant", "content": [{"text": '{"score": 0.5, "passed":'}]},
+        ]
+
+    exc = MaxTokensReachedException("hit the cap")
+    assert _partial_text_on_max_tokens(exc, FakeAgent()) == '{"score": 0.5, "passed":'
+    assert _partial_text_on_max_tokens(ValueError("other"), FakeAgent()) is None
+    class Empty:
+        messages = []
+    assert _partial_text_on_max_tokens(exc, Empty()) is None

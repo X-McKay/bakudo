@@ -194,7 +194,30 @@ def build_and_run(
         budget_exc = _find_budget_exceeded(exc)
         if budget_exc is not None:
             return _blocked_by_budget(budget_exc)
+        partial = _partial_text_on_max_tokens(exc, agent)
+        if partial is not None:
+            return partial
         raise
+
+
+def _partial_text_on_max_tokens(exc: Exception, agent: Any) -> str | None:
+    """Salvage the partial response when generation hit ``maxTokens``.
+
+    Strands raises ``MaxTokensReachedException`` after appending the partial
+    assistant message to the conversation history; a truncated review/summary
+    that the result normalizer can parse beats failing the whole run (observed
+    live: the critic's thinking + verdict overran the cap mid-eval).
+    """
+    if type(exc).__name__ != "MaxTokensReachedException":
+        return None
+    for message in reversed(getattr(agent, "messages", []) or []):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content", [])
+        texts = [b["text"] for b in content if isinstance(b, dict) and "text" in b]
+        if texts:
+            return "\n".join(texts)
+    return None
 
 
 def _blocked_by_budget(exc: BudgetExceeded) -> str:
