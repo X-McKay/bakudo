@@ -21,6 +21,11 @@ from .workspace import Workspace
 # A tool is a named callable returning a JSON-serialisable result.
 Tool = Callable[..., dict[str, Any]]
 
+# After this many policy denials in one run, command execution shuts off
+# entirely (circuit breaker) — a model fighting the policy wall must be
+# bounded deterministically, not by prompt compliance.
+DENIAL_CIRCUIT_BREAKER = 5
+
 
 class BudgetExceeded(Exception):
     """Raised when a run exceeds its time or token budget (spec section 19.1)."""
@@ -114,11 +119,35 @@ def _edit_file(ctx: ToolContext, path: str, content: str) -> dict[str, Any]:
 def _make_run_command(policy: CommandPolicy) -> Tool:
     def _run_command(ctx: ToolContext, command: str, timeout: int = 600) -> dict[str, Any]:
         ctx._enter_tool()
+        if len(ctx.denied_commands) >= DENIAL_CIRCUIT_BREAKER:
+            # Observed live: a read-only role burned 100+ tool calls retrying
+            # denied writes via sed/awk workarounds. Past the threshold the
+            # policy wall becomes absolute for the rest of the run.
+            return {
+                "circuit_breaker": True,
+                "denied": True,
+                "command": command,
+                "reason": (
+                    "command execution disabled for the rest of this run after "
+                    f"{len(ctx.denied_commands)} policy denials. Do not attempt "
+                    "further commands or workarounds — produce your final "
+                    "report from what you already know, now."
+                ),
+            }
         try:
             argv = policy.check(command)
         except CommandDenied as denied:
             ctx.denied_commands.append({"command": command, "reason": denied.reason})
-            return {"denied": True, "reason": denied.reason, "command": command}
+            return {
+                "denied": True,
+                "command": command,
+                "reason": (
+                    f"{denied.reason}. This is the role's non-negotiable command "
+                    "policy, not a transient error — do not retry this command "
+                    "or attempt workarounds (sed/awk/shell redirection); "
+                    "continue with what the policy allows and report instead."
+                ),
+            }
         timeout = ctx.clamp_timeout(timeout)
         try:
             proc = ctx.workspace.run(argv, timeout=timeout)

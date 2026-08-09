@@ -222,3 +222,37 @@ def test_extract_report_falls_back_on_failure():
             raise RuntimeError("provider exploded")
 
     assert _extract_report(BrokenAgent(), fallback="the final text") == "the final text"
+
+
+# --- denial circuit-breaker: a policy wall must not become a retry loop ---
+
+
+def _denying_tools(tmp_path):
+    bundle = _bundle()
+    ctx = _ctx(bundle, tmp_path)
+    tools = build_tool_callables(bundle.agent_spec, ctx)
+    return tools, ctx
+
+
+def test_denial_message_is_instructive(tmp_path):
+    tools, ctx = _denying_tools(tmp_path)
+    out = tools["run-command"](command="curl http://blocked.example")
+    assert out["denied"] is True
+    text = out["reason"]
+    assert "do not retry" in text.lower()
+
+
+def test_denials_trip_the_circuit_breaker(tmp_path):
+    """Observed live: a read-only scout burned 100+ tool calls retrying
+    denied writes (sed/awk workarounds). After the threshold, command
+    execution shuts off for the rest of the run with a hard directive."""
+    tools, ctx = _denying_tools(tmp_path)
+    for _ in range(5):
+        out = tools["run-command"](command="curl http://blocked.example")
+        assert out["denied"] is True
+    tripped = tools["run-command"](command="echo hi")  # allowlisted, but too late
+    assert tripped.get("circuit_breaker") is True
+    assert "disabled" in tripped["reason"].lower()
+    # And it stays off, without executing anything.
+    again = tools["run-command"](command="echo hi")
+    assert again.get("circuit_breaker") is True

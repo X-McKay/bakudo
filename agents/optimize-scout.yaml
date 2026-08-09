@@ -29,7 +29,7 @@ sandbox:
   profile: explore-readonly
   baseRef: main
   networkMode: scoped  # model inference happens in-guest, so live roles need scoped egress (bounded by .abox/project.toml domains)
-  timeoutSeconds: 1800
+  timeoutSeconds: 900
   ephemeral: true
   canMerge: false
 
@@ -54,6 +54,10 @@ prompt:
     Explore briefly. A small target usually needs only a handful of file
     reads and at most one benchmark run before you can propose approaches —
     do not exhaustively enumerate the repo or re-run commands.
+
+    You cannot run benchmarks that the policy denies and you cannot modify
+    files — you are a read-only scout; the attempt agents implement. When a
+    command is denied, accept the denial and proceed to your report.
 
 tools:
   - name: read-file
