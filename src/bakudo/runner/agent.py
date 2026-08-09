@@ -16,7 +16,7 @@ from typing import Any
 
 from ..agent_spec import AgentSpec
 from ..bundle import TaskBundle
-from ..strands_tools import BudgetExceeded, ToolContext, build_tool_callables
+from ..strands_tools import LoopHalt, ToolContext, build_tool_callables
 from .prompts import render_system_prompt, render_user_prompt
 
 # An offline driver maps (system_prompt, user_prompt, tools) -> raw model text.
@@ -163,68 +163,110 @@ def build_and_run(
     user_prompt = render_user_prompt(bundle)
     tool_callables = build_tool_callables(spec, ctx)
 
-    # Apply the run budget to the tool layer (wall-clock deadline + token cap),
-    # keeping headroom below the abox --timeout so the graceful blocked result
-    # wins the race against the VM kill (ABOX-16).
+    # Apply the run budget to the tool layer (wall-clock deadline + token cap
+    # + tool-call ceiling), keeping headroom below the abox --timeout so the
+    # graceful blocked result wins the race against the VM kill (ABOX-16).
     ctx.set_budget(
         timeout_seconds=max(
             1, bundle.budget.timeout_seconds - GUEST_DEADLINE_HEADROOM_SECONDS
         ),
         token_cap=bundle.budget.max_tokens,
+        tool_call_ceiling=bundle.budget.max_tool_calls,
     )
 
     if offline_driver is None and os.environ.get("BAKUDO_OFFLINE") == "1":
         offline_driver = _default_offline_driver
 
-    try:
-        if offline_driver is not None:
+    if offline_driver is not None:
+        # No strands agent exists offline, so there is no report phase to run;
+        # a halt maps straight to its canned blocked result.
+        try:
             return offline_driver(system_prompt, user_prompt, tool_callables)
+        except LoopHalt as offline_halt:
+            return _halt_fallback(offline_halt)
 
-        from strands import Agent  # type: ignore
+    from strands import Agent  # type: ignore
 
-        model = build_model(spec)
-        accounting = TokenAccounting(ctx)
-        agent = Agent(
-            model=model,
-            system_prompt=system_prompt,
-            tools=to_strands_tools(tool_callables),
-            hooks=[accounting],
-        )
+    model = build_model(spec)
+    accounting = TokenAccounting(ctx)
+    agent = Agent(
+        model=model,
+        system_prompt=system_prompt,
+        tools=to_strands_tools(tool_callables),
+        hooks=[accounting],
+    )
+
+    # Run the loop to *some* ending — clean finish, LoopHalt (budget/tool-call
+    # ceiling/denial breaker), or a maxTokens clip — then fall through to the
+    # one unconditional report phase. The report is the deliverable; it must
+    # never again be a side effect of how the loop happened to end (issue #27).
+    halt: LoopHalt | None = None
+    try:
         response = agent(user_prompt)
         if ctx.tokens_used == 0:
             # Fallback when the hooks API yielded no usage (provider variance).
             _capture_usage(ctx, response)
-        return _extract_report(agent, fallback=str(response))
-    except BudgetExceeded as exc:
-        return _blocked_by_budget(exc)
+        fallback = str(response)
+    except LoopHalt as exc:
+        halt = exc
+        fallback = _halt_fallback(halt)
     except Exception as exc:
-        # The Strands event loop may wrap a hook-raised BudgetExceeded.
-        budget_exc = _find_budget_exceeded(exc)
-        if budget_exc is not None:
-            return _blocked_by_budget(budget_exc)
-        partial = _partial_text_on_max_tokens(exc, agent)
-        if partial is not None:
+        # The Strands event loop may wrap a hook-raised LoopHalt.
+        halt = _find_loop_halt(exc)
+        if halt is not None:
+            fallback = _halt_fallback(halt)
+        else:
+            partial = _partial_text_on_max_tokens(exc, agent)
+            if partial is None:
+                raise
             # Even a clipped conversation usually holds enough for a report.
-            return _extract_report(agent, fallback=partial)
-        raise
+            fallback = partial
+
+    return _report_phase(agent, ctx, halt=halt, fallback=fallback)
 
 
-def _extract_report(agent: Any, fallback: str) -> str:
+def _report_phase(agent: Any, ctx: ToolContext, *, halt: LoopHalt | None, fallback: str) -> str:
+    """The unconditional final phase: extract the run report (issue #27).
+
+    Budget enforcement is disarmed first so the one bounded extraction call
+    cannot be killed by the very budget that ended the loop. A halted run's
+    report is coerced to ``blocked`` with the halt reason appended — the model
+    reports what it did, the runner reports how the run ended. Any extraction
+    failure falls back to the ending-specific text, which ``normalize_result``
+    best-effort parses as before.
+    """
+    ctx.begin_report_phase()
+    report = _extract_report(agent, fallback=None, halt=halt)
+    if report is None:
+        return fallback
+    if halt is not None:
+        report["status"] = "blocked"
+        reasons = [str(r) for r in report.get("blocked_reasons") or []]
+        if halt.blocked_reason not in reasons:
+            reasons.append(halt.blocked_reason)
+        report["blocked_reasons"] = reasons
+    return json.dumps(report)
+
+
+def _extract_report(
+    agent: Any, fallback: Any = None, halt: LoopHalt | None = None
+) -> dict[str, Any] | None:
     """Extract the run report via strands structured output, from history.
 
     Schema-enforced tool-use makes the result contract non-negotiable (a
     scout narrating approaches in prose while leaving ``proposed_followups``
-    empty was observed live). Any failure falls back to the final text, which
-    ``normalize_result`` best-effort parses as before.
+    empty was observed live). Returns the report dict, or ``fallback`` when
+    extraction fails.
     """
     from .result import AgentReport
 
+    prompt = _EXTRACTION_PROMPT if halt is None else _halted_extraction_prompt(halt)
     try:
         # The instructions matter: without them this model fills the scalar
         # fields and leaves arrays empty (verified live against the vLLM
         # deployment — two approaches in prose, followups []).
-        report = agent.structured_output(AgentReport, _EXTRACTION_PROMPT)
-        return json.dumps(report.model_dump(mode="json"))
+        report = agent.structured_output(AgentReport, prompt)
+        return report.model_dump(mode="json")
     except Exception:  # noqa: BLE001 - extraction is an upgrade, not a gate
         return fallback
 
@@ -236,6 +278,13 @@ _EXTRACTION_PROMPT = (
     "approach mentioned only in prose does not exist. Leave proposed_followups "
     "empty ONLY if you genuinely found nothing worth doing."
 )
+
+
+def _halted_extraction_prompt(halt: LoopHalt) -> str:
+    return (
+        f"The run was force-stopped before completion ({halt}). You cannot run "
+        "any more tools. Report only work you already did. " + _EXTRACTION_PROMPT
+    )
 
 
 def _partial_text_on_max_tokens(exc: Exception, agent: Any) -> str | None:
@@ -258,22 +307,22 @@ def _partial_text_on_max_tokens(exc: Exception, agent: Any) -> str | None:
     return None
 
 
-def _blocked_by_budget(exc: BudgetExceeded) -> str:
+def _halt_fallback(halt: LoopHalt) -> str:
     return json.dumps(
         {
             "status": "blocked",
-            "summary": f"Run stopped: budget exceeded ({exc.reason}).",
-            "blocked_reasons": [f"budget:{exc.reason}"],
+            "summary": f"Run stopped: {halt}",
+            "blocked_reasons": [halt.blocked_reason],
         }
     )
 
 
-def _find_budget_exceeded(exc: BaseException | None) -> BudgetExceeded | None:
-    """Walk the exception chain looking for a wrapped :class:`BudgetExceeded`."""
+def _find_loop_halt(exc: BaseException | None) -> LoopHalt | None:
+    """Walk the exception chain looking for a wrapped :class:`LoopHalt`."""
     seen: set[int] = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
-        if isinstance(exc, BudgetExceeded):
+        if isinstance(exc, LoopHalt):
             return exc
         exc = exc.__cause__ or exc.__context__
     return None

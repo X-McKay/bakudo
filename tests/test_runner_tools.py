@@ -195,8 +195,6 @@ def test_extract_report_uses_structured_output():
     """The result contract rides strands structured output (schema-enforced),
     with the final text only as fallback — observed live: a scout narrating
     approaches in prose while proposed_followups stayed empty."""
-    import json
-
     from bakudo.runner.agent import _extract_report
     from bakudo.runner.result import AgentReport
 
@@ -209,7 +207,7 @@ def test_extract_report_uses_structured_output():
                 proposed_followups=["Approach 1: use a set"],
             )
 
-    out = json.loads(_extract_report(GoodAgent(), fallback="ignored"))
+    out = _extract_report(GoodAgent())
     assert out["proposed_followups"] == ["Approach 1: use a set"]
     assert out["status"] == "success"
 
@@ -221,7 +219,153 @@ def test_extract_report_falls_back_on_failure():
         def structured_output(self, model, prompt=None):
             raise RuntimeError("provider exploded")
 
-    assert _extract_report(BrokenAgent(), fallback="the final text") == "the final text"
+    assert _extract_report(BrokenAgent(), fallback=None) is None
+
+
+# --- issue #27: report extraction is the unconditional final phase ---
+
+
+def _live_run(monkeypatch, tmp_path, fake_agent_cls, spec_name="explore"):
+    """Drive build_and_run's live path with a fake strands Agent."""
+    import strands
+
+    from bakudo.bundle import Budget
+    from bakudo.runner.agent import build_and_run
+    from bakudo.strands_tools import ToolContext
+
+    # The in-process CLI tests os.environ.setdefault BAKUDO_OFFLINE=1 for the
+    # whole test process; the live path must state its posture explicitly.
+    monkeypatch.delenv("BAKUDO_OFFLINE", raising=False)
+    monkeypatch.setattr(strands, "Agent", fake_agent_cls)
+    monkeypatch.setattr("bakudo.runner.agent.build_model", lambda spec: object())
+    spec = load_spec_file(AGENTS / f"{spec_name}.yaml")
+    objective = Objective(type="explore", repo="bakudo", title="t")
+    bundle = TaskBundle(
+        run_id="run_R", objective_id=objective.id, objective=objective,
+        agent_spec=spec, budget=Budget(timeoutSeconds=600),
+    )
+    ctx = ToolContext(
+        workspace=Workspace(tmp_path), skills=SkillRegistry(allowed=[]), run_id="run_R",
+    )
+    return build_and_run(spec, bundle, ctx, offline_driver=None), ctx
+
+
+class _FakeAgentBase:
+    """Constructor-compatible with strands.Agent; subclasses set behavior."""
+
+    extracted = None  # AgentReport returned by structured_output, or None to raise
+
+    def __init__(self, *, model=None, system_prompt=None, tools=None, hooks=None):
+        self.prompts = []
+
+    def structured_output(self, model, prompt=None):
+        self.prompts.append(prompt)
+        if self.extracted is None:
+            raise RuntimeError("extraction failed")
+        return self.extracted
+
+
+def test_report_extracted_on_budget_halt(monkeypatch, tmp_path):
+    """A BudgetExceeded ending must still yield the guided structured-output
+    report — status coerced to blocked, halt reason appended, payload kept."""
+    import json
+
+    from bakudo.runner.result import AgentReport
+    from bakudo.strands_tools import BudgetExceeded
+
+    class FakeAgent(_FakeAgentBase):
+        extracted = AgentReport(
+            status="success", summary="explored half the repo",
+            proposed_followups=["Approach 1: use a set"],
+        )
+
+        def __call__(self, prompt):
+            raise BudgetExceeded("timeout")
+
+    out, ctx = _live_run(monkeypatch, tmp_path, FakeAgent)
+    data = json.loads(out)
+    assert data["status"] == "blocked"
+    assert "budget:timeout" in data["blocked_reasons"]
+    assert data["proposed_followups"] == ["Approach 1: use a set"]
+    assert ctx.reporting is True  # enforcement was disarmed for extraction
+
+
+def test_report_extracted_on_denial_halt(monkeypatch, tmp_path):
+    import json
+
+    from bakudo.runner.result import AgentReport
+    from bakudo.strands_tools import DenialsExhausted
+
+    class FakeAgent(_FakeAgentBase):
+        extracted = AgentReport(status="success", summary="hit the policy wall")
+
+        def __call__(self, prompt):
+            raise DenialsExhausted(5)
+
+    out, _ = _live_run(monkeypatch, tmp_path, FakeAgent)
+    data = json.loads(out)
+    assert data["status"] == "blocked"
+    assert "denials:circuit_breaker" in data["blocked_reasons"]
+    assert data["summary"] == "hit the policy wall"
+
+
+def test_halted_extraction_failure_falls_back_to_blocked_json(monkeypatch, tmp_path):
+    import json
+
+    from bakudo.strands_tools import BudgetExceeded
+
+    class FakeAgent(_FakeAgentBase):
+        extracted = None  # structured_output raises
+
+        def __call__(self, prompt):
+            raise BudgetExceeded("token_cap")
+
+    out, _ = _live_run(monkeypatch, tmp_path, FakeAgent)
+    data = json.loads(out)
+    assert data["status"] == "blocked"
+    assert "budget:token_cap" in data["blocked_reasons"]
+
+
+def test_halted_extraction_prompt_names_the_stop(monkeypatch, tmp_path):
+    """The extraction prompt for a halted run must tell the model it was
+    force-stopped and still carry the followups guidance."""
+    from bakudo.runner.result import AgentReport
+    from bakudo.strands_tools import BudgetExceeded
+
+    captured = {}
+
+    class FakeAgent(_FakeAgentBase):
+        extracted = AgentReport(status="success", summary="s")
+
+        def __call__(self, prompt):
+            raise BudgetExceeded("tool_calls")
+
+        def structured_output(self, model, prompt=None):
+            captured["prompt"] = prompt
+            return super().structured_output(model, prompt)
+
+    _live_run(monkeypatch, tmp_path, FakeAgent)
+    assert "stopped" in captured["prompt"].lower()
+    assert "proposed_followups" in captured["prompt"]
+
+
+def test_tool_call_ceiling_wired_from_bundle_budget(tmp_path):
+    """bundle.budget.maxToolCalls must land on the ToolContext ceiling."""
+    from bakudo.bundle import Budget
+    from bakudo.runner.agent import build_and_run
+    from bakudo.strands_tools import ToolContext
+
+    spec = load_spec_file(AGENTS / "explore.yaml")
+    objective = Objective(type="explore", repo="bakudo", title="t")
+    bundle = TaskBundle(
+        run_id="run_C", objective_id=objective.id, objective=objective,
+        agent_spec=spec, budget=Budget(timeoutSeconds=600, maxToolCalls=7),
+    )
+    ctx = ToolContext(
+        workspace=Workspace(tmp_path), skills=SkillRegistry(allowed=[]), run_id="run_C",
+    )
+    build_and_run(spec, bundle, ctx, offline_driver=lambda s, u, t: "{}")
+    assert ctx.tool_call_ceiling == 7
 
 
 # --- denial circuit-breaker: a policy wall must not become a retry loop ---
