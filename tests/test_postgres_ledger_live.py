@@ -90,3 +90,25 @@ def test_create_phase_finish_events_round_trip(ledger):
     kinds = [e.event_type for e in events]
     assert kinds.count("created") == 1, "created event must be idempotent (TMP-8)"
     assert "phase" in kinds and kinds.count("finished") == 1
+
+    # retried phase/finish writes must not duplicate events (TMP-8)
+    ledger.set_phase(RUN_ID, RunPhase.agent_running)
+    ledger.finish_run(RUN_ID, RunPhase.completed, {"status": "success"})
+    kinds = [e.event_type for e in ledger.events(RUN_ID)]
+    assert kinds.count("finished") == 1
+    assert sum(1 for e in ledger.events(RUN_ID)
+               if e.idem_key == "phase:agent_running") == 1
+
+
+def test_record_eval_retry_is_idempotent(ledger):
+    from bakudo.evals.result import EvalResult
+
+    ledger.create_run(_record(), objective=_objective())
+    result = EvalResult(
+        subject_type="run", subject_id=RUN_ID, suite_name="safety",
+        score=1.0, passed=True, details={"note": "live idempotency probe"},
+    )
+    ledger.record_eval(result)
+    ledger.record_eval(result)  # simulated activity retry
+    rows = ledger.eval_results(RUN_ID)
+    assert len(rows) == 1, "retried record_eval must not duplicate rows (TMP-8)"

@@ -103,6 +103,49 @@ async def _poll(predicate, timeout=15.0, interval=0.1):
     return False
 
 
+# --- flagship happy path: full AgentRunWorkflow lifecycle ---
+
+
+async def test_agent_run_workflow_happy_path_writes_full_event_log(env, deps):
+    from bakudo.temporal.shared import AgentRunInput
+
+    spec = _impl.load_agent_spec("explore")
+    async with make_worker(env, [AgentRunWorkflow, EvalWorkflow]):
+        out = await env.client.execute_workflow(
+            AgentRunWorkflow.run,
+            AgentRunInput(
+                run_id="run_HAPPY1",
+                objective={"id": "obj_HAPPY1", "type": "explore", "repo": "bakudo",
+                           "title": "happy path"},
+                agent_spec=spec,
+            ),
+            id="run-run_HAPPY1",
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert out.phase == "completed"
+    assert out.result["status"] == "success"
+    assert out.scorecard is not None
+    assert out.eval_results, "eval results must flow back through the child workflow"
+
+    run = deps.get_run("run_HAPPY1")
+    assert run.phase.value == "completed"
+    assert run.started_at is not None and run.completed_at is not None
+    assert run.result == out.result
+
+    events = deps.events("run_HAPPY1")
+    kinds = [e.event_type for e in events]
+    assert kinds[0] == "created" and kinds.count("created") == 1
+    assert kinds.count("finished") == 1
+    phases = [e.payload.get("phase") for e in events if e.event_type == "phase"]
+    assert phases == [
+        "bundle_rendered", "sandbox_starting", "agent_running",
+        "collecting_artifacts", "evaluating",
+    ]
+    # Evals were recorded against the run.
+    assert deps.eval_results("run_HAPPY1")
+
+
 # --- singleton startup (TMP-7) ---
 
 
