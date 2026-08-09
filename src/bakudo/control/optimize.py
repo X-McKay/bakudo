@@ -13,11 +13,24 @@ reject churn, and the corpus rewards leaving already-optimal code untouched.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 # An attempt must actually improve at least one measured dimension (score
 # strictly above neutral) and regress neither to be eligible.
 NEUTRAL = 0.5
+
+# Issue #28 (OPT-3): the minimum *independently measured* fractional speedup
+# for a winner's benchmark claim to count as reproduced. Wall-clock timing of
+# the whole bench command carries interpreter-startup noise, so this floor is
+# deliberately above perf_eval's PERF_NOISE_TOLERANCE.
+BENCH_VERIFY_MIN_IMPROVEMENT = 0.05
+
+# Independent measurement hook: (winner_diff, bench_command) ->
+# (measured_before_seconds, measured_after_seconds). Injected so the loop
+# logic stays pure; the live implementation runs both benches in a fresh
+# sandbox (never host-side — the diff is model-authored code).
+BenchMeasure = Callable[[str, str], tuple[float, float]]
 
 # Suites that must be present and passing for an attempt to be eligible.
 REQUIRED_PASSED_SUITES = ("schema", "safety", "task", "code")
@@ -128,6 +141,25 @@ def _eligible(scorecard: dict[str, Any]) -> tuple[bool, str]:
     return True, "eligible"
 
 
+def bench_reproduces(measured_before: float, measured_after: float) -> tuple[bool, str]:
+    """Judge an independent bench measurement (issue #28, OPT-3).
+
+    The winner's *claimed* speedup is irrelevant here: selection already
+    gated on it. What must hold is that the measured run shows a real
+    improvement at all — otherwise the claim did not reproduce.
+    """
+    if measured_before <= 0:
+        return False, f"invalid measured baseline {measured_before!r}"
+    improvement = (measured_before - measured_after) / measured_before
+    detail = (
+        f"measured {measured_before:.4f}s -> {measured_after:.4f}s "
+        f"({improvement:+.0%})"
+    )
+    if improvement > BENCH_VERIFY_MIN_IMPROVEMENT:
+        return True, detail
+    return False, f"{detail}: claimed speedup did not reproduce"
+
+
 def select_winner(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Pick the best eligible attempt, or None when no safe improvement exists.
 
@@ -212,6 +244,7 @@ def run_optimize_loop(
     max_approaches: int = 3,
     ledger: Any = None,
     sandbox: Any = None,
+    bench_measure: BenchMeasure | None = None,
 ) -> dict[str, Any]:
     """Run the scout → attempts → selection loop in-process.
 
@@ -280,6 +313,9 @@ def run_optimize_loop(
                 {
                     "run_id": attempt.run_id,
                     "git_branch": attempt.outcome.git_branch,
+                    # The agent branch does not survive sandbox cleanup, so the
+                    # collected diff is the only re-benchable artifact (#28).
+                    "diff": attempt.outcome.diff,
                     "result": attempt.result.to_dict() if attempt.result else None,
                     "scorecard": (
                         attempt.scorecard.model_dump(mode="json")
@@ -289,7 +325,10 @@ def run_optimize_loop(
                 }
             )
 
-        winner = select_winner(candidates)
+        bench_cmd = base.get("constraints", {}).get("benchCommand")
+        winner, verified, verify_feedback = _verified_winner(
+            candidates, bench_cmd, bench_measure
+        )
         if winner is not None:
             return {
                 "status": "improved",
@@ -298,8 +337,9 @@ def run_optimize_loop(
                 "git_branch": winner.get("git_branch"),
                 "scorecard": winner.get("scorecard"),
                 "result": winner.get("result"),
+                "bench_verified": verified,
             }
-        feedback = round_feedback(candidates)
+        feedback = round_feedback(candidates) + verify_feedback
 
     return {
         "status": "no-change",
@@ -307,3 +347,39 @@ def run_optimize_loop(
         "reason": "no attempt cleared the gates",
         "feedback": feedback,
     }
+
+
+def _verified_winner(
+    candidates: list[dict[str, Any]],
+    bench_command: str | None,
+    bench_measure: BenchMeasure | None,
+) -> tuple[dict[str, Any] | None, bool, list[str]]:
+    """Select a winner, independently re-benching each pick (issue #28).
+
+    A candidate whose claimed speedup does not reproduce is rejected (with
+    feedback for the next scout round) and selection falls through to the
+    next eligible attempt. Without a bench command or measurer there is
+    nothing to verify: selection proceeds as before, marked unverified.
+    """
+    remaining = list(candidates)
+    verify_feedback: list[str] = []
+    while True:
+        winner = select_winner(remaining)
+        if winner is None:
+            return None, False, verify_feedback
+        if not bench_command or bench_measure is None:
+            return winner, False, verify_feedback
+        try:
+            measured_before, measured_after = bench_measure(
+                winner.get("diff") or "", bench_command
+            )
+            ok, detail = bench_reproduces(measured_before, measured_after)
+        except Exception as exc:  # noqa: BLE001 - a broken bench must not crash the loop
+            ok, detail = False, f"bench verification errored: {exc}"
+        if ok:
+            return winner, True, verify_feedback
+        title = ((winner.get("result") or {}).get("summary") or "attempt")[:120]
+        verify_feedback.append(
+            f"'{title}': failed independent bench verification: {detail}"
+        )
+        remaining = [c for c in remaining if c is not winner]

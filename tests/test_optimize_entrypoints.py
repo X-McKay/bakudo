@@ -80,6 +80,39 @@ def test_cli_optimize_resolves_sandbox_when_live(monkeypatch, capsys):
     assert got == getattr(expected, "__qualname__", "x")
 
 
+def test_cli_optimize_live_abox_wires_bench_verification(monkeypatch):
+    """Issue #28: live abox runs must independently re-bench the winner —
+    the CLI passes a fresh-sandbox bench_measure into the loop."""
+    import bakudo.cli as cli
+
+    captured = {}
+
+    def fake_loop(objective, scout, attempt, **kw):
+        captured.update(kw)
+        return {"status": "no-change", "rounds_used": 1, "reason": "test"}
+
+    monkeypatch.setattr("bakudo.control.optimize.run_optimize_loop", fake_loop)
+    monkeypatch.setenv("BAKUDO_OFFLINE", "0")
+    monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
+    rc = cli.main(["optimize", "--repo", "r", "--title", "t"])
+    assert rc == 0
+    assert captured.get("bench_measure") is not None
+
+
+def test_cli_optimize_offline_has_no_bench_verifier(monkeypatch, capsys):
+    captured = {}
+
+    def fake_loop(objective, scout, attempt, **kw):
+        captured.update(kw)
+        return {"status": "no-change", "rounds_used": 1, "reason": "test"}
+
+    monkeypatch.setattr("bakudo.control.optimize.run_optimize_loop", fake_loop)
+    monkeypatch.setenv("BAKUDO_OFFLINE", "1")
+    rc = main(["optimize", "--repo", "r", "--title", "t"])
+    assert rc == 0
+    assert captured.get("bench_measure") is None
+
+
 def test_cli_optimize_live_without_sandbox_fails_closed(monkeypatch):
     import bakudo.cli as cli
 
