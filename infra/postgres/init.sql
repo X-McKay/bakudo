@@ -54,7 +54,13 @@ create table if not exists run_events (
   run_id text references runs(id),
   ts timestamptz not null default now(),
   event_type text not null,
-  payload jsonb not null default '{}'
+  payload jsonb not null default '{}',
+  -- Caller-computed idempotency key (TMP-8): a retried Temporal activity
+  -- re-issues the same logical event; unique (run_id, idem_key) plus
+  -- `on conflict do nothing` in the writer drops the duplicate. NULL keys
+  -- (ad-hoc events) always append.
+  idem_key text,
+  unique (run_id, idem_key)
 );
 create index if not exists run_events_run_id_ts on run_events (run_id, ts);
 

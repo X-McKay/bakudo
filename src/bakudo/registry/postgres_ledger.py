@@ -11,6 +11,7 @@ of bakudo imports without the ``db`` extra. The DDL lives in
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -174,7 +175,10 @@ class PostgresLedger:
                  record.objective_id, record.agent_ref, record.phase.value,
                  record.git_branch, record.started_at, record.completed_at),
             )
-            self._append_event(conn, RunEvent(run_id=record.id, event_type="created"))
+            self._append_event(
+                conn,
+                RunEvent(run_id=record.id, event_type="created", idem_key="created"),
+            )
         return record
 
     def get_run(self, run_id: str) -> RunRecord | None:
@@ -199,7 +203,11 @@ class PostgresLedger:
             self._do(conn, "update runs set status = %s where id = %s", (phase.value, run_id))
             self._append_event(
                 conn,
-                RunEvent(run_id=run_id, event_type="phase", payload={"phase": phase.value}),
+                RunEvent(
+                    run_id=run_id, event_type="phase",
+                    payload={"phase": phase.value},
+                    idem_key=f"phase:{phase.value}",
+                ),
             )
 
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None:
@@ -212,14 +220,22 @@ class PostgresLedger:
             self._append_event(
                 conn,
                 RunEvent(run_id=run_id, event_type="finished",
-                         payload={"phase": phase.value, "result": result or {}}),
+                         payload={"phase": phase.value, "result": result or {}},
+                         idem_key="finished"),
             )
 
     def _append_event(self, conn: Any, event: RunEvent) -> None:
+        # Idempotent under activity retry (TMP-8): identical logical events
+        # (same run_id + idem_key) conflict away; NULL keys always append.
         self._do(
             conn,
-            "insert into run_events (run_id, ts, event_type, payload) values (%s,%s,%s,%s)",
-            (event.run_id, event.ts, event.event_type, json.dumps(event.payload)),
+            """
+            insert into run_events (run_id, ts, event_type, payload, idem_key)
+            values (%s,%s,%s,%s,%s)
+            on conflict (run_id, idem_key) do nothing
+            """,
+            (event.run_id, event.ts, event.event_type,
+             json.dumps(event.payload), event.idem_key),
         )
 
     def append_event(self, event: RunEvent) -> None:
@@ -228,27 +244,41 @@ class PostgresLedger:
 
     def events(self, run_id: str) -> list[RunEvent]:
         rows = self._all(
-            "select run_id, ts, event_type, payload from run_events where run_id = %s order by id",
+            "select run_id, ts, event_type, payload, idem_key "
+            "from run_events where run_id = %s order by id",
             (run_id,),
         )
         return [
             RunEvent(
                 run_id=r[0], ts=r[1], event_type=r[2],
                 payload=r[3] if isinstance(r[3], dict) else json.loads(r[3] or "{}"),
+                idem_key=r[4],
             )
             for r in rows
         ]
 
     # --- evals & promotions ---
+    @staticmethod
+    def _eval_id(result: EvalResult) -> str:
+        """Deterministic id per (subject, suite) so activity retries collide
+        instead of duplicating rows (TMP-8)."""
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"bakudo:eval:{result.subject_type}:{result.subject_id}:{result.suite_name}",
+            )
+        )
+
     def record_eval(self, result: EvalResult) -> None:
         self._exec(
             """
             insert into eval_results
                 (id, subject_type, subject_id, suite_name, score, passed, details, created_at)
-            values (gen_random_uuid(), %s,%s,%s,%s,%s,%s, now())
+            values (%s,%s,%s,%s,%s,%s,%s, now())
+            on conflict (id) do nothing
             """,
-            (result.subject_type, result.subject_id, result.suite_name,
-             result.score, result.passed, json.dumps(result.details)),
+            (self._eval_id(result), result.subject_type, result.subject_id,
+             result.suite_name, result.score, result.passed, json.dumps(result.details)),
         )
 
     def eval_results(self, subject_id: str) -> list[EvalResult]:

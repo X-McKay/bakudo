@@ -76,7 +76,9 @@ class InMemoryLedger:
             self._objectives.setdefault(record.objective_id, objective)
         self._runs[record.id] = record
         self._events.setdefault(record.id, [])
-        self.append_event(RunEvent(run_id=record.id, event_type="created"))
+        self.append_event(
+            RunEvent(run_id=record.id, event_type="created", idem_key="created")
+        )
         return record
 
     def objectives(self) -> dict[str, dict[str, Any]]:
@@ -91,7 +93,10 @@ class InMemoryLedger:
         if phase == RunPhase.agent_running and run.started_at is None:
             run.started_at = datetime.now(UTC)
         self.append_event(
-            RunEvent(run_id=run_id, event_type="phase", payload={"phase": phase.value})
+            RunEvent(
+                run_id=run_id, event_type="phase",
+                payload={"phase": phase.value}, idem_key=f"phase:{phase.value}",
+            )
         )
 
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None:
@@ -100,11 +105,20 @@ class InMemoryLedger:
         run.result = result
         run.completed_at = datetime.now(UTC)
         self.append_event(
-            RunEvent(run_id=run_id, event_type="finished", payload={"phase": phase.value})
+            RunEvent(
+                run_id=run_id, event_type="finished",
+                payload={"phase": phase.value}, idem_key="finished",
+            )
         )
 
     def append_event(self, event: RunEvent) -> None:
-        self._events.setdefault(event.run_id, []).append(event)
+        events = self._events.setdefault(event.run_id, [])
+        # Idempotent under retry, matching the durable backend (TMP-8).
+        if event.idem_key is not None and any(
+            e.idem_key == event.idem_key for e in events
+        ):
+            return
+        events.append(event)
 
     def events(self, run_id: str) -> list[RunEvent]:
         return list(self._events.get(run_id, []))

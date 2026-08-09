@@ -171,3 +171,56 @@ def test_create_run_without_objective_upserts_stub_row(record):
     ledger.create_run(record)
     obj_params = next(p for s, p in conn.executed if "insert into objectives" in s)
     assert obj_params[0] == "obj_T1"
+
+
+# --- TMP-8: idempotent writes under activity retry ---
+
+def _event_inserts(conn):
+    return [(s, p) for s, p in conn.executed if "insert into run_events" in s]
+
+
+def test_run_events_carry_deterministic_idempotency_keys(record):
+    """A retried activity re-issues the same logical event; the insert must
+    carry a caller-computed idem_key and conflict away instead of duplicating."""
+    from bakudo.registry.records import RunPhase
+
+    conn = FakeConn()
+    ledger = PostgresLedger(conn)
+    ledger.create_run(record)
+    ledger.set_phase("run_T1", RunPhase.agent_running)
+    ledger.finish_run("run_T1", RunPhase.completed, {"ok": True})
+
+    inserts = _event_inserts(conn)
+    assert len(inserts) == 3
+    keys = [params[-1] for _, params in inserts]
+    assert keys == ["created", "phase:agent_running", "finished"]
+    for sql, _ in inserts:
+        assert "on conflict (run_id, idem_key) do nothing" in sql
+
+
+def test_record_eval_id_is_deterministic_from_subject_and_suite():
+    from bakudo.evals.result import EvalResult
+
+    conn = FakeConn()
+    ledger = PostgresLedger(conn)
+    result = EvalResult(
+        subject_type="run", subject_id="run_T1", suite_name="safety",
+        score=1.0, passed=True, details={},
+    )
+    ledger.record_eval(result)
+    ledger.record_eval(result)
+
+    inserts = [(s, p) for s, p in conn.executed if "insert into eval_results" in s]
+    assert len(inserts) == 2
+    ids = [p[0] for _, p in inserts]
+    assert ids[0] == ids[1], "retried record_eval must reuse the same id"
+    assert "gen_random_uuid" not in inserts[0][0]
+    assert "on conflict (id) do nothing" in inserts[0][0]
+
+    other = EvalResult(
+        subject_type="run", subject_id="run_T1", suite_name="task",
+        score=1.0, passed=True, details={},
+    )
+    ledger.record_eval(other)
+    other_id = [p[0] for s, p in conn.executed if "insert into eval_results" in s][-1]
+    assert other_id != ids[0], "different suites must not collide"
