@@ -7,6 +7,8 @@ runtime extras are missing and no offline driver is supplied.
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import os
 from collections.abc import Callable
@@ -95,13 +97,44 @@ def _resolve_base_url(base_url_ref: str | None) -> str:
     return os.environ.get(key, default)
 
 
+def _as_named_callable(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Present a ToolContext-bound ``functools.partial`` as a plain function.
+
+    Strands' ``@tool`` requires a real function (``__name__``/``__doc__``/
+    inspectable signature) and derives the model-facing input schema from it,
+    so the partial's already-bound leading parameters (the ToolContext) must
+    be stripped from the visible signature.
+    """
+    if not isinstance(fn, functools.partial):
+        return fn
+
+    inner = fn.func
+    sig = inspect.signature(inner)
+    params = list(sig.parameters.values())[len(fn.args):]
+    params = [p for p in params if p.name not in fn.keywords]
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **kwargs)
+
+    wrapper.__name__ = name.replace("-", "_")
+    wrapper.__qualname__ = wrapper.__name__
+    wrapper.__doc__ = inner.__doc__
+    wrapper.__signature__ = sig.replace(parameters=params)  # type: ignore[attr-defined]
+    wrapper.__annotations__ = {
+        p.name: p.annotation for p in params if p.annotation is not inspect.Parameter.empty
+    }
+    if sig.return_annotation is not inspect.Signature.empty:
+        wrapper.__annotations__["return"] = sig.return_annotation
+    return wrapper
+
+
 def to_strands_tools(callables: dict[str, Callable[..., Any]]) -> list[Any]:
     """Adapt bakudo tool callables to Strands ``@tool`` functions."""
     from strands import tool  # type: ignore
 
     adapted = []
     for name, fn in callables.items():
-        wrapped = tool(name=name)(fn)
+        wrapped = tool(name=name)(_as_named_callable(name, fn))
         adapted.append(wrapped)
     return adapted
 
