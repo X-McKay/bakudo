@@ -46,7 +46,10 @@ create table if not exists runs (
   status text not null,            -- run phase (section 12.1)
   git_branch text,
   started_at timestamptz,
-  completed_at timestamptz
+  completed_at timestamptz,
+  -- Terminal result.json stored on finish_run (TMP-9), matching the
+  -- in-memory reference ledger.
+  result jsonb
 );
 
 create table if not exists run_events (

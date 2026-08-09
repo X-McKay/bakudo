@@ -185,22 +185,38 @@ class PostgresLedger:
         row = self._one(
             """
             select id, temporal_workflow_id, abox_task_id, objective_id,
-                   agent_ref, status, git_branch, started_at, completed_at
+                   agent_ref, status, git_branch, started_at, completed_at, result
             from runs where id = %s
             """,
             (run_id,),
         )
         if row is None:
             return None
+        result = row[9]
+        if isinstance(result, str):
+            result = json.loads(result)
         return RunRecord(
             id=row[0], temporal_workflow_id=row[1], abox_task_id=row[2],
             objective_id=row[3], agent_ref=row[4], phase=RunPhase(row[5]),
             git_branch=row[6], started_at=row[7], completed_at=row[8],
+            result=result,
         )
 
     def set_phase(self, run_id: str, phase: RunPhase) -> None:
         with self._connection() as conn:
-            self._do(conn, "update runs set status = %s where id = %s", (phase.value, run_id))
+            if phase == RunPhase.agent_running:
+                # Parity with InMemoryLedger (TMP-9): the first agent_running
+                # phase stamps started_at; coalesce keeps retries idempotent.
+                self._do(
+                    conn,
+                    "update runs set status = %s, "
+                    "started_at = coalesce(started_at, now()) where id = %s",
+                    (phase.value, run_id),
+                )
+            else:
+                self._do(
+                    conn, "update runs set status = %s where id = %s", (phase.value, run_id)
+                )
             self._append_event(
                 conn,
                 RunEvent(
@@ -212,10 +228,13 @@ class PostgresLedger:
 
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None:
         with self._connection() as conn:
+            # Parity with InMemoryLedger (TMP-9): the terminal result lives on
+            # the run row, not only inside the finished event payload.
             self._do(
                 conn,
-                "update runs set status = %s, completed_at = now() where id = %s",
-                (phase.value, run_id),
+                "update runs set status = %s, completed_at = now(), result = %s "
+                "where id = %s",
+                (phase.value, json.dumps(result) if result is not None else None, run_id),
             )
             self._append_event(
                 conn,

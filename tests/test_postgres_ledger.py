@@ -173,6 +173,61 @@ def test_create_run_without_objective_upserts_stub_row(record):
     assert obj_params[0] == "obj_T1"
 
 
+# --- TMP-9: backend parity with InMemoryLedger ---
+
+def test_set_phase_agent_running_stamps_started_at_once(record):
+    """InMemoryLedger stamps started_at on the first agent_running phase;
+    the Postgres backend must do the same (idempotently, via coalesce)."""
+    from bakudo.registry.records import RunPhase
+
+    conn = FakeConn()
+    PostgresLedger(conn).set_phase("run_T1", RunPhase.agent_running)
+    update = next(s for s, _ in conn.executed if "update runs" in s)
+    assert "coalesce(started_at, now())" in update
+
+    conn2 = FakeConn()
+    PostgresLedger(conn2).set_phase("run_T1", RunPhase.evaluating)
+    update2 = next(s for s, _ in conn2.executed if "update runs" in s)
+    assert "started_at" not in update2, "only agent_running stamps started_at"
+
+
+def test_finish_run_stores_result_on_the_run_row(record):
+    from bakudo.registry.records import RunPhase
+
+    conn = FakeConn()
+    PostgresLedger(conn).finish_run("run_T1", RunPhase.completed, {"ok": True})
+    update_sql, update_params = next(
+        (s, p) for s, p in conn.executed if "update runs" in s
+    )
+    assert "result = " in update_sql
+    assert '{"ok": true}' in update_params
+
+
+def test_get_run_selects_the_result_column():
+    conn = FakeConn()
+    PostgresLedger(conn).get_run("run_T1")
+    select = next(s for s, _ in conn.executed if "from runs" in s)
+    assert "result" in select
+
+
+def test_in_memory_parity_started_at_and_result(record):
+    """The reference backend's behavior the SQL above must match."""
+    from bakudo.registry import InMemoryLedger
+    from bakudo.registry.records import RunPhase
+
+    ledger = InMemoryLedger()
+    ledger.create_run(record, objective={"id": "obj_T1"})
+    assert ledger.get_run("run_T1").started_at is None
+    ledger.set_phase("run_T1", RunPhase.agent_running)
+    first = ledger.get_run("run_T1").started_at
+    assert first is not None
+    ledger.set_phase("run_T1", RunPhase.agent_running)
+    assert ledger.get_run("run_T1").started_at == first
+    ledger.finish_run("run_T1", RunPhase.completed, {"ok": True})
+    run = ledger.get_run("run_T1")
+    assert run.result == {"ok": True} and run.completed_at is not None
+
+
 # --- TMP-8: idempotent writes under activity retry ---
 
 def _event_inserts(conn):
