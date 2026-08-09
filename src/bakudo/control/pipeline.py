@@ -79,7 +79,15 @@ def run_objective(
 
     if not outcome.succeeded or outcome.result is None:
         ledger.finish_run(run_id, RunPhase.failed, outcome.result)
-        return PipelineResult(run_id, RunPhase.failed, None, [], None, outcome)
+        # Keep the failed result's own diagnosis (summary, blocked_reasons)
+        # when it parses — callers like the optimize loop surface it (OPT-12).
+        failed_result: RunResult | None = None
+        if isinstance(outcome.result, dict):
+            try:
+                failed_result = RunResult.model_validate(outcome.result)
+            except Exception:  # noqa: BLE001 - diagnostics are best-effort
+                failed_result = None
+        return PipelineResult(run_id, RunPhase.failed, failed_result, [], None, outcome)
 
     result = RunResult.model_validate(outcome.result)
 

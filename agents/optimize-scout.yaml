@@ -20,7 +20,7 @@ model:
   modelId: Qwen3.6-35B-A3B-FP8
   baseUrlRef: vllm/qwen-coder
   temperature: 0.3
-  maxTokens: 8192
+  maxTokens: 16384
 
 sandbox:
   provider: abox
@@ -44,6 +44,10 @@ prompt:
     If the code is already simple, fast, and idiomatic, return an empty
     proposedFollowups list and say why. Declining to invent work is a
     successful outcome; manufactured churn is a failure.
+
+    Keep your reasoning brief and decisive: once you have 2-3 solid
+    approaches, stop deliberating and emit the final result.json — do not
+    spend your output budget searching for marginal extra options.
 
 tools:
   - name: read-file

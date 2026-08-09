@@ -157,3 +157,48 @@ def test_loop_caps_approaches_per_round():
     )
     assert outcome["status"] == "improved"
     assert sandbox.attempt_calls == 2
+
+
+# --- OPT-12: a failed scout must never masquerade as "no-change" ---
+
+
+class FailingScoutSandbox(ScriptedSandbox):
+    """Scout runs fail `fail_times` times (runner error), then behave normally."""
+
+    def __init__(self, rounds, fail_times=99):
+        super().__init__(rounds)
+        self.fail_times = fail_times
+
+    def __call__(self, bundle) -> AboxOutcome:
+        name = bundle.agent_spec.metadata.name
+        if name == "optimize-scout" and self.fail_times > 0:
+            self.fail_times -= 1
+            self.failed_scout_calls = getattr(self, "failed_scout_calls", 0) + 1
+            return AboxOutcome(
+                run_id=bundle.run_id, abox_task_id=bundle.run_id, exit_code=1,
+                git_branch=f"bakudo/{bundle.run_id}",
+                result={
+                    "run_id": bundle.run_id, "agent": f"{name}@1",
+                    "objective_id": bundle.objective_id, "status": "failed",
+                    "summary": "Runner error: MaxTokensReachedException: clipped",
+                    "blocked_reasons": ["runner_exception"],
+                },
+            )
+        return super().__call__(bundle)
+
+
+def test_failed_scout_reports_scout_failed_not_no_change():
+    sandbox = FailingScoutSandbox([{"approaches": [], "metrics": []}])
+    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    assert outcome["status"] == "scout-failed"
+    assert "MaxTokensReachedException" in outcome["reason"]
+    assert outcome["status"] != "no-change"
+
+
+def test_failed_scout_is_retried_once_then_proceeds():
+    sandbox = FailingScoutSandbox(
+        [{"approaches": ["use a set"], "metrics": [IMPROVED]}], fail_times=1
+    )
+    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    assert outcome["status"] == "improved"
+    assert sandbox.failed_scout_calls == 1 and sandbox.scout_calls == 1  # retry ran

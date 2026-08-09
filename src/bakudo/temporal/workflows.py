@@ -272,6 +272,27 @@ class OptimizationWorkflow:
                 inp.timeout_seconds,
             )
             scout_result = scout.get("result") or {}
+            if scout.get("phase") == "failed" or (
+                not scout_result or scout_result.get("status") == "failed"
+            ):
+                # One retry, then a distinct failure outcome — an infra/model
+                # failure must never masquerade as "no-change" (OPT-12).
+                scout = await self._child_run(
+                    scout_objective(inp.objective, feedback=feedback),
+                    inp.scout_spec,
+                    inp.timeout_seconds,
+                )
+                scout_result = scout.get("result") or {}
+                if scout.get("phase") == "failed" or (
+                    not scout_result or scout_result.get("status") == "failed"
+                ):
+                    self._phase = "scout-failed"
+                    return {
+                        "status": "scout-failed",
+                        "rounds_used": self._round,
+                        "reason": "scout run failed: "
+                        + str(scout_result.get("summary") or "no result collected"),
+                    }
             approaches = list(
                 scout_result.get("proposed_followups", [])
             )[: inp.max_approaches]
