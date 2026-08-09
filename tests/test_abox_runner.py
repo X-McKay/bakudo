@@ -143,7 +143,7 @@ def test_build_command_matches_abox_0_6_contract(tmp_path, monkeypatch):
         "--task", "run_TEST01",
         "--base", "main",
         "--timeout", "1800",
-        "--network", "safe",
+        "--network", "scoped",
         "--input-file", f"{tmp_path / 'scratch' / 'bundle.json'}:bundle.json",
         "-e", "BAKUDO_OFFLINE=1",
         "-e", "VLLM_BASE_URL=https://llm.example/v1",

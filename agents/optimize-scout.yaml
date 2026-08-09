@@ -26,7 +26,7 @@ sandbox:
   provider: abox
   profile: explore-readonly
   baseRef: main
-  networkMode: none
+  networkMode: scoped  # model inference happens in-guest, so live roles need scoped egress (bounded by .abox/project.toml domains)
   timeoutSeconds: 1800
   ephemeral: true
   canMerge: false
