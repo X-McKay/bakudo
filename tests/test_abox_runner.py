@@ -144,14 +144,16 @@ def test_build_command_matches_abox_0_6_contract(tmp_path, monkeypatch):
         "--base", "main",
         "--timeout", "1800",
         "--network", "safe",
-        "--ephemeral",
         "--input-file", f"{tmp_path / 'scratch' / 'bundle.json'}:bundle.json",
         "-e", "BAKUDO_OFFLINE=1",
         "-e", "VLLM_BASE_URL=https://llm.example/v1",
         "-e", "VLLM_API_KEY=sk-test",
         "-e", "BAKUDO_VLLM_QWEN_CODER=https://llm-fast.example/v1",
         "--",
-        "agent-runner",
+        # The `agent-runner` console script lands in the guest's pip *user*
+        # bin (~/.local/bin), which abox 0.6.0 keeps off the fixed guest PATH;
+        # the module invocation is PATH-independent (verified in-guest).
+        "python3", "-m", "bakudo.runner.main",
         "--bundle", "/abox-meta/inputs/bundle.json",
         "--result", "/workspace/.agent/result.json",
     ]
@@ -172,11 +174,15 @@ def test_build_command_forwards_only_env_present_in_worker(tmp_path, monkeypatch
     assert env_args == ["VLLM_BASE_URL=https://llm.example/v1"]
 
 
-def test_build_command_omits_ephemeral_when_spec_not_ephemeral(tmp_path, monkeypatch):
+def test_build_command_never_passes_ephemeral(tmp_path, monkeypatch):
+    # abox --ephemeral removes the worktree+branch the moment the agent
+    # command exits — *before* the host can collect result.json via
+    # `abox path`. Spec ephemerality is instead honoured by the runner's
+    # unconditional post-collection `abox stop --clean`.
     _clear_model_env(monkeypatch)
-    bundle = _bundle(ephemeral=False)
-    cmd = AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
-    assert "--ephemeral" not in cmd
+    for bundle in (_bundle(ephemeral=True), _bundle(ephemeral=False)):
+        cmd = AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
+        assert "--ephemeral" not in cmd
 
 
 @pytest.mark.parametrize(

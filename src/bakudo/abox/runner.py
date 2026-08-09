@@ -6,8 +6,10 @@ never from workflow code. Protocol, verified against the abox 0.6.0 CLI:
 1. the rendered ``bundle.json`` is written to a host scratch dir and staged
    into the guest via ``--input-file`` (it appears read-only under
    ``/abox-meta/inputs/``);
-2. the guest command is ``agent-runner --bundle /abox-meta/inputs/bundle.json
-   --result /workspace/.agent/result.json``;
+2. the guest command is ``python3 -m bakudo.runner.main --bundle
+   /abox-meta/inputs/bundle.json --result /workspace/.agent/result.json``
+   (the module form of the ``agent-runner`` entrypoint; pip's user bin where
+   the prepare flow installs console scripts is off the fixed guest PATH);
 3. abox forks branch ``agent/<task>`` from ``--base`` into a host worktree;
    after the run the worktree is resolved with ``abox path <task>`` and
    ``<worktree>/.agent/result.json`` is collected and schema-validated;
@@ -268,14 +270,21 @@ class AboxRunner:
             "--timeout", str(spec.sandbox.timeout_seconds),
             "--network", network,
         ]
-        if spec.sandbox.ephemeral:
-            argv.append("--ephemeral")
+        # Never `--ephemeral`: abox would remove the worktree+branch the moment
+        # the agent exits, before result.json can be collected via `abox path`.
+        # Spec ephemerality is honoured by the unconditional post-collection
+        # `abox stop --clean` in run()'s finally block instead.
         argv += ["--input-file", f"{scratch_dir / 'bundle.json'}:bundle.json"]
         for name in self._forwarded_env():
             argv += ["-e", f"{name}={os.environ[name]}"]
         argv += [
             "--",
-            "agent-runner",
+            # Equivalent to the `agent-runner` console script, but PATH-proof:
+            # in the 0.6.0 guest the pip *user* bin (~/.local/bin) where the
+            # prepare flow's editable install drops console scripts is not on
+            # the fixed guest PATH, while `python3 -m` resolves through user
+            # site-packages regardless (verified in-guest).
+            "python3", "-m", "bakudo.runner.main",
             "--bundle", self._guest_bundle_path,
             "--result", "/workspace/.agent/result.json",
         ]
