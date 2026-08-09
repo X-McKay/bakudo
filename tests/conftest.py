@@ -1,13 +1,22 @@
 """Shared pytest configuration.
 
-Registers the markers used by tests that talk to real external services.
-Such tests are always skipped unless their environment variable is set, so
-default runs never touch the network or the sandbox runtime.
+* Puts this checkout's ``src/`` ahead of any installed ``bakudo`` so tests in
+  a worktree always exercise the tree they live in.
+* Registers the markers used by tests that talk to real external services.
+  Such tests are always skipped unless their environment variable is set, so
+  default runs never touch the network or the sandbox runtime.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
+
+_SRC = str(Path(__file__).resolve().parents[1] / "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 
 def pytest_configure(config: pytest.Config) -> None:

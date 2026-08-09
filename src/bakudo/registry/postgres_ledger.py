@@ -11,6 +11,9 @@ of bakudo imports without the ``db`` extra. The DDL lives in
 from __future__ import annotations
 
 import json
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from ..evals.promotion import PromotionDecision
@@ -19,32 +22,69 @@ from .records import AgentVersionRecord, RunEvent, RunPhase, RunRecord
 
 
 class PostgresLedger:
-    """A sync ledger over the bakudo tables. Construct via :meth:`connect`."""
+    """A sync ledger over the bakudo tables. Construct via :meth:`connect`.
 
-    def __init__(self, conn: Any) -> None:
+    Thread safety (TMP-1): activities run concurrently on the worker's thread
+    pool, and a single psycopg connection is not thread-safe. In DSN mode
+    every ledger call opens a short-lived connection and closes it when done.
+    (``psycopg_pool`` is not a project dependency; per-call connections are
+    the simple safe default until it is.) An explicit injected connection is
+    still supported for tests/tools and is caller-owned — the caller must not
+    share the ledger across threads in that mode.
+    """
+
+    def __init__(
+        self,
+        conn: Any = None,
+        *,
+        dsn: str | None = None,
+        connect_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        if conn is None and dsn is None:
+            raise ValueError("PostgresLedger requires a connection or a DSN")
         self._conn = conn
+        self._dsn = dsn
+        self._connect_kwargs = connect_kwargs or {}
 
     @classmethod
     def connect(cls, dsn: str, **kwargs: Any) -> PostgresLedger:
-        import psycopg  # lazy
-
-        conn = psycopg.connect(dsn, autocommit=True, **kwargs)
-        return cls(conn)
+        return cls(dsn=dsn, connect_kwargs=kwargs)
 
     def close(self) -> None:
-        self._conn.close()
+        if self._conn is not None:
+            self._conn.close()
 
-    def _exec(self, sql: str, params: tuple = ()) -> None:
-        with self._conn.cursor() as cur:
+    @contextmanager
+    def _connection(self) -> Iterator[Any]:
+        """Yield a connection: the injected one, or a fresh per-call one."""
+        if self._conn is not None:
+            yield self._conn
+            return
+        import psycopg  # lazy so bakudo imports without the db extra
+
+        assert self._dsn is not None  # guaranteed by __init__
+        conn = psycopg.connect(self._dsn, autocommit=True, **self._connect_kwargs)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _do(conn: Any, sql: str, params: tuple = ()) -> None:
+        with conn.cursor() as cur:
             cur.execute(sql, params)
 
+    def _exec(self, sql: str, params: tuple = ()) -> None:
+        with self._connection() as conn:
+            self._do(conn, sql, params)
+
     def _one(self, sql: str, params: tuple = ()) -> tuple | None:
-        with self._conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchone()
 
     def _all(self, sql: str, params: tuple = ()) -> list[tuple]:
-        with self._conn.cursor() as cur:
+        with self._connection() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()
 
@@ -95,84 +135,169 @@ class PostgresLedger:
         )
 
     # --- runs ---
-    def create_run(self, record: RunRecord) -> RunRecord:
-        self._exec(
-            """
-            insert into runs
-                (id, temporal_workflow_id, abox_task_id, objective_id,
-                 agent_ref, status, git_branch, started_at, completed_at)
-            values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            on conflict (id) do nothing
-            """,
-            (record.id, record.temporal_workflow_id, record.abox_task_id,
-             record.objective_id, record.agent_ref, record.phase.value,
-             record.git_branch, record.started_at, record.completed_at),
-        )
-        self.append_event(RunEvent(run_id=record.id, event_type="created"))
+    def create_run(self, record: RunRecord, objective: dict | None = None) -> RunRecord:
+        """Create the run row, upserting its objective first (TMP-2).
+
+        ``runs.objective_id`` has a FK on ``objectives``; nothing else is
+        guaranteed to have inserted the objective, so the upsert happens here,
+        idempotently, in the same transaction as the run insert. Without an
+        objective document a stub row is written so the FK still holds.
+        """
+        obj = objective or {}
+        with self._connection() as conn, conn.transaction():
+            self._do(
+                conn,
+                """
+                insert into objectives (id, repo, type, title, objective_json, status, priority)
+                values (%s,%s,%s,%s,%s,%s,%s)
+                on conflict (id) do nothing
+                """,
+                (
+                    record.objective_id,
+                    obj.get("repo", "unknown"),
+                    obj.get("type", "unknown"),
+                    obj.get("title", ""),
+                    json.dumps(obj),
+                    obj.get("status", "ready"),
+                    (obj.get("priority") or {}).get("score"),
+                ),
+            )
+            self._do(
+                conn,
+                """
+                insert into runs
+                    (id, temporal_workflow_id, abox_task_id, objective_id,
+                     agent_ref, status, git_branch, started_at, completed_at)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (id) do nothing
+                """,
+                (record.id, record.temporal_workflow_id, record.abox_task_id,
+                 record.objective_id, record.agent_ref, record.phase.value,
+                 record.git_branch, record.started_at, record.completed_at),
+            )
+            self._append_event(
+                conn,
+                RunEvent(run_id=record.id, event_type="created", idem_key="created"),
+            )
         return record
 
     def get_run(self, run_id: str) -> RunRecord | None:
         row = self._one(
             """
             select id, temporal_workflow_id, abox_task_id, objective_id,
-                   agent_ref, status, git_branch, started_at, completed_at
+                   agent_ref, status, git_branch, started_at, completed_at, result
             from runs where id = %s
             """,
             (run_id,),
         )
         if row is None:
             return None
+        result = row[9]
+        if isinstance(result, str):
+            result = json.loads(result)
         return RunRecord(
             id=row[0], temporal_workflow_id=row[1], abox_task_id=row[2],
             objective_id=row[3], agent_ref=row[4], phase=RunPhase(row[5]),
             git_branch=row[6], started_at=row[7], completed_at=row[8],
+            result=result,
         )
 
     def set_phase(self, run_id: str, phase: RunPhase) -> None:
-        self._exec("update runs set status = %s where id = %s", (phase.value, run_id))
-        self.append_event(
-            RunEvent(run_id=run_id, event_type="phase", payload={"phase": phase.value})
-        )
+        with self._connection() as conn:
+            if phase == RunPhase.agent_running:
+                # Parity with InMemoryLedger (TMP-9): the first agent_running
+                # phase stamps started_at; coalesce keeps retries idempotent.
+                self._do(
+                    conn,
+                    "update runs set status = %s, "
+                    "started_at = coalesce(started_at, now()) where id = %s",
+                    (phase.value, run_id),
+                )
+            else:
+                self._do(
+                    conn, "update runs set status = %s where id = %s", (phase.value, run_id)
+                )
+            self._append_event(
+                conn,
+                RunEvent(
+                    run_id=run_id, event_type="phase",
+                    payload={"phase": phase.value},
+                    idem_key=f"phase:{phase.value}",
+                ),
+            )
 
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None:
-        self._exec(
-            "update runs set status = %s, completed_at = now() where id = %s",
-            (phase.value, run_id),
-        )
-        self.append_event(
-            RunEvent(run_id=run_id, event_type="finished",
-                     payload={"phase": phase.value, "result": result or {}})
+        with self._connection() as conn:
+            # Parity with InMemoryLedger (TMP-9): the terminal result lives on
+            # the run row, not only inside the finished event payload.
+            self._do(
+                conn,
+                "update runs set status = %s, completed_at = now(), result = %s "
+                "where id = %s",
+                (phase.value, json.dumps(result) if result is not None else None, run_id),
+            )
+            self._append_event(
+                conn,
+                RunEvent(run_id=run_id, event_type="finished",
+                         payload={"phase": phase.value, "result": result or {}},
+                         idem_key="finished"),
+            )
+
+    def _append_event(self, conn: Any, event: RunEvent) -> None:
+        # Idempotent under activity retry (TMP-8): identical logical events
+        # (same run_id + idem_key) conflict away; NULL keys always append.
+        self._do(
+            conn,
+            """
+            insert into run_events (run_id, ts, event_type, payload, idem_key)
+            values (%s,%s,%s,%s,%s)
+            on conflict (run_id, idem_key) do nothing
+            """,
+            (event.run_id, event.ts, event.event_type,
+             json.dumps(event.payload), event.idem_key),
         )
 
     def append_event(self, event: RunEvent) -> None:
-        self._exec(
-            "insert into run_events (run_id, ts, event_type, payload) values (%s,%s,%s,%s)",
-            (event.run_id, event.ts, event.event_type, json.dumps(event.payload)),
-        )
+        with self._connection() as conn:
+            self._append_event(conn, event)
 
     def events(self, run_id: str) -> list[RunEvent]:
         rows = self._all(
-            "select run_id, ts, event_type, payload from run_events where run_id = %s order by id",
+            "select run_id, ts, event_type, payload, idem_key "
+            "from run_events where run_id = %s order by id",
             (run_id,),
         )
         return [
             RunEvent(
                 run_id=r[0], ts=r[1], event_type=r[2],
                 payload=r[3] if isinstance(r[3], dict) else json.loads(r[3] or "{}"),
+                idem_key=r[4],
             )
             for r in rows
         ]
 
     # --- evals & promotions ---
+    @staticmethod
+    def _eval_id(result: EvalResult) -> str:
+        """Deterministic id per (subject, suite) so activity retries collide
+        instead of duplicating rows (TMP-8)."""
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"bakudo:eval:{result.subject_type}:{result.subject_id}:{result.suite_name}",
+            )
+        )
+
     def record_eval(self, result: EvalResult) -> None:
         self._exec(
             """
             insert into eval_results
                 (id, subject_type, subject_id, suite_name, score, passed, details, created_at)
-            values (gen_random_uuid(), %s,%s,%s,%s,%s,%s, now())
+            values (%s,%s,%s,%s,%s,%s,%s, now())
+            on conflict (id) do nothing
             """,
-            (result.subject_type, result.subject_id, result.suite_name,
-             result.score, result.passed, json.dumps(result.details)),
+            (self._eval_id(result), result.subject_type, result.subject_id,
+             result.suite_name, result.score, result.passed, json.dumps(result.details)),
         )
 
     def eval_results(self, subject_id: str) -> list[EvalResult]:

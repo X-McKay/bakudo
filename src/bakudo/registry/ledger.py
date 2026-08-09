@@ -8,7 +8,7 @@ it exclusively through activities (Temporal rule, spec section 11.2).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
@@ -21,8 +21,11 @@ class Ledger(Protocol):
     def active_version(self, name: str) -> AgentVersionRecord | None: ...
     def get_agent_version(self, name: str, version: int) -> AgentVersionRecord | None: ...
 
-    # Runs
-    def create_run(self, record: RunRecord) -> RunRecord: ...
+    # Runs. ``objective`` is the objective document backing the run: durable
+    # backends upsert it first so the runs FK holds (TMP-2).
+    def create_run(
+        self, record: RunRecord, objective: dict[str, Any] | None = None
+    ) -> RunRecord: ...
     def get_run(self, run_id: str) -> RunRecord | None: ...
     def set_phase(self, run_id: str, phase: RunPhase) -> None: ...
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None: ...
@@ -40,6 +43,7 @@ class InMemoryLedger:
 
     def __init__(self) -> None:
         self._versions: dict[str, AgentVersionRecord] = {}  # key: name@version
+        self._objectives: dict[str, dict[str, Any]] = {}
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[RunEvent]] = {}
         self._evals: dict[str, list[EvalResult]] = {}
@@ -65,11 +69,20 @@ class InMemoryLedger:
         return self._versions.get(self._vkey(name, version))
 
     # --- runs ---
-    def create_run(self, record: RunRecord) -> RunRecord:
+    def create_run(
+        self, record: RunRecord, objective: dict[str, Any] | None = None
+    ) -> RunRecord:
+        if objective is not None:
+            self._objectives.setdefault(record.objective_id, objective)
         self._runs[record.id] = record
         self._events.setdefault(record.id, [])
-        self.append_event(RunEvent(run_id=record.id, event_type="created"))
+        self.append_event(
+            RunEvent(run_id=record.id, event_type="created", idem_key="created")
+        )
         return record
+
+    def objectives(self) -> dict[str, dict[str, Any]]:
+        return dict(self._objectives)
 
     def get_run(self, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
@@ -80,7 +93,10 @@ class InMemoryLedger:
         if phase == RunPhase.agent_running and run.started_at is None:
             run.started_at = datetime.now(UTC)
         self.append_event(
-            RunEvent(run_id=run_id, event_type="phase", payload={"phase": phase.value})
+            RunEvent(
+                run_id=run_id, event_type="phase",
+                payload={"phase": phase.value}, idem_key=f"phase:{phase.value}",
+            )
         )
 
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None:
@@ -89,11 +105,20 @@ class InMemoryLedger:
         run.result = result
         run.completed_at = datetime.now(UTC)
         self.append_event(
-            RunEvent(run_id=run_id, event_type="finished", payload={"phase": phase.value})
+            RunEvent(
+                run_id=run_id, event_type="finished",
+                payload={"phase": phase.value}, idem_key="finished",
+            )
         )
 
     def append_event(self, event: RunEvent) -> None:
-        self._events.setdefault(event.run_id, []).append(event)
+        events = self._events.setdefault(event.run_id, [])
+        # Idempotent under retry, matching the durable backend (TMP-8).
+        if event.idem_key is not None and any(
+            e.idem_key == event.idem_key for e in events
+        ):
+            return
+        events.append(event)
 
     def events(self, run_id: str) -> list[RunEvent]:
         return list(self._events.get(run_id, []))

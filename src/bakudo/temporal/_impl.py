@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .. import ids
 from ..abox.local import local_sandbox
@@ -101,15 +102,27 @@ def configure(
         DEPS.collector = collector
 
 
+def _budget_for(spec: AgentSpec, timeout_seconds: int) -> Budget:
+    """Budget for a bundle: ``bakudo.bundle.budget_from_spec`` when it exists
+    (landing separately), else the current input-timeout behavior."""
+    from .. import bundle as bundle_mod
+
+    budget_from_spec = getattr(bundle_mod, "budget_from_spec", None)
+    if callable(budget_from_spec):
+        return budget_from_spec(spec)
+    return Budget(timeoutSeconds=timeout_seconds)
+
+
 def _bundle_from_input(inp: AgentRunInput) -> TaskBundle:
+    spec = parse_spec(inp.agent_spec)
     return TaskBundle(
         run_id=inp.run_id,
         objective_id=inp.objective["id"],
         objective=Objective.model_validate(inp.objective),
-        agent_spec=parse_spec(inp.agent_spec),
+        agent_spec=spec,
         memory_excerpts=[MemoryExcerpt.model_validate(m) for m in inp.memory_excerpts],
         eval_rubric=inp.eval_rubric,
-        budget=Budget(timeoutSeconds=inp.timeout_seconds),
+        budget=_budget_for(spec, inp.timeout_seconds),
     )
 
 
@@ -126,8 +139,40 @@ def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
     )
     ledger = DEPS.ledger
     if hasattr(ledger, "create_run"):
-        ledger.create_run(record)
+        # Pass the objective document so durable ledgers can upsert the
+        # objectives row the runs FK points at (TMP-2).
+        ledger.create_run(record, objective=inp.objective)
     return {"run_id": record.id, "git_branch": record.git_branch}
+
+
+def load_agent_spec(name: str) -> dict | None:
+    """Load an agent spec document by name for meta-agent dispatch (TMP-3).
+
+    Prefers the ledger's active version; falls back to the repo's seed
+    ``agents/<name>.yaml``. Returns ``None`` when nothing resolves — the
+    workflow dead-letters the objective rather than crashing.
+    """
+    import yaml
+
+    active = getattr(DEPS.ledger, "active_version", None)
+    if callable(active):
+        record = active(name)
+        if record is not None:
+            try:
+                doc = yaml.safe_load(record.spec_yaml)
+            except yaml.YAMLError:
+                doc = None
+            if isinstance(doc, dict):
+                return doc
+
+    # Repo seed specs; reject anything that is not a bare agent name.
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return None
+    path = Path(__file__).resolve().parents[3] / "agents" / f"{name}.yaml"
+    if not path.is_file():
+        return None
+    doc = yaml.safe_load(path.read_text())
+    return doc if isinstance(doc, dict) else None
 
 
 def render_bundle(inp: AgentRunInput) -> dict:

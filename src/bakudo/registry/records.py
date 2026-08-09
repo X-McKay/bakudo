@@ -53,12 +53,19 @@ class AgentVersionRecord(BaseModel):
 
 
 class RunEvent(BaseModel):
-    """A row of ``run_events`` — the durable event log (spec section 17.1)."""
+    """A row of ``run_events`` — the durable event log (spec section 17.1).
+
+    ``idem_key`` is a caller-computed idempotency key (TMP-8): a retried
+    activity re-issues the same logical event, and durable backends drop the
+    duplicate via ``unique (run_id, idem_key)``. ``None`` means "always
+    append".
+    """
 
     run_id: str
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     ts: datetime = Field(default_factory=_now)
+    idem_key: str | None = None
 
 
 class RunRecord(BaseModel):
