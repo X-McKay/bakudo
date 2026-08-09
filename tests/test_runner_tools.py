@@ -129,3 +129,17 @@ def test_to_strands_tools_accepts_context_bound_partials():
     # The bound ToolContext must not leak into the model-facing schema.
     schema = str(spec)
     assert "ctx" not in schema
+
+
+def test_exception_chain_includes_root_cause():
+    from bakudo.runner.main import _exception_chain
+
+    try:
+        try:
+            raise ConnectionRefusedError("dial tcp 1.2.3.4:443 refused")
+        except ConnectionRefusedError as inner:
+            raise RuntimeError("Connection error.") from inner
+    except RuntimeError as exc:
+        chain = _exception_chain(exc)
+    assert "RuntimeError: Connection error." in chain
+    assert "ConnectionRefusedError" in chain and "refused" in chain

@@ -30,6 +30,21 @@ from .agent import build_and_run
 from .result import normalize_result
 
 
+def _exception_chain(exc: BaseException, limit: int = 4) -> str:
+    """``Type: msg (caused by Type: msg ...)`` — the outermost exception alone
+    (e.g. openai's generic ``APIConnectionError: Connection error.``) routinely
+    hides the actionable root cause, and the summary is often the only
+    diagnostic that leaves the sandbox."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen and len(parts) < limit:
+        seen.add(id(cur))
+        parts.append(f"{type(cur).__name__}: {cur}")
+        cur = cur.__cause__ or cur.__context__
+    return " (caused by ".join(parts) + ")" * (len(parts) - 1)
+
+
 def _load_bundle(args: argparse.Namespace) -> TaskBundle:
     if args.bundle:
         data = json.loads(Path(args.bundle).read_text())
@@ -64,7 +79,7 @@ def run(args: argparse.Namespace) -> int:
         raw = json.dumps(
             {
                 "status": "failed",
-                "summary": f"Runner error: {type(exc).__name__}: {exc}",
+                "summary": f"Runner error: {_exception_chain(exc)}",
                 "blocked_reasons": ["runner_exception"],
             }
         )
