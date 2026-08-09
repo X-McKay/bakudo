@@ -362,6 +362,11 @@ class MetaState:
     # Objectives that could not be dispatched (no resolvable agent spec):
     # parked with a reason instead of crashing the workflow task (TMP-3).
     dead_letter: list[dict[str, Any]] = field(default_factory=list)
+    # Ids already dispatched/dead-lettered. Observer objective ids are
+    # deterministic, so id-dedupe suffices to stop the same signal being
+    # re-dispatched every observer cycle. Bounded FIFO, carried across
+    # Continue-As-New.
+    processed_ids: list[str] = field(default_factory=list)
     # History-roll threshold; part of the carried state so tests (and
     # operators) can lower it without patching module globals.
     continue_as_new_threshold: int = _CONTINUE_AS_NEW_THRESHOLD
@@ -377,9 +382,30 @@ class MetaAgentWorkflow:
         self._handled = 0
         self._paused = False
 
+    # Retain at most this many processed objective ids for dedupe.
+    _PROCESSED_IDS_MAX = 10_000
+
+    def _is_duplicate(self, objective: dict[str, Any]) -> bool:
+        obj_id = objective.get("id")
+        if not obj_id:
+            return False
+        return obj_id in self._state.processed_ids or any(
+            o.get("id") == obj_id for o in self._backlog
+        )
+
+    def _mark_processed(self, objective: dict[str, Any]) -> None:
+        obj_id = objective.get("id")
+        if obj_id:
+            self._state.processed_ids.append(obj_id)
+            overflow = len(self._state.processed_ids) - self._PROCESSED_IDS_MAX
+            if overflow > 0:
+                del self._state.processed_ids[:overflow]
+
     # --- Signals (async events, section 11.4) ---
     @workflow.signal
     def new_objective(self, objective: dict[str, Any]) -> None:
+        if self._is_duplicate(objective):
+            return
         self._backlog.append(objective)
 
     @workflow.signal
@@ -421,7 +447,8 @@ class MetaAgentWorkflow:
     # --- Updates (validated state changes returning a result, section 11.4) ---
     @workflow.update
     def submit_objective(self, objective: dict[str, Any]) -> str:
-        self._backlog.append(objective)
+        if not self._is_duplicate(objective):
+            self._backlog.append(objective)
         return objective.get("id", "")
 
     @submit_objective.validator
@@ -469,6 +496,7 @@ class MetaAgentWorkflow:
 
             objective = self._backlog.pop(0)
             self._handled += 1
+            self._mark_processed(objective)
 
             # Resolve the agent spec (TMP-3): an inline agent_spec wins, then
             # suggestedAgents[0] / the per-type default, loaded via activity.

@@ -190,6 +190,46 @@ async def test_meta_dead_letters_unresolvable_objective(env, deps):
         assert deps._runs == {}
 
 
+# --- backlog dedupe by objective id (observer ids are deterministic) ---
+
+
+async def test_meta_dedupes_objectives_by_id(env, deps):
+    """The same objective id signalled repeatedly — in the same cycle or a
+    later observer cycle — must be dispatched at most once."""
+    objective = {
+        "id": "obj_DUP1",
+        "type": "explore",
+        "repo": "bakudo",
+        "title": "dedupe test",
+        "suggestedAgents": ["explore"],
+    }
+    async with make_worker(env, [MetaAgentWorkflow, AgentRunWorkflow, EvalWorkflow]):
+        handle = await env.client.start_workflow(
+            MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
+        )
+        # Hold dispatch so in-backlog dedupe is observable.
+        await handle.signal(MetaAgentWorkflow.pause_autonomy)
+        await handle.signal(MetaAgentWorkflow.new_objective, objective)
+        await handle.signal(MetaAgentWorkflow.new_objective, objective)
+        backlog = await handle.query(MetaAgentWorkflow.get_backlog)
+        assert [o["id"] for o in backlog] == ["obj_DUP1"], "backlog must dedupe by id"
+
+        await handle.signal(MetaAgentWorkflow.resume_autonomy)
+
+        async def processed():
+            status = await handle.query(MetaAgentWorkflow.get_status)
+            return status["processed_objectives"] == 1
+
+        assert await _poll(processed)
+
+        # A later cycle re-emitting the same id must be a no-op.
+        await handle.signal(MetaAgentWorkflow.new_objective, objective)
+        await asyncio.sleep(0.5)
+        status = await handle.query(MetaAgentWorkflow.get_status)
+        assert status["backlog"] == 0
+        assert len(deps._runs) == 1, "the duplicate id was dispatched again"
+
+
 # --- run-completion loop (TMP-5) ---
 
 
