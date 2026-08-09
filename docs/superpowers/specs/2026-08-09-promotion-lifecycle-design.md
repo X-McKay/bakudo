@@ -1,6 +1,7 @@
 # Promotion lifecycle + critic — wave-2 design proposal
 
-Status: DRAFT — awaiting user review before implementation.
+Status: APPROVED 2026-08-09 (user) — critic = sandboxed agent (not direct
+judge); canary routing = hash(run_id); old approve route removed outright.
 Fixes: OPT-4, OPT-5, OPT-6, OPT-7/API-7, OPT-8, API-6 (findings doc
 `docs/superpowers/reviews/2026-08-09-post-refactor-review-findings.md`).
 Spec anchors: §15 (evolution loop), §15.3 (policy), §23.3 (target demo),
@@ -56,24 +57,26 @@ ledger writes with events — no silent state.
   implements read/resolve so `GET /promotions/pending` works on the durable
   ledger.
 
-## 5. Critic (fixes OPT-8) — the one real trade-off
+## 5. Critic (fixes OPT-8) — RESOLVED: sandboxed critic agent
 
-**Chosen (recommended): direct LLM-judge eval.** `critic_eval` calls the judge
-model directly from the eval layer (OpenAI-compatible call to the role-mapped
-endpoint; `llm-fast` for cheap gating by default, configurable to the 35B) with
-a fixed review rubric and a pinned JSON verdict schema
-`{score: 0..1, passed: bool, issues: [str]}` (aligned with
-`schemas/eval-result.schema.json`). Behavior changes:
-- configured + judge call fails → the suite ERRORS (no silent pass);
-- not configured → the critic suite is **omitted from the scorecard** entirely
-  (today's abstention fabricates score 1.0);
-- non-dict / non-numeric verdicts → structured error, one retry, then fail.
-`agents/critic.yaml`'s result contract is aligned to the same verdict schema.
+Per spec §9.1/§21, `critic_eval` runs the `critic` role as a **real read-only
+agent in an abox sandbox** over the candidate branch:
 
-**Alternative (spec §9.1-faithful, deferred):** run the `critic` role as a real
-read-only sandboxed agent over the candidate branch and grade its result.
-Heavier (sandbox + model per eval) and depends on the abox path just being
-repaired; proposed as a follow-up issue, not this wave.
+- The eval layer spawns a critic run through the same sandbox driver as any
+  other role (read-only policy, `networkMode` scoped to the model endpoint
+  only, modest timeout ~600s), with the candidate's diff/branch as the review
+  target in the objective payload.
+- `agents/critic.yaml`'s result contract is changed to the pinned verdict
+  schema `{score: 0..1, passed: bool, issues: [str]}` (subsumed into
+  `result.json`; validated against `schemas/eval-result.schema.json` shape).
+- Failure semantics: sandbox or schema failure → the critic suite ERRORS
+  (no silent pass, no fabricated abstention score — today's 1.0 abstention
+  is removed). If no sandbox is available (offline/dev), the critic suite is
+  omitted from the scorecard; a promotion policy that *requires* `critic`
+  then fails loudly with `missing required suite`.
+- Cost note (accepted trade-off): each critic-gated eval costs one sandbox +
+  model run; bounded by read-only policy + timeout. Depends on the wave-1
+  abox repair being merged first — wave 2 sequences after it.
 
 ## 6. Required suites default (fixes OPT-4)
 
