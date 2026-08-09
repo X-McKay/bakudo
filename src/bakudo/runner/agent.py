@@ -11,6 +11,7 @@ import functools
 import inspect
 import json
 import os
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -267,7 +268,14 @@ def _extract_report(
         # deployment — two approaches in prose, followups []).
         report = agent.structured_output(AgentReport, prompt)
         return report.model_dump(mode="json")
-    except Exception:  # noqa: BLE001 - extraction is an upgrade, not a gate
+    except Exception as exc:  # noqa: BLE001 - extraction is an upgrade, not a gate
+        # Guest stderr is collected into AboxOutcome — a silent fallback here
+        # cost a live diagnosis (the strands-1.45 tools:[] 400 was invisible).
+        print(
+            f"[agent-runner] report extraction failed, using fallback: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return fallback
 
 

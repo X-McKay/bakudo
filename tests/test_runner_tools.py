@@ -212,7 +212,10 @@ def test_extract_report_uses_structured_output():
     assert out["status"] == "success"
 
 
-def test_extract_report_falls_back_on_failure():
+def test_extract_report_falls_back_on_failure_and_logs(capsys):
+    """Extraction failure must fall back AND say why on stderr — a silent
+    swallow cost a live diagnosis (the strands-1.45 tools:[] 400 was invisible
+    from outside the guest)."""
     from bakudo.runner.agent import _extract_report
 
     class BrokenAgent:
@@ -220,6 +223,26 @@ def test_extract_report_falls_back_on_failure():
             raise RuntimeError("provider exploded")
 
     assert _extract_report(BrokenAgent(), fallback=None) is None
+    err = capsys.readouterr().err
+    assert "report extraction failed" in err
+    assert "provider exploded" in err
+
+
+def test_runtime_extra_pins_strands_below_1_45():
+    """strands-agents >=1.45 reimplements structured_output via
+    beta.chat.completions.parse with `tools: []`, which vLLM rejects (HTTP
+    400: '`tools` must not be an empty array') — verified live 2026-08-09
+    against 1.44.0 (OK) and 1.45.0/1.50.0/1.51.0 (FAIL). The runtime extra
+    must exclude the broken range or every in-guest extraction silently
+    falls back."""
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with open(pyproject, "rb") as fh:
+        data = tomllib.load(fh)
+    runtime = data["project"]["optional-dependencies"]["runtime"]
+    strands = next(r for r in runtime if r.startswith("strands-agents"))
+    assert "<1.45" in strands.replace(" ", "")
 
 
 # --- issue #27: report extraction is the unconditional final phase ---
