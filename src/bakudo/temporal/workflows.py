@@ -256,7 +256,10 @@ class OptimizationWorkflow:
                 }
 
             self._phase = "attempting"
-            attempts = await asyncio.gather(
+            # return_exceptions (TMP-11): one crashed attempt must not fail
+            # the whole round or terminate its siblings — it becomes an
+            # ineligible candidate whose crash feeds the next scout round.
+            raw = await asyncio.gather(
                 *(
                     self._child_run(
                         attempt_objective(inp.objective, approach=a, index=i),
@@ -264,8 +267,31 @@ class OptimizationWorkflow:
                         inp.timeout_seconds,
                     )
                     for i, a in enumerate(approaches)
-                )
+                ),
+                return_exceptions=True,
             )
+            attempts: list[dict] = []
+            for index, out in enumerate(raw):
+                if isinstance(out, asyncio.CancelledError):
+                    raise out
+                if isinstance(out, BaseException):
+                    workflow.logger.warning(
+                        "optimize attempt %d crashed: %s", index + 1, out
+                    )
+                    attempts.append(
+                        {
+                            "run_id": None,
+                            "phase": "failed",
+                            "git_branch": "",
+                            "result": {
+                                "status": "failed",
+                                "summary": f"attempt {index + 1} crashed: {out}",
+                            },
+                            "scorecard": None,
+                        }
+                    )
+                else:
+                    attempts.append(out)
 
             self._phase = "selecting"
             winner = select_winner(list(attempts))

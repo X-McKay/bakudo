@@ -27,6 +27,7 @@ from bakudo.temporal.workflows import (
     EvalWorkflow,
     MetaAgentWorkflow,
     MetaState,
+    OptimizationWorkflow,
 )
 
 # --- deterministic agent-name resolution (TMP-3) ---
@@ -257,6 +258,52 @@ async def test_activity_exhaustion_writes_terminal_failed_phase(env, deps, monke
         assert run.phase.value == "failed", f"ledger stuck at {run.phase.value!r}"
         kinds = [e.event_type for e in deps.events("run_FAIL1")]
         assert kinds.count("finished") == 1
+
+
+# --- one crashed optimize attempt must not fail the round (TMP-11) ---
+
+
+async def test_crashed_optimize_attempt_becomes_feedback_not_failure(env, deps, monkeypatch):
+    from bakudo.temporal.shared import OptimizeInput
+
+    def scripted_sandbox(bundle):
+        title = bundle.objective.title
+        if "[optimize-scout]" in title:
+            out = stub_sandbox(bundle)
+            out.result["proposed_followups"] = ["approach A", "approach B"]
+            return out
+        if "[optimize-attempt 1]" in title:
+            raise RuntimeError("attempt sandbox crashed")
+        return stub_sandbox(bundle)
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", scripted_sandbox)
+    scout_spec = _impl.load_agent_spec("optimize-scout")
+    attempt_spec = _impl.load_agent_spec("optimize-attempt")
+    assert scout_spec and attempt_spec
+
+    async with make_worker(
+        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        out = await env.client.execute_workflow(
+            OptimizationWorkflow.run,
+            OptimizeInput(
+                objective={
+                    "id": "obj_OPT1", "type": "optimize", "repo": "bakudo",
+                    "title": "opt", "constraints": {},
+                },
+                scout_spec=scout_spec,
+                attempt_spec=attempt_spec,
+                max_rounds=1,
+                max_approaches=2,
+            ),
+            id="optimize-obj_OPT1",
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    # The workflow completes (no-change), the crash surfacing as feedback.
+    assert out["status"] == "no-change"
+    assert out["rounds_used"] == 1
+    assert any("crash" in fb for fb in out.get("feedback", [])), out.get("feedback")
 
 
 # --- Continue-As-New must not kill in-flight runs (TMP-6) ---
