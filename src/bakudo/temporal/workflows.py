@@ -21,6 +21,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from ..control.optimize import (
@@ -30,9 +31,11 @@ with workflow.unsafe.imports_passed_through():
         select_winner,
     )
     from .activities import (
+        check_canary_graduation,
         collect_signals,
         compact_memories,
         create_run,
+        load_agent_spec,
         persist_run,
         render_bundle,
         run_agent_evolution,
@@ -48,6 +51,7 @@ with workflow.unsafe.imports_passed_through():
         EvolutionInput,
         ObserveInput,
         OptimizeInput,
+        resolve_agent_name,
     )
 
 # Activities that touch the network/model get generous timeouts; ledger writes
@@ -60,6 +64,18 @@ _LONG: dict[str, Any] = dict(
 _SHORT: dict[str, Any] = dict(
     start_to_close_timeout=timedelta(seconds=30),
     retry_policy=RetryPolicy(maximum_attempts=5),
+)
+# run_sandbox options (TMP-12). maximum_attempts=1 is deliberate: a retried
+# sandbox re-executes a non-idempotent agent run against the same
+# deterministic run_id/branch (worktree + branch collision, doubled model
+# spend), so failures surface as a terminal failed phase (TMP-10) for the
+# control plane to re-dispatch under a fresh run_id instead. The activity
+# heartbeats every 30s (activities.run_sandbox), so heartbeat_timeout detects
+# a crashed worker in minutes rather than after the 2h start-to-close.
+_SANDBOX: dict[str, Any] = dict(
+    start_to_close_timeout=timedelta(hours=2),
+    heartbeat_timeout=timedelta(minutes=5),
+    retry_policy=RetryPolicy(maximum_attempts=1),
 )
 
 
@@ -92,8 +108,47 @@ class AgentRunWorkflow:
             persist_run, args=[run_id, phase, payload or {}], **_SHORT
         )
 
+    async def _notify_meta(self, run_id: str) -> None:
+        """Signal run_completed to the meta workflow so active_runs drains (TMP-5).
+
+        Guard: only when this run was dispatched *by* the meta workflow — the
+        parent workflow id is deterministic workflow state, so this needs no
+        input flag and cannot misfire for CLI/API-started runs. Best-effort:
+        a missing/closed meta singleton must not fail a finished run.
+        """
+        parent = workflow.info().parent
+        if parent is None or parent.workflow_id != META_WORKFLOW_ID:
+            return
+        try:
+            handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
+            await handle.signal("run_completed", run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - best-effort notification
+            workflow.logger.warning(
+                "run_completed signal to %s failed: %s", META_WORKFLOW_ID, exc
+            )
+
     @workflow.run
     async def run(self, inp: AgentRunInput) -> AgentRunOutput:
+        try:
+            return await self._run_lifecycle(inp)
+        except (ActivityError, ChildWorkflowError) as err:
+            # TMP-10: retry exhaustion must not leave the ledger stuck at a
+            # non-terminal phase forever — record a terminal failed phase (and
+            # its finished event) best-effort, then let the workflow fail.
+            cause = getattr(err, "cause", None) or err
+            try:
+                await self._advance(inp.run_id, "failed", {"error": str(cause)})
+            except (ActivityError, ChildWorkflowError) as persist_err:
+                workflow.logger.warning(
+                    "could not persist terminal failed phase for %s: %s",
+                    inp.run_id, persist_err,
+                )
+            await self._notify_meta(inp.run_id)
+            raise
+
+    async def _run_lifecycle(self, inp: AgentRunInput) -> AgentRunOutput:
         workflow_id = workflow.info().workflow_id
         await workflow.execute_activity(
             create_run, args=[inp, workflow_id], **_SHORT
@@ -105,16 +160,18 @@ class AgentRunWorkflow:
 
         if self._cancelled:
             await self._advance(inp.run_id, "cancelled")
+            await self._notify_meta(inp.run_id)
             return AgentRunOutput(inp.run_id, "cancelled", "", "")
 
         await self._advance(inp.run_id, "sandbox_starting")
         await self._advance(inp.run_id, "agent_running")
-        sandbox = await workflow.execute_activity(run_sandbox, bundle, **_LONG)
+        sandbox = await workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
 
         await self._advance(inp.run_id, "collecting_artifacts")
         result = sandbox.get("result")
         if not sandbox.get("succeeded") or result is None:
             await self._advance(inp.run_id, "failed", {"result": result})
+            await self._notify_meta(inp.run_id)
             return AgentRunOutput(
                 inp.run_id, "failed",
                 bundle["agent_spec"]["metadata"]["name"], sandbox.get("git_branch", ""),
@@ -138,6 +195,23 @@ class AgentRunWorkflow:
         )
 
         await self._advance(inp.run_id, "completed", {"result": result})
+
+        # Canary graduation check (design §3): the workflow stays deterministic
+        # — it only invokes the activity; comparison and transitions happen
+        # ledger-side. Best-effort: a failed graduation check must not fail a
+        # run that already completed.
+        try:
+            await workflow.execute_activity(
+                check_canary_graduation,
+                bundle["agent_spec"]["metadata"]["name"],
+                **_SHORT,
+            )
+        except (ActivityError, ChildWorkflowError) as exc:
+            workflow.logger.warning(
+                "canary graduation check failed for %s: %s", inp.run_id, exc
+            )
+
+        await self._notify_meta(inp.run_id)
         return AgentRunOutput(
             run_id=inp.run_id,
             phase="completed",
@@ -198,6 +272,27 @@ class OptimizationWorkflow:
                 inp.timeout_seconds,
             )
             scout_result = scout.get("result") or {}
+            if scout.get("phase") == "failed" or (
+                not scout_result or scout_result.get("status") == "failed"
+            ):
+                # One retry, then a distinct failure outcome — an infra/model
+                # failure must never masquerade as "no-change" (OPT-12).
+                scout = await self._child_run(
+                    scout_objective(inp.objective, feedback=feedback),
+                    inp.scout_spec,
+                    inp.timeout_seconds,
+                )
+                scout_result = scout.get("result") or {}
+                if scout.get("phase") == "failed" or (
+                    not scout_result or scout_result.get("status") == "failed"
+                ):
+                    self._phase = "scout-failed"
+                    return {
+                        "status": "scout-failed",
+                        "rounds_used": self._round,
+                        "reason": "scout run failed: "
+                        + str(scout_result.get("summary") or "no result collected"),
+                    }
             approaches = list(
                 scout_result.get("proposed_followups", [])
             )[: inp.max_approaches]
@@ -211,7 +306,10 @@ class OptimizationWorkflow:
                 }
 
             self._phase = "attempting"
-            attempts = await asyncio.gather(
+            # return_exceptions (TMP-11): one crashed attempt must not fail
+            # the whole round or terminate its siblings — it becomes an
+            # ineligible candidate whose crash feeds the next scout round.
+            raw = await asyncio.gather(
                 *(
                     self._child_run(
                         attempt_objective(inp.objective, approach=a, index=i),
@@ -219,8 +317,31 @@ class OptimizationWorkflow:
                         inp.timeout_seconds,
                     )
                     for i, a in enumerate(approaches)
-                )
+                ),
+                return_exceptions=True,
             )
+            attempts: list[dict] = []
+            for index, out in enumerate(raw):
+                if isinstance(out, asyncio.CancelledError):
+                    raise out
+                if isinstance(out, BaseException):
+                    workflow.logger.warning(
+                        "optimize attempt %d crashed: %s", index + 1, out
+                    )
+                    attempts.append(
+                        {
+                            "run_id": None,
+                            "phase": "failed",
+                            "git_branch": "",
+                            "result": {
+                                "status": "failed",
+                                "summary": f"attempt {index + 1} crashed: {out}",
+                            },
+                            "scorecard": None,
+                        }
+                    )
+                else:
+                    attempts.append(out)
 
             self._phase = "selecting"
             winner = select_winner(list(attempts))
@@ -259,6 +380,10 @@ def _as_dict(out: AgentRunOutput) -> dict:
 
 # --- Long-running meta-agent entity workflow (section 11.3) ---
 
+# Continue-As-New after this many handled events keeps history bounded.
+_CONTINUE_AS_NEW_THRESHOLD = 500
+
+
 @dataclass
 class MetaState:
     """Durable high-level state (section 11.3)."""
@@ -272,10 +397,17 @@ class MetaState:
     processed_objectives: int = 0
     # Undispatched backlog carried across Continue-As-New boundaries.
     pending_backlog: list[dict[str, Any]] = field(default_factory=list)
-
-
-# Continue-As-New after this many handled events keeps history bounded.
-_CONTINUE_AS_NEW_THRESHOLD = 500
+    # Objectives that could not be dispatched (no resolvable agent spec):
+    # parked with a reason instead of crashing the workflow task (TMP-3).
+    dead_letter: list[dict[str, Any]] = field(default_factory=list)
+    # Ids already dispatched/dead-lettered. Observer objective ids are
+    # deterministic, so id-dedupe suffices to stop the same signal being
+    # re-dispatched every observer cycle. Bounded FIFO, carried across
+    # Continue-As-New.
+    processed_ids: list[str] = field(default_factory=list)
+    # History-roll threshold; part of the carried state so tests (and
+    # operators) can lower it without patching module globals.
+    continue_as_new_threshold: int = _CONTINUE_AS_NEW_THRESHOLD
 
 
 @workflow.defn
@@ -288,9 +420,30 @@ class MetaAgentWorkflow:
         self._handled = 0
         self._paused = False
 
+    # Retain at most this many processed objective ids for dedupe.
+    _PROCESSED_IDS_MAX = 10_000
+
+    def _is_duplicate(self, objective: dict[str, Any]) -> bool:
+        obj_id = objective.get("id")
+        if not obj_id:
+            return False
+        return obj_id in self._state.processed_ids or any(
+            o.get("id") == obj_id for o in self._backlog
+        )
+
+    def _mark_processed(self, objective: dict[str, Any]) -> None:
+        obj_id = objective.get("id")
+        if obj_id:
+            self._state.processed_ids.append(obj_id)
+            overflow = len(self._state.processed_ids) - self._PROCESSED_IDS_MAX
+            if overflow > 0:
+                del self._state.processed_ids[:overflow]
+
     # --- Signals (async events, section 11.4) ---
     @workflow.signal
     def new_objective(self, objective: dict[str, Any]) -> None:
+        if self._is_duplicate(objective):
+            return
         self._backlog.append(objective)
 
     @workflow.signal
@@ -318,16 +471,22 @@ class MetaAgentWorkflow:
             "pending_promotions": len(self._state.pending_promotions),
             "budget_usd_remaining": self._state.budget_usd_remaining,
             "processed_objectives": self._state.processed_objectives,
+            "dead_letter": len(self._state.dead_letter),
         }
 
     @workflow.query
     def get_backlog(self) -> list[dict[str, Any]]:
         return list(self._backlog)
 
+    @workflow.query
+    def get_dead_letter(self) -> list[dict[str, Any]]:
+        return list(self._state.dead_letter)
+
     # --- Updates (validated state changes returning a result, section 11.4) ---
     @workflow.update
     def submit_objective(self, objective: dict[str, Any]) -> str:
-        self._backlog.append(objective)
+        if not self._is_duplicate(objective):
+            self._backlog.append(objective)
         return objective.get("id", "")
 
     @submit_objective.validator
@@ -365,28 +524,63 @@ class MetaAgentWorkflow:
             # Wake only when there is dispatchable work or it is time to roll
             # history. Backlog is never dropped while paused/observing.
             await workflow.wait_condition(
-                lambda: self._can_dispatch() or self._handled >= _CONTINUE_AS_NEW_THRESHOLD
+                lambda: self._can_dispatch()
+                or self._handled >= self._state.continue_as_new_threshold
             )
-            if self._handled >= _CONTINUE_AS_NEW_THRESHOLD:
+            if self._handled >= self._state.continue_as_new_threshold:
                 # Carry the full state, including any undispatched backlog.
                 self._state.pending_backlog = list(self._backlog)
                 workflow.continue_as_new(self._state)
 
             objective = self._backlog.pop(0)
-            run_id = objective.get("run_id") or workflow.uuid4().hex
-            self._state.active_runs.append(run_id)
             self._handled += 1
+            self._mark_processed(objective)
+
+            # The run id is minted before spec resolution so canary routing is
+            # deterministic per run (design §2).
+            run_id = objective.get("run_id") or workflow.uuid4().hex
+
+            # Resolve the agent spec (TMP-3): an inline agent_spec wins, then
+            # suggestedAgents[0] / the per-type default, loaded via activity
+            # (which enforces active-only resolution + canary routing, OPT-5).
+            # Unresolvable objectives are dead-lettered, never crash the task.
+            spec = objective.get("agent_spec")
+            if not isinstance(spec, dict):
+                spec = None
+                agent_name = resolve_agent_name(objective)
+                if agent_name is not None:
+                    spec = await workflow.execute_activity(
+                        load_agent_spec, args=[agent_name, run_id], **_SHORT
+                    )
+                if not isinstance(spec, dict):
+                    reason = (
+                        f"no agent spec resolvable (agent={agent_name!r}, "
+                        f"type={objective.get('type')!r}, "
+                        f"suggestedAgents={objective.get('suggestedAgents')!r})"
+                    )
+                    workflow.logger.warning(
+                        "dead-lettering objective %s: %s", objective.get("id"), reason
+                    )
+                    self._state.dead_letter.append(
+                        {"objective": objective, "reason": reason}
+                    )
+                    continue
+
+            self._state.active_runs.append(run_id)
 
             # Dispatch the run as a child workflow; the meta-agent does not block
-            # on it — completion arrives via the run_completed signal.
+            # on it — completion arrives via the run_completed signal. ABANDON
+            # keeps in-flight runs alive across Continue-As-New (TMP-6): the
+            # parent "closing" to roll history must not kill a 2h sandbox run.
             await workflow.start_child_workflow(
                 AgentRunWorkflow.run,
                 AgentRunInput(
                     run_id=run_id,
                     objective=objective,
-                    agent_spec=objective["agent_spec"],
+                    agent_spec=spec,
                 ),
                 id=f"run-{run_id}",
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
             )
 
 

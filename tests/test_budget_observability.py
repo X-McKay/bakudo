@@ -1,15 +1,18 @@
 """Phase D1/D2: budget enforcement and observability counters."""
 
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from bakudo.abox.local import local_sandbox
 from bakudo.agent_spec import load_spec_file
-from bakudo.bundle import Budget, TaskBundle
+from bakudo.bundle import Budget, TaskBundle, budget_from_spec
 from bakudo.control import run_objective
 from bakudo.curriculum import Objective
+from bakudo.runner.agent import GUEST_DEADLINE_HEADROOM_SECONDS, TokenAccounting, build_and_run
 from bakudo.skills import SkillRegistry
 from bakudo.strands_tools import BudgetExceeded, ToolContext, Workspace, build_tool_callables
 
@@ -81,3 +84,105 @@ def test_budget_exceeded_yields_blocked_result():
     )
     assert out.result["status"] == "blocked"
     assert any("budget" in r for r in out.result["blocked_reasons"])
+
+
+# ---------------------------------------------------------------------------
+# API-3/API-4: budget_from_spec, mid-run token accounting, timeout clamping
+# ---------------------------------------------------------------------------
+
+
+def test_budget_from_spec_always_reads_timeout():
+    spec = load_spec_file(AGENTS / "explore.yaml")
+    budget = budget_from_spec(spec)
+    assert budget.timeout_seconds == spec.sandbox.timeout_seconds
+    assert budget.max_tokens is None  # explore.yaml declares no run token budget
+
+
+def test_budget_from_spec_reads_optional_budget_fields():
+    # Forward-compatible: a spec-shaped object carrying budget fields is honoured.
+    spec = SimpleNamespace(
+        sandbox=SimpleNamespace(timeout_seconds=120),
+        budget=SimpleNamespace(max_tokens=5000, max_usd=1.5),
+    )
+    budget = budget_from_spec(spec)
+    assert budget.timeout_seconds == 120
+    assert budget.max_tokens == 5000
+    assert budget.max_usd == 1.5
+
+
+def test_guest_deadline_has_headroom_below_abox_timeout():
+    # ABOX-16: the in-guest deadline must beat the VM kill (abox --timeout).
+    spec = load_spec_file(AGENTS / "explore.yaml")
+    objective = Objective(type="explore", repo="bakudo", title="t")
+    bundle = TaskBundle(
+        run_id="run_H", objective_id=objective.id, objective=objective,
+        agent_spec=spec, budget=Budget(timeoutSeconds=1000),
+    )
+    ctx = ToolContext(
+        workspace=Workspace(Path(".")), skills=SkillRegistry(allowed=[]), run_id="run_H",
+    )
+    build_and_run(spec, bundle, ctx, offline_driver=lambda s, u, t: "{}")
+    remaining = ctx.deadline_monotonic - time.monotonic()
+    assert 0 < remaining <= 1000 - GUEST_DEADLINE_HEADROOM_SECONDS + 1
+
+
+def test_token_accounting_trips_cap_mid_run():
+    ctx = ToolContext(
+        workspace=Workspace(Path(".")), skills=SkillRegistry(allowed=[]), run_id="run_T",
+    )
+    ctx.set_budget(token_cap=100)
+    hook = TokenAccounting(ctx)
+
+    event = SimpleNamespace(
+        agent=SimpleNamespace(
+            event_loop_metrics=SimpleNamespace(accumulated_usage={"totalTokens": 120})
+        )
+    )
+    with pytest.raises(BudgetExceeded, match="token_cap"):
+        hook.on_model_call(event)
+    assert ctx.tokens_used == 120
+    assert ctx.model_calls == 1
+
+
+def test_token_accounting_accumulates_deltas():
+    ctx = ToolContext(
+        workspace=Workspace(Path(".")), skills=SkillRegistry(allowed=[]), run_id="run_T",
+    )
+    hook = TokenAccounting(ctx)
+
+    def event(total):
+        return SimpleNamespace(
+            agent=SimpleNamespace(
+                event_loop_metrics=SimpleNamespace(accumulated_usage={"totalTokens": total})
+            )
+        )
+
+    hook.on_model_call(event(50))
+    hook.on_model_call(event(80))
+    assert ctx.tokens_used == 80  # cumulative source, delta-accounted
+    assert ctx.model_calls == 2
+
+
+def test_run_command_timeout_clamped_to_remaining_budget(tmp_path):
+    # API-4: the model may not extend its own wall clock via run-command timeout.
+    spec, ctx = _ctx(tmp_path)
+    ctx.set_budget(timeout_seconds=5)
+    seen = {}
+    real_run = ctx.workspace.run
+
+    def spying_run(argv, timeout=600):
+        seen["timeout"] = timeout
+        return real_run(argv, timeout=timeout)
+
+    ctx.workspace.run = spying_run
+    tools = build_tool_callables(spec, ctx)
+    tools["run-command"](command="echo hi", timeout=600)
+    assert seen["timeout"] <= 5
+
+
+def test_run_command_subprocess_timeout_reported_not_raised(tmp_path):
+    spec, ctx = _ctx(tmp_path)
+    tools = build_tool_callables(spec, ctx)
+    out = tools["run-command"](command="python -c 'import time; time.sleep(5)'", timeout=1)
+    assert out["exit_code"] == 124
+    assert out["timed_out"] is True

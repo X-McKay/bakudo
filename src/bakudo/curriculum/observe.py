@@ -10,7 +10,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .. import ids
 from .objective import Objective, ObjectiveType, Priority, rank
+
+
+def _observer_id(repo: str, type_: ObjectiveType, source_key: str) -> str:
+    """Deterministic objective id from (repo, type, source key) — the same
+    repo signal yields the SAME id every observer cycle (MEM-6), so the meta
+    workflow can dedupe by id instead of re-dispatching duplicates."""
+    return ids.deterministic_objective_id(f"{repo}\x1f{type_.value}\x1f{source_key}")
 
 
 @dataclass
@@ -72,6 +80,7 @@ def _label_value(labels: list[str]) -> float:
 def _issue_objective(repo: str, issue: Issue) -> Objective:
     is_bug = any(label.lower() in {"bug", "defect"} for label in issue.labels)
     return Objective(
+        id=_observer_id(repo, ObjectiveType.add_feature, f"issue:{issue.number}"),
         type=ObjectiveType.add_feature,
         repo=repo,
         title=issue.title,
@@ -88,6 +97,7 @@ def _issue_objective(repo: str, issue: Issue) -> Objective:
 
 def _failing_test_objective(repo: str, test: FailingTest) -> Objective:
     return Objective(
+        id=_observer_id(repo, ObjectiveType.qa, f"test:{test.name}"),
         type=ObjectiveType.qa,
         repo=repo,
         title=f"Fix failing test: {test.name}",
@@ -100,6 +110,9 @@ def _failing_test_objective(repo: str, test: FailingTest) -> Objective:
 
 def _todo_objective(repo: str, todo: Todo) -> Objective:
     return Objective(
+        id=_observer_id(
+            repo, ObjectiveType.maintenance, f"todo:{todo.path}:{todo.text}"
+        ),
         type=ObjectiveType.maintenance,
         repo=repo,
         title=f"Resolve TODO in {todo.path}",
@@ -112,6 +125,7 @@ def _todo_objective(repo: str, todo: Todo) -> Objective:
 def _coverage_objective(repo: str, gap: CoverageGap) -> Objective:
     deficit = max(0.0, 1.0 - gap.covered_pct)
     return Objective(
+        id=_observer_id(repo, ObjectiveType.eval_author, f"coverage:{gap.path}"),
         type=ObjectiveType.eval_author,
         repo=repo,
         title=f"Raise test coverage for {gap.path}",
@@ -124,6 +138,9 @@ def _coverage_objective(repo: str, gap: CoverageGap) -> Objective:
 def _advisory_objective(repo: str, advisory: Advisory) -> Objective:
     risk = _SEVERITY_RISK.get(advisory.severity.lower(), 0.5)
     return Objective(
+        id=_observer_id(
+            repo, ObjectiveType.maintenance, f"advisory:{advisory.package}"
+        ),
         type=ObjectiveType.maintenance,
         repo=repo,
         title=f"Patch advisory in {advisory.package} ({advisory.severity})",

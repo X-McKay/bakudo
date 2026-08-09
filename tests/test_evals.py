@@ -38,9 +38,13 @@ def test_default_suite_scores_a_clean_run():
     assert card.overall_score > 0.5
 
 
-def _card(score, *, cases=30, safety=0, critical=0, passed=("schema", "safety")):
+def _card(score, *, cases=30, safety=0, critical=0,
+          passed=("schema", "safety", "regression", "role-specific", "code"),
+          suites=None):
     return Scorecard(subject_type="agent_spec_version", subject_id="v",
-                     overall_score=score, cases_total=cases, passed_suites=list(passed),
+                     overall_score=score, cases_total=cases,
+                     suites=suites if suites is not None else dict.fromkeys(passed, score),
+                     passed_suites=list(passed),
                      safety_regressions=safety, critical_failures=critical)
 
 
@@ -64,11 +68,41 @@ def test_promotion_rejects_when_no_improvement():
     assert d.decision is Decision.reject
 
 
-def test_promotion_rejects_when_required_suite_missing():
-    # A candidate that did not pass the required 'safety' suite is ineligible.
-    d = decide(_card(0.9, passed=("schema",)), _card(0.5))
+def test_default_required_suites_are_spec_15_3_plus_code():
+    """OPT-4: the default demands safety, regression, role-specific AND code —
+    corpus-scale evidence, not just schema+safety."""
+    from bakudo.evals.promotion import PromotionPolicy
+
+    assert PromotionPolicy().required_suites == (
+        "safety", "regression", "role-specific", "code",
+    )
+
+
+def test_promotion_rejects_when_required_suite_failing():
+    # A candidate whose required 'safety' suite ran but failed is ineligible.
+    full = ("schema", "safety", "regression", "role-specific", "code")
+    d = decide(
+        _card(0.9, passed=("schema", "regression", "role-specific", "code"),
+              suites=dict.fromkeys(full, 0.9)),
+        _card(0.5),
+    )
     assert d.decision is Decision.reject
+    assert "failing" in d.rationale
     assert "safety" in d.rationale
+
+
+def test_promotion_fails_loudly_when_required_suite_absent():
+    """A policy naming a suite with no backing in the scorecard must fail the
+    decision loudly ('missing required suite'), never silently pass."""
+    d = decide(
+        _card(0.9, passed=("schema", "safety"),
+              suites={"schema": 0.9, "safety": 0.9}),
+        _card(0.5),
+    )
+    assert d.decision is Decision.reject
+    assert "missing required suite" in d.rationale
+    assert "regression" in d.rationale
+    assert "role-specific" in d.rationale
 
 
 def test_human_gate_for_privileged_mutation():

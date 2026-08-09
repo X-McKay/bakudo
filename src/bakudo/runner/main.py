@@ -17,16 +17,32 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .. import ids
 from ..agent_spec import load_spec_file
-from ..bundle import Budget, TaskBundle
+from ..bundle import TaskBundle, budget_from_spec
 from ..curriculum.objective import Objective
 from ..skills import SkillRegistry
 from ..strands_tools import ToolContext, Workspace
 from .agent import build_and_run
 from .result import normalize_result
+
+
+def _exception_chain(exc: BaseException, limit: int = 4) -> str:
+    """``Type: msg (caused by Type: msg ...)`` — the outermost exception alone
+    (e.g. openai's generic ``APIConnectionError: Connection error.``) routinely
+    hides the actionable root cause, and the summary is often the only
+    diagnostic that leaves the sandbox."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen and len(parts) < limit:
+        seen.add(id(cur))
+        parts.append(f"{type(cur).__name__}: {cur}")
+        cur = cur.__cause__ or cur.__context__
+    return " (caused by ".join(parts) + ")" * (len(parts) - 1)
 
 
 def _load_bundle(args: argparse.Namespace) -> TaskBundle:
@@ -41,12 +57,41 @@ def _load_bundle(args: argparse.Namespace) -> TaskBundle:
         objective_id=objective.id,
         objective=objective,
         agent_spec=spec,
-        budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
+        budget=budget_from_spec(spec),
     )
 
 
 def run(args: argparse.Namespace) -> int:
-    bundle = _load_bundle(args)
+    try:
+        bundle = _load_bundle(args)
+    except Exception as exc:  # noqa: BLE001 - version skew must be diagnosable
+        # A bundle this runner can't parse (typically control-plane/worker-plane
+        # version skew: the worker vendored an older bakudo than the control
+        # plane that rendered the bundle) still gets a failed result.json —
+        # identity fields recovered best-effort from the raw document.
+        raw_ids: dict[str, str] = {}
+        if args.bundle:
+            try:
+                doc = json.loads(Path(args.bundle).read_text())
+                raw_ids = {
+                    k: doc[k] for k in ("run_id", "objective_id") if isinstance(doc.get(k), str)
+                }
+            except Exception:  # noqa: BLE001 - identity recovery is best-effort
+                pass
+        failure = {
+            "run_id": raw_ids.get("run_id", "run_" + "0" * 26),
+            "agent": "unknown@0",
+            "objective_id": raw_ids.get("objective_id", "obj_" + "0" * 26),
+            "status": "failed",
+            "summary": (
+                "Runner could not load the task bundle (control/worker version "
+                f"skew?): {_exception_chain(exc)}"
+            ),
+            "blocked_reasons": ["bundle_incompatible"],
+        }
+        Path(args.result).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.result).write_text(json.dumps(failure, indent=2))
+        return 1
     spec = bundle.agent_spec
 
     workspace = Workspace(Path(args.workspace))
@@ -56,16 +101,18 @@ def run(args: argparse.Namespace) -> int:
         memory_query=bundle.memory_query,
     )
 
+    started = time.monotonic()
     try:
         raw = build_and_run(spec, bundle, ctx)
     except Exception as exc:  # noqa: BLE001 - surface any runtime failure as a result
         raw = json.dumps(
             {
                 "status": "failed",
-                "summary": f"Runner error: {type(exc).__name__}: {exc}",
+                "summary": f"Runner error: {_exception_chain(exc)}",
                 "blocked_reasons": ["runner_exception"],
             }
         )
+    runtime_seconds = time.monotonic() - started
 
     result = normalize_result(
         raw,
@@ -81,6 +128,18 @@ def run(args: argparse.Namespace) -> int:
         result.blocked_reasons.extend(
             f"denied:{d['reason']}" for d in ctx.denied_commands
         )
+
+    # Self-report observability so the host/evals never grade empty signals
+    # (ABOX-10). result.schema.json only allows numeric metrics, so the
+    # counters land there; the agent's own metrics keep precedence.
+    observability = ctx.observability()
+    for key in (
+        "tool_calls", "model_calls", "tokens_used", "memories_retrieved",
+    ):
+        result.metrics.setdefault(key, float(observability[key]))
+    result.metrics.setdefault("denied_commands", float(len(ctx.denied_commands)))
+    result.metrics.setdefault("skills_loaded", float(len(ctx.skills_loaded)))
+    result.metrics.setdefault("runtime_seconds", round(runtime_seconds, 3))
 
     result_path = Path(args.result)
     result_path.parent.mkdir(parents=True, exist_ok=True)

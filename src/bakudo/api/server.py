@@ -7,12 +7,19 @@ the durable :class:`MetaAgentWorkflow` via :mod:`bakudo.temporal.client`.
 
 from __future__ import annotations
 
+import logging
 import os
+import secrets
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
 from ..control import MetaAgentTools
+from ..curriculum import QueueName
+
+logger = logging.getLogger(__name__)
 
 
 # Request models live at module scope: under `from __future__ import
@@ -38,26 +45,89 @@ class OptimizeIn(BaseModel):
     maxApproaches: int = 3
 
 
+class RunIn(BaseModel):
+    objective_id: str
+    agent: str
+
+
+class PromotionResolutionIn(BaseModel):
+    """Body of POST /promotions/{promotion_id}/approve|reject (spec §25.3).
+
+    Deliberately identity-and-commentary only: scorecards and mutation kinds
+    are read from the LEDGER's stored decision, never from the request
+    (OPT-7/API-7). Unknown extra fields are ignored by pydantic.
+    """
+
+    approved_by: str
+    comment: str | None = None
+
+
+def _resolve_sandbox() -> Callable[..., Any]:
+    """Resolve the run sandbox with the same fail-closed policy as the
+    Temporal activity layer (:meth:`bakudo.temporal._impl.Deps.sandbox_fn`,
+    importable without the ``temporal`` extra): ``BAKUDO_SANDBOX`` must be
+    ``abox`` or ``local``, ``local`` additionally requires ``BAKUDO_ENV=dev``,
+    and unset raises instead of silently executing on the host (OPT-10).
+    """
+    from ..temporal._impl import Deps
+
+    return Deps(memory=None).sandbox_fn()
+
+
+def _register_repo_agent_specs(tools: MetaAgentTools) -> None:
+    """Register the repo's seed agents (``agents/*.yaml``) at startup with the
+    same loader the CLI uses, so ``POST /runs`` resolves them by name and
+    'Unknown agent' only means a genuinely unknown name (API-8).
+
+    Source-tree-relative like the CLI loaders; installs without an ``agents/``
+    directory register nothing (API-12 tracks that packaging gap).
+    """
+    from ..agent_spec import load_spec_file
+
+    agents_dir = Path(__file__).resolve().parents[3] / "agents"
+    if not agents_dir.is_dir():  # pragma: no cover - wheel installs
+        return
+    for spec_path in sorted(agents_dir.glob("*.yaml")):
+        tools.register_agent_spec(load_spec_file(spec_path))
+
+
 def build_app(tools: MetaAgentTools | None = None) -> Any:
     """Build the FastAPI app. Requires the ``api`` extra (fastapi, uvicorn)."""
     from fastapi import Depends, FastAPI, Header, HTTPException
 
     tools = tools or MetaAgentTools()
-    app = FastAPI(title="bakudo control plane", version="3.0.0")
+    _register_repo_agent_specs(tools)
 
-    # Optional bearer-token auth on mutating routes. When BAKUDO_API_TOKEN is
-    # unset, auth is disabled (dev only); set it in any shared environment.
+    # Bearer-token auth on every route (API-1). When BAKUDO_API_TOKEN is unset,
+    # auth is disabled (dev only) — warned once here; set it in any shared
+    # environment.
     api_token = os.environ.get("BAKUDO_API_TOKEN")
+    if not api_token:
+        logger.warning("API auth disabled: BAKUDO_API_TOKEN not set")
 
     def require_auth(authorization: str | None = Header(default=None)) -> None:
         if not api_token:
             return
-        if authorization != f"Bearer {api_token}":
+        supplied = (authorization or "").encode("utf-8")
+        expected = f"Bearer {api_token}".encode()
+        if not secrets.compare_digest(supplied, expected):
             raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
-    auth = [Depends(require_auth)]
+    # App-level dependency: every route, read and write, requires the token
+    # when one is configured. (FastAPI's /openapi.json and /docs endpoints are
+    # not path operations and stay open; they expose the schema, not data.)
+    app = FastAPI(
+        title="bakudo control plane", version="3.0.0", dependencies=[Depends(require_auth)]
+    )
 
-    @app.post("/objectives", dependencies=auth)
+    def resolve_sandbox() -> Callable[..., Any]:
+        """Fail closed with a clear 409 instead of executing on the host."""
+        try:
+            return _resolve_sandbox()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/objectives")
     def submit_objective(body: ObjectiveIn) -> dict[str, str]:
         from .. import ids
 
@@ -71,12 +141,21 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 
     @app.get("/objectives")
     def list_objectives(queue: str = "ready") -> list[dict[str, Any]]:
-        return tools.list_objectives(queue)
-
-    @app.post("/runs", dependencies=auth)
-    def spawn_run(objective_id: str, agent: str) -> dict[str, str]:
         try:
-            run_id = tools.spawn_agent_run(objective_id, agent)
+            return tools.list_objectives(queue)
+        except ValueError as exc:
+            valid = ", ".join(q.value for q in QueueName)
+            raise HTTPException(
+                status_code=422, detail=f"invalid queue {queue!r}; valid queues: {valid}"
+            ) from exc
+
+    @app.post("/runs")
+    def spawn_run(body: RunIn) -> dict[str, str]:
+        # The explicit sandbox honours the fail-closed BAKUDO_SANDBOX policy
+        # (OPT-10) instead of the tools default in-process local_sandbox.
+        sandbox = resolve_sandbox()
+        try:
+            run_id = tools.spawn_agent_run(body.objective_id, body.agent, sandbox=sandbox)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"run_id": run_id}
@@ -92,7 +171,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     def get_logs(run_id: str) -> list[dict[str, Any]]:
         return tools.query_logs(run_id)
 
-    @app.post("/optimize", dependencies=auth)
+    @app.post("/optimize")
     def optimize(body: OptimizeIn) -> dict[str, Any]:
         """Drive one optimize objective through scout → attempts → selection.
 
@@ -103,6 +182,8 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         from .. import ids
         from ..control.optimize import load_role_spec, run_optimize_loop
         from ..curriculum import Objective
+
+        sandbox = resolve_sandbox()
 
         constraints: dict[str, Any] = {"avoidPublicApiChanges": True}
         if body.targetPaths:
@@ -135,20 +216,50 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
                 max_rounds=body.maxRounds,
                 max_approaches=body.maxApproaches,
                 ledger=tools.ledger,
+                sandbox=sandbox,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"objective_id": objective.id, **outcome}
 
-    @app.post("/promotions/approve", dependencies=auth)
-    def approve_promotion(candidate: dict[str, Any], baseline: dict[str, Any] | None = None):
-        return tools.promote_candidate(candidate, baseline)
+    def _resolve_promotion(
+        promotion_id: str, approved: bool, body: PromotionResolutionIn
+    ) -> dict[str, Any]:
+        """Resolve a pending decision against the LEDGER's stored record."""
+        try:
+            decision = tools.ledger.resolve_promotion(
+                promotion_id,
+                approved=approved,
+                approved_by=body.approved_by,
+                comment=body.comment,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return decision.to_dict()
+
+    @app.post("/promotions/{promotion_id}/approve")
+    def approve_promotion(
+        promotion_id: str, body: PromotionResolutionIn
+    ) -> dict[str, Any]:
+        """Approve a pending promotion: candidate goes pending_human -> canary
+        (spec §25.3). The old bulk /promotions/approve route that trusted
+        caller-supplied scorecards is REMOVED (OPT-7/API-7)."""
+        return _resolve_promotion(promotion_id, True, body)
+
+    @app.post("/promotions/{promotion_id}/reject")
+    def reject_promotion(
+        promotion_id: str, body: PromotionResolutionIn
+    ) -> dict[str, Any]:
+        """Reject a pending promotion: candidate goes pending_human -> rejected."""
+        return _resolve_promotion(promotion_id, False, body)
 
     @app.get("/promotions/pending")
     def pending_promotions() -> list[dict[str, Any]]:
-        """Promotion decisions awaiting a human gate (spec sections 19.2, 26)."""
-        promotions: list = getattr(tools.ledger, "promotions", lambda: [])()
-        return [p.to_dict() for p in promotions if p.requires_human]
+        """Promotion decisions awaiting a human gate (spec sections 19.2, 26),
+        read from the durable ledger (API-6)."""
+        return [p.to_dict() for p in tools.ledger.promotions(status="pending")]
 
     @app.get("/status")
     def status() -> dict[str, Any]:

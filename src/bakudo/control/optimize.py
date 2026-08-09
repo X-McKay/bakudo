@@ -172,6 +172,19 @@ def load_role_spec(name: str, path: str | None = None) -> Any:
     return load_spec_file(spec_path)
 
 
+def _scout_failed(scout: Any) -> bool:
+    """A scout run that produced no result, or a failed one, is a *failure* —
+    distinct from a successful scout that proposed nothing (OPT-12)."""
+    phase = getattr(scout, "phase", None)
+    if getattr(phase, "value", phase) == "failed":
+        return True
+    result = getattr(scout, "result", None)
+    if result is None:
+        return True
+    status = getattr(result, "status", None)
+    return getattr(status, "value", status) == "failed"
+
+
 def run_optimize_loop(
     objective: Any,
     scout_spec: Any,
@@ -208,6 +221,24 @@ def run_optimize_loop(
             ledger=ledger,
             sandbox=sandbox,
         )
+        if _scout_failed(scout):
+            # One retry: scout failures are usually transient (model hiccup,
+            # output truncation), and losing the whole cycle to one is wasteful.
+            scout = run_objective(
+                Objective.model_validate(scout_objective(base, feedback=feedback)),
+                scout_spec,
+                ledger=ledger,
+                sandbox=sandbox,
+            )
+        if _scout_failed(scout):
+            # OPT-12: infrastructure/model failure must never masquerade as the
+            # "code is already optimal" success outcome.
+            summary = scout.result.summary if scout.result else "no result collected"
+            return {
+                "status": "scout-failed",
+                "rounds_used": rounds,
+                "reason": f"scout run failed: {summary}",
+            }
         followups = scout.result.proposed_followups if scout.result else []
         approaches = list(followups)[:max_approaches]
         if not approaches:

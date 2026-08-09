@@ -16,17 +16,20 @@ role:
 
 model:
   provider: openai-compatible
-  modelId: critic-large
+  modelId: Qwen3.6-35B-A3B-FP8
   baseUrlRef: vllm/critic-large
   temperature: 0.2
-  maxTokens: 8192
+  maxTokens: 16384
+  # Structured-output role: answer directly, don't spend the budget thinking.
+  enableThinking: false
 
 sandbox:
   provider: abox
   profile: explore-readonly
   baseRef: main
-  networkMode: none
-  timeoutSeconds: 1800
+  # Scoped to the model endpoint only (design §5); modest review timeout.
+  networkMode: scoped
+  timeoutSeconds: 300
   ephemeral: true
   canMerge: false
 
@@ -35,7 +38,10 @@ prompt:
     You are a critic agent. Review the candidate diff and the implementation
     agent's reasoning. Identify correctness risks, design flaws, missing tests,
     and security concerns. Be specific and cite file paths. Do not modify files.
-    Return a structured result.json.
+    Keep the review focused: read only what you need, then conclude.
+    Your FINAL message must be exactly one JSON object and nothing after it:
+    {"score": <0..1>, "passed": <true|false>, "issues": ["<each serious issue>"]}
+    (score = overall quality; passed = whether the change is acceptable.)
 
 tools:
   - name: read-file
@@ -48,7 +54,10 @@ skills:
 outputContract:
   requiredFiles:
     - result.json
+  # The pinned critic verdict (design §5), subsumed into the result.json
+  # envelope: score -> metrics.score, passed -> metrics.passed (1|0),
+  # issues -> proposedFollowups entries.
   resultSchema:
-    status: ["success", "blocked", "failed"]
-    summary: string
-    proposedFollowups: list
+    score: number     # 0..1
+    passed: bool
+    issues: list      # of strings

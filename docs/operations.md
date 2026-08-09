@@ -56,8 +56,10 @@ cd infra && docker compose up -d
 
 The worker connects to Temporal and, if `BAKUDO_POSTGRES_DSN` is set, wires the
 Postgres ledger and the durable `PgSemanticMemoryStore` into the activity layer
-(`temporal/worker.py`); if `NEO4J_URI` is also set, accepted memory writes are
-mirrored into the graph. Model traffic is
+(`temporal/worker.py`) — `VLLM_EMBED_URL` is then mandatory (the worker fails
+fast rather than silently using the lexical hashing embedder); if `NEO4J_URI`
+is also set, accepted memory writes are mirrored into the graph. *(The Neo4j
+mirror is frozen pending the FalkorDB migration — leave `NEO4J_URI` unset.)* Model traffic is
 routed through the vLLM gateway; bring it up with the `models` compose profile
 once you have hosted vLLM backends configured in `infra/vllm-gateway/config.yaml`.
 
@@ -81,9 +83,11 @@ run with a `budget:*` blocked reason rather than running away.
 ## CI and types
 
 `make check` runs the full local gate (`ruff` + `mypy` + `pytest`). The Python
-CI workflow lives at `ci/python-ci.yml`; a maintainer should
-`git mv ci/python-ci.yml .github/workflows/ci.yml` to activate it (the
-automation cannot modify `.github/workflows/` itself).
+CI workflow lives at `.github/workflows/ci.yml` and installs the full
+`[all,dev]` extras so the API/Temporal/memory test surface runs in CI.
+Live-integration tests are opt-in: `pytest -m live` (needs live-service env
+vars) and `ABOX_LIVE=1 pytest tests/test_abox_live.py` (needs a trusted,
+warmed abox project).
 
 ## Build order (spec §29)
 

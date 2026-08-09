@@ -1,16 +1,10 @@
 # Python CI for bakudo.
 #
-# NOTE: this file lives under ci/ rather than .github/workflows/ because the
-# automation lacks the GitHub `workflows` permission (verified: both git push
-# and the contents API return 403 for workflow paths). To activate it, a
-# maintainer with that permission must move it over the legacy Rust workflow:
-#
-#     git rm .github/workflows/ci.yml
-#     git mv ci/python-ci.yml .github/workflows/ci.yml
-#     git commit -m "ci: replace Rust workflow with Python CI" && git push
-#
-# It mirrors `make check` (ruff + mypy + pytest) plus an offline smoke test
-# of the operator surface, on the same interpreters the package supports.
+# Mirrors `make check` (ruff + mypy + pytest) plus an offline smoke test of
+# the operator surface, on the same interpreters the package supports. It
+# installs the full `[all,dev]` extras so pytest and mypy exercise the same
+# surface as a fully-provisioned dev box (temporalio, strands, psycopg,
+# httpx, fastapi) instead of silently skipping the heavy-dependency suites.
 
 name: CI
 
@@ -32,7 +26,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
-        run: pip install -e ".[dev,api]"
+        run: pip install -e ".[all,dev]"
       - name: Lint
         run: ruff check src tests
       # python -m avoids any stale mypy/pytest shadowing the venv's on PATH.

@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import ids
 from ..agent_spec import AgentSpec, parse_spec
 from ..curriculum import Objective, ObjectiveQueues, QueueName
 from ..evals import EvalContext, Scorecard, decide, run_default_suite
-from ..evals.promotion import PromotionPolicy
+from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
 from ..memory import InMemoryStore, MemoryItem, MemoryRejected, MemoryStore
 from ..registry import InMemoryLedger, RunPhase
 from ..registry.ledger import Ledger
@@ -71,24 +72,60 @@ class MetaAgentTools:
         self.register_agent_spec(spec)
         return spec.ref
 
-    def _resolve_spec(self, agent: str) -> AgentSpec:
-        """Resolve ``name`` (active) or ``name@version`` to an AgentSpec."""
+    def _spec_for(self, record) -> AgentSpec:
+        """The AgentSpec object behind a ledger version record."""
+        spec = self._specs.get(record.name, {}).get(record.version)
+        if spec is None:
+            # Registered directly against the ledger; the YAML is authoritative.
+            import yaml
+
+            spec = parse_spec(yaml.safe_load(record.spec_yaml))
+            self._specs.setdefault(record.name, {})[record.version] = spec
+        return spec
+
+    def _resolve_spec(self, agent: str, run_id: str | None = None) -> AgentSpec:
+        """Resolve an agent ref to a *spawnable* spec (design §2, fixes OPT-5).
+
+        ``name`` resolves to the ACTIVE version only — candidates, rejected,
+        and archived versions never shadow it. When a canary version exists
+        and a ``run_id`` is given, ``hash(run_id) % 100 < canary_percent``
+        deterministically routes that run to the canary. A pinned
+        ``name@version`` resolves only while that version is active or canary.
+        """
         if "@" in agent:
             name, version_s = agent.split("@", 1)
-            spec = self._specs.get(name, {}).get(int(version_s))
-            if spec is None:
+            record = self.ledger.get_agent_version(name, int(version_s))
+            if record is None:
                 raise KeyError(f"Unknown agent spec: {agent}")
-            return spec
-        versions = self._specs.get(agent)
-        if not versions:
+            if record.status not in ("active", "canary"):
+                raise KeyError(
+                    f"Agent spec {agent} is not spawnable (status={record.status})"
+                )
+            return self._spec_for(record)
+
+        if agent not in self._specs and self.ledger.active_version(agent) is None:
             raise KeyError(f"Unknown agent: {agent}")
-        return versions[max(versions)]
+        if run_id is not None:
+            canary = self.ledger.canary_version(agent)
+            if canary is not None and routes_to_canary(
+                run_id, PromotionPolicy().canary_percent
+            ):
+                return self._spec_for(canary)
+        active = self.ledger.active_version(agent)
+        if active is None:
+            raise KeyError(f"No active version for agent: {agent}")
+        return self._spec_for(active)
 
     # --- runs ---
-    def spawn_agent_run(self, objective_id: str, agent: str) -> str:
+    def spawn_agent_run(self, objective_id: str, agent: str, *, sandbox=None) -> str:
         objective = self._objectives[objective_id]
-        spec = self._resolve_spec(agent)
-        pipeline = run_objective(objective, spec, ledger=self.ledger)
+        # The run id is minted before spec resolution so canary routing is
+        # deterministic per run (design §2).
+        run_id = ids.run_id()
+        spec = self._resolve_spec(agent, run_id=run_id)
+        pipeline = run_objective(
+            objective, spec, ledger=self.ledger, sandbox=sandbox, run_id=run_id
+        )
         self._runs[pipeline.run_id] = pipeline
         return pipeline.run_id
 
@@ -156,7 +193,10 @@ class MetaAgentTools:
         decision = decide(
             candidate, baseline, policy=PromotionPolicy(), mutation_kinds=mutation_kinds or []
         )
-        self.ledger.record_promotion(decision)
+        # Record the decision AND move the candidate version through the §1
+        # state machine (reject -> rejected, human gate -> pending_human,
+        # auto-pass -> canary), fixing OPT-7's dead-end decisions.
+        apply_decision(self.ledger, decision)
         return decision.to_dict()
 
     def archive_candidate(self, agent: str, reason: str) -> dict[str, str]:

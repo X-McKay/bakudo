@@ -46,7 +46,8 @@
         "modelId": { "type": "string" },
         "baseUrlRef": { "type": "string", "description": "Reference to a provider/secret config, never an inline secret." },
         "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-        "maxTokens": { "type": "integer", "minimum": 1 }
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "enableThinking": { "type": "boolean" }
       }
     },
     "sandbox": {

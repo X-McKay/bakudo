@@ -81,13 +81,17 @@ def run_corpus(
     ``run_fn(objective) -> CaseRun`` executes one case (typically by spawning a
     sandboxed run). Each grader's per-case results are averaged into one
     aggregate :class:`EvalResult`; expectation grading becomes a synthetic
-    ``role-specific`` suite. ``cases_total`` is the corpus size.
+    ``role-specific`` suite, and a synthetic ``regression`` suite (spec §15.3
+    — required by the default promotion policy) passes only when every case is
+    fully clean (all graders AND expectations). ``cases_total`` is the corpus
+    size.
     """
     if not cases:
         raise ValueError("Cannot run an empty corpus.")
 
     per_suite: dict[str, list[EvalResult]] = defaultdict(list)
     expectation_passes = 0
+    clean_cases = 0
 
     for case in cases:
         run: CaseRun = run_fn(case.objective)
@@ -99,11 +103,12 @@ def run_corpus(
             runtime_seconds=run.runtime_seconds,
             tokens_used=run.tokens_used,
         )
-        for grader in graders:
-            res = grader(ctx)
+        case_results = [grader(ctx) for grader in graders]
+        for res in case_results:
             per_suite[res.suite_name].append(res)
         passed, _ = grade_expectations(case, run)
         expectation_passes += int(passed)
+        clean_cases += int(passed and all(r.passed for r in case_results))
 
     total = len(cases)
     aggregated: list[EvalResult] = []
@@ -137,6 +142,20 @@ def run_corpus(
             details={
                 "cases_total": total,
                 "cases_passed": expectation_passes,
+                "corpus": suite_name,
+            },
+        )
+    )
+    aggregated.append(
+        EvalResult(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            suite_name="regression",
+            score=clean_cases / total,
+            passed=clean_cases == total,
+            details={
+                "cases_total": total,
+                "cases_passed": clean_cases,
                 "corpus": suite_name,
             },
         )

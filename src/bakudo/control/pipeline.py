@@ -15,7 +15,7 @@ from .. import ids
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome
 from ..agent_spec import AgentSpec
-from ..bundle import Budget, TaskBundle
+from ..bundle import TaskBundle, budget_from_spec
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, EvalResult, Scorecard, run_suite
 from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
@@ -42,18 +42,23 @@ def run_objective(
     ledger: Ledger | None = None,
     sandbox: SandboxFn | None = None,
     workflow_id: str | None = None,
+    run_id: str | None = None,
 ) -> PipelineResult:
-    """Run one objective with one agent spec, end to end."""
+    """Run one objective with one agent spec, end to end.
+
+    ``run_id`` may be supplied by the caller (the spawn path mints it before
+    spec resolution so canary routing is deterministic per run, design §2).
+    """
     ledger = ledger or InMemoryLedger()
     sandbox = sandbox or local_sandbox
-    run_id = ids.run_id()
+    run_id = run_id or ids.run_id()
 
     bundle = TaskBundle(
         run_id=run_id,
         objective_id=objective.id,
         objective=objective,
         agent_spec=spec,
-        budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
+        budget=budget_from_spec(spec),
     )
 
     ledger.create_run(
@@ -74,7 +79,15 @@ def run_objective(
 
     if not outcome.succeeded or outcome.result is None:
         ledger.finish_run(run_id, RunPhase.failed, outcome.result)
-        return PipelineResult(run_id, RunPhase.failed, None, [], None, outcome)
+        # Keep the failed result's own diagnosis (summary, blocked_reasons)
+        # when it parses — callers like the optimize loop surface it (OPT-12).
+        failed_result: RunResult | None = None
+        if isinstance(outcome.result, dict):
+            try:
+                failed_result = RunResult.model_validate(outcome.result)
+            except Exception:  # noqa: BLE001 - diagnostics are best-effort
+                failed_result = None
+        return PipelineResult(run_id, RunPhase.failed, failed_result, [], None, outcome)
 
     result = RunResult.model_validate(outcome.result)
 

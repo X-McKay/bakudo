@@ -83,3 +83,41 @@ def test_collect_signals_empty_without_collector(monkeypatch):
     for var in ("BAKUDO_REPO_PATH", "BAKUDO_COVERAGE_XML", "BAKUDO_JUNIT_XML", "GITHUB_TOKEN"):
         monkeypatch.delenv(var, raising=False)
     assert _impl.collect_signals(ObserveInput(repo="r")) == []
+
+
+def test_two_observe_cycles_over_unchanged_repo_yield_identical_objective_ids(
+    tmp_path, monkeypatch
+):
+    """MEM-6 end-to-end: an unchanged worktree scanned in two observer cycles
+    produces byte-identical objective ids, enabling dedupe-by-id downstream."""
+    (tmp_path / "app.py").write_text("# TODO: handle timeout\n")
+    monkeypatch.setattr(_impl.DEPS, "collector", TodoCollector(tmp_path))
+
+    first = _impl.collect_signals(ObserveInput(repo="payments-api"))
+    second = _impl.collect_signals(ObserveInput(repo="payments-api"))
+
+    assert [o["id"] for o in first] == [o["id"] for o in second]
+    assert first and first[0]["id"].startswith("objd_")
+
+
+def test_composite_collector_isolates_a_failing_collector(caplog):
+    """MEM-14: one collector blowing up (e.g. a GitHub 403) must not abort the
+    whole snapshot — the rest still contribute, and the failure is logged."""
+    import logging
+
+    class BoomCollector:
+        def collect(self, repo):
+            raise RuntimeError("GitHub said 403")
+
+    class OkCollector:
+        def collect(self, repo):
+            return RepoSignals(repo=repo, todos=[Todo(path="a.py", text="do it")])
+
+    from bakudo.curriculum.collectors import CompositeCollector
+
+    composite = CompositeCollector([BoomCollector(), OkCollector()])
+    with caplog.at_level(logging.WARNING, logger="bakudo.curriculum.collectors"):
+        signals = composite.collect("payments-api")
+
+    assert [t.text for t in signals.todos] == ["do it"]
+    assert any("BoomCollector" in r.message for r in caplog.records)

@@ -14,6 +14,35 @@ from typing import Any
 TASK_QUEUE_CONTROL = "bakudo-control"
 TASK_QUEUE_RUNS = "bakudo-runs"
 
+# Default agent per objective type, used when an objective carries no
+# ``suggestedAgents`` (TMP-3). Types with no sensible default (eval-author,
+# skill-gen, critic-only flows without a critic agent...) resolve to None and
+# the meta-agent dead-letters the objective instead of crashing.
+DEFAULT_AGENT_BY_TYPE: dict[str, str] = {
+    "explore": "explore",
+    "add-feature": "add-feature",
+    "qa": "qa",
+    "critic": "critic",
+    "maintenance": "add-feature",
+    "optimize": "optimize-scout",
+}
+
+
+def resolve_agent_name(objective: dict[str, Any]) -> str | None:
+    """Deterministically resolve the agent name for an objective (TMP-3).
+
+    Order: ``suggestedAgents[0]`` (what observer objectives carry), then the
+    per-type default mapping. Returns ``None`` when unresolvable — the caller
+    dead-letters, never crashes. Pure and import-safe for workflow code.
+    """
+    suggested = objective.get("suggestedAgents") or objective.get("suggested_agents")
+    if isinstance(suggested, list) and suggested and isinstance(suggested[0], str):
+        return suggested[0]
+    obj_type = objective.get("type")
+    if isinstance(obj_type, str):
+        return DEFAULT_AGENT_BY_TYPE.get(obj_type)
+    return None
+
 
 @dataclass
 class AgentRunInput:

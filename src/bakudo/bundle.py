@@ -26,6 +26,39 @@ class Budget(BaseModel):
     max_usd: float | None = Field(default=None, alias="maxUsd", ge=0)
 
 
+def budget_from_spec(spec: Any) -> Budget:
+    """Derive the run :class:`Budget` from an agent spec (review finding API-3).
+
+    ``timeoutSeconds`` always comes from ``spec.sandbox.timeoutSeconds`` — it is
+    the single wall-clock number shared by the abox ``--timeout`` and the
+    in-guest deadline. Token/cost caps are read from an optional ``spec.budget``
+    (``max_tokens``/``maxTokens``, ``max_usd``/``maxUsd``) when a spec carries
+    one; the current v1alpha1 AgentSpec schema does not define run-level budget
+    fields yet, so these default to ``None`` for schema-validated specs.
+
+    This is the single budget-construction point for every bundle producer
+    (control/pipeline, runner/main, temporal/_impl).
+    """
+
+    def _first(obj: Any, *names: str) -> Any:
+        for name in names:
+            value = getattr(obj, name, None)
+            if value is not None:
+                return value
+        return None
+
+    spec_budget = getattr(spec, "budget", None)
+    max_tokens = max_usd = None
+    if spec_budget is not None:
+        max_tokens = _first(spec_budget, "max_tokens", "maxTokens")
+        max_usd = _first(spec_budget, "max_usd", "maxUsd")
+    return Budget(
+        timeoutSeconds=int(spec.sandbox.timeout_seconds),
+        maxTokens=max_tokens,
+        maxUsd=max_usd,
+    )
+
+
 class MemoryExcerpt(BaseModel):
     """A retrieved memory item, trimmed for prompt inclusion."""
 
