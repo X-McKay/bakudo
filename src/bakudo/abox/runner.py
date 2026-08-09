@@ -55,6 +55,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import ids
+from ..agent_spec.models import AgentSpec
 from ..bundle import TaskBundle
 from ..schema import SchemaValidationError, validate_result
 
@@ -254,6 +255,12 @@ class AboxRunner:
         )
         return names
 
+    @staticmethod
+    def _base_ref(spec: AgentSpec) -> str:
+        """The branch sandboxes fork from: ``BAKUDO_BASE_REF`` env override
+        first (operator validating unmerged work), else the spec's baseRef."""
+        return os.environ.get("BAKUDO_BASE_REF") or spec.sandbox.base_ref
+
     def build_command(
         self, bundle: TaskBundle, scratch_dir: Path, repo: Path | None = None
     ) -> list[str]:
@@ -266,7 +273,7 @@ class AboxRunner:
             self._abox_bin, "run",
             "--repo", str(repo),
             "--task", bundle.run_id,
-            "--base", spec.sandbox.base_ref,
+            "--base", self._base_ref(spec),
             "--timeout", str(spec.sandbox.timeout_seconds),
             "--network", network,
         ]
@@ -333,7 +340,7 @@ class AboxRunner:
                 if collect_error:
                     errors.append(collect_error)
                 diff, changed_files = self._collect_diff(
-                    worktree, spec.sandbox.base_ref
+                    worktree, self._base_ref(spec)
                 )
 
             outcome = AboxOutcome(

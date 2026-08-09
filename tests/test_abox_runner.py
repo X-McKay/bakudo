@@ -369,3 +369,19 @@ def test_run_passes_through_observability_metrics(tmp_path, monkeypatch):
     assert outcome.denied_commands == [
         {"command": "", "reason": "command 'curl' not in allowlist"}
     ]
+
+
+def test_base_ref_env_override(tmp_path, monkeypatch):
+    """BAKUDO_BASE_REF lets an operator run sandboxes against an unmerged
+    branch (e.g. validating fixes before they reach the spec's baseRef)."""
+    monkeypatch.setenv("BAKUDO_BASE_REF", "validate/some-branch")
+    cmd = AboxRunner(repo_root=tmp_path).build_command(_bundle(), tmp_path / "s")
+    i = cmd.index("--base")
+    assert cmd[i + 1] == "validate/some-branch"
+
+
+def test_base_ref_defaults_to_spec(tmp_path, monkeypatch):
+    monkeypatch.delenv("BAKUDO_BASE_REF", raising=False)
+    cmd = AboxRunner(repo_root=tmp_path).build_command(_bundle(), tmp_path / "s")
+    i = cmd.index("--base")
+    assert cmd[i + 1] == "main"
