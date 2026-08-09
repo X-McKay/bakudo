@@ -7,6 +7,7 @@ through Strands and logged for the agent-observability layer (spec section 18.3)
 from __future__ import annotations
 
 import functools
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -76,6 +77,18 @@ class ToolContext:
         self.tool_calls += 1
         self.check_budget()
 
+    def clamp_timeout(self, requested: int) -> int:
+        """Clamp a model-supplied command timeout to the remaining wall clock.
+
+        Review finding API-4: ``run-command`` must not let the model extend its
+        own budget via the ``timeout`` argument. With no deadline set the
+        requested value passes through unchanged.
+        """
+        if self.deadline_monotonic is None:
+            return requested
+        remaining = int(self.deadline_monotonic - time.monotonic())
+        return max(1, min(requested, remaining))
+
     def observability(self) -> dict[str, Any]:
         return {
             "tool_calls": self.tool_calls,
@@ -106,7 +119,18 @@ def _make_run_command(policy: CommandPolicy) -> Tool:
         except CommandDenied as denied:
             ctx.denied_commands.append({"command": command, "reason": denied.reason})
             return {"denied": True, "reason": denied.reason, "command": command}
-        proc = ctx.workspace.run(argv, timeout=timeout)
+        timeout = ctx.clamp_timeout(timeout)
+        try:
+            proc = ctx.workspace.run(argv, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Report like GNU timeout instead of crashing the tool loop.
+            return {
+                "command": command,
+                "exit_code": 124,
+                "timed_out": True,
+                "stdout": "",
+                "stderr": f"command killed after {timeout}s (timeout)",
+            }
         return {
             "command": command,
             "exit_code": proc.returncode,

@@ -50,10 +50,28 @@ class Workspace:
             timeout=timeout,
         )
 
+    def _untracked_files(self) -> list[str]:
+        proc = self.run(["git", "ls-files", "--others", "--exclude-standard"])
+        return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
     def git_diff(self) -> str:
-        proc = self.run(["git", "diff", "--no-color"])
-        return proc.stdout
+        """The working-tree diff, *including* untracked files (ABOX-9).
+
+        Plain ``git diff`` is blind to newly created files, which silently
+        defeats ``maxChangedFiles`` gates and diff-based evals on create-only
+        changes. Untracked content is appended via ``git diff --no-index``
+        against ``/dev/null`` (which exits 1 on a difference — expected).
+        """
+        parts = [self.run(["git", "diff", "--no-color"]).stdout]
+        for name in self._untracked_files():
+            proc = self.run(
+                ["git", "diff", "--no-color", "--no-index", "--", "/dev/null", name]
+            )
+            parts.append(proc.stdout)
+        return "".join(parts)
 
     def changed_files(self) -> list[str]:
+        """Tracked modifications plus untracked files (ABOX-9)."""
         proc = self.run(["git", "diff", "--name-only"])
-        return [line for line in proc.stdout.splitlines() if line.strip()]
+        tracked = [line for line in proc.stdout.splitlines() if line.strip()]
+        return sorted(set(tracked) | set(self._untracked_files()))

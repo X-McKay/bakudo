@@ -21,6 +21,44 @@ from .prompts import render_system_prompt, render_user_prompt
 # Used for tests and for dry-runs without vLLM/Strands.
 OfflineDriver = Callable[[str, str, dict[str, Callable[..., Any]]], str]
 
+# The in-guest deadline sits below the abox --timeout so a graceful
+# "blocked: budget" result always beats the VM kill (review finding ABOX-16).
+GUEST_DEADLINE_HEADROOM_SECONDS = 30
+
+
+class TokenAccounting:
+    """Per-model-call token accounting + budget enforcement (finding API-3).
+
+    Strands accumulates usage on ``agent.event_loop_metrics.accumulated_usage``
+    across the internal tool-use loop; this hook delta-accounts it into the
+    :class:`ToolContext` after *every* model call and re-checks the budget, so
+    a token cap (and the wall-clock deadline) can trip mid-run instead of only
+    after the loop ends. Registered via the Strands hooks API when the runtime
+    is present; ``on_model_call`` is runtime-agnostic and unit-testable.
+    """
+
+    def __init__(self, ctx: ToolContext) -> None:
+        self._ctx = ctx
+        self._last_total = 0
+
+    def on_model_call(self, event: Any) -> None:
+        self._ctx.model_calls += 1
+        try:
+            usage = event.agent.event_loop_metrics.accumulated_usage
+            total = int(usage.get("totalTokens", 0))
+        except Exception:  # noqa: BLE001 - usage shape varies across providers
+            total = self._last_total
+        if total > self._last_total:
+            self._ctx.tokens_used += total - self._last_total
+            self._last_total = total
+        self._ctx.check_budget()
+
+    def register_hooks(self, registry: Any, **_: Any) -> None:
+        """Strands ``HookProvider`` protocol entrypoint."""
+        from strands.hooks import AfterModelCallEvent  # type: ignore
+
+        registry.add_callback(AfterModelCallEvent, self.on_model_call)
+
 
 def build_model(spec: AgentSpec) -> Any:
     """Build a Strands model object from the spec's model config.
@@ -84,9 +122,13 @@ def build_and_run(
     user_prompt = render_user_prompt(bundle)
     tool_callables = build_tool_callables(spec, ctx)
 
-    # Apply the run budget to the tool layer (wall-clock deadline + token cap).
+    # Apply the run budget to the tool layer (wall-clock deadline + token cap),
+    # keeping headroom below the abox --timeout so the graceful blocked result
+    # wins the race against the VM kill (ABOX-16).
     ctx.set_budget(
-        timeout_seconds=bundle.budget.timeout_seconds,
+        timeout_seconds=max(
+            1, bundle.budget.timeout_seconds - GUEST_DEADLINE_HEADROOM_SECONDS
+        ),
         token_cap=bundle.budget.max_tokens,
     )
 
@@ -100,23 +142,47 @@ def build_and_run(
         from strands import Agent  # type: ignore
 
         model = build_model(spec)
+        accounting = TokenAccounting(ctx)
         agent = Agent(
             model=model,
             system_prompt=system_prompt,
             tools=to_strands_tools(tool_callables),
+            hooks=[accounting],
         )
-        ctx.model_calls += 1
         response = agent(user_prompt)
-        _capture_usage(ctx, response)
+        if ctx.tokens_used == 0:
+            # Fallback when the hooks API yielded no usage (provider variance).
+            _capture_usage(ctx, response)
         return str(response)
     except BudgetExceeded as exc:
-        return json.dumps(
-            {
-                "status": "blocked",
-                "summary": f"Run stopped: budget exceeded ({exc.reason}).",
-                "blocked_reasons": [f"budget:{exc.reason}"],
-            }
-        )
+        return _blocked_by_budget(exc)
+    except Exception as exc:
+        # The Strands event loop may wrap a hook-raised BudgetExceeded.
+        budget_exc = _find_budget_exceeded(exc)
+        if budget_exc is not None:
+            return _blocked_by_budget(budget_exc)
+        raise
+
+
+def _blocked_by_budget(exc: BudgetExceeded) -> str:
+    return json.dumps(
+        {
+            "status": "blocked",
+            "summary": f"Run stopped: budget exceeded ({exc.reason}).",
+            "blocked_reasons": [f"budget:{exc.reason}"],
+        }
+    )
+
+
+def _find_budget_exceeded(exc: BaseException | None) -> BudgetExceeded | None:
+    """Walk the exception chain looking for a wrapped :class:`BudgetExceeded`."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, BudgetExceeded):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
 
 
 def _capture_usage(ctx: ToolContext, response: Any) -> None:

@@ -17,11 +17,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from .. import ids
 from ..agent_spec import load_spec_file
-from ..bundle import Budget, TaskBundle
+from ..bundle import TaskBundle, budget_from_spec
 from ..curriculum.objective import Objective
 from ..skills import SkillRegistry
 from ..strands_tools import ToolContext, Workspace
@@ -41,7 +42,7 @@ def _load_bundle(args: argparse.Namespace) -> TaskBundle:
         objective_id=objective.id,
         objective=objective,
         agent_spec=spec,
-        budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
+        budget=budget_from_spec(spec),
     )
 
 
@@ -56,6 +57,7 @@ def run(args: argparse.Namespace) -> int:
         memory_query=bundle.memory_query,
     )
 
+    started = time.monotonic()
     try:
         raw = build_and_run(spec, bundle, ctx)
     except Exception as exc:  # noqa: BLE001 - surface any runtime failure as a result
@@ -66,6 +68,7 @@ def run(args: argparse.Namespace) -> int:
                 "blocked_reasons": ["runner_exception"],
             }
         )
+    runtime_seconds = time.monotonic() - started
 
     result = normalize_result(
         raw,
@@ -81,6 +84,18 @@ def run(args: argparse.Namespace) -> int:
         result.blocked_reasons.extend(
             f"denied:{d['reason']}" for d in ctx.denied_commands
         )
+
+    # Self-report observability so the host/evals never grade empty signals
+    # (ABOX-10). result.schema.json only allows numeric metrics, so the
+    # counters land there; the agent's own metrics keep precedence.
+    observability = ctx.observability()
+    for key in (
+        "tool_calls", "model_calls", "tokens_used", "memories_retrieved",
+    ):
+        result.metrics.setdefault(key, float(observability[key]))
+    result.metrics.setdefault("denied_commands", float(len(ctx.denied_commands)))
+    result.metrics.setdefault("skills_loaded", float(len(ctx.skills_loaded)))
+    result.metrics.setdefault("runtime_seconds", round(runtime_seconds, 3))
 
     result_path = Path(args.result)
     result_path.parent.mkdir(parents=True, exist_ok=True)
