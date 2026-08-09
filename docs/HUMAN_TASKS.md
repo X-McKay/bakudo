@@ -18,22 +18,14 @@ Treat each task as: **do the action → verify the acceptance check → tick it.
 
 ---
 
-## 1. Activate Python CI (cannot be automated — needs `workflows` permission)
+## 1. Activate Python CI — DONE (PR #26 + validation branch)
 
-The generated Python CI lives at `ci/python-ci.yml` because the automation
-lacks GitHub's `workflows` permission (verified: both git push and the
-contents API return 403 for workflow paths). A human must move it into place,
-replacing the legacy Rust workflow:
+The Python CI lives at `.github/workflows/ci.yml` (moved by c553243) and
+installs the full `[all,dev]` extras so the API/Temporal test surface actually
+runs (fixed on the 2026-08-09 validation branch).
 
-```bash
-git rm .github/workflows/ci.yml
-git mv ci/python-ci.yml .github/workflows/ci.yml
-git commit -m "ci: replace Rust workflow with Python CI"
-git push
-```
-
-- [ ] **Acceptance:** the PR shows the new `CI` workflow (ruff + mypy + pytest +
-      smoke) running and green; the legacy Rust job is gone.
+- [x] **Acceptance:** the `CI` workflow (ruff + mypy + pytest + smoke) runs
+      and is green; the legacy Rust job is gone.
 
 ---
 
@@ -47,8 +39,21 @@ cd infra && docker compose up -d
 # Temporal UI: http://localhost:8080   Control API: http://localhost:8000
 ```
 
-- [ ] **Postgres** reachable; `infra/postgres/init.sql` applied (the ledger
-      tables exist). Set `BAKUDO_POSTGRES_DSN`.
+- [x] **Postgres** reachable; `infra/postgres/init.sql` applied (the ledger
+      tables exist). Set `BAKUDO_POSTGRES_DSN`. *(Applied to the live cluster
+      2026-08-09; `pgcrypto` + `vector` extensions pre-created as admin.)*
+- [ ] **⚠ pgvector on the live server crashes the database.** The `vector`
+      0.8.2 extension on `postgresql-0` (bitnami, PG 18.3) dies with
+      **signal 4 (Illegal instruction)** on the first real vector operation,
+      taking the whole server into recovery (observed 2026-08-09 16:38 GMT;
+      likely a build/CPU mismatch, e.g. AVX-512 codegen on a node without it).
+      Until the extension binary is rebuilt for the node's CPU (or the image
+      is swapped for one with a matching pgvector build), do NOT run
+      semantic-memory writes/queries against the live DB — the worker wires
+      the pg store whenever `BAKUDO_POSTGRES_DSN` is set, so either fix the
+      extension or run the worker without memory-compaction workflows.
+      **Acceptance:** `tests/test_store_pg_live.py` passes against the live
+      DSN without the server crashing.
 - [ ] **Neo4j** reachable; `infra/neo4j/init.cypher` applied (constraints exist).
 - [ ] **Temporal** cluster reachable at `TEMPORAL_ADDRESS`; namespace created.
 - [ ] **Acceptance:** `bakudo-worker` connects and serves the task queues; the
@@ -76,9 +81,16 @@ mapping (spec open question §28.3).
 
 The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 
-- [ ] Install the `abox` binary on the worker host (see
-      https://github.com/X-McKay/abox).
-- [ ] Set `BAKUDO_SANDBOX=abox` (never `local` outside `BAKUDO_ENV=dev`).
+- [x] Install the `abox` binary on the worker host (see
+      https://github.com/X-McKay/abox). *(0.6.0 validated end-to-end
+      2026-08-09: offline + live-model runs through real microVMs.)*
+- [x] Set `BAKUDO_SANDBOX=abox` (never `local` outside `BAKUDO_ENV=dev`).
+- [ ] **Every target repo agents operate on needs its own `.abox/project.toml`**
+      with a prepare flow that installs the bakudo runner in-guest (vendor the
+      wheel: `pip install vendor/bakudo-*.whl[runtime]`), the `python-glibc`
+      profile, and scoped network domains for the model endpoints — then
+      `abox project trust` + `abox env warm` per repo. See
+      `.abox/` in this repo and the optfix fixture pattern for templates.
 - [ ] Define the abox sandbox profiles named in `abox/runner.py::PROFILES`
       (`explore-readonly`, `add-feature-python`, `optimize-python`, …) with the network bundles
       (`github-api`, `pypi-public`, `vllm-gateway`) and resource/diff limits.
