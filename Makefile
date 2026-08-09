@@ -1,4 +1,4 @@
-.PHONY: install lint type test check demo
+.PHONY: install lint type test check demo wheel
 
 install:
 	pip install -e ".[dev]"
@@ -19,3 +19,13 @@ check: lint type test
 
 demo:
 	bakudo demo
+
+# Build a vendorable wheel stamped with the git SHA (3.0.0.dev0+<sha>) so pip
+# treats every build as a distinct version — a refreshed vendor wheel in a
+# target repo then actually reinstalls instead of "already satisfied".
+wheel:
+	@sha=$$(git rev-parse --short HEAD); \
+	sed -i "s/^version = \"3\.0\.0.*\"/version = \"3.0.0.dev0+$$sha\"/" pyproject.toml; \
+	pip wheel . -w dist --no-deps -q; \
+	git checkout -- pyproject.toml; \
+	ls -t dist/bakudo-*.whl | head -1

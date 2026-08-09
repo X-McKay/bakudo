@@ -95,7 +95,9 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
       changes** — a stale worker-plane wheel can't parse newer bundles
       (observed live 2026-08-09; the runner now reports it as a failed result
       with `bundle_incompatible` instead of dying silently, but the run still
-      fails). A future improvement: automated version handshake at bundle load.
+      fails). Build vendor wheels with `make wheel` (SHA-stamped `3.0.0.dev0+<sha>`
+      versions) and use a force-reinstall prepare so refreshes always take
+      effect. A future improvement: automated version handshake at bundle load.
 - [ ] Define the abox sandbox profiles named in `abox/runner.py::PROFILES`
       (`explore-readonly`, `add-feature-python`, `optimize-python`, …) with the network bundles
       (`github-api`, `pypi-public`, `vllm-gateway`) and resource/diff limits.
