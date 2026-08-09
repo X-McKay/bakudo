@@ -55,6 +55,20 @@ print(json.dumps({{"{marker}": {{"before": before, "after": after}}}}))
 """
 
 
+def resolve_repo_path(repo: str, root: Path | str | None = None) -> Path:
+    """Resolve a bare repo name to a host path (mirrors AboxRunner.resolve_repo)."""
+    import os
+
+    if root is None:
+        env_root = os.environ.get("BAKUDO_REPO_ROOT")
+        root = Path(env_root) if env_root else Path.cwd()
+    root = Path(root)
+    candidate = root / repo
+    if (candidate / ".git").exists():
+        return candidate
+    return root
+
+
 def abox_bench_measure(
     repo: Path | str,
     *,

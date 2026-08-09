@@ -477,6 +477,80 @@ async def test_blocked_scout_without_followups_is_scout_failed(env, deps, monkey
     assert "halted at the tool-call ceiling" in out["reason"]
 
 
+def _optimize_scripted_sandbox(diff="--- a/dedupe.py\n+++ b/dedupe.py\n"):
+    def scripted(bundle):
+        out = stub_sandbox(bundle)
+        if "[optimize-scout]" in bundle.objective.title:
+            out.result["proposed_followups"] = ["use a set"]
+        else:
+            out.result["metrics"] = {
+                "bench_seconds_before": 10.0, "bench_seconds_after": 6.0,
+            }
+            out.result["tests_run"] = [{"command": "pytest -q", "status": "passed"}]
+            out.result["changed_files"] = ["dedupe.py"]
+            out.diff = diff
+        return out
+
+    return scripted
+
+
+def _optimize_input(_impl_mod):
+    from bakudo.temporal.shared import OptimizeInput
+
+    return OptimizeInput(
+        objective={
+            "id": "obj_OPT3", "type": "optimize", "repo": "bakudo",
+            "title": "opt", "acceptanceCriteria": ["All existing tests pass"],
+            "constraints": {"benchCommand": "python3 bench.py"},
+        },
+        scout_spec=_impl_mod.load_agent_spec("optimize-scout"),
+        attempt_spec=_impl_mod.load_agent_spec("optimize-attempt"),
+        max_rounds=1,
+        max_approaches=1,
+    )
+
+
+async def test_optimize_workflow_verifies_winner_bench(env, deps, monkeypatch):
+    """Issue #28 (workflow mirror): the winner's diff is independently
+    re-benched via activity before the workflow returns 'improved'."""
+    measures = []
+
+    def fake_measure(diff, bench_command):
+        measures.append((diff, bench_command))
+        return (10.0, 4.0)
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", _optimize_scripted_sandbox())
+    monkeypatch.setattr(_impl.DEPS, "bench_measure", fake_measure)
+
+    async with make_worker(
+        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        out = await env.client.execute_workflow(
+            OptimizationWorkflow.run, _optimize_input(_impl),
+            id="optimize-obj_OPT3", task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert out["status"] == "improved"
+    assert out["bench_verified"] is True
+    assert measures == [("--- a/dedupe.py\n+++ b/dedupe.py\n", "python3 bench.py")]
+
+
+async def test_optimize_workflow_rejects_unreproduced_winner(env, deps, monkeypatch):
+    monkeypatch.setattr(_impl.DEPS, "sandbox", _optimize_scripted_sandbox())
+    monkeypatch.setattr(_impl.DEPS, "bench_measure", lambda d, b: (10.0, 10.0))
+
+    async with make_worker(
+        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        out = await env.client.execute_workflow(
+            OptimizationWorkflow.run, _optimize_input(_impl),
+            id="optimize-obj_OPT3b", task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert out["status"] == "no-change"
+    assert any("verification" in fb for fb in out.get("feedback", []))
+
+
 # --- Continue-As-New must not kill in-flight runs (TMP-6) ---
 
 
