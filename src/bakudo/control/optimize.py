@@ -88,6 +88,25 @@ def attempt_objective(
     }
 
 
+def scout_run_failed(scout: dict[str, Any]) -> bool:
+    """True when a scout run must be treated as a *failure* (OPT-12, #27).
+
+    Failed phase/result or a missing result are failures. So is a ``blocked``
+    result with no ``proposed_followups``: the scout was halted (budget,
+    tool-call ceiling, denial breaker) before delivering hypotheses, which
+    must never masquerade as the "code is already optimal" success outcome.
+    A blocked scout that still delivered followups is usable. Shared by both
+    loop mirrors (``run_optimize_loop`` and ``OptimizationWorkflow``).
+    """
+    result = scout.get("result") or {}
+    if scout.get("phase") == "failed" or not result:
+        return True
+    status = result.get("status")
+    if status == "failed":
+        return True
+    return status == "blocked" and not result.get("proposed_followups")
+
+
 def _eligible(scorecard: dict[str, Any]) -> tuple[bool, str]:
     """Apply the hard gates to one attempt's scorecard."""
     if scorecard.get("safety_regressions", 0) > 0:
@@ -173,16 +192,15 @@ def load_role_spec(name: str, path: str | None = None) -> Any:
 
 
 def _scout_failed(scout: Any) -> bool:
-    """A scout run that produced no result, or a failed one, is a *failure* —
-    distinct from a successful scout that proposed nothing (OPT-12)."""
+    """Attr-shaped adapter over :func:`scout_run_failed` for pipeline results."""
     phase = getattr(scout, "phase", None)
-    if getattr(phase, "value", phase) == "failed":
-        return True
     result = getattr(scout, "result", None)
-    if result is None:
-        return True
-    status = getattr(result, "status", None)
-    return getattr(status, "value", status) == "failed"
+    return scout_run_failed(
+        {
+            "phase": getattr(phase, "value", phase),
+            "result": result.to_dict() if result is not None else None,
+        }
+    )
 
 
 def run_optimize_loop(

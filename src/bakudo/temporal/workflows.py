@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         attempt_objective,
         round_feedback,
         scout_objective,
+        scout_run_failed,
         select_winner,
     )
     from .activities import (
@@ -272,20 +273,18 @@ class OptimizationWorkflow:
                 inp.timeout_seconds,
             )
             scout_result = scout.get("result") or {}
-            if scout.get("phase") == "failed" or (
-                not scout_result or scout_result.get("status") == "failed"
-            ):
+            if scout_run_failed(scout):
                 # One retry, then a distinct failure outcome — an infra/model
-                # failure must never masquerade as "no-change" (OPT-12).
+                # failure (including a blocked scout that delivered no
+                # followups, issue #27) must never masquerade as "no-change"
+                # (OPT-12).
                 scout = await self._child_run(
                     scout_objective(inp.objective, feedback=feedback),
                     inp.scout_spec,
                     inp.timeout_seconds,
                 )
                 scout_result = scout.get("result") or {}
-                if scout.get("phase") == "failed" or (
-                    not scout_result or scout_result.get("status") == "failed"
-                ):
+                if scout_run_failed(scout):
                     self._phase = "scout-failed"
                     return {
                         "status": "scout-failed",

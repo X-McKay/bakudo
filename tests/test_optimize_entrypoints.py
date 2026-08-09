@@ -18,9 +18,10 @@ def test_cli_optimize_runs_offline_end_to_end(capsys, monkeypatch):
     )
     out = capsys.readouterr().out
     assert rc == 0
-    # The offline scout proposes nothing, and declining to invent work is a
-    # successful outcome — the loop must say so rather than fail.
-    assert "status      : no-change" in out
+    # The offline scout is *blocked* (no model) with no followups: since issue
+    # #27 that is a scout failure — it must not masquerade as the "code is
+    # already optimal" no-change outcome. The CLI still completes (rc 0).
+    assert "status      : scout-failed" in out
     assert "rounds used : 1" in out
 
 

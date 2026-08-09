@@ -202,3 +202,39 @@ def test_failed_scout_is_retried_once_then_proceeds():
     outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
     assert outcome["status"] == "improved"
     assert sandbox.failed_scout_calls == 1 and sandbox.scout_calls == 1  # retry ran
+
+
+# --- issue #27: a blocked scout with no followups is a failure, not "no-change"
+
+
+class BlockedScoutSandbox(ScriptedSandbox):
+    """Scout runs end blocked (budget/denials halt) with scripted followups."""
+
+    def __call__(self, bundle) -> AboxOutcome:
+        out = super().__call__(bundle)
+        if bundle.agent_spec.metadata.name == "optimize-scout":
+            out.result["status"] = "blocked"
+            out.result["blocked_reasons"] = ["budget:tool_calls"]
+        return out
+
+
+def test_blocked_scout_with_no_followups_is_scout_failed():
+    """Observed live: a wall-clock-blocked scout with empty followups read as
+    the 'code is already optimal' success outcome. It is a scout failure."""
+    sandbox = BlockedScoutSandbox(
+        [{"approaches": [], "metrics": []}, {"approaches": [], "metrics": []}]
+    )
+    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    assert outcome["status"] == "scout-failed"
+    assert outcome["status"] != "no-change"
+    assert sandbox.scout_calls == 2  # the one retry ran
+
+
+def test_blocked_scout_with_followups_is_still_usable():
+    """A halted scout that still delivered hypotheses feeds the attempts."""
+    sandbox = BlockedScoutSandbox(
+        [{"approaches": ["batch queries"], "metrics": [IMPROVED]}]
+    )
+    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    assert outcome["status"] == "improved"
+    assert sandbox.attempt_calls == 1

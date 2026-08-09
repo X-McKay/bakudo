@@ -436,6 +436,47 @@ async def test_crashed_optimize_attempt_becomes_feedback_not_failure(env, deps, 
     assert any("crash" in fb for fb in out.get("feedback", [])), out.get("feedback")
 
 
+async def test_blocked_scout_without_followups_is_scout_failed(env, deps, monkeypatch):
+    """Issue #27 loop hole (workflow mirror): a blocked scout with empty
+    followups must surface as scout-failed, never as 'no-change'."""
+    from bakudo.temporal.shared import OptimizeInput
+
+    def blocked_scout_sandbox(bundle):
+        out = stub_sandbox(bundle)
+        if "[optimize-scout]" in bundle.objective.title:
+            out.result["status"] = "blocked"
+            out.result["blocked_reasons"] = ["budget:tool_calls"]
+            out.result["summary"] = "halted at the tool-call ceiling"
+        return out
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", blocked_scout_sandbox)
+    scout_spec = _impl.load_agent_spec("optimize-scout")
+    attempt_spec = _impl.load_agent_spec("optimize-attempt")
+    assert scout_spec and attempt_spec
+
+    async with make_worker(
+        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        out = await env.client.execute_workflow(
+            OptimizationWorkflow.run,
+            OptimizeInput(
+                objective={
+                    "id": "obj_OPT2", "type": "optimize", "repo": "bakudo",
+                    "title": "opt", "constraints": {},
+                },
+                scout_spec=scout_spec,
+                attempt_spec=attempt_spec,
+                max_rounds=1,
+                max_approaches=2,
+            ),
+            id="optimize-obj_OPT2",
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert out["status"] == "scout-failed"
+    assert "halted at the tool-call ceiling" in out["reason"]
+
+
 # --- Continue-As-New must not kill in-flight runs (TMP-6) ---
 
 
