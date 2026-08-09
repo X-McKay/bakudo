@@ -70,6 +70,12 @@ tools:
 skills:
   - codebase-navigation@^1.0
 
+budget:
+  # Issue #27: a read-only scout needs a handful of reads and at most one
+  # bench run; past this ceiling it force-transitions to the report phase
+  # (observed live: a scout wandered within allowed commands to wall-clock).
+  maxToolCalls: 25
+
 outputContract:
   requiredFiles:
     - result.json

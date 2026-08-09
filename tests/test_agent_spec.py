@@ -85,6 +85,16 @@ def test_spec_budget_defaults_to_none():
     assert spec.budget is None
 
 
+@pytest.mark.parametrize("name", ["optimize-scout", "optimize-attempt"])
+def test_optimize_roles_declare_tool_call_ceilings(name):
+    """Issue #27: the optimize roles are bounded by maxToolCalls so a
+    wandering run force-transitions into the report phase with wall clock
+    to spare (observed live: a scout wandered until the VM kill)."""
+    spec = load_spec_file(AGENTS / f"{name}.yaml")
+    assert spec.budget is not None and spec.budget.max_tool_calls is not None
+    assert spec.budget.max_tool_calls <= 60
+
+
 def test_spec_budget_rejects_non_positive_ceiling(tmp_path):
     import yaml
 
