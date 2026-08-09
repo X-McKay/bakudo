@@ -220,6 +220,45 @@ async def test_completed_child_run_drains_meta_active_runs(env, deps):
         assert run.phase.value == "completed"
 
 
+# --- retry exhaustion leaves a terminal ledger record (TMP-10) ---
+
+
+async def test_activity_exhaustion_writes_terminal_failed_phase(env, deps, monkeypatch):
+    """When the sandbox activity exhausts its retries the workflow fails, but
+    the ledger must not be left at agent_running forever: a terminal failed
+    phase + finished event land first."""
+    from temporalio.client import WorkflowFailureError
+
+    def broken_sandbox(bundle):
+        raise RuntimeError("sandbox exploded")
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", broken_sandbox)
+    spec = _impl.load_agent_spec("explore")
+    assert spec is not None
+
+    from bakudo.temporal.shared import AgentRunInput
+
+    async with make_worker(env, [AgentRunWorkflow, EvalWorkflow]):
+        with pytest.raises(WorkflowFailureError):
+            await env.client.execute_workflow(
+                AgentRunWorkflow.run,
+                AgentRunInput(
+                    run_id="run_FAIL1",
+                    objective={"id": "obj_FAIL1", "type": "explore", "repo": "r",
+                               "title": "t"},
+                    agent_spec=spec,
+                ),
+                id="run-run_FAIL1",
+                task_queue=TASK_QUEUE_CONTROL,
+            )
+
+        run = deps.get_run("run_FAIL1")
+        assert run is not None
+        assert run.phase.value == "failed", f"ledger stuck at {run.phase.value!r}"
+        kinds = [e.event_type for e in deps.events("run_FAIL1")]
+        assert kinds.count("finished") == 1
+
+
 # --- Continue-As-New must not kill in-flight runs (TMP-6) ---
 
 

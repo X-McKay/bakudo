@@ -21,6 +21,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
     from ..control.optimize import (
@@ -117,6 +118,24 @@ class AgentRunWorkflow:
 
     @workflow.run
     async def run(self, inp: AgentRunInput) -> AgentRunOutput:
+        try:
+            return await self._run_lifecycle(inp)
+        except (ActivityError, ChildWorkflowError) as err:
+            # TMP-10: retry exhaustion must not leave the ledger stuck at a
+            # non-terminal phase forever — record a terminal failed phase (and
+            # its finished event) best-effort, then let the workflow fail.
+            cause = getattr(err, "cause", None) or err
+            try:
+                await self._advance(inp.run_id, "failed", {"error": str(cause)})
+            except (ActivityError, ChildWorkflowError) as persist_err:
+                workflow.logger.warning(
+                    "could not persist terminal failed phase for %s: %s",
+                    inp.run_id, persist_err,
+                )
+            await self._notify_meta(inp.run_id)
+            raise
+
+    async def _run_lifecycle(self, inp: AgentRunInput) -> AgentRunOutput:
         workflow_id = workflow.info().workflow_id
         await workflow.execute_activity(
             create_run, args=[inp, workflow_id], **_SHORT
