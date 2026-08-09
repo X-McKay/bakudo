@@ -46,6 +46,11 @@ def create_run(inp: AgentRunInput, workflow_id: str) -> dict:
     return _impl.create_run(inp, workflow_id)
 
 
+@_DEFN(name="load_agent_spec")
+def load_agent_spec(name: str) -> dict | None:
+    return _impl.load_agent_spec(name)
+
+
 @_DEFN(name="render_bundle")
 def render_bundle(inp: AgentRunInput) -> dict:
     return _impl.render_bundle(inp)
@@ -88,6 +93,7 @@ def collect_signals(inp: ObserveInput) -> list[dict]:
 
 ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     create_run,
+    load_agent_spec,
     render_bundle,
     run_sandbox,
     persist_run,

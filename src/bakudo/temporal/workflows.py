@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         collect_signals,
         compact_memories,
         create_run,
+        load_agent_spec,
         persist_run,
         render_bundle,
         run_agent_evolution,
@@ -48,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
         EvolutionInput,
         ObserveInput,
         OptimizeInput,
+        resolve_agent_name,
     )
 
 # Activities that touch the network/model get generous timeouts; ledger writes
@@ -272,6 +274,9 @@ class MetaState:
     processed_objectives: int = 0
     # Undispatched backlog carried across Continue-As-New boundaries.
     pending_backlog: list[dict[str, Any]] = field(default_factory=list)
+    # Objectives that could not be dispatched (no resolvable agent spec):
+    # parked with a reason instead of crashing the workflow task (TMP-3).
+    dead_letter: list[dict[str, Any]] = field(default_factory=list)
 
 
 # Continue-As-New after this many handled events keeps history bounded.
@@ -318,11 +323,16 @@ class MetaAgentWorkflow:
             "pending_promotions": len(self._state.pending_promotions),
             "budget_usd_remaining": self._state.budget_usd_remaining,
             "processed_objectives": self._state.processed_objectives,
+            "dead_letter": len(self._state.dead_letter),
         }
 
     @workflow.query
     def get_backlog(self) -> list[dict[str, Any]]:
         return list(self._backlog)
+
+    @workflow.query
+    def get_dead_letter(self) -> list[dict[str, Any]]:
+        return list(self._state.dead_letter)
 
     # --- Updates (validated state changes returning a result, section 11.4) ---
     @workflow.update
@@ -373,9 +383,35 @@ class MetaAgentWorkflow:
                 workflow.continue_as_new(self._state)
 
             objective = self._backlog.pop(0)
+            self._handled += 1
+
+            # Resolve the agent spec (TMP-3): an inline agent_spec wins, then
+            # suggestedAgents[0] / the per-type default, loaded via activity.
+            # Unresolvable objectives are dead-lettered, never crash the task.
+            spec = objective.get("agent_spec")
+            if not isinstance(spec, dict):
+                spec = None
+                agent_name = resolve_agent_name(objective)
+                if agent_name is not None:
+                    spec = await workflow.execute_activity(
+                        load_agent_spec, agent_name, **_SHORT
+                    )
+                if not isinstance(spec, dict):
+                    reason = (
+                        f"no agent spec resolvable (agent={agent_name!r}, "
+                        f"type={objective.get('type')!r}, "
+                        f"suggestedAgents={objective.get('suggestedAgents')!r})"
+                    )
+                    workflow.logger.warning(
+                        "dead-lettering objective %s: %s", objective.get("id"), reason
+                    )
+                    self._state.dead_letter.append(
+                        {"objective": objective, "reason": reason}
+                    )
+                    continue
+
             run_id = objective.get("run_id") or workflow.uuid4().hex
             self._state.active_runs.append(run_id)
-            self._handled += 1
 
             # Dispatch the run as a child workflow; the meta-agent does not block
             # on it — completion arrives via the run_completed signal.
@@ -384,7 +420,7 @@ class MetaAgentWorkflow:
                 AgentRunInput(
                     run_id=run_id,
                     objective=objective,
-                    agent_spec=objective["agent_spec"],
+                    agent_spec=spec,
                 ),
                 id=f"run-{run_id}",
             )

@@ -63,6 +63,38 @@ def test_persist_run_routes_non_terminal_and_terminal(spy):
     assert spy.finished and spy.finished[0][2] == {"ok": True}
 
 
+# --- TMP-3: agent spec loading for meta dispatch ---
+
+def test_load_agent_spec_from_repo_yaml(spy):
+    doc = _impl.load_agent_spec("explore")
+    assert doc is not None and doc["metadata"]["name"] == "explore"
+
+
+def test_load_agent_spec_unknown_returns_none(spy):
+    assert _impl.load_agent_spec("no-such-agent") is None
+
+
+def test_load_agent_spec_rejects_path_traversal(spy):
+    assert _impl.load_agent_spec("../agents/explore") is None
+
+
+def test_load_agent_spec_prefers_ledger_active_version(monkeypatch):
+    from bakudo.registry import InMemoryLedger
+    from bakudo.registry.records import AgentVersionRecord
+
+    ledger = InMemoryLedger()
+    ledger.upsert_agent_version(
+        AgentVersionRecord(
+            name="explore", version=7,
+            spec_yaml="metadata:\n  name: explore\n  version: 7\n",
+            status="active",
+        )
+    )
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    doc = _impl.load_agent_spec("explore")
+    assert doc == {"metadata": {"name": "explore", "version": 7}}
+
+
 # --- A4: fail-closed sandbox selection ---
 
 def _clear_sandbox_env(monkeypatch):
