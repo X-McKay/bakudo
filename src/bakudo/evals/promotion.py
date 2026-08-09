@@ -88,6 +88,57 @@ class PromotionDecision:
 DEFAULT_POLICY = PromotionPolicy()
 
 
+# decide() outcome -> candidate version status (design §1): the decision and
+# the version state machine move together.
+DECISION_TO_VERSION_STATUS: dict[Decision, str] = {
+    Decision.reject: "rejected",
+    Decision.needs_human: "pending_human",
+    Decision.canary: "canary",
+    Decision.promote: "active",
+}
+
+
+def parse_subject_version(subject_id: str) -> tuple[str, int] | None:
+    """Parse an ``agent_spec_version`` subject id (``name@version``)."""
+    name, _, version_s = subject_id.rpartition("@")
+    if not name or not version_s.isdigit():
+        return None
+    return name, int(version_s)
+
+
+def apply_decision(ledger, decision: PromotionDecision) -> PromotionDecision:
+    """Record a decision and transition the candidate version (design §1/§4).
+
+    reject -> ``rejected``; human-gated -> ``pending_human`` (with the PENDING
+    ``promotion_decisions`` row awaiting POST /promotions/{id}/approve);
+    auto-pass -> ``canary``. Non-version subjects (single runs) only record
+    the decision. ``ledger`` is duck-typed to avoid an import cycle with
+    :mod:`bakudo.registry.ledger`.
+    """
+    ledger.record_promotion(decision)
+    card = decision.scorecard
+    if card.subject_type != "agent_spec_version":
+        return decision
+    subject = parse_subject_version(card.subject_id)
+    if subject is None:
+        return decision
+    name, version = subject
+    set_status = getattr(ledger, "set_version_status", None)
+    if not callable(set_status):
+        return decision
+    try:
+        set_status(
+            name, version,
+            DECISION_TO_VERSION_STATUS[decision.decision],
+            reason=decision.rationale,
+        )
+    except KeyError:
+        # The subject version is not registered in this ledger (e.g. ad-hoc
+        # scorecards in dev tooling); the decision record still stands.
+        pass
+    return decision
+
+
 def routes_to_canary(run_id: str, percent: int) -> bool:
     """Deterministic canary routing (design 2026-08-09 §2, fixes OPT-6).
 

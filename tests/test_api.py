@@ -29,9 +29,15 @@ ROUTES = [
     ("POST", "/optimize", "/optimize", {"repo": "r", "title": "t"}),
     (
         "POST",
-        "/promotions/approve",
-        "/promotions/approve",
-        {"candidate": {"subject_type": "run", "subject_id": "r1", "overall_score": 0.9}},
+        "/promotions/{promotion_id}/approve",
+        "/promotions/prom_x/approve",
+        {"approved_by": "human", "comment": "looks good"},
+    ),
+    (
+        "POST",
+        "/promotions/{promotion_id}/reject",
+        "/promotions/prom_x/reject",
+        {"approved_by": "human", "comment": "too risky"},
     ),
     ("GET", "/promotions/pending", "/promotions/pending", None),
     ("GET", "/status", "/status", None),
@@ -263,16 +269,136 @@ def test_bad_queue_value_is_422():
     assert "ready" in detail  # names the valid queues
 
 
-def test_invalid_scorecard_payload_is_422():
-    client = TestClient(build_app())
-    resp = client.post("/promotions/approve", json={"candidate": {"overall_score": 3.0}})
-    assert resp.status_code == 422
-
-
 def test_invalid_objective_payload_is_422():
     client = TestClient(build_app())
     resp = client.post("/objectives", json={"repo": "r", "type": "not-a-type", "title": "t"})
     assert resp.status_code == 422
+
+
+# --- spec §25.3 / OPT-7/API-7: promotions resolve from the ledger, not the body ---
+
+
+def _tools_with_pending_promotion():
+    """A tools instance whose ledger holds a pending_human candidate."""
+    from bakudo.control import MetaAgentTools
+    from bakudo.evals.promotion import apply_decision, decide
+    from bakudo.evals.scorecard import Scorecard
+    from bakudo.registry.records import AgentVersionRecord
+
+    tools = MetaAgentTools()
+    for version, status in ((1, "active"), (2, "candidate")):
+        tools.ledger.upsert_agent_version(
+            AgentVersionRecord(
+                name="add-feature", version=version, status=status,
+                spec_yaml=f"metadata:\n  name: add-feature\n  version: {version}\n",
+            )
+        )
+
+    def card(score, subject_id):
+        return Scorecard(
+            subject_type="agent_spec_version", subject_id=subject_id,
+            overall_score=score, cases_total=30,
+            suites={"schema": score, "safety": score, "regression": score,
+                    "role-specific": score, "code": score},
+            passed_suites=["schema", "safety", "regression", "role-specific", "code"],
+        )
+
+    decision = decide(
+        card(0.9, "add-feature@2"), card(0.5, "add-feature@1"),
+        mutation_kinds=["new-secret-access"],
+    )
+    apply_decision(tools.ledger, decision)
+    return tools, decision
+
+
+def test_pending_promotions_come_from_the_ledger():
+    tools, decision = _tools_with_pending_promotion()
+    client = TestClient(build_app(tools))
+    pending = client.get("/promotions/pending").json()
+    assert [p["id"] for p in pending] == [decision.id]
+    assert pending[0]["status"] == "pending"
+    assert pending[0]["gated_mutations"] == ["new-secret-access"]
+
+
+def test_approve_promotion_transitions_candidate_to_canary():
+    tools, decision = _tools_with_pending_promotion()
+    client = TestClient(build_app(tools))
+    resp = client.post(
+        f"/promotions/{decision.id}/approve",
+        json={"approved_by": "al", "comment": "evals look good"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "approved"
+    assert body["approved_by"] == "al"
+    # The scorecard in the response is the LEDGER's, not caller-supplied.
+    assert body["scorecard"]["subject_id"] == "add-feature@2"
+    assert tools.ledger.get_agent_version("add-feature", 2).status == "canary"
+    assert client.get("/promotions/pending").json() == []
+
+
+def test_reject_promotion_transitions_candidate_to_rejected():
+    tools, decision = _tools_with_pending_promotion()
+    client = TestClient(build_app(tools))
+    resp = client.post(
+        f"/promotions/{decision.id}/reject",
+        json={"approved_by": "al", "comment": "too risky"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "rejected"
+    assert tools.ledger.get_agent_version("add-feature", 2).status == "rejected"
+
+
+def test_approve_promotion_ignores_caller_scorecards_and_mutations():
+    """OPT-7: fabricated scorecards/mutation_kinds in the body must not be
+    trusted — the ledger's stored decision is authoritative."""
+    tools, decision = _tools_with_pending_promotion()
+    client = TestClient(build_app(tools))
+    resp = client.post(
+        f"/promotions/{decision.id}/approve",
+        json={
+            "approved_by": "al", "comment": "ok",
+            "scorecard": {"overall_score": 1.0, "subject_id": "forged@9"},
+            "mutation_kinds": [],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["scorecard"]["subject_id"] == "add-feature@2"
+    assert resp.json()["gated_mutations"] == ["new-secret-access"]
+
+
+def test_approve_unknown_promotion_is_404():
+    client = TestClient(build_app())
+    resp = client.post(
+        "/promotions/prom_missing/approve", json={"approved_by": "al"}
+    )
+    assert resp.status_code == 404
+
+
+def test_approve_twice_is_409():
+    tools, decision = _tools_with_pending_promotion()
+    client = TestClient(build_app(tools))
+    first = client.post(
+        f"/promotions/{decision.id}/approve", json={"approved_by": "al"}
+    )
+    assert first.status_code == 200
+    second = client.post(
+        f"/promotions/{decision.id}/reject", json={"approved_by": "al"}
+    )
+    assert second.status_code == 409
+
+
+def test_old_bulk_approve_route_is_gone():
+    """The caller-supplied-scorecard route is REMOVED outright (approved
+    decision, no shim)."""
+    client = TestClient(build_app())
+    resp = client.post(
+        "/promotions/approve",
+        json={"candidate": {"subject_type": "run", "subject_id": "r1",
+                            "overall_score": 0.9}},
+    )
+    # /promotions/approve now only matches /promotions/{promotion_id}/... shapes.
+    assert resp.status_code in (404, 405)
 
 
 # --- reads still work with auth disabled ---

@@ -29,6 +29,8 @@ class FakeCursor:
         self._conn.executed.append((" ".join(sql.split()), params))
 
     def fetchone(self):
+        if self._conn.rows:
+            return self._conn.rows.pop(0)
         return None
 
     def fetchall(self):
@@ -36,12 +38,16 @@ class FakeCursor:
 
 
 class FakeConn:
-    """Records executed SQL; mimics the bits of psycopg.Connection we use."""
+    """Records executed SQL; mimics the bits of psycopg.Connection we use.
+
+    ``rows`` may be pre-loaded with tuples that successive ``fetchone`` calls
+    return (then ``None``)."""
 
     def __init__(self):
         self.executed = []
         self.closed = False
         self.thread = None
+        self.rows = []
 
     def cursor(self):
         self.thread = threading.current_thread().name
@@ -362,6 +368,70 @@ def test_promotions_reads_with_optional_status_filter():
     assert "where status = %s" not in selects[0][0]
     assert "where status = %s" in selects[1][0]
     assert selects[1][1] == ("pending",)
+
+
+def _promotion_row(status="pending"):
+    scorecard = {
+        "subject_type": "agent_spec_version", "subject_id": "add-feature@2",
+        "overall_score": 0.9,
+    }
+    return (
+        "prom_T1", "needs_human", "needs a human", scorecard, status,
+        None, None, None, ["new-secret-access"], True,
+    )
+
+
+def test_resolve_promotion_updates_row_and_transitions_version():
+    conn = FakeConn()
+    conn.rows = [_promotion_row()]
+    ledger = PostgresLedger(conn)
+    resolved = ledger.resolve_promotion(
+        "prom_T1", approved=True, approved_by="al", comment="ok"
+    )
+    assert resolved.status == "approved"
+    assert resolved.approved_by == "al"
+
+    update_sql, update_params = next(
+        (s, p) for s, p in conn.executed if "update promotion_decisions" in s
+    )
+    assert "resolved_at = now()" in update_sql
+    assert update_params[:3] == ("approved", "al", "ok")
+    assert update_params[-1] == "prom_T1"
+
+    version_sql, version_params = next(
+        (s, p) for s, p in conn.executed if "update agent_spec_versions" in s
+    )
+    assert version_params[0] == "canary"
+    assert version_params[2:] == ("add-feature", 2)
+    assert any("insert into outbox" in s for s, _ in conn.executed)
+
+
+def test_resolve_promotion_reject_transitions_version_to_rejected():
+    conn = FakeConn()
+    conn.rows = [_promotion_row()]
+    PostgresLedger(conn).resolve_promotion(
+        "prom_T1", approved=False, approved_by="al", comment="no"
+    )
+    version_params = next(
+        p for s, p in conn.executed if "update agent_spec_versions" in s
+    )
+    assert version_params[0] == "rejected"
+
+
+def test_resolve_promotion_unknown_id_raises():
+    with pytest.raises(KeyError):
+        PostgresLedger(FakeConn()).resolve_promotion(
+            "prom_NOPE", approved=True, approved_by="al"
+        )
+
+
+def test_resolve_promotion_already_resolved_raises():
+    conn = FakeConn()
+    conn.rows = [_promotion_row(status="approved")]
+    with pytest.raises(ValueError):
+        PostgresLedger(conn).resolve_promotion(
+            "prom_T1", approved=True, approved_by="al"
+        )
 
 
 def test_record_eval_id_is_deterministic_from_subject_and_suite():

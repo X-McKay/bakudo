@@ -44,6 +44,14 @@ class Ledger(Protocol):
     def eval_results(self, subject_id: str) -> list[EvalResult]: ...
     def record_promotion(self, decision: PromotionDecision) -> None: ...
     def promotions(self, status: str | None = None) -> list[PromotionDecision]: ...
+    def resolve_promotion(
+        self,
+        promotion_id: str,
+        *,
+        approved: bool,
+        approved_by: str,
+        comment: str | None = None,
+    ) -> PromotionDecision: ...
 
 
 class InMemoryLedger:
@@ -190,3 +198,56 @@ class InMemoryLedger:
 
     def promotions(self, status: str | None = None) -> list[PromotionDecision]:
         return [p for p in self._promotions if status is None or p.status == status]
+
+    def resolve_promotion(
+        self,
+        promotion_id: str,
+        *,
+        approved: bool,
+        approved_by: str,
+        comment: str | None = None,
+    ) -> PromotionDecision:
+        """Resolve a PENDING human-gated decision (design §4, spec §25.3).
+
+        Approve moves the candidate version ``pending_human -> canary``;
+        reject moves it to ``rejected``. The scorecard and gated mutations are
+        the STORED ones — nothing from the caller is trusted beyond identity
+        and commentary.
+        """
+        decision = next(
+            (p for p in self._promotions if p.id == promotion_id), None
+        )
+        if decision is None:
+            raise KeyError(f"Unknown promotion: {promotion_id}")
+        if decision.status != "pending":
+            raise ValueError(
+                f"Promotion {promotion_id} already resolved (status={decision.status})"
+            )
+        decision.status = "approved" if approved else "rejected"
+        decision.approved_by = approved_by
+        decision.comment = comment
+        decision.resolved_at = datetime.now(UTC)
+
+        self._transition_decision_subject(decision, approved)
+        return decision
+
+    def _transition_decision_subject(
+        self, decision: PromotionDecision, approved: bool
+    ) -> None:
+        from ..evals.promotion import parse_subject_version
+
+        card = decision.scorecard
+        if card.subject_type != "agent_spec_version":
+            return
+        subject = parse_subject_version(card.subject_id)
+        if subject is None:
+            return
+        verb = "approved" if approved else "rejected"
+        try:
+            self.set_version_status(
+                subject[0], subject[1],
+                "canary" if approved else "rejected",
+                reason=f"human {verb} by {decision.approved_by}",
+            )
+        except KeyError:
+            pass

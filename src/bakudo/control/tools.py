@@ -16,7 +16,7 @@ from .. import ids
 from ..agent_spec import AgentSpec, parse_spec
 from ..curriculum import Objective, ObjectiveQueues, QueueName
 from ..evals import EvalContext, Scorecard, decide, run_default_suite
-from ..evals.promotion import PromotionPolicy, routes_to_canary
+from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
 from ..memory import InMemoryStore, MemoryItem, MemoryRejected, MemoryStore
 from ..registry import InMemoryLedger, RunPhase
 from ..registry.ledger import Ledger
@@ -193,7 +193,10 @@ class MetaAgentTools:
         decision = decide(
             candidate, baseline, policy=PromotionPolicy(), mutation_kinds=mutation_kinds or []
         )
-        self.ledger.record_promotion(decision)
+        # Record the decision AND move the candidate version through the §1
+        # state machine (reject -> rejected, human gate -> pending_human,
+        # auto-pass -> canary), fixing OPT-7's dead-end decisions.
+        apply_decision(self.ledger, decision)
         return decision.to_dict()
 
     def archive_candidate(self, agent: str, reason: str) -> dict[str, str]:

@@ -23,7 +23,7 @@ from ..curriculum.objective import Objective
 from ..evals import EvalContext, Scorecard, decide, run_suite
 from ..evals.corpus import CaseRun, load_corpus
 from ..evals.evolution import evolve_agent
-from ..evals.promotion import PromotionPolicy, routes_to_canary
+from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
 from ..memory.compaction import compact
 from ..memory.semantic import SemanticMemoryStore
 from ..registry import InMemoryLedger, RunPhase, RunRecord
@@ -265,6 +265,8 @@ def decide_promotion(inp: PromotionInput) -> dict:
         candidate, baseline,
         policy=PromotionPolicy(), mutation_kinds=inp.mutation_kinds,
     )
+    # Record + transition the candidate version through the §1 state machine.
+    apply_decision(DEPS.ledger, decision)
     return decision.to_dict()
 
 
@@ -297,9 +299,9 @@ def run_agent_evolution(inp: EvolutionInput) -> dict:
     _, cases = load_corpus(inp.corpus_path)
     outcome = evolve_agent(baseline, candidate, cases, _run_case)
 
-    record_promotion = getattr(DEPS.ledger, "record_promotion", None)
-    if callable(record_promotion):
-        record_promotion(outcome.decision)
+    if callable(getattr(DEPS.ledger, "record_promotion", None)):
+        # Record + transition the candidate version (design §1/§4).
+        apply_decision(DEPS.ledger, outcome.decision)
     return {
         "decision": outcome.decision.to_dict(),
         "baseline_scorecard": outcome.baseline.model_dump(mode="json"),

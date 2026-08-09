@@ -439,3 +439,55 @@ class PostgresLedger:
                 (status,),
             )
         return [self._promotion_row(r) for r in rows]
+
+    def resolve_promotion(
+        self,
+        promotion_id: str,
+        *,
+        approved: bool,
+        approved_by: str,
+        comment: str | None = None,
+    ) -> PromotionDecision:
+        """Resolve a PENDING human-gated decision (design §4, spec §25.3).
+
+        The stored row is authoritative: scorecard and gated mutations come
+        from the ledger, never the caller. Approve moves the candidate version
+        ``pending_human -> canary``; reject moves it to ``rejected``.
+        """
+        from datetime import UTC, datetime
+
+        row = self._one(
+            f"select {self._PROMOTION_COLUMNS} from promotion_decisions where id = %s",
+            (promotion_id,),
+        )
+        if row is None:
+            raise KeyError(f"Unknown promotion: {promotion_id}")
+        decision = self._promotion_row(row)
+        if decision.status != "pending":
+            raise ValueError(
+                f"Promotion {promotion_id} already resolved (status={decision.status})"
+            )
+
+        decision.status = "approved" if approved else "rejected"
+        decision.approved_by = approved_by
+        decision.comment = comment
+        decision.resolved_at = datetime.now(UTC)
+        self._exec(
+            "update promotion_decisions set status = %s, approved_by = %s, "
+            "comment = %s, resolved_at = now() where id = %s",
+            (decision.status, approved_by, comment, promotion_id),
+        )
+
+        from ..evals.promotion import parse_subject_version
+
+        card = decision.scorecard
+        if card.subject_type == "agent_spec_version":
+            subject = parse_subject_version(card.subject_id)
+            if subject is not None:
+                verb = "approved" if approved else "rejected"
+                self.set_version_status(
+                    subject[0], subject[1],
+                    "canary" if approved else "rejected",
+                    reason=f"human {verb} by {approved_by}",
+                )
+        return decision

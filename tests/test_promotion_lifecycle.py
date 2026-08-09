@@ -177,6 +177,116 @@ def test_promotion_decision_defaults_are_pending():
     assert d.status == "pending"
 
 
+# --- decide() outcomes drive version transitions (design §1/§4, OPT-7) ---
+
+
+def _ledger_with_candidate(version=2):
+    ledger = InMemoryLedger()
+    ledger.upsert_agent_version(_record(version=1, status="active"))
+    ledger.upsert_agent_version(_record(version=version, status="candidate"))
+    return ledger
+
+
+def test_apply_decision_reject_transitions_candidate_to_rejected():
+    from bakudo.evals.promotion import apply_decision
+
+    ledger = _ledger_with_candidate()
+    decision = decide(_card(safety=1), _card(0.5, subject_id="add-feature@1"))
+    apply_decision(ledger, decision)
+
+    assert ledger.get_agent_version("add-feature", 2).status == "rejected"
+    assert ledger.promotions(status="rejected")[0].id == decision.id
+    assert ledger.active_version("add-feature").version == 1
+
+
+def test_apply_decision_human_gate_parks_candidate_pending_human():
+    from bakudo.evals.promotion import apply_decision
+
+    ledger = _ledger_with_candidate()
+    decision = decide(_card(), _card(0.5), mutation_kinds=["new-secret-access"])
+    apply_decision(ledger, decision)
+
+    version = ledger.get_agent_version("add-feature", 2)
+    assert version.status == "pending_human"
+    pending = ledger.promotions(status="pending")
+    assert [p.id for p in pending] == [decision.id]
+    assert pending[0].gated_mutations == ["new-secret-access"]
+
+
+def test_apply_decision_auto_pass_transitions_candidate_to_canary():
+    from bakudo.evals.promotion import apply_decision
+
+    ledger = _ledger_with_candidate()
+    decision = decide(_card(0.9), _card(0.5, subject_id="add-feature@1"))
+    apply_decision(ledger, decision)
+
+    assert ledger.get_agent_version("add-feature", 2).status == "canary"
+    assert ledger.canary_version("add-feature").version == 2
+    assert ledger.active_version("add-feature").version == 1
+
+
+def test_apply_decision_tolerates_non_version_subjects():
+    from bakudo.evals.promotion import apply_decision
+
+    ledger = InMemoryLedger()
+    card = _card(subject_id="run_X")
+    card.subject_type = "run"
+    decision = decide(card, None)
+    apply_decision(ledger, decision)  # must not raise
+    assert len(ledger.promotions()) == 1
+
+
+# --- human resolution of pending promotions (design §4, API-7) ---
+
+
+def _pending_promotion(ledger):
+    from bakudo.evals.promotion import apply_decision
+
+    decision = decide(_card(), _card(0.5), mutation_kinds=["new-secret-access"])
+    apply_decision(ledger, decision)
+    return decision
+
+
+def test_resolve_promotion_approve_moves_version_to_canary():
+    ledger = _ledger_with_candidate()
+    decision = _pending_promotion(ledger)
+
+    resolved = ledger.resolve_promotion(
+        decision.id, approved=True, approved_by="al", comment="scorecard is clean"
+    )
+    assert resolved.status == "approved"
+    assert resolved.approved_by == "al"
+    assert resolved.comment == "scorecard is clean"
+    assert resolved.resolved_at is not None
+    assert ledger.get_agent_version("add-feature", 2).status == "canary"
+    assert ledger.promotions(status="pending") == []
+
+
+def test_resolve_promotion_reject_moves_version_to_rejected():
+    ledger = _ledger_with_candidate()
+    decision = _pending_promotion(ledger)
+
+    resolved = ledger.resolve_promotion(
+        decision.id, approved=False, approved_by="al", comment="too risky"
+    )
+    assert resolved.status == "rejected"
+    assert ledger.get_agent_version("add-feature", 2).status == "rejected"
+
+
+def test_resolve_promotion_unknown_id_raises_key_error():
+    ledger = _ledger_with_candidate()
+    with pytest.raises(KeyError):
+        ledger.resolve_promotion("prom_NOPE", approved=True, approved_by="al")
+
+
+def test_resolve_promotion_twice_raises_value_error():
+    ledger = _ledger_with_candidate()
+    decision = _pending_promotion(ledger)
+    ledger.resolve_promotion(decision.id, approved=True, approved_by="al")
+    with pytest.raises(ValueError):
+        ledger.resolve_promotion(decision.id, approved=False, approved_by="al")
+
+
 # --- deterministic canary routing (design §2) ---
 
 

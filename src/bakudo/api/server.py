@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from ..control import MetaAgentTools
 from ..curriculum import QueueName
@@ -48,6 +48,18 @@ class OptimizeIn(BaseModel):
 class RunIn(BaseModel):
     objective_id: str
     agent: str
+
+
+class PromotionResolutionIn(BaseModel):
+    """Body of POST /promotions/{promotion_id}/approve|reject (spec §25.3).
+
+    Deliberately identity-and-commentary only: scorecards and mutation kinds
+    are read from the LEDGER's stored decision, never from the request
+    (OPT-7/API-7). Unknown extra fields are ignored by pydantic.
+    """
+
+    approved_by: str
+    comment: str | None = None
 
 
 def _resolve_sandbox() -> Callable[..., Any]:
@@ -210,20 +222,44 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"objective_id": objective.id, **outcome}
 
-    @app.post("/promotions/approve")
-    def approve_promotion(
-        candidate: dict[str, Any], baseline: dict[str, Any] | None = None
+    def _resolve_promotion(
+        promotion_id: str, approved: bool, body: PromotionResolutionIn
     ) -> dict[str, Any]:
+        """Resolve a pending decision against the LEDGER's stored record."""
         try:
-            return tools.promote_candidate(candidate, baseline)
-        except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            decision = tools.ledger.resolve_promotion(
+                promotion_id,
+                approved=approved,
+                approved_by=body.approved_by,
+                comment=body.comment,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return decision.to_dict()
+
+    @app.post("/promotions/{promotion_id}/approve")
+    def approve_promotion(
+        promotion_id: str, body: PromotionResolutionIn
+    ) -> dict[str, Any]:
+        """Approve a pending promotion: candidate goes pending_human -> canary
+        (spec §25.3). The old bulk /promotions/approve route that trusted
+        caller-supplied scorecards is REMOVED (OPT-7/API-7)."""
+        return _resolve_promotion(promotion_id, True, body)
+
+    @app.post("/promotions/{promotion_id}/reject")
+    def reject_promotion(
+        promotion_id: str, body: PromotionResolutionIn
+    ) -> dict[str, Any]:
+        """Reject a pending promotion: candidate goes pending_human -> rejected."""
+        return _resolve_promotion(promotion_id, False, body)
 
     @app.get("/promotions/pending")
     def pending_promotions() -> list[dict[str, Any]]:
-        """Promotion decisions awaiting a human gate (spec sections 19.2, 26)."""
-        promotions: list = getattr(tools.ledger, "promotions", lambda: [])()
-        return [p.to_dict() for p in promotions if p.requires_human]
+        """Promotion decisions awaiting a human gate (spec sections 19.2, 26),
+        read from the durable ledger (API-6)."""
+        return [p.to_dict() for p in tools.ledger.promotions(status="pending")]
 
     @app.get("/status")
     def status() -> dict[str, Any]:
