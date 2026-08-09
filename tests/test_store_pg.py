@@ -230,6 +230,19 @@ def test_write_rejects_exact_repeat_of_confident_memory() -> None:
         store.write_candidate(make_item(confidence=0.8))
 
 
+def test_repeat_check_is_scoped_to_the_candidate_scope() -> None:
+    """The same fact recorded for repo A must not block repo B: scope-filtered
+    recall would never return the repo-A row anyway (MEM-11)."""
+    conn = FakeConn()
+    store = make_store(conn)
+
+    store.write_candidate(make_item())
+
+    (sql, params) = conn.statements("lower(trim(content))")[0]
+    assert "scope @> %s::jsonb" in sql
+    assert '{"repo": "payments-api"}' in params
+
+
 def test_write_rejects_near_duplicate_of_more_confident_memory() -> None:
     conn = FakeConn()
     store = make_store(conn)

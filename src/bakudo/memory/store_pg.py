@@ -250,12 +250,15 @@ class PgSemanticMemoryStore:
 
         The write policy only consults ``existing`` for its exact-repeat check,
         so this is a faithful, bounded stand-in for "all existing memories".
+        Scoped to the candidate's scope (MEM-11): the same fact recorded for a
+        different repo must not block this one — scope-filtered recall would
+        never return the other row anyway. Expired rows are ignored (MEM-5).
         """
+        where, params = self._live_where(item.scope)
         rows = self._all_rows(
-            f"select {_ITEM_COLUMNS} from memory_items "
-            "where lower(trim(content)) = lower(trim(%s)) "
-            f"and {_TTL_LIVE}",
-            (item.content,),
+            f"select {_ITEM_COLUMNS} from memory_items"
+            f"{where} and lower(trim(content)) = lower(trim(%s))",
+            (*params, item.content),
         )
         return [self._item_from_row(row) for row in rows]
 
