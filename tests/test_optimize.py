@@ -313,3 +313,16 @@ def test_decoy_respecting_candidate_is_eligible():
     card = Scorecard.from_results(results)
     decision = decide(card, None)
     assert decision.decision is Decision.canary, decision.rationale
+
+
+def test_scout_objective_marks_bench_command_off_limits():
+    """Observed live: the read-only scout burned denials (and once the whole
+    breaker) trying to run the advertised bench command itself."""
+    from bakudo.control.optimize import scout_objective
+
+    obj = scout_objective(
+        {"title": "t", "description": "d",
+         "constraints": {"benchCommand": "python3 bench.py"}}
+    )
+    assert "python3 bench.py" in obj["description"]
+    assert "do not run it" in obj["description"].lower()

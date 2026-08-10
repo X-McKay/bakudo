@@ -51,7 +51,13 @@ def scout_objective(
     if constraints.get("targetPaths"):
         lines.append(f"Target paths: {', '.join(constraints['targetPaths'])}")
     if constraints.get("benchCommand"):
-        lines.append(f"Benchmark command: {constraints['benchCommand']}")
+        # The scout's read-only policy denies the bench; advertising it as
+        # runnable burned policy denials in every live cycle.
+        lines.append(
+            f"Benchmark command (context only — your read-only policy denies "
+            f"it, do NOT run it; the attempt agents will): "
+            f"{constraints['benchCommand']}"
+        )
     lines.append(
         "Propose up to N distinct optimization approaches as proposedFollowups, "
         "one hypothesis per entry: what to change, the expected effect "
@@ -198,7 +204,13 @@ def round_feedback(candidates: list[dict[str, Any]]) -> list[str]:
         scorecard = candidate.get("scorecard")
         title = (result.get("summary") or "attempt")[:120]
         if not scorecard or result.get("status") != "success":
-            feedback.append(f"'{title}': run {result.get('status', 'failed')}")
+            # Surface the sandbox error for result-less runs — 'run failed'
+            # alone made live cycles undiagnosable.
+            detail = (candidate.get("error") or "")[-200:]
+            feedback.append(
+                f"'{title}': run {result.get('status', 'failed')}"
+                + (f" ({detail})" if detail else "")
+            )
             continue
         ok, reason = _eligible(scorecard)
         if not ok:
@@ -316,6 +328,7 @@ def run_optimize_loop(
                     # The agent branch does not survive sandbox cleanup, so the
                     # collected diff is the only re-benchable artifact (#28).
                     "diff": attempt.outcome.diff,
+                    "error": attempt.outcome.error or attempt.outcome.stderr[-500:],
                     "result": attempt.result.to_dict() if attempt.result else None,
                     "scorecard": (
                         attempt.scorecard.model_dump(mode="json")

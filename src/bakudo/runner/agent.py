@@ -71,10 +71,20 @@ def build_model(spec: AgentSpec) -> Any:
     (host-side credential injection, spec section 19.4) and use Strands'
     OpenAI-compatible provider.
     """
+    import httpx
     from strands.models.openai import OpenAIModel  # type: ignore
 
     base_url = _resolve_base_url(spec.model.base_url_ref)
     api_key = os.environ.get("VLLM_API_KEY", "not-needed")
+    # Transient in-guest ConnectTimeouts to the model endpoint killed two
+    # live optimize cycles (fresh-VM probes were 5/5 clean — the flake is
+    # rare but fatal at SDK-default 2 retries / 5s connect).
+    client_args: dict[str, Any] = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "max_retries": 5,
+        "timeout": httpx.Timeout(600.0, connect=15.0),
+    }
     params: dict[str, Any] = {
         "temperature": spec.model.temperature,
         "max_tokens": spec.model.max_tokens,
@@ -87,7 +97,7 @@ def build_model(spec: AgentSpec) -> Any:
             "chat_template_kwargs": {"enable_thinking": spec.model.enable_thinking}
         }
     return OpenAIModel(
-        client_args={"base_url": base_url, "api_key": api_key},
+        client_args=client_args,
         model_id=spec.model.model_id,
         params=params,
     )

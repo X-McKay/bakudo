@@ -424,3 +424,16 @@ def test_denials_trip_the_circuit_breaker(tmp_path):
     with pytest.raises(DenialsExhausted):
         tools["run-command"](command="echo hi")  # allowlisted, but too late
     assert len(ctx.denied_commands) == 5  # halt is not itself a denial
+
+
+def test_build_model_configures_retries_and_connect_timeout(monkeypatch):
+    """Transient guest->vLLM ConnectTimeouts killed two live cycles: the
+    client must retry more than the SDK default and allow slow connects."""
+    pytest.importorskip("strands")
+    from bakudo.runner.agent import build_model
+
+    monkeypatch.setenv("VLLM_BASE_URL", "https://llm.example/v1")
+    spec = load_spec_file(AGENTS / "optimize-attempt.yaml")
+    client_args = build_model(spec).client_args
+    assert client_args["max_retries"] >= 5
+    assert client_args["timeout"].connect >= 15.0
