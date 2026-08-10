@@ -24,7 +24,6 @@ Failure semantics (no silent pass, no fabricated abstention):
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .. import ids
@@ -44,10 +43,9 @@ _MAX_DIFF_CHARS = 12_000
 
 def _load_critic_spec() -> AgentSpec:
     from ..agent_spec import load_spec_file
+    from ..paths import agents_dir
 
-    return load_spec_file(
-        Path(__file__).resolve().parents[3] / "agents" / "critic.yaml"
-    )
+    return load_spec_file(agents_dir() / "critic.yaml")
 
 
 def _review_objective(ctx: EvalContext):

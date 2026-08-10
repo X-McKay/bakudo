@@ -1,0 +1,89 @@
+"""API-12 regression guard: the wheel is a complete, runnable install.
+
+Builds the wheel, installs it into a throwaway venv, and runs the CLI from an
+empty working directory — proving ``bakudo demo`` / ``optimize`` no longer
+depend on the source tree (which only exists in dev checkouts).
+
+Opt-in because it builds a wheel and creates a venv (`make wheel-smoke`):
+
+    BAKUDO_WHEEL_TESTS=1 pytest tests/test_wheel_install.py
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import venv
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("BAKUDO_WHEEL_TESTS") != "1",
+    reason="wheel-install smoke test; set BAKUDO_WHEEL_TESTS=1 (make wheel-smoke)",
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run(argv, capture_output=True, text=True, timeout=600, **kwargs)
+
+
+@pytest.fixture(scope="module")
+def wheel_venv(tmp_path_factory) -> Path:
+    """A throwaway venv with the freshly built wheel installed."""
+    tmp = tmp_path_factory.mktemp("wheel-install")
+    dist = tmp / "dist"
+    built = _run(
+        [sys.executable, "-m", "pip", "wheel", str(REPO_ROOT), "-w", str(dist), "--no-deps", "-q"]
+    )
+    assert built.returncode == 0, built.stderr
+    wheel = next(dist.glob("bakudo-*.whl"))
+
+    venv_dir = tmp / "venv"
+    # symlinks=True matches the `python -m venv` CLI default on POSIX; the
+    # in-process default (copies) breaks relocatable interpreters whose
+    # libpython lives next to the real binary (e.g. mise installs).
+    venv.create(venv_dir, with_pip=True, symlinks=(os.name == "posix"))
+    installed = _run([str(venv_dir / "bin" / "pip"), "install", "-q", str(wheel)])
+    assert installed.returncode == 0, installed.stderr
+    return venv_dir
+
+
+@pytest.fixture()
+def clean_cwd(tmp_path, monkeypatch) -> Path:
+    """An empty cwd + env so the source tree cannot leak into the run."""
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setenv("BAKUDO_OFFLINE", "1")
+    return tmp_path
+
+
+def test_wheel_packages_the_seed_agents(wheel_venv: Path, clean_cwd: Path):
+    listed = _run(
+        [
+            str(wheel_venv / "bin" / "python"),
+            "-c",
+            "from bakudo.paths import agents_dir; "
+            "print(sorted(p.stem for p in agents_dir().glob('*.yaml')))",
+        ],
+        cwd=clean_cwd,
+    )
+    assert listed.returncode == 0, listed.stderr
+    for name in ("add-feature", "critic", "explore", "optimize-attempt", "optimize-scout", "qa"):
+        assert name in listed.stdout
+
+
+def test_wheel_bakudo_demo_runs_offline(wheel_venv: Path, clean_cwd: Path):
+    # Explicit venv path: a stale `bakudo` elsewhere on PATH must not win.
+    demo = _run([str(wheel_venv / "bin" / "bakudo"), "demo"], cwd=clean_cwd)
+    assert demo.returncode == 0, demo.stderr
+    assert "run_id" in demo.stdout
+    assert "phase" in demo.stdout
+
+
+def test_wheel_bakudo_optimize_help(wheel_venv: Path, clean_cwd: Path):
+    result = _run([str(wheel_venv / "bin" / "bakudo"), "optimize", "--help"], cwd=clean_cwd)
+    assert result.returncode == 0, result.stderr
+    assert "--repo" in result.stdout

@@ -11,7 +11,6 @@ import logging
 import os
 import secrets
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -75,19 +74,17 @@ def _resolve_sandbox() -> Callable[..., Any]:
 
 
 def _register_repo_agent_specs(tools: MetaAgentTools) -> None:
-    """Register the repo's seed agents (``agents/*.yaml``) at startup with the
-    same loader the CLI uses, so ``POST /runs`` resolves them by name and
+    """Register the seed agents (``agents/*.yaml``) at startup with the same
+    loader the CLI uses, so ``POST /runs`` resolves them by name and
     'Unknown agent' only means a genuinely unknown name (API-8).
 
-    Source-tree-relative like the CLI loaders; installs without an ``agents/``
-    directory register nothing (API-12 tracks that packaging gap).
+    Resolved via :func:`bakudo.paths.agents_dir`, which works from both a
+    source checkout and a wheel install (API-12).
     """
     from ..agent_spec import load_spec_file
+    from ..paths import agents_dir
 
-    agents_dir = Path(__file__).resolve().parents[3] / "agents"
-    if not agents_dir.is_dir():  # pragma: no cover - wheel installs
-        return
-    for spec_path in sorted(agents_dir.glob("*.yaml")):
+    for spec_path in sorted(agents_dir().glob("*.yaml")):
         tools.register_agent_spec(load_spec_file(spec_path))
 
 

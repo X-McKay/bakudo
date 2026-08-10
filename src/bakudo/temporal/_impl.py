@@ -10,9 +10,8 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from .. import ids
+from .. import ids, paths
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome, AboxRunner
 from ..agent_spec import AgentSpec, parse_spec
@@ -206,7 +205,7 @@ def load_agent_spec(name: str, run_id: str | None = None) -> dict | None:
     # Repo seed specs; reject anything that is not a bare agent name.
     if not name or "/" in name or "\\" in name or ".." in name:
         return None
-    path = Path(__file__).resolve().parents[3] / "agents" / f"{name}.yaml"
+    path = paths.agents_dir() / f"{name}.yaml"
     if not path.is_file():
         return None
     doc = yaml.safe_load(path.read_text())
