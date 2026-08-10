@@ -76,6 +76,27 @@ def test_compaction_purges_expired_rows_when_store_supports_it():
     compact(result, SemanticMemoryStore(), repo="r")
 
 
+def test_compaction_drains_the_graph_mirror_outbox_when_supported():
+    """Compaction is also the janitor for pending graph-mirror ops (MEM-3):
+    stores exposing flush_graph_mirror() (the Pg store) get their backlog
+    delivered even if no further writes arrive."""
+    result = RunResult.model_validate({
+        "run_id": "run_X", "agent": "explore@1", "objective_id": "obj_X",
+        "status": "success", "summary": "s", "memories_to_write": [],
+    })
+
+    class FlushingStore(SemanticMemoryStore):
+        flushed = 0
+
+        def flush_graph_mirror(self) -> int:
+            self.flushed += 1
+            return 0
+
+    store = FlushingStore()
+    compact(result, store, repo="r")
+    assert store.flushed == 1
+
+
 def test_memories_from_result_attaches_run_provenance():
     result = RunResult.model_validate({
         "run_id": "run_42", "agent": "explore@1", "objective_id": "obj_X",

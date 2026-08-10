@@ -10,7 +10,12 @@ later runs across processes. Similarity runs server-side via the pgvector
 An optional :class:`~bakudo.memory.graph.FalkorGraphMemory` mirror receives a
 ``PRODUCED_MEMORY`` edge (with the embedding attached) for every accepted
 write, which is what the FalkorDB vector index created by
-``FalkorGraphMemory.ensure_schema`` indexes.
+``FalkorGraphMemory.ensure_schema`` indexes. Mirror delivery is outboxed
+(MEM-3): each accepted write enqueues its graph op into
+``graph_mirror_outbox`` inside the same transaction as the memory row, and
+the queue is drained best-effort after commit — a mirror outage never fails
+the durable write and never loses the graph op. Superseding a memory
+enqueues the removal of the old mirrored node (MEM-10).
 
 ``psycopg`` is imported lazily so the rest of bakudo imports without the ``db``
 extra, mirroring :class:`~bakudo.registry.postgres_ledger.PostgresLedger`.
@@ -125,6 +130,11 @@ class PgSemanticMemoryStore:
     # --- store protocol ---
 
     def write_candidate(self, item: MemoryItem) -> MemoryItem:
+        # Drain any mirror backlog first (MEM-3): a retried activity whose
+        # candidate is now rejected as a repeat still pushes the pending
+        # graph ops from its earlier, committed attempt.
+        self._flush_mirror_quietly()
+
         reasons = validate_memory_candidate(item, self._same_content_items(item))
         if reasons:
             raise MemoryRejected("; ".join(reasons))
@@ -139,11 +149,11 @@ class PgSemanticMemoryStore:
                         "near-duplicate of an equally/more confident memory"
                     )
                 self._supersede(near_item.id, item, embedding)
-                self._mirror(item, embedding)
+                self._flush_mirror_quietly()
                 return item
 
         self._insert(item, embedding)
-        self._mirror(item, embedding)
+        self._flush_mirror_quietly()
         return item
 
     def query(
@@ -195,6 +205,48 @@ class PgSemanticMemoryStore:
                 "where ttl is not null and created_at + ttl <= now()"
             )
             return max(int(cur.rowcount), 0)
+
+    def flush_graph_mirror(self, limit: int = 100) -> int:
+        """Drain pending graph-mirror ops from the outbox, oldest first.
+
+        Applies each op to the graph and deletes its row on success; on the
+        first failure the row's ``attempts`` is bumped and draining stops
+        (preserving op order — e.g. a supersede's delete before its upsert).
+        Both graph ops are idempotent (MERGE / MATCH-delete), so at-least-once
+        delivery is safe. Returns the number of ops delivered. Called
+        opportunistically on every write and from compaction (MEM-3).
+        """
+        if self._graph is None:
+            return 0
+        rows = self._all_rows(
+            "select id, op, memory_id, run_id, payload from graph_mirror_outbox "
+            "order by id limit %s",
+            (limit,),
+        )
+        delivered = 0
+        for row_id, op, memory_id, run_id, payload in rows:
+            data = payload if isinstance(payload, dict) else json.loads(payload or "{}")
+            try:
+                if op == "delete":
+                    self._graph.remove_memory(memory_id)
+                else:
+                    self._graph.upsert_memory(
+                        run_id=run_id,
+                        memory_id=memory_id,
+                        memory_type=data.get("type", ""),
+                        confidence=float(data.get("confidence", 0.0)),
+                        embedding=data.get("embedding"),
+                    )
+            except Exception:
+                self._exec(
+                    "update graph_mirror_outbox set attempts = attempts + 1 "
+                    "where id = %s",
+                    (row_id,),
+                )
+                break
+            self._exec("delete from graph_mirror_outbox where id = %s", (row_id,))
+            delivered += 1
+        return delivered
 
     # --- internals ---
 
@@ -280,9 +332,11 @@ class PgSemanticMemoryStore:
 
     def _insert(self, item: MemoryItem, embedding: list[float]) -> None:
         """Insert item + embedding atomically: a split write leaves a zombie
-        row that blocks re-writes forever (MEM-2)."""
+        row that blocks re-writes forever (MEM-2). The graph-mirror op is
+        enqueued in the same transaction (MEM-3)."""
         with self._conn.transaction():
             self._insert_rows(item, embedding)
+            self._enqueue_mirror_upsert(item, embedding)
 
     def _insert_rows(self, item: MemoryItem, embedding: list[float]) -> None:
         self._exec(
@@ -313,19 +367,48 @@ class PgSemanticMemoryStore:
 
         Delete + replacement insert run in one transaction: the old memory is
         never destroyed unless the new item and its embedding both land
-        (MEM-2).
+        (MEM-2). The mirror ops — remove the superseded node (MEM-10), then
+        upsert the replacement — ride the same transaction's outbox (MEM-3).
         """
         with self._conn.transaction():
             self._exec("delete from memory_items where id = %s", (old_id,))
             self._insert_rows(item, embedding)
+            self._enqueue_mirror_remove(old_id)
+            self._enqueue_mirror_upsert(item, embedding)
 
-    def _mirror(self, item: MemoryItem, embedding: list[float]) -> None:
+    def _enqueue_mirror_upsert(self, item: MemoryItem, embedding: list[float]) -> None:
         if self._graph is None:
             return
         run_id = next((e.run_id for e in item.evidence if e.run_id), None)
         if run_id is None:
             return
-        self._graph.record_memory_edge(run_id, item, embedding=embedding)
+        payload = {
+            "type": item.type,
+            "confidence": item.confidence,
+            "embedding": [float(v) for v in embedding],
+        }
+        self._exec(
+            "insert into graph_mirror_outbox (op, memory_id, run_id, payload) "
+            "values (%s, %s, %s, %s)",
+            ("upsert", item.id, run_id, json.dumps(payload)),
+        )
+
+    def _enqueue_mirror_remove(self, memory_id: str) -> None:
+        if self._graph is None:
+            return
+        self._exec(
+            "insert into graph_mirror_outbox (op, memory_id, run_id, payload) "
+            "values (%s, %s, %s, %s)",
+            ("delete", memory_id, None, json.dumps({})),
+        )
+
+    def _flush_mirror_quietly(self) -> None:
+        """Best-effort drain: mirror delivery must never fail the durable
+        write path — undelivered ops stay queued for the next drain."""
+        try:
+            self.flush_graph_mirror()
+        except Exception:
+            pass
 
     @staticmethod
     def _scope_clause(scope: dict | None) -> tuple[str, tuple]:

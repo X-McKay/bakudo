@@ -185,6 +185,21 @@ create table if not exists promotion_decisions (
 );
 create index if not exists promotion_decisions_status on promotion_decisions (status);
 
+-- Graph-mirror outbox (MEM-3): each accepted memory write enqueues its
+-- FalkorDB mirror op here inside the same transaction as the memory row;
+-- PgSemanticMemoryStore.flush_graph_mirror() drains it best-effort after
+-- commit and from compaction. A mirror outage therefore never loses the
+-- graph write, and a retried activity re-delivers instead of dropping it.
+create table if not exists graph_mirror_outbox (
+  id bigserial primary key,
+  op text not null,                -- upsert | delete
+  memory_id text not null,
+  run_id text,
+  payload jsonb not null default '{}',  -- type, confidence, embedding
+  attempts int not null default 0,
+  created_at timestamptz not null default now()
+);
+
 -- Integration-event outbox (section 17.1): durable handoff to projections.
 create table if not exists outbox (
   id bigserial primary key,
