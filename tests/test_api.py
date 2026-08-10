@@ -41,6 +41,12 @@ ROUTES = [
     ),
     ("GET", "/promotions/pending", "/promotions/pending", None),
     ("GET", "/status", "/status", None),
+    # Schema/docs routes: mounted as real path operations so they obey the
+    # same bearer policy as everything else (schema-only exposure is still
+    # exposure).
+    ("GET", "/openapi.json", "/openapi.json", None),
+    ("GET", "/docs", "/docs", None),
+    ("GET", "/redoc", "/redoc", None),
 ]
 
 ROUTE_IDS = [f"{m} {t}" for m, t, _, _ in ROUTES]
@@ -63,13 +69,16 @@ def _dev_local_sandbox(monkeypatch):
 
 
 def test_auth_matrix_covers_every_route():
+    """Self-checking: EVERY route on the app — schema/docs included, no
+    carve-outs — must appear in ROUTES, so a new route (or a FastAPI default
+    route reappearing outside the auth dependency) fails this test instead of
+    silently escaping the sweep."""
     app = build_app()
     app_routes = {
         (method, route.path)
         for route in app.routes
         for method in getattr(route, "methods", set())
         if method != "HEAD"
-        and route.path not in ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
     }
     assert app_routes == {(m, t) for m, t, _, _ in ROUTES}
 

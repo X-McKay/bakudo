@@ -110,12 +110,35 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         if not secrets.compare_digest(supplied, expected):
             raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
+    from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+    from fastapi.responses import HTMLResponse
+
     # App-level dependency: every route, read and write, requires the token
-    # when one is configured. (FastAPI's /openapi.json and /docs endpoints are
-    # not path operations and stay open; they expose the schema, not data.)
+    # when one is configured. FastAPI's default /openapi.json//docs//redoc
+    # endpoints are NOT path operations, so they would bypass this dependency
+    # — they are disabled here and remounted below as real (authenticated)
+    # routes: the schema names every route, model and constraint, and the
+    # bearer policy applies to it like everything else.
     app = FastAPI(
-        title="bakudo control plane", version="3.0.0", dependencies=[Depends(require_auth)]
+        title="bakudo control plane",
+        version="3.0.0",
+        dependencies=[Depends(require_auth)],
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
     )
+
+    @app.get("/openapi.json", include_in_schema=False)
+    def openapi_schema() -> dict[str, Any]:
+        return app.openapi()
+
+    @app.get("/docs", include_in_schema=False)
+    def swagger_docs() -> HTMLResponse:
+        return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - docs")
+
+    @app.get("/redoc", include_in_schema=False)
+    def redoc_docs() -> HTMLResponse:
+        return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - redoc")
 
     def resolve_sandbox() -> Callable[..., Any]:
         """Fail closed with a clear 409 instead of executing on the host."""
