@@ -1,5 +1,14 @@
 # Improvement proposals for bakudo
 
+> **Status: implemented.** This document is the point-in-time review that
+> drove the v3.1 work; every phase of the sequencing table at the bottom has
+> since landed (correctness fixes, pipeline consolidation + central config,
+> the measurable eval system with the payments-api fixture and CI eval gate,
+> the perf/UX pass, automated canary scheduling, and the gated LLM critic —
+> plus a Neo4j→FalkorDB migration decided afterwards). Findings below
+> describe the codebase *as it was reviewed*, kept for the rationale behind
+> each change; see README/docs for current state.
+
 A review of bakudo against three contemporary agent systems —
 [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) (PrimeIntellect's
 self-improving RLM coding agent), [pi](https://github.com/earendil-works/pi)

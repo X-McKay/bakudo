@@ -11,10 +11,12 @@ Runs outside abox. It schedules and evaluates but never executes arbitrary
 repository code. Components:
 
 - **Meta-agent tools** (`control/tools.py`) — the *only* capabilities the
-  control intelligence has (spec §4.3): create/list objectives, spawn/query/
-  cancel runs, compare runs, create candidate specs/skills/evals, run eval
-  suites, promote/archive candidates, query/write memory, query workflows/logs.
-  There is deliberately **no** shell, filesystem, or arbitrary network tool.
+  control intelligence has (spec §4.3): create/list objectives, spawn runs
+  (sync or 202-style async)/query/cancel, compare runs, register candidate
+  specs, promote candidates and advance canaries, archive, query/write
+  memory, query logs. There is deliberately **no** shell, filesystem, or
+  arbitrary network tool — and no second eval entry point (evaluation happens
+  inside the shared run pipeline only).
 - **Curriculum** (`curriculum/`) — the objective model, the priority formula
   (§16.4), and the named queues (§16.3).
 - **Registry / ledger** (`registry/`) — the authoritative record of agent
@@ -52,8 +54,13 @@ created → bundle_rendered → sandbox_starting → agent_running
 
 Each phase transition is persisted to the ledger via the `persist_run`
 activity. The same lifecycle runs **synchronously** in `control/pipeline.py`
-(`run_objective`) so the system is demonstrable without a Temporal cluster — the
-workflow and the pipeline call the same building blocks, so behavior matches.
+(`run_objective`) so the system is demonstrable without a Temporal cluster.
+The phase functions themselves — `build_bundle`, `enforce_sandbox_budgets`,
+`grade_run` — exist once in `control/pipeline.py` and both drivers call them,
+so the eval context, schema gate, and budget enforcement cannot diverge
+between paths. Sandbox executions additionally pass a process-wide admission
+gate (`abox/gate.py`) so fan-outs queue instead of stampeding the microVM
+host.
 
 ### Activities vs workflows
 
@@ -84,8 +91,10 @@ correlation id. See `ids.py`.
 evolution applies to agent specs. A read-only `optimize-scout` proposes
 distinct hypotheses; parallel single-hypothesis `optimize-attempt` child
 runs implement them in sibling sandboxes on their own branches; graders
-(`perf`/`simplicity` on self-reported before/after metrics, on top of the
-default suite) score each candidate; and a pure selection function
+(`perf`/`simplicity` on **harness-measured** before/after metrics — the
+sandbox times the benchmark itself and overwrites agent claims, see
+`evals/measure.py` — on top of the default suite) score each candidate; and
+a pure selection function
 (`control/optimize.py`) picks a winner or returns `no-change`, feeding
 failure summaries into the next scout round (bounded rounds). The fan-out
 lives in the trusted plane — workers never schedule their own sub-agents —
@@ -99,7 +108,17 @@ synchronous in-process mirror (used by `bakudo optimize` and
 ## Eval-first evolution
 
 The meta-agent never overwrites an active agent. It creates candidate specs/
-skills/evals, scores them against a baseline, and promotes only tested
-improvements — gated on zero safety regressions, sufficient eval coverage, a
-minimum score improvement, and human approval for privilege-escalating
-mutations. See `evals/promotion.py`.
+skills/evals, scores them against a baseline over a corpus (including the
+`regression` level: no baseline-passing case may fail), and promotes only
+tested improvements — gated on zero safety regressions, sufficient eval
+coverage, a minimum score improvement, and human approval for
+privilege-escalating mutations. See `evals/promotion.py`.
+
+A `canary` decision enters the **automated canary lifecycle**
+(`control/canary.py`): the candidate is registered, a deterministic
+`canary_percent` slice of dispatches routes to it, every completed run feeds
+observation, and `canary_min_runs` clean runs promote it (an observed safety
+regression rolls it back) with no manual step. When `BAKUDO_CRITIC_MODEL` is
+configured (after `bakudo critic-calibrate` passes), a **gated LLM critic**
+joins every run suite — free triage decides obvious verdicts, only ambiguous
+runs spend a judge call (`evals/critic.py`).

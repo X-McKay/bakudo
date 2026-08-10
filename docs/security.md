@@ -54,5 +54,8 @@ memories, or contain secrets (the secret detectors block common key formats).
 Worker agents must not have: unrestricted LAN access, raw host filesystem
 access, raw secret access, unrestricted package installation, unrestricted
 outbound HTTP, direct access to production systems, or control-plane database
-write access. These are enforced by the abox sandbox profile
-(`abox/runner.py::PROFILES`) and the network bundles in the AgentSpec.
+write access. These are enforced by the abox sandbox template named in
+`sandbox.profile` (defined abox-side) and the network bundles in the
+AgentSpec; bakudo itself additionally enforces the per-spec diff budgets
+(`sandbox.maxChangedFiles`/`maxDiffBytes`) at result collection
+(`control/pipeline.py::enforce_sandbox_budgets`).

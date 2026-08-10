@@ -17,7 +17,7 @@
 
 This spec proposes a durable, always-running meta-agent system that can create, run, evaluate, and evolve specialized agents over time.
 
-The system should be treated as a **durable agent operating system**, not as a single autonomous agent. The meta-agent is the control-plane intelligence. Temporal provides durable orchestration. abox provides sandboxed execution. Strands provides the runtime for individual agents. Postgres stores the authoritative ledger. Neo4j stores relationship-oriented knowledge and memory. vLLM provides local or self-hosted LLM inference.
+The system should be treated as a **durable agent operating system**, not as a single autonomous agent. The meta-agent is the control-plane intelligence. Temporal provides durable orchestration. abox provides sandboxed execution. Strands provides the runtime for individual agents. Postgres stores the authoritative ledger. FalkorDB stores relationship-oriented knowledge and memory. vLLM provides local or self-hosted LLM inference.
 
 The central design principle is:
 
@@ -45,7 +45,7 @@ The system should be able to:
 4. Use Strands to define and execute the agents themselves.
 5. Use vLLM-hosted models through OpenAI-compatible APIs or Strands-compatible providers.
 6. Store authoritative state, runs, evals, logs, and agent specs in Postgres.
-7. Store graph-like knowledge, relationships, and memory in Neo4j.
+7. Store graph-like knowledge, relationships, and memory in FalkorDB.
 8. Create specialized agents for roles such as `explore`, `add-feature`, `qa`, `critic`, and `eval-author`.
 9. Run multiple agents in parallel.
 10. Inspect progress and logs through Temporal and persisted run records.
@@ -82,7 +82,7 @@ flowchart TD
 
     R --> PG[(Postgres)]
     MEM --> PG
-    MEM --> NEO[(Neo4j)]
+    MEM --> NEO[(FalkorDB)]
 
     M -->|spawn child workflows| AR[AgentRun Workflows]
     AR --> AB[abox Sandbox Runner]
@@ -134,7 +134,7 @@ Curriculum generator
 Promotion engine
 Dashboard/API
 Postgres
-Neo4j
+FalkorDB
 vLLM gateway
 ```
 
@@ -631,7 +631,7 @@ abox invocations
 DB reads/writes
 GitHub calls
 MCP calls
-Neo4j writes
+FalkorDB writes
 Postgres writes
 file/object storage writes
 embedding generation
@@ -886,9 +886,9 @@ dimension-agnostic `vector` column queried server-side with the cosine
 operator (`PgSemanticMemoryStore`); retype to `vector(<dim>)` and add an HNSW
 index once a production embedder fixes the dimension.
 
-### 14.2 Neo4j
+### 14.2 FalkorDB
 
-Neo4j should represent relationships that are painful to model in relational tables.
+FalkorDB should represent relationships that are painful to model in relational tables.
 
 Suggested graph structure:
 
@@ -923,7 +923,7 @@ evaluative_memory
   What made outputs good or bad, which agent versions improved, what failed.
 
 relational_memory
-  File, module, task, failure, and skill relationships in Neo4j.
+  File, module, task, failure, and skill relationships in FalkorDB.
 ```
 
 ### 14.4 Memory Record Shape
@@ -1456,7 +1456,7 @@ create table eval_cases (
 
 ---
 
-## 21. Neo4j Graph Model
+## 21. FalkorDB Graph Model
 
 ### 21.1 Core Nodes
 
@@ -1666,7 +1666,7 @@ Open Agent Skills registry
 Skill discovery/load tool
 Memory writer
 Postgres memory table
-Neo4j graph ingestion
+FalkorDB graph ingestion
 retrieval tool
 ```
 
@@ -1707,7 +1707,7 @@ meta-agent-system/
     docker-compose.yml
     temporal/
     postgres/
-    neo4j/
+    falkordb/
     vllm-gateway/
   schemas/
     agent-spec.schema.json
@@ -1959,7 +1959,7 @@ modifying the meta-agent's own control tools
 9. Add memory pipeline:
    - evidence-backed memory candidates
    - Postgres storage
-   - Neo4j graph edges
+   - FalkorDB graph edges
    - retrieval tool
 
 10. Add candidate evolution:
@@ -1971,7 +1971,7 @@ modifying the meta-agent's own control tools
 
 ## 30. Clean v0.1 Spec Sentence
 
-A Temporal-supervised meta-agent maintains a curriculum of objectives, launches versioned Strands agents inside abox microVM sandboxes, stores every run, eval, and memory in Postgres and Neo4j, and evolves agents through candidate specs and Open Agent Skills that must pass evals before promotion.
+A Temporal-supervised meta-agent maintains a curriculum of objectives, launches versioned Strands agents inside abox microVM sandboxes, stores every run, eval, and memory in Postgres and FalkorDB, and evolves agents through candidate specs and Open Agent Skills that must pass evals before promotion.
 
 ---
 
@@ -1992,4 +1992,4 @@ A Temporal-supervised meta-agent maintains a curriculum of objectives, launches 
 - Open Agent Skills: https://agentskills.io/specification
 - Open Agent Skills GitHub: https://github.com/agentskills/agentskills
 - pgvector: https://github.com/pgvector/pgvector
-- Neo4j vector indexes: https://neo4j.com/docs/cypher-manual/current/indexes/semantic-indexes/vector-indexes/
+- FalkorDB vector indexes: https://docs.falkordb.com/commands/graph.query.html#vector-indexes
