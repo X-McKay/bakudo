@@ -352,7 +352,9 @@ def run_optimize_loop(
                 "result": winner.get("result"),
                 "bench_verified": verified,
             }
-        feedback = round_feedback(candidates) + verify_feedback
+        # Accumulate across rounds (OPT-17): round N+1's scout must still see
+        # round 1's dead ends, or it can re-propose them.
+        feedback = feedback + round_feedback(candidates) + verify_feedback
 
     return {
         "status": "no-change",

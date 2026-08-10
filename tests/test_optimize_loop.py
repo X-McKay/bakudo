@@ -347,3 +347,22 @@ def test_feedback_carries_sandbox_error_for_resultless_attempts():
     )
     assert outcome["status"] == "no-change"
     assert any("did not resolve a worktree" in fb for fb in outcome["feedback"])
+
+
+def test_feedback_accumulates_across_rounds():
+    """OPT-17: round-3's scout must still see round-1's dead ends, or it can
+    re-propose them."""
+    sandbox = ScriptedSandbox(
+        [
+            {"approaches": ["inline the ORM"], "metrics": [REGRESSED]},
+            {"approaches": ["cache totals"], "metrics": [NEUTRAL]},
+            {"approaches": ["batch queries"], "metrics": [IMPROVED]},
+        ]
+    )
+    outcome = run_optimize_loop(
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=3
+    )
+    assert outcome["status"] == "improved"
+    round3_desc = sandbox.scout_descriptions[2]
+    assert "regressed perf or simplicity" in round3_desc  # round 1's lesson
+    assert "no measured improvement" in round3_desc       # round 2's lesson
