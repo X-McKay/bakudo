@@ -27,7 +27,7 @@ from ..curriculum.objective import Objective
 from ..skills import SkillRegistry
 from ..strands_tools import ToolContext, Workspace
 from .agent import build_and_run
-from .result import normalize_result
+from .result import RunResult, RunStatus, normalize_result
 
 
 def _exception_chain(exc: BaseException, limit: int = 4) -> str:
@@ -114,12 +114,25 @@ def run(args: argparse.Namespace) -> int:
         )
     runtime_seconds = time.monotonic() - started
 
-    result = normalize_result(
-        raw,
-        run_id=bundle.run_id,
-        agent=spec.ref,
-        objective_id=bundle.objective_id,
-    )
+    try:
+        result = normalize_result(
+            raw,
+            run_id=bundle.run_id,
+            agent=spec.ref,
+            objective_id=bundle.objective_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - a bad result must not lose the run
+        # Observed live: schema-invalid model output crashed the runner here,
+        # leaving NO result.json — worse than a failed-but-diagnosable one.
+        # Built directly (not via normalize_result) so it cannot re-fail.
+        result = RunResult(
+            run_id=bundle.run_id,
+            agent=spec.ref,
+            objective_id=bundle.objective_id,
+            status=RunStatus.failed,
+            summary=f"Result normalization failed: {_exception_chain(exc)}",
+            blocked_reasons=["result_normalization_failed"],
+        )
 
     # Backfill observed changes and denied-command safety signal.
     if not result.changed_files:
