@@ -65,6 +65,9 @@ class AgentRunOutput:
     result: dict[str, Any] | None = None
     scorecard: dict[str, Any] | None = None
     eval_results: list[dict[str, Any]] = field(default_factory=list)
+    # The collected worktree diff. The agent branch does not survive sandbox
+    # cleanup, so this is the only re-benchable artifact (issue #28).
+    diff: str = ""
 
 
 @dataclass

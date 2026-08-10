@@ -45,6 +45,45 @@ def test_token_cap_enforced(tmp_path):
         tools["git-diff"]()
 
 
+def test_tool_call_ceiling_halts_the_loop(tmp_path):
+    """Issue #27: the spec-level maxToolCalls ceiling is a hard halt that
+    force-transitions the run into the report phase."""
+    spec, ctx = _ctx(tmp_path)
+    ctx.set_budget(tool_call_ceiling=2)
+    tools = build_tool_callables(spec, ctx)
+    tools["git-diff"]()
+    tools["git-diff"]()
+    with pytest.raises(BudgetExceeded, match="tool_calls"):
+        tools["git-diff"]()
+
+
+def test_tripped_denial_breaker_halts_the_loop(tmp_path):
+    """Issue #27: once the denial circuit-breaker trips, the *loop* ends —
+    every subsequent tool call raises a LoopHalt (observed live: a scout kept
+    wandering within allowed commands until wall-clock)."""
+    from bakudo.strands_tools import DenialsExhausted, LoopHalt
+
+    spec, ctx = _ctx(tmp_path)
+    tools = build_tool_callables(spec, ctx)
+    for _ in range(5):
+        out = tools["run-command"](command="curl http://blocked.example")
+        assert out["denied"] is True
+    with pytest.raises(DenialsExhausted):
+        tools["read-file"](path="anything")
+    assert issubclass(DenialsExhausted, LoopHalt)
+    assert issubclass(BudgetExceeded, LoopHalt)
+
+
+def test_report_phase_disarms_budget_enforcement(tmp_path):
+    """Issue #27: the final report-extraction model call must not be killed
+    by the very budget that ended the loop."""
+    spec, ctx = _ctx(tmp_path)
+    ctx.set_budget(timeout_seconds=-1, token_cap=1)  # both already exhausted
+    ctx.tokens_used = 10
+    ctx.begin_report_phase()
+    ctx.check_budget()  # must not raise
+
+
 def test_observability_counts_tool_calls_and_skills(tmp_path):
     spec, ctx = _ctx(tmp_path)
     tools = build_tool_callables(spec, ctx)
@@ -108,6 +147,20 @@ def test_budget_from_spec_reads_optional_budget_fields():
     assert budget.timeout_seconds == 120
     assert budget.max_tokens == 5000
     assert budget.max_usd == 1.5
+
+
+def test_budget_from_spec_reads_max_tool_calls(tmp_path):
+    """Issue #27: the spec-level maxToolCalls ceiling rides the run Budget."""
+    import yaml
+
+    from bakudo.agent_spec import load_spec_file as load
+
+    doc = yaml.safe_load((AGENTS / "optimize-scout.yaml").read_text())
+    doc["budget"] = {"maxToolCalls": 25}
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    budget = budget_from_spec(load(p))
+    assert budget.max_tool_calls == 25
 
 
 def test_guest_deadline_has_headroom_below_abox_timeout():

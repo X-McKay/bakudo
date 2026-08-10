@@ -81,6 +81,7 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
     # resolution as the API and the Temporal activity layer — model-driven
     # agent code must never implicitly execute in this process (cf. OPT-10).
     sandbox = None
+    bench_measure = None
     if os.environ.get("BAKUDO_OFFLINE") == "0":
         from .temporal._impl import Deps
 
@@ -89,6 +90,17 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        if os.environ.get("BAKUDO_SANDBOX") == "abox":
+            # Issue #28: the winner's bench claim is independently re-measured
+            # in a fresh sandbox before selection returns. Repo resolution
+            # mirrors AboxRunner.resolve_repo.
+            from .abox.bench import abox_bench_measure
+
+            root_env = os.environ.get("BAKUDO_REPO_ROOT")
+            root = Path(root_env) if root_env else Path.cwd()
+            candidate = root / args.repo
+            repo_path = candidate if (candidate / ".git").exists() else root
+            bench_measure = abox_bench_measure(repo_path)
 
     constraints: dict = {"avoidPublicApiChanges": True}
     if args.target:
@@ -121,6 +133,7 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
         max_rounds=args.rounds,
         max_approaches=args.approaches,
         sandbox=sandbox,
+        bench_measure=bench_measure,
     )
 
     print(f"status      : {outcome['status']}")
@@ -128,11 +141,14 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
     if outcome["status"] == "improved":
         print(f"winner run  : {outcome['winner_run_id']}")
         print(f"branch      : {outcome['git_branch']}")
+        print(f"verified    : {outcome.get('bench_verified', False)}")
         scorecard = outcome.get("scorecard") or {}
         print(f"score       : {scorecard.get('overall_score', 0.0):.3f}")
         print(f"suites      : {json.dumps(scorecard.get('suites', {}))}")
     else:
         print(f"reason      : {outcome.get('reason', '')}")
+        for line in outcome.get("feedback", []):
+            print(f"feedback    : {line}")
     return 0
 
 

@@ -26,8 +26,10 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 with workflow.unsafe.imports_passed_through():
     from ..control.optimize import (
         attempt_objective,
+        bench_reproduces,
         round_feedback,
         scout_objective,
+        scout_run_failed,
         select_winner,
     )
     from .activities import (
@@ -36,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         compact_memories,
         create_run,
         load_agent_spec,
+        measure_winner_bench,
         persist_run,
         render_bundle,
         run_agent_evolution,
@@ -221,6 +224,7 @@ class AgentRunWorkflow:
             result=result,
             scorecard=eval_out.get("scorecard"),
             eval_results=eval_out.get("eval_results", []),
+            diff=sandbox.get("diff", ""),
         )
 
 
@@ -272,20 +276,18 @@ class OptimizationWorkflow:
                 inp.timeout_seconds,
             )
             scout_result = scout.get("result") or {}
-            if scout.get("phase") == "failed" or (
-                not scout_result or scout_result.get("status") == "failed"
-            ):
+            if scout_run_failed(scout):
                 # One retry, then a distinct failure outcome — an infra/model
-                # failure must never masquerade as "no-change" (OPT-12).
+                # failure (including a blocked scout that delivered no
+                # followups, issue #27) must never masquerade as "no-change"
+                # (OPT-12).
                 scout = await self._child_run(
                     scout_objective(inp.objective, feedback=feedback),
                     inp.scout_spec,
                     inp.timeout_seconds,
                 )
                 scout_result = scout.get("result") or {}
-                if scout.get("phase") == "failed" or (
-                    not scout_result or scout_result.get("status") == "failed"
-                ):
+                if scout_run_failed(scout):
                     self._phase = "scout-failed"
                     return {
                         "status": "scout-failed",
@@ -344,7 +346,49 @@ class OptimizationWorkflow:
                     attempts.append(out)
 
             self._phase = "selecting"
-            winner = select_winner(list(attempts))
+            # Issue #28: a winner's self-reported bench claim must reproduce
+            # in an independent fresh-sandbox measurement before it is
+            # trusted; unreproduced candidates are rejected with feedback and
+            # selection falls through to the next eligible attempt.
+            bench_cmd = (inp.objective.get("constraints") or {}).get("benchCommand")
+            remaining = list(attempts)
+            verify_feedback: list[str] = []
+            verified = False
+            winner = select_winner(remaining)
+            while winner is not None and bench_cmd:
+                ok = False
+                detail = ""
+                skipped = False
+                try:
+                    timings = await workflow.execute_activity(
+                        measure_winner_bench,
+                        args=[
+                            winner.get("diff") or "",
+                            bench_cmd,
+                            inp.objective.get("repo", ""),
+                        ],
+                        **_LONG,
+                    )
+                    if timings.get("skipped"):
+                        skipped = True
+                    else:
+                        ok, detail = bench_reproduces(
+                            timings["before"], timings["after"]
+                        )
+                except (ActivityError, ChildWorkflowError) as exc:
+                    detail = f"bench verification errored: {exc}"
+                if skipped:
+                    break  # no measurer available: accept, marked unverified
+                if ok:
+                    verified = True
+                    break
+                title = ((winner.get("result") or {}).get("summary") or "attempt")
+                verify_feedback.append(
+                    f"'{title[:120]}': failed independent bench verification: "
+                    f"{detail}"
+                )
+                remaining = [c for c in remaining if c is not winner]
+                winner = select_winner(remaining)
             if winner is not None:
                 self._phase = "improved"
                 return {
@@ -354,8 +398,9 @@ class OptimizationWorkflow:
                     "git_branch": winner.get("git_branch"),
                     "scorecard": winner.get("scorecard"),
                     "result": winner.get("result"),
+                    "bench_verified": verified,
                 }
-            feedback = round_feedback(list(attempts))
+            feedback = round_feedback(list(attempts)) + verify_feedback
 
         self._phase = "no-change"
         return {
@@ -375,6 +420,7 @@ def _as_dict(out: AgentRunOutput) -> dict:
         "result": out.result,
         "scorecard": out.scorecard,
         "eval_results": out.eval_results,
+        "diff": out.diff,
     }
 
 

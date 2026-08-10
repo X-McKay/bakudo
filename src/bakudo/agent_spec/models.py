@@ -101,6 +101,15 @@ class McpServer(_Strict):
     allowed_tools: list[str] = Field(default_factory=list, alias="allowedTools")
 
 
+class SpecBudget(_Strict):
+    """Per-role run budget (issue #27): hard ceilings enforced by the tool
+    layer; ``maxToolCalls`` force-transitions the run into the report phase."""
+
+    max_tool_calls: int | None = Field(default=None, alias="maxToolCalls", ge=1)
+    max_tokens: int | None = Field(default=None, alias="maxTokens", ge=1)
+    max_usd: float | None = Field(default=None, alias="maxUsd", ge=0)
+
+
 class OutputContract(_Strict):
     required_files: list[str] = Field(alias="requiredFiles", min_length=1)
     result_schema: dict[str, Any] | None = Field(default=None, alias="resultSchema")
@@ -117,6 +126,7 @@ class AgentSpec(_Strict):
     tools: list[ToolRef] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     mcp_servers: list[McpServer] = Field(default_factory=list, alias="mcpServers")
+    budget: SpecBudget | None = None
     output_contract: OutputContract = Field(alias="outputContract")
 
     @property

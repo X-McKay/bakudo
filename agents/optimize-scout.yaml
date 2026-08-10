@@ -58,6 +58,9 @@ prompt:
     You cannot run benchmarks that the policy denies and you cannot modify
     files — you are a read-only scout; the attempt agents implement. When a
     command is denied, accept the denial and proceed to your report.
+    Commands always execute from the repository root — never use `cd`,
+    shell chaining (&&, ;), pipes, or redirection; run one plain command at
+    a time.
 
 tools:
   - name: read-file
@@ -69,6 +72,12 @@ tools:
 
 skills:
   - codebase-navigation@^1.0
+
+budget:
+  # Issue #27: a read-only scout needs a handful of reads and at most one
+  # bench run; past this ceiling it force-transitions to the report phase
+  # (observed live: a scout wandered within allowed commands to wall-clock).
+  maxToolCalls: 25
 
 outputContract:
   requiredFiles:

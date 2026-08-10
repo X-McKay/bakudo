@@ -27,12 +27,40 @@ Tool = Callable[..., dict[str, Any]]
 DENIAL_CIRCUIT_BREAKER = 5
 
 
-class BudgetExceeded(Exception):
-    """Raised when a run exceeds its time or token budget (spec section 19.1)."""
+class LoopHalt(Exception):
+    """The tool layer demands the agent loop end *now* (issue #27).
+
+    Raised from ``ToolContext.check_budget`` — i.e. from both tool entry and
+    the after-model-call hook — so the halt is deterministic, not dependent on
+    prompt compliance. ``build_and_run`` catches it and force-transitions the
+    run into the report-extraction phase; ``blocked_reason`` is the string
+    appended to the report's ``blocked_reasons``.
+    """
+
+    def __init__(self, reason: str, blocked_reason: str, message: str):
+        self.reason = reason
+        self.blocked_reason = blocked_reason
+        super().__init__(message)
+
+
+class BudgetExceeded(LoopHalt):
+    """Raised when a run exceeds its time/token/tool-call budget (section 19.1)."""
 
     def __init__(self, reason: str):
-        self.reason = reason
-        super().__init__(f"Budget exceeded: {reason}")
+        super().__init__(reason, f"budget:{reason}", f"Budget exceeded: {reason}")
+
+
+class DenialsExhausted(LoopHalt):
+    """Raised once the denial circuit-breaker has tripped: a model fighting
+    the policy wall must be bounded deterministically, not by prompt
+    compliance (observed live: 100+ retries, then wandering to wall-clock)."""
+
+    def __init__(self, denials: int):
+        super().__init__(
+            "denials",
+            "denials:circuit_breaker",
+            f"Run halted after {denials} policy denials.",
+        )
 
 
 @dataclass
@@ -56,6 +84,11 @@ class ToolContext:
     # --- budget (section 19.1) ---
     deadline_monotonic: float | None = None
     token_cap: int | None = None
+    tool_call_ceiling: int | None = None
+    # True during the final report-extraction phase: budget enforcement is
+    # disarmed so the one bounded extraction call cannot be killed by the very
+    # budget that ended the loop (issue #27).
+    reporting: bool = False
 
     # --- observability counters (section 18.3) ---
     tool_calls: int = 0
@@ -65,17 +98,32 @@ class ToolContext:
     skills_loaded: list[str] = field(default_factory=list)
 
     def set_budget(
-        self, *, timeout_seconds: int | None = None, token_cap: int | None = None
+        self,
+        *,
+        timeout_seconds: int | None = None,
+        token_cap: int | None = None,
+        tool_call_ceiling: int | None = None,
     ) -> None:
         if timeout_seconds is not None:
             self.deadline_monotonic = time.monotonic() + timeout_seconds
         self.token_cap = token_cap
+        self.tool_call_ceiling = tool_call_ceiling
+
+    def begin_report_phase(self) -> None:
+        """Disarm budget enforcement for the final report-extraction call."""
+        self.reporting = True
 
     def check_budget(self) -> None:
+        if self.reporting:
+            return
         if self.deadline_monotonic is not None and time.monotonic() > self.deadline_monotonic:
             raise BudgetExceeded("timeout")
         if self.token_cap is not None and self.tokens_used >= self.token_cap:
             raise BudgetExceeded("token_cap")
+        if self.tool_call_ceiling is not None and self.tool_calls > self.tool_call_ceiling:
+            raise BudgetExceeded("tool_calls")
+        if len(self.denied_commands) >= DENIAL_CIRCUIT_BREAKER:
+            raise DenialsExhausted(len(self.denied_commands))
 
     def _enter_tool(self) -> None:
         """Account for a tool call and enforce the budget before running it."""
@@ -118,22 +166,9 @@ def _edit_file(ctx: ToolContext, path: str, content: str) -> dict[str, Any]:
 
 def _make_run_command(policy: CommandPolicy) -> Tool:
     def _run_command(ctx: ToolContext, command: str, timeout: int = 600) -> dict[str, Any]:
+        # A tripped denial circuit-breaker halts here (DenialsExhausted from
+        # check_budget): past the threshold the loop ends and the run reports.
         ctx._enter_tool()
-        if len(ctx.denied_commands) >= DENIAL_CIRCUIT_BREAKER:
-            # Observed live: a read-only role burned 100+ tool calls retrying
-            # denied writes via sed/awk workarounds. Past the threshold the
-            # policy wall becomes absolute for the rest of the run.
-            return {
-                "circuit_breaker": True,
-                "denied": True,
-                "command": command,
-                "reason": (
-                    "command execution disabled for the rest of this run after "
-                    f"{len(ctx.denied_commands)} policy denials. Do not attempt "
-                    "further commands or workarounds — produce your final "
-                    "report from what you already know, now."
-                ),
-            }
         try:
             argv = policy.check(command)
         except CommandDenied as denied:

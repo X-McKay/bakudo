@@ -49,6 +49,10 @@ class Deps:
     sandbox: SandboxFn | None = None
     memory: object = field(default_factory=SemanticMemoryStore)
     collector: SignalCollector | None = None
+    # Issue #28: injectable independent bench measurer
+    # ((diff, bench_command) -> (before_s, after_s)); None resolves the
+    # fresh-sandbox abox measurer when the abox sandbox is active.
+    bench_measure: Callable[[str, str], tuple[float, float]] | None = None
 
     def sandbox_fn(self) -> SandboxFn:
         """Resolve the sandbox driver, failing *closed*.
@@ -219,6 +223,25 @@ def run_sandbox(bundle_dict: dict) -> dict:
         "observability": outcome.observability,
         "succeeded": outcome.succeeded,
     }
+
+
+def measure_winner_bench(diff: str, bench_command: str, repo: str) -> dict:
+    """Independently re-measure a winner's bench claim (issue #28).
+
+    Returns ``{"before": s, "after": s}`` from a fresh-sandbox measurement,
+    or ``{"skipped": reason}`` when no measurer is available (non-abox
+    sandboxes) — the workflow then accepts the winner unverified, matching
+    the in-process loop's ``bench_measure=None`` behaviour.
+    """
+    measure = DEPS.bench_measure
+    if measure is None:
+        if os.environ.get("BAKUDO_SANDBOX") != "abox":
+            return {"skipped": "bench verification requires the abox sandbox"}
+        from ..abox.bench import abox_bench_measure, resolve_repo_path
+
+        measure = abox_bench_measure(resolve_repo_path(repo))
+    before, after = measure(diff, bench_command)
+    return {"before": before, "after": after}
 
 
 def persist_run(run_id: str, phase: str, payload: dict) -> None:

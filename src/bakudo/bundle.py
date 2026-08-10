@@ -24,6 +24,9 @@ class Budget(BaseModel):
     timeout_seconds: int = Field(default=3600, alias="timeoutSeconds", ge=1)
     max_tokens: int | None = Field(default=None, alias="maxTokens", ge=1)
     max_usd: float | None = Field(default=None, alias="maxUsd", ge=0)
+    # Issue #27: tool-call ceiling that force-transitions the run into the
+    # report phase with wall clock to spare.
+    max_tool_calls: int | None = Field(default=None, alias="maxToolCalls", ge=1)
 
 
 def budget_from_spec(spec: Any) -> Budget:
@@ -48,14 +51,16 @@ def budget_from_spec(spec: Any) -> Budget:
         return None
 
     spec_budget = getattr(spec, "budget", None)
-    max_tokens = max_usd = None
+    max_tokens = max_usd = max_tool_calls = None
     if spec_budget is not None:
         max_tokens = _first(spec_budget, "max_tokens", "maxTokens")
         max_usd = _first(spec_budget, "max_usd", "maxUsd")
+        max_tool_calls = _first(spec_budget, "max_tool_calls", "maxToolCalls")
     return Budget(
         timeoutSeconds=int(spec.sandbox.timeout_seconds),
         maxTokens=max_tokens,
         maxUsd=max_usd,
+        maxToolCalls=max_tool_calls,
     )
 
 

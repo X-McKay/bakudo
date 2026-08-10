@@ -105,6 +105,11 @@ def run_sandbox(bundle: dict) -> dict:
             beat_thread.join(timeout=2)
 
 
+@_DEFN(name="measure_winner_bench")
+def measure_winner_bench(diff: str, bench_command: str, repo: str) -> dict:
+    return _impl.measure_winner_bench(diff, bench_command, repo)
+
+
 @_DEFN(name="persist_run")
 def persist_run(run_id: str, phase: str, payload: dict) -> None:
     _impl.persist_run(run_id, phase, payload)
@@ -145,6 +150,7 @@ ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     load_agent_spec,
     render_bundle,
     run_sandbox,
+    measure_winner_bench,
     persist_run,
     run_eval_suite,
     decide_promotion,
