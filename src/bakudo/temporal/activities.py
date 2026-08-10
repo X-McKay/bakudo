@@ -92,8 +92,15 @@ def render_bundle(inp: AgentRunInput) -> dict:
 
 
 @_DEFN(name="resolve_agent_spec")
-def resolve_agent_spec(agent: str | None, objective_type: str) -> dict | None:
-    return _impl.resolve_agent_spec(agent, objective_type)
+def resolve_agent_spec(
+    agent: str | None, objective_type: str, routing_key: str = ""
+) -> dict | None:
+    return _impl.resolve_agent_spec(agent, objective_type, routing_key)
+
+
+@_DEFN(name="observe_canary_run")
+def observe_canary_run(run_id: str) -> dict | None:
+    return _impl.observe_canary_run(run_id)
 
 
 @_DEFN(name="run_sandbox")
@@ -135,6 +142,7 @@ ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     create_run,
     render_bundle,
     resolve_agent_spec,
+    observe_canary_run,
     run_sandbox,
     persist_run,
     run_eval_suite,

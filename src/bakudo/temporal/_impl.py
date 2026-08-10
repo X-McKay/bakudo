@@ -16,6 +16,7 @@ from ..abox.gate import sandbox_slot
 from ..abox.select import SandboxFn, resolve_sandbox
 from ..agent_spec import AgentSpec, parse_spec
 from ..bundle import Budget, MemoryExcerpt, TaskBundle
+from ..control.canary import observe_canary, register_canary, route_version
 from ..control.pipeline import build_bundle, enforce_sandbox_budgets, grade_run
 from ..curriculum import build_default_collector, generate_objectives
 from ..curriculum.collectors import SignalCollector
@@ -126,19 +127,23 @@ DEFAULT_AGENT_FOR_TYPE = {
 }
 
 
-def resolve_agent_spec(agent: str | None, objective_type: str) -> dict | None:
+def resolve_agent_spec(
+    agent: str | None, objective_type: str, routing_key: str = ""
+) -> dict | None:
     """Resolve the AgentSpec document to run for an objective.
 
-    Prefers the ledger's active version of the named (or type-default) agent,
-    falling back to the bundled seed specs. Returns ``None`` when no agent can
-    be resolved, so the caller can dead-letter the objective instead of
-    crashing the dispatch loop.
+    Routes through the canary scheduler — a deterministic ``canary_percent``
+    slice of dispatches (keyed by ``routing_key``, typically the objective
+    id) gets the agent's canary version when one exists, everyone else the
+    active version — then falls back to the bundled seed specs. Returns
+    ``None`` when no agent can be resolved, so the caller can dead-letter the
+    objective instead of crashing the dispatch loop.
     """
     name = agent or DEFAULT_AGENT_FOR_TYPE.get(objective_type)
     if name is None:
         return None
 
-    record = DEPS.ledger.active_version(name)
+    record = route_version(DEPS.ledger, name, routing_key or name)
     if record is not None:
         document = yaml.safe_load(record.spec_yaml)
         if isinstance(document, dict):
@@ -150,6 +155,19 @@ def resolve_agent_spec(agent: str | None, objective_type: str) -> dict | None:
         if isinstance(document, dict):
             return document
     return None
+
+
+def observe_canary_run(run_id: str) -> dict | None:
+    """Post-run canary observation: advance/roll back when the quota is met.
+
+    A no-op (None) unless the run's agent version is the current canary of
+    its agent — cheap enough to call after every run.
+    """
+    record = DEPS.ledger.get_run(run_id)
+    if record is None:
+        return None
+    decision = observe_canary(DEPS.ledger, record.agent_ref)
+    return decision.to_dict() if decision is not None else None
 
 
 def run_sandbox(bundle_dict: dict) -> dict:
@@ -253,6 +271,10 @@ def run_agent_evolution(inp: EvolutionInput) -> dict:
     outcome = evolve_agent(baseline, candidate, cases, _run_case)
 
     DEPS.ledger.record_promotion(outcome.decision)
+    # A canary decision starts the automated canary lifecycle: the candidate
+    # is registered so dispatch routing and post-run observation pick it up.
+    if outcome.decision.decision.value == "canary":
+        register_canary(DEPS.ledger, candidate)
     return {
         "decision": outcome.decision.to_dict(),
         "baseline_scorecard": outcome.baseline.model_dump(mode="json"),

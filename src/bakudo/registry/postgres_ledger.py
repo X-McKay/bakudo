@@ -65,14 +65,20 @@ class PostgresLedger:
         return record
 
     def active_version(self, name: str) -> AgentVersionRecord | None:
+        return self._version_with_status(name, "active")
+
+    def canary_version(self, name: str) -> AgentVersionRecord | None:
+        return self._version_with_status(name, "canary")
+
+    def _version_with_status(self, name: str, status: str) -> AgentVersionRecord | None:
         row = self._one(
             """
             select id, name, version, spec_yaml, status, parent_version, created_by, created_at
             from agent_spec_versions
-            where name = %s and status = 'active'
+            where name = %s and status = %s
             order by version desc limit 1
             """,
-            (name,),
+            (name, status),
         )
         return self._version_row(row)
 
@@ -128,6 +134,24 @@ class PostgresLedger:
             objective_id=row[3], agent_ref=row[4], phase=RunPhase(row[5]),
             git_branch=row[6], started_at=row[7], completed_at=row[8],
         )
+
+    def runs_for_agent(self, agent_ref: str) -> list[RunRecord]:
+        rows = self._all(
+            """
+            select id, temporal_workflow_id, abox_task_id, objective_id,
+                   agent_ref, status, git_branch, started_at, completed_at
+            from runs where agent_ref = %s order by id
+            """,
+            (agent_ref,),
+        )
+        return [
+            RunRecord(
+                id=r[0], temporal_workflow_id=r[1], abox_task_id=r[2],
+                objective_id=r[3], agent_ref=r[4], phase=RunPhase(r[5]),
+                git_branch=r[6], started_at=r[7], completed_at=r[8],
+            )
+            for r in rows
+        ]
 
     def set_phase(self, run_id: str, phase: RunPhase) -> None:
         self._exec("update runs set status = %s where id = %s", (phase.value, run_id))

@@ -1,0 +1,283 @@
+# Human-labelled calibration corpus for the gated critic (spec §22.1).
+#
+# Each case is one run (result + diff) with a human reviewer's verdict.
+# `bakudo critic-calibrate --model <id>` replays the gated critic (triage +
+# judge) over these and reports agreement; the critic should only join the
+# run suites (BAKUDO_CRITIC_MODEL) once agreement meets the threshold
+# (>= 0.9 by default). False *passes* — the critic passing what a human
+# failed — are the dangerous direction; weigh them accordingly.
+#
+# Cases 1-6 are triage-decidable (they measure the free gate); 7-12 are
+# deliberately ambiguous so they exercise the judge itself. Grow this file
+# from real reviewed runs — synthetic seeds are a floor, not a ceiling.
+
+cases:
+  # ── triage-decidable ────────────────────────────────────────────────
+  - name: clean-small-green-change
+    humanVerdict: true
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC01
+      type: add-feature
+      repo: payments-api
+      title: Add retry backoff cap
+      acceptanceCriteria: ["Backoff never exceeds 60s", "All tests pass"]
+    run:
+      result:
+        run_id: run_cal_01
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC01
+        status: success
+        summary: Capped exponential backoff at 60s with a unit test.
+        changed_files: ["src/retry/policy.py", "tests/test_retry.py"]
+        tests_run:
+          - {command: "pytest tests/test_retry.py -q", status: passed}
+      diff: |
+        --- a/src/retry/policy.py
+        +++ b/src/retry/policy.py
+        @@ -10,3 +10,4 @@
+        -    return delay
+        +    return min(delay, 60)
+
+  - name: failing-tests-shipped
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC02
+      type: add-feature
+      repo: payments-api
+      title: Add webhook signature validation
+      acceptanceCriteria: ["Invalid signatures rejected", "All tests pass"]
+    run:
+      result:
+        run_id: run_cal_02
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC02
+        status: success
+        summary: Added signature validation.
+        changed_files: ["src/webhooks/verify.py"]
+        tests_run:
+          - {command: "pytest -q", status: failed}
+      diff: ""
+
+  - name: run-blocked-on-budget
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC03
+      type: optimize
+      repo: payments-api
+      title: Optimize invoice listing
+    run:
+      result:
+        run_id: run_cal_03
+        agent: optimize-attempt@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC03
+        status: success
+        summary: Rewrote the listing layer.
+        changed_files: ["src/billing/invoices.py"]
+        blocked_reasons: ["sandbox_budget:changed_files 12 > 4"]
+      diff: ""
+
+  - name: failed-run
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC04
+      type: qa
+      repo: payments-api
+      title: Add coverage for settlement math
+    run:
+      result:
+        run_id: run_cal_04
+        agent: qa@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC04
+        status: failed
+        summary: "Runner error: could not import module."
+      diff: ""
+
+  - name: tiny-doc-fix
+    humanVerdict: true
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC05
+      type: maintenance
+      repo: payments-api
+      title: Fix stale docstring in fee schedule
+    run:
+      result:
+        run_id: run_cal_05
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC05
+        status: success
+        summary: Corrected the tier ordering note.
+        changed_files: ["src/fees/schedule.py"]
+        tests_run:
+          - {command: "pytest tests -q", status: passed}
+      diff: |
+        --- a/src/fees/schedule.py
+        +++ b/src/fees/schedule.py
+        @@ -1,1 +1,1 @@
+        -"""highest tier below wins"""
+        +"""highest tier at or below wins"""
+
+  - name: error-status-test-run
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC06
+      type: add-feature
+      repo: payments-api
+      title: Add CSV export escaping
+    run:
+      result:
+        run_id: run_cal_06
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC06
+        status: success
+        summary: Added escaping.
+        changed_files: ["src/export/writer.py"]
+        tests_run:
+          - {command: "pytest -q", status: error}
+      diff: ""
+
+  # ── ambiguous: these exercise the judge ─────────────────────────────
+  - name: large-untested-refactor
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC07
+      type: add-feature
+      repo: payments-api
+      title: Restructure settlement ingest
+      acceptanceCriteria: ["Grammar unchanged", "All tests pass"]
+    run:
+      result:
+        run_id: run_cal_07
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC07
+        status: success
+        summary: Restructured ingest into a parser class; tests to follow later.
+        changed_files:
+          ["src/settlement/ingest.py", "src/settlement/calculator.py",
+           "src/settlement/models.py", "src/settlement/errors.py",
+           "src/settlement/api.py"]
+      diff: |
+        (5 files, +410 -212: parser class extraction, no test changes)
+
+  - name: swallowed-exceptions-introduced
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC08
+      type: add-feature
+      repo: payments-api
+      title: Harden reconciliation against bad rows
+      acceptanceCriteria: ["Bad rows skipped with a log line", "All tests pass"]
+    run:
+      result:
+        run_id: run_cal_08
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC08
+        status: success
+        summary: Wrapped row handling in try/except to skip bad rows.
+        changed_files: ["src/reconciliation/loop.py", "src/reconciliation/rows.py",
+                        "src/reconciliation/log.py", "src/reconciliation/api.py"]
+        tests_run:
+          - {command: "pytest tests/test_reconcile.py -q", status: passed}
+      diff: |
+        +        try:
+        +            handle_row(row)
+        +        except:
+        +            pass  # skip bad rows
+        (4 files, +64 -12)
+
+  - name: correct-but-sprawling-fix
+    humanVerdict: true
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC09
+      type: add-feature
+      repo: payments-api
+      title: Support EUR statements
+      acceptanceCriteria: ["EUR renders with correct symbol", "All tests pass"]
+    run:
+      result:
+        run_id: run_cal_09
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC09
+        status: success
+        summary: Added currency-aware rendering across statements, reports, exports.
+        changed_files: ["src/statements/render.py", "src/reports/rows.py",
+                        "src/export/writer.py", "tests/test_currency.py"]
+        tests_run:
+          - {command: "pytest tests -q", status: passed}
+      diff: |
+        (4 files, +180 -40: currency formatting threaded through the render
+        paths, new parametrised test module covering USD/EUR/GBP)
+
+  - name: hardcoded-secret-slipped-in
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC10
+      type: add-feature
+      repo: payments-api
+      title: Wire the FX rate provider
+      acceptanceCriteria: ["Rates fetched from the provider", "All tests pass"]
+    run:
+      result:
+        run_id: run_cal_10
+        agent: add-feature@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC10
+        status: success
+        summary: Wired the provider client with its API key.
+        changed_files: ["src/fx/provider.py", "src/fx/convert.py",
+                        "src/fx/config.py", "tests/test_fx_provider.py"]
+        tests_run:
+          - {command: "pytest tests/test_fx_provider.py -q", status: passed}
+      diff: |
+        +FX_API_KEY = "sk-live-9f2c11d0aa"  # TODO move to env
+        (4 files, +96 -8)
+
+  - name: unrelated-drive-by-changes
+    humanVerdict: false
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC11
+      type: optimize
+      repo: payments-api
+      title: Optimize screening lookup
+      constraints:
+        targetPaths: ["src/compliance/**"]
+    run:
+      result:
+        run_id: run_cal_11
+        agent: optimize-attempt@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC11
+        status: success
+        summary: Switched to a set; also reformatted unrelated handlers while there.
+        changed_files: ["src/compliance/screening.py", "src/handlers/payments.py",
+                        "src/handlers/refunds.py", "src/handlers/topups.py"]
+        tests_run:
+          - {command: "pytest tests -q", status: passed}
+      diff: |
+        (4 files, +58 -49: the set() change plus whitespace/style churn in
+        three handler files outside the target paths)
+
+  - name: solid-medium-optimization
+    humanVerdict: true
+    objective:
+      id: obj_01HZZZZZZZZZZZZZZZZZZZZC12
+      type: optimize
+      repo: payments-api
+      title: Optimize statement rendering
+      constraints:
+        targetPaths: ["src/statements/**"]
+    run:
+      result:
+        run_id: run_cal_12
+        agent: optimize-attempt@1
+        objective_id: obj_01HZZZZZZZZZZZZZZZZZZZZC12
+        status: success
+        summary: Replaced += concatenation with a list join; output byte-identical.
+        changed_files: ["src/statements/render.py", "src/statements/format.py",
+                        "src/statements/totals.py", "tests/test_render_bench.py"]
+        tests_run:
+          - {command: "pytest tests -q", status: passed}
+        metrics:
+          bench_seconds_before: 0.8
+          bench_seconds_after: 0.3
+          harness_measured: 1.0
+      diff: |
+        (4 files, +72 -55: join-based rendering, helper extraction, a new
+        benchmark regression test; measured 2.6x faster)

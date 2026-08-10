@@ -22,6 +22,7 @@ from ..memory import InMemoryStore, MemoryItem, MemoryRejected, MemoryStore
 from ..registry import InMemoryLedger, RunPhase
 from ..registry.ledger import Ledger
 from ..registry.records import AgentVersionRecord
+from .canary import observe_canary
 from .pipeline import PipelineResult, run_objective
 
 
@@ -95,6 +96,8 @@ class MetaAgentTools:
         spec = self._resolve_spec(agent)
         pipeline = run_objective(objective, spec, ledger=self.ledger, memory=self.memory)
         self._runs[pipeline.run_id] = pipeline
+        # Canary observation: a completed canaried run may complete the quota.
+        observe_canary(self.ledger, spec.ref)
         return pipeline.run_id
 
     def _jobs(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -120,6 +123,7 @@ class MetaAgentTools:
                 objective, spec, ledger=self.ledger, memory=self.memory, run_id=run_id
             )
             self._runs[run_id] = pipeline
+            observe_canary(self.ledger, spec.ref)
             return pipeline
 
         self._pending[run_id] = self._jobs().submit(execute)

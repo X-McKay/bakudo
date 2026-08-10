@@ -202,9 +202,18 @@ def suite_for(objective_type: str) -> list[Grader]:
     return OPTIMIZE_SUITE if objective_type == "optimize" else DEFAULT_SUITE
 
 
-def run_suite(ctx: EvalContext) -> list[EvalResult]:
-    """Run the graders appropriate to the objective, schema-validating each."""
+def run_suite(ctx: EvalContext, *, critic=None) -> list[EvalResult]:
+    """Run the graders appropriate to the objective, schema-validating each.
+
+    ``critic`` is an optional judge (see :mod:`bakudo.evals.critic`): when
+    provided, the gated critic level joins the suite — triage decides obvious
+    verdicts for free, only ambiguous runs spend the judge call.
+    """
     results = [grader(ctx) for grader in suite_for(ctx.objective.type.value)]
+    if critic is not None:
+        from .critic import gated_critic_eval  # local: avoids an import cycle
+
+        results.append(gated_critic_eval(ctx, critic))
     for r in results:
         r.validate_against_schema()
     return results

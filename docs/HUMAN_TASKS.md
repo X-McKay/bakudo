@@ -122,10 +122,14 @@ replace/extend those with real history as it accumulates.
 
 - [ ] For each role, curate ≥25 cases from real objectives + historical
       failures (use the `eval-author` role to convert failures into cases).
-- [ ] Configure an LLM critic judge (`evals/critic.llm_judge`) and add the
-      `critic` suite to the corpus run where you want review gating.
-- [ ] Decide the production `PromotionPolicy` (required suites incl. a
-      `regression` corpus, score threshold, canary %).
+- [ ] Calibrate the LLM critic: grow
+      `evals/corpora/critic-calibration.yaml` with real reviewed runs, run
+      `bakudo critic-calibrate --model <id>`, and set `BAKUDO_CRITIC_MODEL`
+      only once agreement is ≥0.9 (false *passes* are the dangerous
+      direction).
+- [ ] Decide the production `PromotionPolicy` (required suites incl. the
+      `regression` corpus, score threshold, canary % — canary advancement is
+      automated via `control/canary.py`).
 - [ ] **Acceptance:** `AgentEvolutionWorkflow` can promote a genuinely-better
       candidate and rejects a regression, on real corpora.
 

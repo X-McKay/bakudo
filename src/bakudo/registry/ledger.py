@@ -19,11 +19,13 @@ class Ledger(Protocol):
     # Agent versions
     def upsert_agent_version(self, record: AgentVersionRecord) -> AgentVersionRecord: ...
     def active_version(self, name: str) -> AgentVersionRecord | None: ...
+    def canary_version(self, name: str) -> AgentVersionRecord | None: ...
     def get_agent_version(self, name: str, version: int) -> AgentVersionRecord | None: ...
 
     # Runs
     def create_run(self, record: RunRecord) -> RunRecord: ...
     def get_run(self, run_id: str) -> RunRecord | None: ...
+    def runs_for_agent(self, agent_ref: str) -> list[RunRecord]: ...
     def set_phase(self, run_id: str, phase: RunPhase) -> None: ...
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None: ...
     def append_event(self, event: RunEvent) -> None: ...
@@ -56,11 +58,17 @@ class InMemoryLedger:
         return record
 
     def active_version(self, name: str) -> AgentVersionRecord | None:
-        actives = [
+        return self._version_with_status(name, "active")
+
+    def canary_version(self, name: str) -> AgentVersionRecord | None:
+        return self._version_with_status(name, "canary")
+
+    def _version_with_status(self, name: str, status: str) -> AgentVersionRecord | None:
+        matches = [
             v for v in self._versions.values()
-            if v.name == name and v.status == "active"
+            if v.name == name and v.status == status
         ]
-        return max(actives, key=lambda v: v.version, default=None)
+        return max(matches, key=lambda v: v.version, default=None)
 
     def get_agent_version(self, name: str, version: int) -> AgentVersionRecord | None:
         return self._versions.get(self._vkey(name, version))
@@ -74,6 +82,9 @@ class InMemoryLedger:
 
     def get_run(self, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
+
+    def runs_for_agent(self, agent_ref: str) -> list[RunRecord]:
+        return [r for r in self._runs.values() if r.agent_ref == agent_ref]
 
     def set_phase(self, run_id: str, phase: RunPhase) -> None:
         run = self._runs[run_id]

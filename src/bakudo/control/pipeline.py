@@ -122,14 +122,21 @@ def grade_run(
     schema_valid_hint: bool = True,
     token_budget: int | None = None,
     time_budget_s: float | None = None,
+    critic: Any | None = None,
 ) -> GradedRun:
     """Grade one run: schema-validate, normalise, run the suite, record.
 
     The *only* place an :class:`EvalContext` is constructed for a run — the
     raw worker output is validated against ``result.schema.json`` at the
     trust boundary (so the schema gate can fail), then normalised forgivingly
-    so the rest of the suite still grades malformed output.
+    so the rest of the suite still grades malformed output. The gated critic
+    level joins the suite when a judge is configured (``BAKUDO_CRITIC_MODEL``)
+    or passed explicitly.
     """
+    if critic is None:
+        from ..evals.critic import default_judge
+
+        critic = default_judge()
     schema_valid = schema_valid_hint and is_valid(raw_result, "result.schema.json")
     result = normalize_result(
         raw_result,
@@ -149,7 +156,7 @@ def grade_run(
         time_budget_s=time_budget_s,
     )
     # Suite selection keys off the objective type (optimize adds perf/simplicity).
-    eval_results = run_suite(ctx)
+    eval_results = run_suite(ctx, critic=critic)
     for r in eval_results:
         ledger.record_eval(r)
     return GradedRun(

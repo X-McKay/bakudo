@@ -168,16 +168,20 @@ schema-visible) but intentionally unwired until something real consumes it:
   machinery exists, so a worker can never merge regardless of the flag.
   Winning optimize branches are merged by the operator (or a future
   release-manager role) after review.
-- **Canary run scheduling** — promotion decisions advance through canary via
-  `evaluate_canary()` on observed scorecards, but nothing routes a percentage
-  of live traffic to canaried versions automatically yet.
 - **Graph queries** — FalkorDB mirrors memory writes; the richer run/skill graph
   queries from spec §14.2 wait until the curriculum actually reads them.
 - **Half the DDL** — several Postgres tables implement spec §20 ahead of the
   code that will use them; `infra/postgres/init.sql` labels which.
-- **LLM critic in the default suite** — `critic_eval` exists but is not part
-  of any suite until it is benchmarked against human judgement (eval roadmap
-  in [docs/improvement-proposals.md](docs/improvement-proposals.md) §6).
+
+Two former entries have graduated. **Canary scheduling** is automated
+(`control/canary.py`): a canary evolution decision registers the candidate, a
+deterministic `canary_percent` slice of dispatches routes to it, every
+completed run feeds observation, and `canary_min_runs` clean runs promote it
+(safety regressions roll it back) — no manual step. The **LLM critic** joins
+every run suite when `BAKUDO_CRITIC_MODEL` is set, behind a free triage gate
+(obvious passes/failures never spend a judge call); set it only after
+`bakudo critic-calibrate --model <id>` shows ≥0.9 agreement with the
+human-labelled corpus in `evals/corpora/critic-calibration.yaml`.
 
 ## License
 

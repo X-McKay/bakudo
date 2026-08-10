@@ -161,6 +161,42 @@ def _cmd_eval_corpus(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_critic_calibrate(args: argparse.Namespace) -> int:
+    """Measure the gated critic against the human-labelled corpus."""
+    from .evals.critic import calibrate, llm_judge, load_calibration
+
+    cases = load_calibration(args.corpus)
+    judge = llm_judge(args.model)
+    report = calibrate(judge, cases)
+
+    print(f"model        : {args.model}")
+    print(f"cases        : {report.cases_total}")
+    print(f"agreement    : {report.agreement:.2f}  (threshold {args.min_agreement:.2f})")
+    print(f"judge calls  : {report.judged_calls} (rest decided by free triage)")
+    print(f"false passes : {report.false_passes}  <- the dangerous direction")
+    print(f"false fails  : {report.false_fails}")
+    for d in report.disagreements:
+        source = "judge" if d.judged else f"triage:{d.triage}"
+        print(
+            f"  disagreed on {d.case}: human={'pass' if d.human_verdict else 'fail'} "
+            f"critic={'pass' if d.critic_verdict else 'fail'} ({source})"
+        )
+
+    if report.agreement < args.min_agreement:
+        print(
+            f"\nBelow the {args.min_agreement:.2f} agreement bar — do NOT set "
+            "BAKUDO_CRITIC_MODEL yet. Improve the judge prompt/model or grow "
+            "the corpus, then re-run.",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        "\nAgreement meets the bar. Enable the critic in run suites with "
+        f"BAKUDO_CRITIC_MODEL={args.model}."
+    )
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Check every configured dependency; exit non-zero if anything fails."""
     from .doctor import run_checks
@@ -261,6 +297,22 @@ def main(argv: list[str] | None = None) -> int:
         "--limit", type=int, default=None, help="Run only the first N cases."
     )
     p_corpus.set_defaults(func=_cmd_eval_corpus)
+
+    p_calibrate = sub.add_parser(
+        "critic-calibrate",
+        help="Measure the LLM critic against the human-labelled corpus "
+        "(gate for BAKUDO_CRITIC_MODEL).",
+    )
+    p_calibrate.add_argument("--model", required=True, help="Judge model id.")
+    p_calibrate.add_argument(
+        "--corpus", default="evals/corpora/critic-calibration.yaml",
+        help="Labelled calibration corpus path.",
+    )
+    p_calibrate.add_argument(
+        "--min-agreement", type=float, default=0.9,
+        help="Required human-agreement rate (default 0.9).",
+    )
+    p_calibrate.set_defaults(func=_cmd_critic_calibrate)
 
     p_doctor = sub.add_parser(
         "doctor", help="Check every configured dependency (temporal/db/graph/model/abox)."

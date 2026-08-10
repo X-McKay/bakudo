@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
         collect_signals,
         compact_memories,
         create_run,
+        observe_canary_run,
         persist_run,
         render_bundle,
         resolve_agent_spec,
@@ -156,6 +157,11 @@ class AgentRunWorkflow:
         )
 
         await self._advance(inp.run_id, "completed", {"result": result})
+        # Canary observation: if this run's agent version is a canary, its
+        # scorecard may complete the observation quota (promote/roll back).
+        await workflow.execute_activity(
+            observe_canary_run, inp.run_id, **_SHORT
+        )
         await self._notify_meta(inp.run_id)
         return AgentRunOutput(
             run_id=inp.run_id,
@@ -372,7 +378,13 @@ class MetaAgentWorkflow:
                 )
                 spec = await workflow.execute_activity(
                     resolve_agent_spec,
-                    args=[suggested[0] if suggested else None, objective.get("type", "")],
+                    args=[
+                        suggested[0] if suggested else None,
+                        objective.get("type", ""),
+                        # Canary routing key: stable per objective, so replay
+                        # routes identically.
+                        objective.get("id", ""),
+                    ],
                     **_SHORT,
                 )
             if spec is None:

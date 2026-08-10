@@ -89,6 +89,14 @@ class Settings(BaseModel):
         description="API key for the model gateway (optional for local vLLM).",
         json_schema_extra=_env("VLLM_API_KEY", secret=True),
     )
+    critic_model: str | None = Field(
+        default=None,
+        description="Model id for the LLM critic judge. Setting it adds the "
+        "gated critic level to every run suite — configure only after "
+        "`bakudo critic-calibrate` shows >=0.9 agreement with the "
+        "human-labelled calibration corpus.",
+        json_schema_extra=_env("BAKUDO_CRITIC_MODEL"),
+    )
 
     # --- Control API ---
     api_token: str | None = Field(
