@@ -1,6 +1,6 @@
 """The Temporal worker process entrypoint (``bakudo-worker``).
 
-Connects to Temporal, optionally wires the durable Postgres ledger + Neo4j
+Connects to Temporal, optionally wires the durable Postgres ledger + FalkorDB
 graph into the activity layer, and serves the control and run task queues.
 """
 
@@ -163,9 +163,27 @@ def _resolve_embedder() -> Any | None:
     return embedder_cls(base_url=url)
 
 
+def _resolve_graph() -> Any | None:
+    """Resolve the optional FalkorDB graph mirror from ``FALKORDB_URL``.
+
+    Replaces the retired NEO4J_URI/NEO4J_PASSWORD wiring. Credentials, if
+    any, ride inside the URL (``falkor://user:pass@host:6379``).
+    ``BAKUDO_GRAPH_GROUP_ID`` namespaces the graph key so tenants on a
+    shared FalkorDB never mix nodes (MEM-16).
+    """
+    url = os.environ.get("FALKORDB_URL")
+    if not url:
+        return None
+    from ..memory.graph import FalkorGraphMemory
+
+    group_id = os.environ.get("BAKUDO_GRAPH_GROUP_ID", "default")
+    return FalkorGraphMemory.connect(url, group_id=group_id)
+
+
 def _wire_dependencies() -> None:
     """Wire the durable ledger + memory if a DSN is configured (otherwise
-    in-memory). The Neo4j graph mirror rides along when NEO4J_URI is set."""
+    in-memory). The FalkorDB graph mirror rides along when FALKORDB_URL is
+    set."""
     from . import _impl
 
     dsn = os.environ.get("BAKUDO_POSTGRES_DSN")
@@ -177,24 +195,16 @@ def _wire_dependencies() -> None:
     from ..memory.store_pg import PgSemanticMemoryStore
     from ..registry.postgres_ledger import PostgresLedger
 
-    graph = None
-    neo4j_uri = os.environ.get("NEO4J_URI")
-    if neo4j_uri:
-        from ..memory.graph import Neo4jGraphMemory
-
-        password = os.environ.get("NEO4J_PASSWORD")
-        if not password:
-            raise RuntimeError(
-                "NEO4J_URI is set but NEO4J_PASSWORD is not; refusing to "
-                "guess credentials for the graph memory mirror."
-            )
-        graph = Neo4jGraphMemory.connect(
-            neo4j_uri, os.environ.get("NEO4J_USER", "neo4j"), password
-        )
+    graph = _resolve_graph()
+    memory = PgSemanticMemoryStore.connect(dsn, graph=graph, embedder=embedder)
+    if graph is not None:
+        # Constraints + vector index, dimensioned by the actual embedder in
+        # play — never a hardcoded constant (MEM-16).
+        graph.ensure_schema(vector_dim=memory.embedder.dim)
 
     _impl.configure(
         ledger=PostgresLedger.connect(dsn),
-        memory=PgSemanticMemoryStore.connect(dsn, graph=graph, embedder=embedder),
+        memory=memory,
     )
 
 

@@ -3,7 +3,7 @@
 The :class:`Embedder` protocol lets production plug in a real model (vLLM/OpenAI
 ``embeddings``), while :class:`HashingEmbedder` provides a deterministic,
 dependency-free fallback for tests and offline use. Vectors feed pgvector /
-Neo4j vector indexes in production.
+FalkorDB vector indexes in production.
 """
 
 from __future__ import annotations

@@ -7,10 +7,10 @@ embedding-based dedup/retrieval, but persisted in the ``memory_items`` +
 later runs across processes. Similarity runs server-side via the pgvector
 ``<=>`` (cosine distance) operator; the DDL lives in ``infra/postgres/init.sql``.
 
-An optional :class:`~bakudo.memory.graph.Neo4jGraphMemory` mirror receives a
+An optional :class:`~bakudo.memory.graph.FalkorGraphMemory` mirror receives a
 ``PRODUCED_MEMORY`` edge (with the embedding attached) for every accepted
-write, which is what the commented Neo4j vector index in
-``infra/neo4j/init.cypher`` indexes when an operator enables it.
+write, which is what the FalkorDB vector index created by
+``FalkorGraphMemory.ensure_schema`` indexes.
 
 ``psycopg`` is imported lazily so the rest of bakudo imports without the ``db``
 extra, mirroring :class:`~bakudo.registry.postgres_ledger.PostgresLedger`.
@@ -24,7 +24,7 @@ from datetime import timedelta
 from typing import Any
 
 from .embeddings import Embedder, HashingEmbedder
-from .graph import Neo4jGraphMemory
+from .graph import FalkorGraphMemory
 from .models import MemoryItem
 from .policy import MemoryRejected, validate_memory_candidate
 from .semantic import DEFAULT_DEDUP_THRESHOLD
@@ -93,7 +93,7 @@ class PgSemanticMemoryStore:
         *,
         embedder: Embedder | None = None,
         dedup_threshold: float = DEFAULT_DEDUP_THRESHOLD,
-        graph: Neo4jGraphMemory | None = None,
+        graph: FalkorGraphMemory | None = None,
     ) -> None:
         self._conn = conn
         self.embedder = embedder or HashingEmbedder()
@@ -109,7 +109,7 @@ class PgSemanticMemoryStore:
         *,
         embedder: Embedder | None = None,
         dedup_threshold: float = DEFAULT_DEDUP_THRESHOLD,
-        graph: Neo4jGraphMemory | None = None,
+        graph: FalkorGraphMemory | None = None,
         **kwargs: Any,
     ) -> PgSemanticMemoryStore:
         import psycopg  # lazy

@@ -15,7 +15,7 @@ class MemoryType(str, Enum):
     semantic = "semantic_memory"      # stable repo/domain/API facts
     procedural = "procedural_memory"  # skills, workflows, recipes
     evaluative = "evaluative_memory"  # what made outputs good/bad
-    relational = "relational_memory"  # graph relationships (Neo4j)
+    relational = "relational_memory"  # graph relationships (FalkorDB)
     # Worker-emitted shorthand types (from result.json) map onto semantic.
     repo_fact = "repo_fact"
 
