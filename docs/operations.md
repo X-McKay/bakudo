@@ -63,6 +63,25 @@ mirror is frozen pending the FalkorDB migration — leave `NEO4J_URI` unset.)* M
 routed through the vLLM gateway; bring it up with the `models` compose profile
 once you have hosted vLLM backends configured in `infra/vllm-gateway/config.yaml`.
 
+### Repo-scoped kubectl
+
+When the live infra runs on a Kubernetes cluster, keep all project kubectl
+activity isolated from the host's `~/.kube/config`:
+
+```bash
+make kubeconfig                 # KUBE_SRC_CONTEXT=<name> to pick the source
+set -a; . ./.env; set +a        # .env exports KUBECONFIG=$PWD/.kube/config
+kubectl config current-context  # -> bakudo
+```
+
+`make kubeconfig` writes a flattened copy of one host context to
+`.kube/config` (gitignored, mode 600) under a repo-specific context named
+`bakudo` with the `bakudo` namespace as default. With `KUBECONFIG` pointed
+there, kubectl reads **and writes** only that file — switching contexts,
+changing namespaces, or any other config mutation during local testing can
+never touch the host's real kubeconfig. Re-run `make kubeconfig` to refresh
+after credential rotation.
+
 ## Observability (spec §18)
 
 - **Temporal**: workflow status, activity retries, history size, timeouts —
