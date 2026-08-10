@@ -71,9 +71,15 @@ mapping (spec open question §28.3).
 - [ ] Point `infra/vllm-gateway/config.yaml` `api_base`s at them; set
       `VLLM_BASE_URL` / `VLLM_API_KEY` (and any `BAKUDO_VLLM_<REF>` overrides).
 - [ ] Confirm the `agents/*.yaml` `modelId`/`baseUrlRef` match the gateway.
-- [ ] **Acceptance:** a one-off real run (not `BAKUDO_OFFLINE`) returns a
-      schema-valid `result.json` through the gateway; per-role token budgets and
-      rate limits are configured on the gateway.
+- [x] **Acceptance:** a one-off real run (not `BAKUDO_OFFLINE`) returns a
+      schema-valid `result.json` through the gateway. *(Proven live 2026-08-09/10
+      against the hosted endpoints; per-role token budgets now also exist
+      spec-side via `budget.maxTokens`/`maxToolCalls`.)*
+- [ ] **⚠ Keep `strands-agents>=1.43,<1.45` pinned** (the `[runtime]` extra):
+      strands ≥1.45 sends `tools: []` from its OpenAI-provider structured
+      output, which vLLM rejects (HTTP 400) — every in-guest report extraction
+      silently degrades. Lift the cap only after re-validating extraction
+      against the live deployment (bisected 2026-08-09: 1.44.0 OK, 1.45+ FAIL).
 
 ---
 
@@ -101,13 +107,19 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 - [ ] Define the abox sandbox profiles named in `abox/runner.py::PROFILES`
       (`explore-readonly`, `add-feature-python`, `optimize-python`, …) with the network bundles
       (`github-api`, `pypi-public`, `vllm-gateway`) and resource/diff limits.
-- [ ] Validate the real `abox run` flags against
-      `AboxRunner.build_command` (the contract test pins the shape; confirm the
-      installed abox CLI accepts `--task/--base/--branch/--timeout/--template/
-      --mount` or adjust the runner).
-- [ ] **Acceptance:** a real sandboxed run produces a diff on the
+- [x] Validate the real `abox run` flags against `AboxRunner.build_command`.
+      *(Done on the 2026-08-09 validation branch: the runner speaks the real
+      0.6.0 protocol — `--repo/--task/--base/--timeout/--network/--input-file`,
+      results collected via `abox path`.)*
+- [x] **Acceptance:** a real sandboxed run produces a diff on the
       `agent/<run_id>` branch and a collected `result.json`; denied commands and
-      denied egress appear in the run's audit log.
+      denied egress appear in the run's audit log. *(Proven live; note the
+      branch is deleted by the post-collection `abox stop --clean` — the
+      collected diff is the durable artifact, which is also what independent
+      bench verification re-runs.)*
+- [ ] **⚠ Guest command policy quirk:** abox's in-guest proxy denies mutating
+      git ops (`git apply` observed live). Anything needing to materialise a
+      diff must do it host-side (see `abox/bench.py`).
 
 ---
 
