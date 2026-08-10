@@ -7,13 +7,67 @@ graph into the activity layer, and serves the control and run task queues.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Sandbox runs can hold an activity thread for hours; size the pool so long
 # runs do not starve the quick ledger-write activities on the same queue.
 _ACTIVITY_POOL_SIZE = 16
+
+
+def log_sandbox_posture() -> None:
+    """Announce the worker's sandbox posture at startup (TMP-13).
+
+    The compose worker image ships no abox binary/KVM, so the composed stack
+    declares ``BAKUDO_SANDBOX=unavailable``. The worker still starts (ledger
+    writes, evals-on-stored-results, curriculum, memory compaction all work),
+    but every sandbox-requiring activity fails fast with an actionable error
+    — this log makes that posture visible in ``docker compose logs worker``
+    instead of surfacing only when the first run fails.
+    """
+    mode = os.environ.get("BAKUDO_SANDBOX")
+    if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
+        mode = "abox"
+
+    if mode == "unavailable":
+        logger.warning(
+            "sandbox posture: DEGRADED (BAKUDO_SANDBOX=unavailable). Sandbox "
+            "runs are unavailable: this deployment has no abox binary and no "
+            "KVM. The worker serves non-sandbox activities; every "
+            "sandbox-requiring run will fail fast with an actionable error. "
+            "To enable real sandboxing, mount the host abox binary and "
+            "/dev/kvm into the worker and set BAKUDO_SANDBOX=abox "
+            "(see infra/docker-compose.yml)."
+        )
+    elif mode == "abox":
+        resolved = shutil.which("abox")
+        if resolved is None:
+            logger.warning(
+                "sandbox posture: BAKUDO_SANDBOX=abox but the abox binary "
+                "was not found on PATH — every sandbox run will fail with "
+                "AboxNotFoundError. Install abox 0.6.0 (and expose /dev/kvm "
+                "when containerized) or set BAKUDO_SANDBOX=unavailable to "
+                "declare the degraded mode."
+            )
+        else:
+            logger.info("sandbox posture: abox microVM sandbox (%s)", resolved)
+    elif mode == "local":
+        logger.info(
+            "sandbox posture: in-process local sandbox (dev-only; requires "
+            "BAKUDO_ENV=dev, not an isolation boundary)"
+        )
+    else:
+        logger.warning(
+            "sandbox posture: BAKUDO_SANDBOX is not set (fail-closed) — "
+            "every sandbox-requiring run will be refused. Set it to 'abox', "
+            "'local' (dev-only), or 'unavailable' to declare a degraded "
+            "deployment."
+        )
 
 
 def worker_configs() -> list[dict[str, Any]]:
@@ -134,6 +188,7 @@ async def _run() -> None:
 
     from .shared import TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS
 
+    log_sandbox_posture()
     _wire_dependencies()
 
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
@@ -146,6 +201,11 @@ async def _run() -> None:
 
 
 def main() -> None:
+    # The sandbox-posture warning (TMP-13) must reach `docker compose logs`
+    # even in a bare container with no logging config of its own.
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     asyncio.run(_run())
 
 

@@ -393,6 +393,21 @@ def test_sandbox_abox_selected(monkeypatch):
     assert callable(Deps().sandbox_fn())
 
 
+def test_sandbox_unavailable_mode_fails_loud_and_actionable(monkeypatch):
+    """TMP-13: the compose worker image ships no abox binary, so the compose
+    stack declares BAKUDO_SANDBOX=unavailable. Sandbox-requiring paths must
+    fail fast with an error that says why and how to enable real sandboxing —
+    never hang or silently no-op."""
+    _clear_sandbox_env(monkeypatch)
+    monkeypatch.setenv("BAKUDO_SANDBOX", "unavailable")
+    with pytest.raises(RuntimeError) as excinfo:
+        Deps().sandbox_fn()
+    message = str(excinfo.value)
+    assert "unavailable" in message
+    assert "abox" in message
+    assert "/dev/kvm" in message  # names the fix, not just the failure
+
+
 def test_run_sandbox_dict_carries_error_and_stderr_tail(monkeypatch):
     """Failed runs must leave diagnosable breadcrumbs in the durable event
     payloads — live cycles were undiagnosable without them."""

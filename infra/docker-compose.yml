@@ -4,7 +4,9 @@
 #
 # Brings up Postgres (ledger), Neo4j (graph memory), the Temporal cluster + UI,
 # a vLLM gateway placeholder, and the bakudo worker + control API. Worker agents
-# run in abox microVMs out-of-band; abox is not part of this compose file.
+# run in abox microVMs out-of-band; abox is not part of this compose file —
+# see the worker service below for the default DEGRADED sandbox posture and
+# how to enable real sandboxing (mount host abox + /dev/kvm).
 
 name: bakudo
 
@@ -65,6 +67,24 @@ services:
       - ./vllm-gateway/config.yaml:/etc/litellm/config.yaml:ro
     ports: ["4000:4000"]
 
+  # SANDBOX POSTURE — DEGRADED BY DEFAULT (TMP-13).
+  # The worker image contains no abox binary and the container has no KVM, so
+  # sandbox runs are unavailable in the composed stack. BAKUDO_SANDBOX is set
+  # to `unavailable` to declare that truthfully: the worker starts and serves
+  # non-sandbox activities (ledger, evals on stored results, curriculum,
+  # memory compaction), logs the degraded posture loudly at startup, and every
+  # sandbox-requiring run fails fast with an actionable error — it never hangs
+  # or silently no-ops.
+  #
+  # To enable real sandboxing the host must have abox 0.6.0 and KVM; then:
+  #   1. mount the host abox binary:
+  #        volumes:
+  #          - /usr/local/bin/abox:/usr/local/bin/abox:ro
+  #   2. pass through the KVM device:
+  #        devices:
+  #          - /dev/kvm:/dev/kvm
+  #   3. mount the target repos and point BAKUDO_REPO_ROOT at them
+  #   4. set BAKUDO_SANDBOX: abox
   worker:
     build:
       context: ..
@@ -78,7 +98,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       BAKUDO_POSTGRES_DSN: postgresql://bakudo:bakudo@postgres:5432/bakudo
-      BAKUDO_SANDBOX: abox
+      BAKUDO_SANDBOX: unavailable
       VLLM_BASE_URL: http://vllm-gateway:4000/v1
 
   api:
@@ -90,6 +110,9 @@ services:
     environment:
       BAKUDO_API_HOST: 0.0.0.0
       TEMPORAL_ADDRESS: temporal:7233
+      # Same degraded posture as the worker: POST /runs and /optimize return
+      # an actionable 409 instead of an opaque "BAKUDO_SANDBOX must be set".
+      BAKUDO_SANDBOX: unavailable
     ports: ["8000:8000"]
 
 volumes:

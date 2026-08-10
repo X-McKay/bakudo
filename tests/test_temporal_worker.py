@@ -123,3 +123,77 @@ def test_resolve_embedder_builds_real_openai_embedder(monkeypatch):
     emb = worker._resolve_embedder()
     assert isinstance(emb, embeddings.OpenAIEmbedder)
     assert emb._base_url == "https://embeddings.example/v1"
+
+
+# --- TMP-13: the worker announces its sandbox posture loudly at startup ---
+
+
+def _posture_records(caplog):
+    return [r for r in caplog.records if "sandbox posture" in r.getMessage()]
+
+
+def test_posture_warns_degraded_when_sandbox_unavailable(monkeypatch, caplog):
+    """The compose stack sets BAKUDO_SANDBOX=unavailable (image has no abox
+    binary/KVM): the worker must start but say so loudly, including how to
+    enable real sandboxing."""
+    import logging
+
+    from bakudo.temporal.worker import log_sandbox_posture
+
+    monkeypatch.setenv("BAKUDO_SANDBOX", "unavailable")
+    with caplog.at_level(logging.INFO, logger="bakudo.temporal.worker"):
+        log_sandbox_posture()
+    records = _posture_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    assert "DEGRADED" in message
+    assert "/dev/kvm" in message
+    assert "BAKUDO_SANDBOX=abox" in message
+
+
+def test_posture_warns_when_abox_configured_but_binary_missing(monkeypatch, caplog):
+    """BAKUDO_SANDBOX=abox with no abox on PATH means every sandbox run will
+    fail; the worker must say so at startup, not two hours into a run."""
+    import logging
+
+    from bakudo.temporal import worker
+
+    monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: None)
+    with caplog.at_level(logging.INFO, logger="bakudo.temporal.worker"):
+        worker.log_sandbox_posture()
+    records = _posture_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "abox" in records[0].getMessage()
+    assert "not found" in records[0].getMessage()
+
+
+def test_posture_info_when_abox_configured_and_present(monkeypatch, caplog):
+    import logging
+
+    from bakudo.temporal import worker
+
+    monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: "/usr/local/bin/abox")
+    with caplog.at_level(logging.INFO, logger="bakudo.temporal.worker"):
+        worker.log_sandbox_posture()
+    records = _posture_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+
+
+def test_posture_warns_when_sandbox_unset(monkeypatch, caplog):
+    import logging
+
+    from bakudo.temporal.worker import log_sandbox_posture
+
+    monkeypatch.delenv("BAKUDO_SANDBOX", raising=False)
+    monkeypatch.delenv("BAKUDO_USE_ABOX", raising=False)
+    with caplog.at_level(logging.INFO, logger="bakudo.temporal.worker"):
+        log_sandbox_posture()
+    records = _posture_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "BAKUDO_SANDBOX" in records[0].getMessage()

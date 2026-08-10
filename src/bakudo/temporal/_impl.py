@@ -77,6 +77,18 @@ class Deps:
                     "sandbox is not an isolation boundary."
                 )
             return local_sandbox
+        if mode == "unavailable":
+            # TMP-13: the declared posture of deployments that cannot sandbox
+            # (e.g. the default docker-compose worker image, which ships no
+            # abox binary or KVM). Fail loud and actionable, never hang or
+            # silently no-op.
+            raise RuntimeError(
+                "sandbox runs are unavailable in this deployment "
+                "(BAKUDO_SANDBOX=unavailable): the worker image has no abox "
+                "binary and no /dev/kvm. To enable real sandboxing, mount the "
+                "host abox binary and /dev/kvm into the worker and set "
+                "BAKUDO_SANDBOX=abox (see infra/docker-compose.yml)."
+            )
         if mode is None:
             raise RuntimeError(
                 "BAKUDO_SANDBOX must be set to 'abox' or 'local' "
