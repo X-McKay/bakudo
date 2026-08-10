@@ -106,10 +106,15 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
   proposes approaches, parallel single-hypothesis `optimize-attempt` runs
   implement them in sibling sandboxes, and perf/simplicity graders plus hard
   behavior-preservation gates pick a winner or return no-change, looping with
-  feedback across bounded rounds. Submit via `bakudo optimize` or
-  `POST /optimize` (both drive the in-process mirror `run_optimize_loop`);
-  production submits the Temporal workflow via
-  `temporal.client.start_optimization`;
+  feedback accumulated across bounded rounds. The winner's benchmark claim is
+  **independently re-measured** before selection returns (diff applied
+  host-side to a `verify/` branch, timed best-of-3 in fresh network-isolated
+  sandboxes; unreproduced claims are rejected with feedback). Every run is
+  bounded by the spec-level `budget.maxToolCalls` ceiling and ends with a
+  guided structured-output report extraction regardless of how the loop
+  terminated. Submit via `bakudo optimize` or `POST /optimize` (both drive
+  the in-process mirror `run_optimize_loop`); production submits the Temporal
+  workflow via `temporal.client.start_optimization`;
 - **durable semantic memory** — `PgSemanticMemoryStore` over pgvector,
   auto-wired in the worker from `BAKUDO_POSTGRES_DSN`, with an optional Neo4j
   graph mirror from `NEO4J_URI`/`NEO4J_PASSWORD`;

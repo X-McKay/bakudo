@@ -141,6 +141,29 @@ sandboxes, and hard-gated winner selection that treats "no safe improvement"
 as a first-class outcome — backed by a 25-case corpus whose no-change decoys
 make manufactured churn unpromotable.
 
+The 2026-08 hardening passes took the production plane **live end-to-end**
+(real abox 0.6.0 microVMs, Temporal + Postgres, hosted vLLM models) and
+restructured the two things live runs proved fragile:
+
+- **The run report is a phase, not a side effect** (issue #27): every loop
+  ending — clean finish, budget/timeout, the spec-level `budget.maxToolCalls`
+  ceiling, the denial circuit-breaker — force-transitions into one guided
+  structured-output report extraction, so the deliverable survives however
+  the loop ends.
+- **Winners are verified, not trusted** (issue #28): a selected attempt's
+  benchmark claim must reproduce under independent measurement (its diff
+  applied host-side to a `verify/` branch, timed best-of-3 in fresh
+  network-isolated sandboxes) before selection returns; unreproduced claims
+  are rejected with feedback to the next scout round.
+
+Both terminals are live-proven on a fixture repo: a real O(n²) fix selected
+with `bench_verified: true`, and a 3-round cycle that correctly rejected a
+plausible-but-false speedup claim (measured −5%) before ending in an honest
+`no-change`. See
+[docs/superpowers/reviews/](docs/superpowers/reviews/) for the validation
+reports, including the live failure ladder. Note the pinned
+`strands-agents>=1.43,<1.45` (1.45+ breaks structured output against vLLM).
+
 See [docs/spec.md](docs/spec.md) for the full design and [docs/operations.md](docs/operations.md)
 for what is wired end-to-end versus what needs live infrastructure.
 
