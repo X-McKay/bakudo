@@ -5,7 +5,7 @@ evaluates, and evolves specialized agents over time.
 
 > This is a ground-up redesign (v3). Earlier versions of bakudo were a Rust TUI/
 > daemon for driving coding agents. bakudo is now a Python **agent operating
-> system** built on Temporal, Strands, abox, Postgres, Neo4j, and vLLM. See the
+> system** built on Temporal, Strands, abox, Postgres, FalkorDB, and vLLM. See the
 > [system spec](docs/spec.md) and [architecture](docs/architecture.md).
 
 ## The idea
@@ -35,7 +35,7 @@ Human / API / Scheduler
         │               │                     │                                    │
    (signals/queries) Registry/Curriculum   EvalWorkflow                      Scoped tools / Skills / MCP
         │               │                     │
-     Postgres (ledger)  └── Neo4j (graph memory)
+     Postgres (ledger)  └── FalkorDB (graph memory)
 ```
 
 ## What's in this repo
@@ -51,7 +51,7 @@ src/bakudo/
   abox/          abox sandbox runner + a local in-process sandbox for dev (§6)
   evals/         eval levels, scorecard, promotion policy (§15, §22)
   memory/        evidence-backed memory model, write policy, semantic stores
-                 (in-process + durable pgvector), Neo4j graph (§14)
+                 (in-process + durable pgvector), FalkorDB graph (§14)
   registry/      the authoritative ledger (in-memory + Postgres) (§14.1, §20)
   temporal/      workflows, activities, worker, client (§11, §12)
   control/       run pipeline, the optimization loop, and the meta-agent's
@@ -63,14 +63,14 @@ agents/          seed AgentSpecs: explore, add-feature, qa, critic,
                  optimize-scout, optimize-attempt (§9)
 skills/          seed skills: codebase-navigation, test-selection, safe-refactor
 evals/           eval corpora: add-feature (sample), optimize (25 cases) (§22)
-infra/           docker-compose, Postgres DDL, Neo4j schema, vLLM gateway (§20, §21, §24)
+infra/           docker-compose, Postgres DDL, vLLM gateway (§20, §21, §24)
 docs/            spec, architecture, security, operations
 ```
 
 ## Quickstart (offline, no infra)
 
 The control-plane domain logic runs with only the light core dependencies — no
-Temporal, Postgres, Neo4j, abox, or vLLM required.
+Temporal, Postgres, FalkorDB, abox, or vLLM required.
 
 ```bash
 pip install -e ".[dev]"
@@ -98,7 +98,7 @@ pytest
 
 ```bash
 cp .env.example .env
-cd infra && docker compose up -d        # postgres, neo4j, temporal(+UI), worker, api
+cd infra && docker compose up -d        # postgres, falkordb, temporal(+UI), worker, api
 # Temporal UI at http://localhost:8080, control API at http://localhost:8000
 ```
 
@@ -119,7 +119,7 @@ This is a **v0.1 vertical slice** following the spec's recommended build order
 (§29). The control-plane domain logic — schemas, agent specs, curriculum,
 evals/promotion, memory policy, registry, the run pipeline, and the meta-agent
 tool surface — is implemented and tested in-process. The Temporal workflows,
-abox microVM runner, Strands/vLLM model wiring, and Postgres/Neo4j adapters are
+abox microVM runner, Strands/vLLM model wiring, and Postgres/FalkorDB adapters are
 implemented against their real client libraries (installed via extras) and
 exercised through the same building blocks the offline pipeline uses.
 
@@ -133,7 +133,7 @@ advanced uniformly; sandbox selection **fails closed**; promotion enforces
 Since then two larger slices have landed. **Durable semantic memory**:
 `PgSemanticMemoryStore` persists policy-gated memories with server-side
 pgvector similarity (worker auto-wires it from `BAKUDO_POSTGRES_DSN`, with an
-optional Neo4j mirror), so memories written by one run are retrievable by
+optional FalkorDB mirror), so memories written by one run are retrievable by
 later runs. **The optimization loop**: `OptimizationWorkflow` (and its offline
 mirror behind `bakudo optimize` / `POST /optimize`) fans an optimize objective
 out to a read-only scout, parallel single-hypothesis attempt runs in sibling
