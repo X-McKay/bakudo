@@ -1,4 +1,4 @@
-.PHONY: install lint type test check demo wheel kubeconfig
+.PHONY: install lint type test check demo wheel
 
 install:
 	pip install -e ".[dev]"
@@ -19,21 +19,6 @@ check: lint type test
 
 demo:
 	bakudo demo
-
-# Bootstrap a repo-scoped kubeconfig at .kube/config (gitignored): a flattened
-# copy of one host context, renamed to "bakudo". With KUBECONFIG pointed here
-# (sourcing .env does it), kubectl reads/writes ONLY this file — local testing
-# can never switch contexts on, or otherwise mutate, ~/.kube/config.
-# Override the source context with KUBE_SRC_CONTEXT=<name>.
-kubeconfig:
-	@src=$${KUBE_SRC_CONTEXT:-default}; \
-	mkdir -p .kube; \
-	kubectl config view --minify --flatten --context="$$src" > .kube/config; \
-	chmod 600 .kube/config; \
-	KUBECONFIG=$(CURDIR)/.kube/config kubectl config rename-context "$$src" bakudo >/dev/null; \
-	KUBECONFIG=$(CURDIR)/.kube/config kubectl config use-context bakudo >/dev/null; \
-	echo "wrote .kube/config (context 'bakudo' from host context '$$src')"; \
-	echo "activate with: export KUBECONFIG=$(CURDIR)/.kube/config  (or source .env)"
 
 # Build a vendorable wheel stamped with the git SHA (3.0.0.dev0+<sha>) so pip
 # treats every build as a distinct version — a refreshed vendor wheel in a

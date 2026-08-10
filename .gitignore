@@ -26,6 +26,3 @@ artifacts/
 *.swo
 node_modules/
 uv.lock
-
-# Repo-scoped kubeconfig (contains cluster credentials; make kubeconfig)
-.kube/
