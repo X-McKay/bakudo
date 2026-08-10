@@ -137,3 +137,18 @@ def test_empty_diff_is_refused(tmp_path):
     measure = abox_bench_measure(_repo(tmp_path), executor=_ok_executor([]))
     with pytest.raises(ValueError, match="empty diff"):
         measure("", "python3 bench.py")
+
+
+def test_timer_script_compiles_and_takes_best_of_n():
+    """The rendered in-guest timer must be valid python (a SyntaxError only
+    surfaces live otherwise) and time the bench best-of-N — single-shot
+    wall-clock nearly false-failed a micro-bench near the 5% threshold."""
+    from bakudo.abox.bench import _BENCH_REPEATS, _MARKER, _TIMER_TEMPLATE
+
+    script = _TIMER_TEMPLATE.format(
+        bench="python3 bench.py", marker=_MARKER, repeats=_BENCH_REPEATS
+    )
+    compile(script, "timer", "exec")
+    assert _BENCH_REPEATS >= 3
+    assert f"range({_BENCH_REPEATS})" in script
+    assert "min(timings)" in script

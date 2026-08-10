@@ -1,5 +1,9 @@
 
+from pathlib import Path
+
 from bakudo.runner.result import normalize_result
+
+AGENTS = Path(__file__).resolve().parents[1] / "agents"
 
 CTX = dict(run_id="run_X", agent="add-feature@1", objective_id="obj_X")
 
@@ -60,3 +64,51 @@ def test_normalize_verdict_failed_review():
                            run_id="run_C", agent="critic@1", objective_id="obj_C")
     assert out.status.value == "success"  # the critic RUN succeeded; the verdict is negative
     assert out.metrics["passed"] == 0.0
+
+
+def test_unknown_test_status_coerces_to_error():
+    """Observed live: a scout recorded its denied test attempt as status
+    'denied'; the schema enum rejected it and the run lost its result."""
+    result = normalize_result(
+        {"status": "blocked", "summary": "s",
+         "tests_run": [{"command": "pytest -q", "status": "denied"},
+                       {"command": "pytest -q", "status": "passed"},
+                       "tests/test_x.py"],
+         },
+        run_id="run_1", agent="a@1", objective_id="obj_1",
+    )
+    statuses = [t.status for t in result.tests_run]
+    assert statuses == ["error", "passed", "error"]
+    result.validate_against_schema()
+
+
+def test_runner_writes_failed_result_when_normalization_raises(tmp_path, monkeypatch):
+    """normalize_result sat outside main.run's guard: any schema-invalid
+    output crashed the runner with NO result.json (observed live)."""
+    import argparse
+
+    from bakudo.runner import main as runner_main
+
+    def exploding(*a, **k):
+        raise RuntimeError("normalization exploded")
+
+    monkeypatch.setattr(runner_main, "normalize_result", exploding)
+    monkeypatch.setenv("BAKUDO_OFFLINE", "1")
+    args = argparse.Namespace(
+        bundle=None, spec=str(AGENTS / "explore.yaml"),
+        objective=None, result=str(tmp_path / "result.json"),
+        workspace=str(tmp_path), run_id="run_NORM1",
+    )
+    import json as _json
+
+    from bakudo.curriculum import Objective
+
+    obj = Objective(type="explore", repo="bakudo", title="t")
+    objective_path = tmp_path / "objective.json"
+    objective_path.write_text(_json.dumps(obj.to_dict()))
+    args.objective = str(objective_path)
+    rc = runner_main.run(args)
+    assert rc == 1
+    written = _json.loads((tmp_path / "result.json").read_text())
+    assert written["status"] == "failed"
+    assert "normalization exploded" in written["summary"]

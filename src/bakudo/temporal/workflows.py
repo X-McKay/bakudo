@@ -400,7 +400,8 @@ class OptimizationWorkflow:
                     "result": winner.get("result"),
                     "bench_verified": verified,
                 }
-            feedback = round_feedback(list(attempts)) + verify_feedback
+            # Accumulate across rounds (OPT-17), mirroring run_optimize_loop.
+            feedback = feedback + round_feedback(list(attempts)) + verify_feedback
 
         self._phase = "no-change"
         return {

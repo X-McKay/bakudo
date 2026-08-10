@@ -322,3 +322,47 @@ def test_no_bench_command_skips_verification():
     )
     assert outcome["status"] == "improved"
     assert outcome["bench_verified"] is False  # nothing to bench-verify
+
+
+class InfraFailingAttemptSandbox(ScriptedSandbox):
+    """Attempts die at the abox level: no result.json, only an error string."""
+
+    def __call__(self, bundle) -> AboxOutcome:
+        out = super().__call__(bundle)
+        if bundle.agent_spec.metadata.name != "optimize-scout":
+            out.result = None
+            out.exit_code = 1
+            out.error = "abox path did not resolve a worktree for this task"
+        return out
+
+
+def test_feedback_carries_sandbox_error_for_resultless_attempts():
+    """Diagnosing live cycles required a hand-rolled teeing sandbox because
+    'run failed' feedback discarded the abox error entirely."""
+    sandbox = InfraFailingAttemptSandbox(
+        [{"approaches": ["use a set"], "metrics": [IMPROVED]}]
+    )
+    outcome = run_optimize_loop(
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=1
+    )
+    assert outcome["status"] == "no-change"
+    assert any("did not resolve a worktree" in fb for fb in outcome["feedback"])
+
+
+def test_feedback_accumulates_across_rounds():
+    """OPT-17: round-3's scout must still see round-1's dead ends, or it can
+    re-propose them."""
+    sandbox = ScriptedSandbox(
+        [
+            {"approaches": ["inline the ORM"], "metrics": [REGRESSED]},
+            {"approaches": ["cache totals"], "metrics": [NEUTRAL]},
+            {"approaches": ["batch queries"], "metrics": [IMPROVED]},
+        ]
+    )
+    outcome = run_optimize_loop(
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=3
+    )
+    assert outcome["status"] == "improved"
+    round3_desc = sandbox.scout_descriptions[2]
+    assert "regressed perf or simplicity" in round3_desc  # round 1's lesson
+    assert "no measured improvement" in round3_desc       # round 2's lesson

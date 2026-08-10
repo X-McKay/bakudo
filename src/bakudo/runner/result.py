@@ -134,6 +134,31 @@ def _extract_json_blob(text: str) -> dict[str, Any] | None:
     return None
 
 
+# The statuses result.schema.json accepts for a tests_run entry.
+_VALID_TEST_STATUSES = {"passed", "failed", "skipped", "error"}
+
+
+def _sanitize_tests_run(data: dict[str, Any]) -> None:
+    """Coerce model-authored tests_run entries into the schema's shape.
+
+    Observed live: a scout recorded its *denied* test attempt as status
+    "denied" (and another run reported bare path strings); the schema enum
+    rejected the result and the whole run lost its deliverable. Anything the
+    enum doesn't know maps to "error" — never a passing status.
+    """
+    entries = data.get("tests_run")
+    if not isinstance(entries, list):
+        return
+    cleaned: list[Any] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            entry = {"command": entry, "status": "error"}
+        elif isinstance(entry, dict) and entry.get("status") not in _VALID_TEST_STATUSES:
+            entry = {**entry, "status": "error"}
+        cleaned.append(entry)
+    data["tests_run"] = cleaned
+
+
 def normalize_result(
     raw: Any,
     *,
@@ -170,6 +195,7 @@ def normalize_result(
     elif _looks_like_verdict(data):
         data = _fold_verdict(data)
 
+    _sanitize_tests_run(data)
     data.setdefault("run_id", run_id)
     data.setdefault("agent", agent)
     data.setdefault("objective_id", objective_id)

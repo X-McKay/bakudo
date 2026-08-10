@@ -391,3 +391,27 @@ def test_sandbox_abox_selected(monkeypatch):
     _clear_sandbox_env(monkeypatch)
     monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
     assert callable(Deps().sandbox_fn())
+
+
+def test_run_sandbox_dict_carries_error_and_stderr_tail(monkeypatch):
+    """Failed runs must leave diagnosable breadcrumbs in the durable event
+    payloads — live cycles were undiagnosable without them."""
+    from bakudo.abox.runner import AboxOutcome
+    from bakudo.temporal import _impl
+
+    def broken(bundle):
+        return AboxOutcome(
+            run_id=bundle.run_id, abox_task_id=bundle.run_id, exit_code=1,
+            git_branch="b", result=None, stderr="x" * 3000 + "the real cause",
+            error="no result.json at /w/.agent/result.json",
+        )
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", broken)
+    inp = AgentRunInput(
+        run_id="run_ERR1",
+        objective={"id": "obj_ERR1", "type": "explore", "repo": "r", "title": "t"},
+        agent_spec=_impl.load_agent_spec("explore"),
+    )
+    out = _impl.run_sandbox(_impl.render_bundle(inp))
+    assert out["error"] == "no result.json at /w/.agent/result.json"
+    assert out["stderr"].endswith("the real cause") and len(out["stderr"]) <= 2000

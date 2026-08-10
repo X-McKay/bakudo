@@ -222,6 +222,9 @@ def run_sandbox(bundle_dict: dict) -> dict:
         "tokens_used": outcome.tokens_used,
         "observability": outcome.observability,
         "succeeded": outcome.succeeded,
+        # Failure breadcrumbs: live cycles were undiagnosable without them.
+        "error": outcome.error,
+        "stderr": outcome.stderr[-2000:],
     }
 
 

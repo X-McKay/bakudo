@@ -35,15 +35,23 @@ _TIMER_TEMPLATE = """\
 import json, subprocess, sys, time
 
 bench = {bench!r}
-start = time.perf_counter()
-proc = subprocess.run(bench, shell=True, cwd="/workspace",
-                      capture_output=True, text=True)
-elapsed = time.perf_counter() - start
-if proc.returncode != 0:
-    sys.stderr.write(proc.stdout[-2000:] + proc.stderr[-2000:])
-    sys.exit(f"bench command failed with exit {{proc.returncode}}")
-print(json.dumps({{"{marker}": {{"seconds": elapsed}}}}))
+timings = []
+for _ in range({repeats}):
+    start = time.perf_counter()
+    proc = subprocess.run(bench, shell=True, cwd="/workspace",
+                          capture_output=True, text=True)
+    timings.append(time.perf_counter() - start)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout[-2000:] + proc.stderr[-2000:])
+        sys.exit(f"bench command failed with exit {{proc.returncode}}")
+print(json.dumps({{"{marker}": {{"seconds": min(timings)}}}}))
 """
+
+# Best-of-N per ref: wall-clock timing carries interpreter-startup and cache
+# noise (~60ms floor) that compresses large speedups and can false-fail
+# micro-benches near the verification threshold; the minimum is the stable
+# estimator of a command's true cost.
+_BENCH_REPEATS = 3
 
 
 def resolve_repo_path(repo: str, root: Path | str | None = None) -> Path:
@@ -73,7 +81,9 @@ def abox_bench_measure(
     executor = executor or _subprocess_executor
 
     def _bench_once(task: str, ref: str, bench_command: str) -> float:
-        timer = _TIMER_TEMPLATE.format(bench=bench_command, marker=_MARKER)
+        timer = _TIMER_TEMPLATE.format(
+            bench=bench_command, marker=_MARKER, repeats=_BENCH_REPEATS
+        )
         argv = [
             abox_bin, "run",
             "--repo", str(repo),

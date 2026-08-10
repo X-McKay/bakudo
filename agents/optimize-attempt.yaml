@@ -21,6 +21,10 @@ model:
   baseUrlRef: vllm/qwen-coder
   temperature: 0.2
   maxTokens: 8192
+  # Observed live: with thinking on, the winning attempt burned ~140k tokens
+  # (cost suite 0.28) on a task the scout already scoped to one hypothesis.
+  # Implementation is guided work, not open-ended deliberation.
+  enableThinking: false
 
 sandbox:
   provider: abox
