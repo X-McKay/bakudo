@@ -24,3 +24,5 @@ artifacts/
 .DS_Store
 *.swp
 *.swo
+node_modules/
+uv.lock
