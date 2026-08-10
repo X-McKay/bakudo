@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -26,32 +27,22 @@ _VERIFY_TIMEOUT_HEADROOM_SECONDS = 120
 
 _MARKER = "verify_bench"
 
-# Runs in-guest: time bench, apply the winner diff, time bench again. The
-# bench command is shell-executed exactly as the attempt agent would run it.
+# Runs in-guest: time the bench command once (shell-executed exactly as the
+# attempt agent would run it) and print the marker. The winner diff is applied
+# HOST-side onto a temporary verification branch beforehand — abox's in-guest
+# command proxy denies mutating git ops like `git apply` (verified live).
 _TIMER_TEMPLATE = """\
 import json, subprocess, sys, time
 
 bench = {bench!r}
-
-def timed():
-    start = time.perf_counter()
-    proc = subprocess.run(bench, shell=True, cwd="/workspace",
-                          capture_output=True, text=True)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stdout[-2000:] + proc.stderr[-2000:])
-        sys.exit(f"bench command failed with exit {{proc.returncode}}")
-    return time.perf_counter() - start
-
-before = timed()
-apply = subprocess.run(
-    ["git", "apply", "/abox-meta/inputs/verify.patch"],
-    cwd="/workspace", capture_output=True, text=True,
-)
-if apply.returncode != 0:
-    sys.stderr.write(apply.stderr[-2000:])
-    sys.exit("winner diff did not apply")
-after = timed()
-print(json.dumps({{"{marker}": {{"before": before, "after": after}}}}))
+start = time.perf_counter()
+proc = subprocess.run(bench, shell=True, cwd="/workspace",
+                      capture_output=True, text=True)
+elapsed = time.perf_counter() - start
+if proc.returncode != 0:
+    sys.stderr.write(proc.stdout[-2000:] + proc.stderr[-2000:])
+    sys.exit(f"bench command failed with exit {{proc.returncode}}")
+print(json.dumps({{"{marker}": {{"seconds": elapsed}}}}))
 """
 
 
@@ -81,31 +72,26 @@ def abox_bench_measure(
     repo = Path(repo)
     executor = executor or _subprocess_executor
 
-    def measure(diff: str, bench_command: str) -> tuple[float, float]:
-        if not diff.strip():
-            raise ValueError("empty diff: nothing to verify")
-        task = f"verify-{ids.run_id()[-12:]}"
-        scratch = Path(tempfile.mkdtemp(prefix=f"{task}-"))
+    def _bench_once(task: str, ref: str, bench_command: str) -> float:
+        timer = _TIMER_TEMPLATE.format(bench=bench_command, marker=_MARKER)
+        argv = [
+            abox_bin, "run",
+            "--repo", str(repo),
+            "--task", task,
+            "--base", ref,
+            "--timeout", str(timeout),
+            "--network", "safe",
+            "--",
+            "python3", "-c", timer,
+        ]
         try:
-            patch = scratch / "verify.patch"
-            patch.write_text(diff if diff.endswith("\n") else diff + "\n")
-            timer = _TIMER_TEMPLATE.format(bench=bench_command, marker=_MARKER)
-            argv = [
-                abox_bin, "run",
-                "--repo", str(repo),
-                "--task", task,
-                "--base", base_ref,
-                "--timeout", str(timeout),
-                "--network", "safe",
-                "--input-file", f"{patch}:verify.patch",
-                "--",
-                "python3", "-c", timer,
-            ]
             result = executor(argv, timeout + _VERIFY_TIMEOUT_HEADROOM_SECONDS)
             if result.exit_code != 0:
+                # Guest console interleaves into abox stdout; the actionable
+                # failure text is as likely there as on stderr.
                 raise RuntimeError(
                     f"bench verification sandbox failed (exit {result.exit_code}): "
-                    f"{result.stderr[-2000:] or result.stdout[-2000:]}"
+                    f"stdout: {result.stdout[-1500:]} stderr: {result.stderr[-1500:]}"
                 )
             return _parse_marker(result.stdout)
         finally:
@@ -115,12 +101,51 @@ def abox_bench_measure(
                 )
             except Exception:  # noqa: BLE001 - best-effort cleanup
                 pass
+
+    def measure(diff: str, bench_command: str) -> tuple[float, float]:
+        if not diff.strip():
+            raise ValueError("empty diff: nothing to verify")
+        verify_id = ids.run_id()[-12:]
+        branch = f"verify/{verify_id}"
+        scratch = Path(tempfile.mkdtemp(prefix=f"verify-{verify_id}-"))
+        worktree = scratch / "worktree"
+        try:
+            patch = scratch / "verify.patch"
+            patch.write_text(diff if diff.endswith("\n") else diff + "\n")
+            # Host-side: materialise the winner's state on a temp branch. This
+            # only writes file content — nothing from the diff is executed.
+            _git(repo, "worktree", "add", "-b", branch, str(worktree), base_ref)
+            _git(worktree, "apply", str(patch))
+            _git(worktree, "add", "-A")
+            _git(worktree, "-c", "user.email=bakudo@verify", "-c",
+                 "user.name=bakudo-verify", "commit", "-q", "-m",
+                 "bench verification candidate")
+            before = _bench_once(f"verify-b-{verify_id}", base_ref, bench_command)
+            after = _bench_once(f"verify-a-{verify_id}", branch, bench_command)
+            return before, after
+        finally:
+            for args in (
+                ("worktree", "remove", "--force", str(worktree)),
+                ("branch", "-D", branch),
+            ):
+                try:
+                    _git(repo, *args)
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
             shutil.rmtree(scratch, ignore_errors=True)
 
     return measure
 
 
-def _parse_marker(stdout: str) -> tuple[float, float]:
+def _git(cwd: Path | str, *args: str) -> None:
+    proc = subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=120
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {args[0]} failed: {proc.stderr[-1000:]}")
+
+
+def _parse_marker(stdout: str) -> float:
     for line in reversed(stdout.splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -129,9 +154,9 @@ def _parse_marker(stdout: str) -> tuple[float, float]:
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-        timings = data.get(_MARKER)
-        if isinstance(timings, dict):
-            return float(timings["before"]), float(timings["after"])
+        timing = data.get(_MARKER)
+        if isinstance(timing, dict):
+            return float(timing["seconds"])
     raise RuntimeError(
         "bench verification produced no timing marker in guest stdout: "
         + stdout[-500:]

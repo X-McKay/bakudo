@@ -284,7 +284,10 @@ _EXTRACTION_PROMPT = (
     "hypothesis you identified or proposed MUST be one self-contained entry in "
     "proposed_followups (what to change, expected effect, how to verify) — an "
     "approach mentioned only in prose does not exist. Leave proposed_followups "
-    "empty ONLY if you genuinely found nothing worth doing."
+    "empty ONLY if you genuinely found nothing worth doing. Record every test "
+    "command you executed as a tests_run entry ({command, status}) — the task "
+    "gate needs passing-test evidence, and a test run not recorded there does "
+    "not count."
 )
 
 
