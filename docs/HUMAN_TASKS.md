@@ -57,7 +57,17 @@ cd infra && docker compose up -d
       sweeps). Semantic-memory ops against the live DB are safe again.
       **Acceptance met:** `tests/test_store_pg_live.py` — 4/4 passed against
       the live DSN 2026-08-10, zero crashes in server logs.
-- [ ] **Neo4j** reachable; `infra/neo4j/init.cypher` applied (constraints exist).
+- [x] **Graph mirror (FalkorDB)** reachable — the Neo4j mirror was replaced by
+      FalkorDB (PR #47, issue #29). Live instance: `database/falkordb` in the
+      cluster (authed, persistent), exposed at `falkordb.almckay.io:6380` via
+      the traefik `falkordb` entrypoint; `FALKORDB_URL` wired in `.env`
+      2026-08-11. Schema (constraints + vector index) is ensured
+      programmatically by the worker at boot (`ensure_schema`); the
+      `graph_mirror_outbox` table self-migrates on the live DB at first wired
+      connect. **Verified live:** the opt-in `tests/test_graph_falkor_live.py`
+      suite (6/6) against the cluster instance, plus a combined live-PG +
+      live-FalkorDB smoke (write → mirrored node → supersede removes it,
+      no dead outbox rows).
 - [ ] **Temporal** cluster reachable at `TEMPORAL_ADDRESS`; namespace created.
 - [ ] **Acceptance:** `bakudo-worker` connects and serves the task queues; the
       Temporal UI lists the worker.
@@ -178,16 +188,17 @@ replace/extend those with real history as it accumulates.
 The durable store is implemented: `PgSemanticMemoryStore`
 (`src/bakudo/memory/store_pg.py`) persists memories in `memory_items` +
 `memory_embeddings` with server-side pgvector similarity, and the worker wires
-it automatically whenever `BAKUDO_POSTGRES_DSN` is set (with a Neo4j graph
-mirror when `NEO4J_URI`/`NEO4J_PASSWORD` are set). What remains is judgement:
+it automatically whenever `BAKUDO_POSTGRES_DSN` is set (with a FalkorDB graph
+mirror when `FALKORDB_URL` is set). What remains is judgement:
 
 - [ ] Decide repo-scoped vs org-wide memory (spec open question §28.10) —
       writes are currently scoped `{"repo": ...}` by compaction.
 - [ ] Once a production embedder is fixed (the default `HashingEmbedder` is
       256-dim and lexical), retype `memory_embeddings.embedding` to
       `vector(<dim>)` and add the HNSW index (see the comment in
-      `infra/postgres/init.sql`), and optionally enable the Neo4j vector index
-      in `infra/neo4j/init.cypher` with matching dimensions.
+      `infra/postgres/init.sql`); the FalkorDB vector index takes its
+      dimension from the wired embedder at boot (`ensure_schema`) and fails
+      loudly on a mismatch, so no manual graph-side step is needed.
 - [ ] **Acceptance:** memories written by one run are retrievable by a later
       run (semantic `query-memory` returns them across processes).
 
