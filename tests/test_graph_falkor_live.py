@@ -92,6 +92,13 @@ def test_ensure_schema_is_idempotent_and_enforces_uniqueness(
     }
 
 
+def test_ensure_schema_rejects_a_changed_vector_dim(graph: FalkorGraphMemory) -> None:
+    """An embedder swap across boots must fail loudly, not leave the old
+    index dimension silently poisoning every mirror upsert."""
+    with pytest.raises(RuntimeError, match="dimension"):
+        graph.ensure_schema(vector_dim=_DIM // 2)
+
+
 def test_memory_edge_round_trip_and_removal(graph: FalkorGraphMemory) -> None:
     item = _item("webhook delivery retries transient 5xx with backoff")
     embedding = [float(i) / _DIM for i in range(_DIM)]
