@@ -199,8 +199,11 @@ def _wire_dependencies() -> None:
     memory = PgSemanticMemoryStore.connect(dsn, graph=graph, embedder=embedder)
     if graph is not None:
         # Constraints + vector index, dimensioned by the actual embedder in
-        # play — never a hardcoded constant (MEM-16).
-        graph.ensure_schema(vector_dim=memory.embedder.dim)
+        # play — never a hardcoded constant (MEM-16). Best-effort: a graph
+        # outage at boot logs and defers the schema to the first mirror
+        # write instead of crash-looping the worker (the outbox tolerates
+        # mirror outages); genuine schema errors still raise.
+        graph.ensure_schema_soon(vector_dim=memory.embedder.dim)
 
     _impl.configure(
         ledger=PostgresLedger.connect(dsn),

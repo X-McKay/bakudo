@@ -21,6 +21,49 @@ class FakeResult:
         self.result_set = rows
 
 
+ALL_CONSTRAINT_KEYS: list[tuple[str, tuple[str, ...]]] = [
+    ("Agent", ("name",)),
+    ("Run", ("id",)),
+    ("Objective", ("id",)),
+    ("Skill", ("name",)),
+    ("Memory", ("id",)),
+    ("FailureMode", ("name",)),
+    ("AgentVersion", ("name", "version")),
+    ("File", ("repo", "path")),
+]
+
+
+def constraint_listing(status: str = "OPERATIONAL") -> list[dict]:
+    return [
+        {
+            "type": "UNIQUE",
+            "label": label,
+            "properties": list(props),
+            "entitytype": "NODE",
+            "status": status,
+        }
+        for label, props in ALL_CONSTRAINT_KEYS
+    ]
+
+
+def memory_vector_index_row(dim: int) -> list[Any]:
+    """The list_indices() row shape a real FalkorDB returns for the Memory
+    label (label, properties, types, per-property options, ...)."""
+    return [
+        "Memory",
+        ["id", "embedding"],
+        {"id": ["RANGE"], "embedding": ["VECTOR"]},
+        {
+            "id": {},
+            "embedding": {"dimension": dim, "similarityFunction": "cosine"},
+        },
+        "english",
+        [],
+        "NODE",
+        "OPERATIONAL",
+    ]
+
+
 class FakeFalkorGraph:
     """Records queries and schema calls; answers from canned rows."""
 
@@ -31,6 +74,13 @@ class FakeFalkorGraph:
         self.vector_indexes: list[tuple[str, tuple[str, ...], int, str]] = []
         self.raise_on_constraint: Exception | None = None
         self.raise_on_vector_index: Exception | None = None
+        # list_constraints() answers: a sequence consumed one per call
+        # (last entry repeats); empty -> derived from unique_constraints,
+        # all OPERATIONAL.
+        self.constraint_listings: list[list[dict]] = []
+        self.constraint_polls = 0
+        # list_indices() rows (see memory_vector_index_row).
+        self.index_rows: list[list[Any]] = []
 
     def query(self, q: str, params: dict | None = None) -> FakeResult:
         self.queries.append((q, params))
@@ -47,6 +97,26 @@ class FakeFalkorGraph:
         if self.raise_on_vector_index is not None:
             raise self.raise_on_vector_index
         self.vector_indexes.append((label, properties, dim, similarity_function))
+
+    def list_constraints(self) -> list[dict]:
+        self.constraint_polls += 1
+        if self.constraint_listings:
+            if len(self.constraint_listings) > 1:
+                return self.constraint_listings.pop(0)
+            return self.constraint_listings[0]
+        return [
+            {
+                "type": "UNIQUE",
+                "label": label,
+                "properties": list(props),
+                "entitytype": "NODE",
+                "status": "OPERATIONAL",
+            }
+            for label, props in self.unique_constraints
+        ]
+
+    def list_indices(self) -> FakeResult:
+        return FakeResult(self.index_rows)
 
 
 def make_item(run_id: str | None = "run-1") -> MemoryItem:
@@ -111,6 +181,7 @@ def test_ensure_schema_tolerates_already_existing_schema() -> None:
     graph, fake = make_graph()
     fake.raise_on_constraint = Exception("Constraint already exists")
     fake.raise_on_vector_index = Exception("Attribute 'embedding' is already indexed")
+    fake.constraint_listings = [constraint_listing()]  # already all there
 
     graph.ensure_schema(vector_dim=256)  # no raise
 
@@ -121,6 +192,125 @@ def test_ensure_schema_reraises_real_errors() -> None:
 
     with pytest.raises(Exception, match="connection reset"):
         graph.ensure_schema()
+
+
+def test_ensure_schema_polls_async_constraints_until_operational() -> None:
+    """GRAPH.CONSTRAINT CREATE is asynchronous: ensure_schema must not
+    return while constraints are still under construction."""
+    graph, fake = make_graph()
+    fake.constraint_listings = [
+        constraint_listing("UNDER CONSTRUCTION"),
+        constraint_listing("UNDER CONSTRUCTION"),
+        constraint_listing("OPERATIONAL"),
+    ]
+
+    graph.ensure_schema()
+
+    assert fake.constraint_polls == 3
+
+
+def test_ensure_schema_raises_when_a_constraint_failed() -> None:
+    """A FAILED async constraint means uniqueness is silently unenforced —
+    that must surface, not vanish."""
+    graph, fake = make_graph()
+    listing = constraint_listing()
+    listing[2]["status"] = "FAILED"
+
+    fake.constraint_listings = [listing]
+
+    with pytest.raises(RuntimeError, match="FAILED"):
+        graph.ensure_schema()
+
+
+def test_ensure_schema_times_out_on_stuck_constraints() -> None:
+    graph, fake = make_graph()
+    fake.constraint_listings = [constraint_listing("UNDER CONSTRUCTION")]
+
+    with pytest.raises(RuntimeError, match="not operational"):
+        graph.ensure_schema(constraint_timeout=0.05)
+
+
+def test_ensure_schema_raises_on_vector_dim_mismatch() -> None:
+    """An existing vector index with a different dimension must fail loudly:
+    swallowing 'already indexed' would keep the old dim and turn every
+    mirror upsert into a poison row."""
+    graph, fake = make_graph()
+    fake.index_rows = [memory_vector_index_row(dim=256)]
+
+    with pytest.raises(RuntimeError, match="256(.|\\n)*1024"):
+        graph.ensure_schema(vector_dim=1024)
+    assert fake.vector_indexes == []  # never tried to re-create
+
+
+def test_ensure_schema_skips_vector_create_when_dim_already_matches() -> None:
+    graph, fake = make_graph()
+    fake.index_rows = [memory_vector_index_row(dim=256)]
+
+    graph.ensure_schema(vector_dim=256)
+
+    assert fake.vector_indexes == []
+
+
+def test_ensure_schema_soon_defers_connection_failures_to_the_next_op() -> None:
+    """Worker boot must not crash-loop on a graph outage (the outbox exists
+    to tolerate exactly that): ensure_schema_soon logs and retries the
+    schema before the next graph write instead."""
+    graph, fake = make_graph()
+    fake.raise_on_constraint = Exception("connection refused")
+
+    graph.ensure_schema_soon(vector_dim=256)  # no raise
+
+    assert fake.unique_constraints == []  # nothing applied yet
+
+    fake.raise_on_constraint = None  # mirror is back
+    graph.upsert_memory(
+        run_id="run-1", memory_id="mem-1", memory_type="repo_fact", confidence=0.8
+    )
+
+    assert len(fake.unique_constraints) == 8  # schema applied before the op
+    assert fake.vector_indexes == [("Memory", ("embedding",), 256, "cosine")]
+    assert len(fake.queries) == 1  # then the upsert itself
+
+    # Once applied, later ops do not re-run the schema.
+    graph.remove_memory("mem-1")
+    assert len(fake.unique_constraints) == 8
+
+
+def test_ensure_schema_soon_still_raises_schema_errors() -> None:
+    """Only outages are deferred; real schema problems (dim mismatch,
+    failed constraints) need an operator and crash the boot loudly."""
+    graph, fake = make_graph()
+    fake.index_rows = [memory_vector_index_row(dim=256)]
+
+    with pytest.raises(RuntimeError, match="dimension"):
+        graph.ensure_schema_soon(vector_dim=1024)
+
+
+def test_connect_sets_socket_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """redis defaults to unbounded sockets; a partitioned mirror must fail
+    fast instead of hanging every write_candidate."""
+    import falkordb
+
+    captured: dict[str, Any] = {}
+
+    class FakeDB:
+        def select_graph(self, name: str) -> str:
+            captured["graph_name"] = name
+            return "graph"
+
+    def fake_from_url(url: str, **kwargs: Any) -> FakeDB:
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeDB()
+
+    monkeypatch.setattr(falkordb.FalkorDB, "from_url", staticmethod(fake_from_url))
+
+    FalkorGraphMemory.connect("falkor://example:6379", group_id="teamA")
+
+    assert captured["url"] == "falkor://example:6379"
+    assert captured["graph_name"] == f"{GRAPH_NAME_PREFIX}:teamA"
+    assert 0 < captured["socket_connect_timeout"] <= 10
+    assert 0 < captured["socket_timeout"] <= 10
 
 
 def test_upsert_memory_merges_node_and_edge_with_vecf32_embedding() -> None:

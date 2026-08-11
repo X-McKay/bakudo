@@ -23,11 +23,23 @@ Neo4j dialect this adapter absorbs:
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from .models import MemoryItem
 
+logger = logging.getLogger(__name__)
+
 GRAPH_NAME_PREFIX = "bakudo-memory"
+
+# Fail fast on a partitioned mirror instead of hanging every write_candidate
+# for the OS TCP timeout (redis defaults to unbounded sockets).
+_SOCKET_TIMEOUT_SECONDS = 5.0
+
+# GRAPH.CONSTRAINT CREATE is asynchronous; poll cadence while waiting for
+# constraints to become OPERATIONAL.
+_CONSTRAINT_POLL_INTERVAL_SECONDS = 0.05
 
 # Uniqueness constraints ported from the retired infra/neo4j/init.cypher
 # (single-property keys plus the AgentVersion/File composite keys).
@@ -63,14 +75,23 @@ class FalkorGraphMemory:
     def __init__(self, graph: Any, *, db: Any | None = None) -> None:
         self._graph = graph
         self._db = db
+        # Desired schema recorded by ensure_schema_soon while the server is
+        # unreachable; applied before the next graph write.
+        self._pending_schema: dict[str, Any] | None = None
 
     @classmethod
     def connect(cls, url: str, *, group_id: str = "default") -> FalkorGraphMemory:
         """Connect to FalkorDB (``falkor://`` / ``redis://`` URL; credentials
-        ride in the URL) and select the group's graph key."""
+        ride in the URL) and select the group's graph key. Socket timeouts
+        are bounded so a network partition degrades to a fast, retryable
+        outbox failure rather than hanging every memory write."""
         from falkordb import FalkorDB  # lazy
 
-        db = FalkorDB.from_url(url)
+        db = FalkorDB.from_url(
+            url,
+            socket_connect_timeout=_SOCKET_TIMEOUT_SECONDS,
+            socket_timeout=_SOCKET_TIMEOUT_SECONDS,
+        )
         return cls(db.select_graph(graph_name_for(group_id)), db=db)
 
     def close(self) -> None:
@@ -79,13 +100,24 @@ class FalkorGraphMemory:
 
     # --- schema ---
 
-    def ensure_schema(self, *, vector_dim: int | None = None) -> None:
+    def ensure_schema(
+        self, *, vector_dim: int | None = None, constraint_timeout: float = 10.0
+    ) -> None:
         """Create the uniqueness constraints (and their supporting indexes),
         plus the Memory-embedding vector index when ``vector_dim`` is given.
 
         The dimension comes from the wired embedder at boot, never a
         hardcoded constant (MEM-16). Safe to call on every worker start:
-        "already exists/indexed" responses are swallowed.
+        "already exists/indexed" responses are swallowed, but two failure
+        classes stay loud because they silently corrupt the mirror:
+
+        * ``GRAPH.CONSTRAINT CREATE`` is asynchronous — constraints are
+          polled until OPERATIONAL; FAILED (or never materialising within
+          ``constraint_timeout``) raises rather than leaving uniqueness
+          unenforced.
+        * An existing vector index whose dimension differs from
+          ``vector_dim`` raises — silently keeping the old dimension would
+          make every subsequent vecf32 upsert a poison outbox row.
         """
         for label, properties in _UNIQUE_CONSTRAINTS:
             try:
@@ -93,14 +125,106 @@ class FalkorGraphMemory:
             except Exception as exc:
                 if not _is_already_exists(exc):
                     raise
+        self._await_constraints(timeout=constraint_timeout)
         if vector_dim is not None:
-            try:
-                self._graph.create_node_vector_index(
-                    "Memory", "embedding", dim=vector_dim, similarity_function="cosine"
+            existing = self._memory_vector_index_dim()
+            if existing is None:
+                try:
+                    self._graph.create_node_vector_index(
+                        "Memory",
+                        "embedding",
+                        dim=vector_dim,
+                        similarity_function="cosine",
+                    )
+                except Exception as exc:
+                    if not _is_already_exists(exc):
+                        raise
+            elif int(existing) != int(vector_dim):
+                raise RuntimeError(
+                    f"FalkorDB vector index on Memory.embedding has dimension "
+                    f"{int(existing)} but the configured embedder emits "
+                    f"{int(vector_dim)}-dim vectors. Silently keeping the old "
+                    "dimension would poison every mirror upsert; either "
+                    "configure the matching embedder or drop and rebuild the "
+                    "index (drop_node_vector_index) after migrating the "
+                    "stored embeddings."
                 )
-            except Exception as exc:
-                if not _is_already_exists(exc):
-                    raise
+
+    def ensure_schema_soon(self, *, vector_dim: int | None = None) -> None:
+        """Best-effort :meth:`ensure_schema` for worker boot.
+
+        A graph outage at boot must not crash-loop the worker — the outbox
+        exists precisely to tolerate mirror outages — so connection-level
+        failures are logged and the schema is retried before the next graph
+        write instead. Genuine schema errors (:class:`RuntimeError`: vector
+        dim mismatch, failed constraints) still raise: they need an
+        operator, not a retry.
+        """
+        self._pending_schema = {"vector_dim": vector_dim}
+        try:
+            self.ensure_schema(vector_dim=vector_dim)
+        except RuntimeError:
+            raise
+        except Exception:
+            logger.warning(
+                "FalkorDB schema not applied (server unreachable?); will "
+                "retry before the next graph write",
+                exc_info=True,
+            )
+            return
+        self._pending_schema = None
+
+    def _apply_pending_schema(self) -> None:
+        if self._pending_schema is None:
+            return
+        self.ensure_schema(**self._pending_schema)
+        self._pending_schema = None
+
+    def _await_constraints(self, *, timeout: float) -> None:
+        """Poll until every ported constraint is OPERATIONAL."""
+        wanted = {(label, props) for label, props in _UNIQUE_CONSTRAINTS}
+        deadline = time.monotonic() + timeout
+        while True:
+            listing = self._graph.list_constraints()
+            status = {
+                (c["label"], tuple(c["properties"])): c["status"] for c in listing
+            }
+            failed = sorted(k for k in wanted if status.get(k) == "FAILED")
+            if failed:
+                raise RuntimeError(
+                    f"FalkorDB constraint creation FAILED for {failed}; "
+                    "uniqueness would be silently unenforced (likely "
+                    "pre-existing duplicate nodes — deduplicate and retry)."
+                )
+            if all(status.get(k) == "OPERATIONAL" for k in wanted):
+                return
+            if time.monotonic() >= deadline:
+                stuck = sorted(k for k in wanted if status.get(k) != "OPERATIONAL")
+                raise RuntimeError(
+                    f"FalkorDB constraints not operational after {timeout}s: "
+                    f"{stuck}"
+                )
+            time.sleep(_CONSTRAINT_POLL_INTERVAL_SECONDS)
+
+    def _memory_vector_index_dim(self) -> int | None:
+        """The dimension of the existing Memory.embedding vector index, or
+        None when absent / unparseable (then creation is attempted and the
+        benign "already indexed" race is swallowed)."""
+        try:
+            rows = self._graph.list_indices().result_set
+        except Exception:
+            return None
+        for row in rows:
+            try:
+                if row[0] != "Memory":
+                    continue
+                options = row[3]
+                embedding = options.get("embedding") if isinstance(options, dict) else None
+                if isinstance(embedding, dict) and "dimension" in embedding:
+                    return int(embedding["dimension"])
+            except Exception:
+                continue
+        return None
 
     # --- writes ---
 
@@ -114,6 +238,7 @@ class FalkorGraphMemory:
         repo: str,
     ) -> None:
         """Create (:Run)-[:USED_AGENT]->, -[:ATTEMPTED]->, -[:TOUCHED_FILE]-> edges."""
+        self._apply_pending_schema()
         cypher = """
         merge (r:Run {id: $run_id})
         merge (av:AgentVersion {name: $agent_name, version: $agent_version})
@@ -167,6 +292,7 @@ class FalkorGraphMemory:
         ``embedding`` is provided it is stored as ``vecf32`` — the only
         property type FalkorDB vector indexes cover.
         """
+        self._apply_pending_schema()
         set_clauses = ["m.type = $type", "m.confidence = $confidence"]
         params: dict[str, Any] = {
             "run_id": run_id,
@@ -192,6 +318,7 @@ class FalkorGraphMemory:
         accumulates nodes the relational store already deleted (MEM-10).
         Idempotent: deleting an absent node matches nothing.
         """
+        self._apply_pending_schema()
         self._graph.query(
             "match (m:Memory {id: $mem_id}) detach delete m",
             params={"mem_id": memory_id},
