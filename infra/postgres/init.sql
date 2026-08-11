@@ -194,6 +194,10 @@ create index if not exists promotion_decisions_status on promotion_decisions (st
 -- Rows failing mirror_max_attempts times are parked (dead = true) so a
 -- poison payload cannot wedge the queue; parked rows are kept for operator
 -- inspection and never retried automatically.
+--
+-- CANONICAL DDL — mirrored by _GRAPH_MIRROR_OUTBOX_DDL in
+-- src/bakudo/memory/store_pg.py, which self-migrates existing databases
+-- (this file only runs at first initialization). Keep the two in sync.
 create table if not exists graph_mirror_outbox (
   id bigserial primary key,
   op text not null,                -- upsert | delete

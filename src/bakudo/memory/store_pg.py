@@ -56,6 +56,25 @@ _OUTBOX_DRAIN_LOCK = 0x62_6B_6D_69  # "bkmi": bakudo mirror
 # for operator inspection and never retried automatically.
 DEFAULT_MIRROR_MAX_ATTEMPTS = 20
 
+# Self-migration DDL for the graph-mirror outbox. infra/postgres/init.sql is
+# the canonical, documented copy (it carries the full commentary and runs at
+# first database initialization); this constant MUST match it exactly and
+# exists because init.sql never runs against an already-initialized database
+# (compose volume upgrade, the live cluster) — without it the first
+# graph-backed write would hit UndefinedTable inside the write transaction
+# and roll back the durable memory write.
+_GRAPH_MIRROR_OUTBOX_DDL = """\
+create table if not exists graph_mirror_outbox (
+  id bigserial primary key,
+  op text not null,                -- upsert | delete
+  memory_id text not null,
+  run_id text,
+  payload jsonb not null default '{}',  -- type, confidence, embedding
+  attempts int not null default 0,
+  dead boolean not null default false,
+  created_at timestamptz not null default now()
+)"""
+
 
 def ttl_to_interval(ttl: str | None) -> str | None:
     """Convert the compact TTL shorthand (``"180d"``) to Postgres interval text.
@@ -121,6 +140,8 @@ class PgSemanticMemoryStore:
         self.mirror_max_attempts = DEFAULT_MIRROR_MAX_ATTEMPTS
         self._require_pgvector()
         self._require_embedding_dim()
+        if self._graph is not None:
+            self._ensure_outbox_table()
 
     @classmethod
     def connect(
@@ -360,6 +381,20 @@ class PgSemanticMemoryStore:
                 "HashingEmbedder is a dev/test fallback and cannot write to the "
                 "typed production schema."
             )
+
+    def _ensure_outbox_table(self) -> None:
+        """Self-migrate the graph-mirror outbox (idempotent).
+
+        Runs only when a graph mirror is wired — an unwired store never
+        touches the database shape. The ``add column`` covers databases that
+        were initialized with the pre-dead-letter outbox revision.
+        """
+        self._exec(_GRAPH_MIRROR_OUTBOX_DDL, ())
+        self._exec(
+            "alter table graph_mirror_outbox "
+            "add column if not exists dead boolean not null default false",
+            (),
+        )
 
     def _same_content_items(self, item: MemoryItem) -> list[MemoryItem]:
         """Fetch stored items with identical normalised content.

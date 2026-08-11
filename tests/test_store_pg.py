@@ -198,6 +198,10 @@ class GraphStub:
         self.removes: list[str] = []
         self.fail_upserts = fail_upserts
         self.fail_ids = fail_ids or set()
+        # The resulting graph state: which Memory nodes exist after all
+        # delivered ops (upsert adds, remove deletes) — lets tests assert
+        # convergence, not just op order.
+        self.nodes: set[str] = set()
 
     def upsert_memory(
         self,
@@ -222,9 +226,11 @@ class GraphStub:
                 "embedding": embedding,
             }
         )
+        self.nodes.add(memory_id)
 
     def remove_memory(self, memory_id: str) -> None:
         self.removes.append(memory_id)
+        self.nodes.discard(memory_id)
 
 
 def make_store(conn: FakeConn, **kwargs) -> PgSemanticMemoryStore:
@@ -413,6 +419,29 @@ def test_graph_mirror_skipped_without_run_evidence() -> None:
 
 
 # --- graph-mirror outbox (MEM-3) + supersede removal (MEM-10) ---
+
+
+def test_store_with_graph_self_migrates_the_outbox_table() -> None:
+    """init.sql only runs at first database initialization: on an existing
+    database (compose volume upgrade, the live cluster) the outbox table
+    would be absent and the first graph-backed write would raise
+    UndefinedTable inside the write transaction, rolling back the durable
+    memory write. The store must create the table itself at connect time."""
+    conn = FakeConn()
+    make_store(conn, graph=GraphStub())
+
+    assert conn.statements("create table if not exists graph_mirror_outbox")
+    # Databases that got the earlier outbox revision (no dead column) are
+    # upgraded too.
+    assert conn.statements("add column if not exists dead")
+
+
+def test_store_without_graph_skips_outbox_migration() -> None:
+    """No mirror wired -> the store must not touch the database shape."""
+    conn = FakeConn()
+    make_store(conn)
+
+    assert not conn.statements("graph_mirror_outbox")
 
 
 def test_mirror_op_is_enqueued_in_the_write_transaction() -> None:
@@ -775,6 +804,40 @@ def test_purge_expired_enqueues_graph_removals_in_the_purge_transaction() -> Non
     # The next drain removes the nodes.
     assert store.flush_graph_mirror() == 2
     assert graph.removes == ["m-exp-1", "m-exp-2"]
+
+
+def test_stale_upsert_queued_during_outage_then_purge_converges_to_no_node() -> None:
+    """PR #47 P2 review scenario: a memory's upsert stays queued through a
+    mirror outage, its TTL expires, and compaction purges the Postgres row
+    before the backlog flushes. Because purge_expired enqueues its delete op
+    into the same FIFO — necessarily AFTER the stale upsert — the drain
+    delivers upsert(M) then delete(M) and the graph converges to no node."""
+    conn = FakeConn()
+    graph = GraphStub(fail_upserts=1)
+    store = make_store(conn, graph=graph)
+
+    item = make_item(run_id="run-1")
+    store.write_candidate(item)  # mirror down: upsert(M) stays queued
+    assert [r["op"] for r in conn.outbox] == ["upsert"]
+
+    # TTL elapses; compaction's purge deletes the Postgres row and enqueues
+    # the mirror delete behind the stale upsert (same order compact() uses:
+    # purge first, then flush).
+    conn.purge_ids = [item.id]
+    assert store.purge_expired() == 1
+    assert [(r["op"], r["memory_id"]) for r in conn.outbox] == [
+        ("upsert", item.id),
+        ("delete", item.id),
+    ]
+
+    assert store.flush_graph_mirror() == 2
+
+    # The stale upsert landed first, then the purge's delete removed it:
+    # nothing purged from Postgres survives in the graph.
+    assert [u["memory_id"] for u in graph.upserts] == [item.id]
+    assert graph.removes == [item.id]
+    assert graph.nodes == set()
+    assert conn.outbox == []
 
 
 def test_purge_expired_without_graph_enqueues_nothing() -> None:
