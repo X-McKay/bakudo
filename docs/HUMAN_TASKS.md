@@ -42,18 +42,21 @@ cd infra && docker compose up -d
 - [x] **Postgres** reachable; `infra/postgres/init.sql` applied (the ledger
       tables exist). Set `BAKUDO_POSTGRES_DSN`. *(Applied to the live cluster
       2026-08-09; `pgcrypto` + `vector` extensions pre-created as admin.)*
-- [ ] **⚠ pgvector on the live server crashes the database.** The `vector`
-      0.8.2 extension on `postgresql-0` (bitnami, PG 18.3) dies with
-      **signal 4 (Illegal instruction)** on the first real vector operation,
-      taking the whole server into recovery (observed 2026-08-09 16:38 GMT;
-      likely a build/CPU mismatch, e.g. AVX-512 codegen on a node without it).
-      Until the extension binary is rebuilt for the node's CPU (or the image
-      is swapped for one with a matching pgvector build), do NOT run
-      semantic-memory writes/queries against the live DB — the worker wires
-      the pg store whenever `BAKUDO_POSTGRES_DSN` is set, so either fix the
-      extension or run the worker without memory-compaction workflows.
-      **Acceptance:** `tests/test_store_pg_live.py` passes against the live
-      DSN without the server crashing.
+- [x] **⚠ pgvector on the live server crashes the database — FIXED
+      2026-08-10** (issue #30). Root cause: bitnami's `vector.so` build mixes
+      AVX-512VL instructions (`vextractf64x2` in `vector_norm`) into AVX2
+      code; the database node's Zen+ CPU has no AVX-512, so any **HNSW
+      insert/scan** (which normalizes vectors) SIGILLed the backend and
+      crash-recovered the server. Plain seq-scan distance queries never
+      crashed — the failure appeared only once `memory_embeddings` got its
+      HNSW index. Fix: a portable `-march=x86-64-v2` rebuild of the same
+      pgvector 0.8.2 overlaid via ConfigMap subPath mount, image pinned by
+      digest (kubani PR #56, `infrastructure/gitops/apps/postgresql/`);
+      verified first on a throwaway pod on the same node (stock `.so`
+      reproducibly crashed; portable build passed HNSW/IVFFlat/halfvec/bit
+      sweeps). Semantic-memory ops against the live DB are safe again.
+      **Acceptance met:** `tests/test_store_pg_live.py` — 4/4 passed against
+      the live DSN 2026-08-10, zero crashes in server logs.
 - [ ] **Neo4j** reachable; `infra/neo4j/init.cypher` applied (constraints exist).
 - [ ] **Temporal** cluster reachable at `TEMPORAL_ADDRESS`; namespace created.
 - [ ] **Acceptance:** `bakudo-worker` connects and serves the task queues; the
