@@ -19,14 +19,28 @@ _PKG_ROOT = Path(__file__).resolve().parent
 
 @cache
 def _resolve(name: str) -> Path:
-    # Packaged location first (installed wheel), then source-tree fallback.
-    packaged = Path(str(files("bakudo") / "_data" / name))
+    # Packaged location first (installed wheel): a plain filesystem probe —
+    # str(files(...)) is only a real path for on-disk packages, and would
+    # break on MultiplexedPath/zip traversables even when the data IS on disk.
+    packaged = _PKG_ROOT / "_data" / name
     if packaged.is_dir():
         return packaged
+    # Source-tree layout (dev checkout).
     repo_root = _PKG_ROOT.parents[1]  # src/bakudo -> src -> repo root
     source = repo_root / name
     if source.is_dir():
         return source
+    # Last chance: ask importlib.resources, accepting the answer only when it
+    # names a real directory on disk (e.g. bakudo merged across sys.path
+    # entries, where _PKG_ROOT points at the entry without the data).
+    try:
+        traversable = files("bakudo") / "_data" / name
+        if traversable.is_dir():
+            candidate = Path(str(traversable))
+            if candidate.is_dir():
+                return candidate
+    except (TypeError, ValueError, OSError, ModuleNotFoundError):
+        pass
     raise FileNotFoundError(
         f"Could not locate bundled data directory '{name}'. "
         f"Looked in {packaged} and {source}."

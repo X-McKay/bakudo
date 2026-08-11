@@ -79,35 +79,48 @@ def _register_repo_agent_specs(tools: MetaAgentTools) -> None:
     'Unknown agent' only means a genuinely unknown name (API-8).
 
     Resolved via :func:`bakudo.paths.agents_dir`, which works from both a
-    source checkout and a wheel install (API-12).
+    source checkout and a wheel install (API-12). An install with no bundled
+    agents data at all still boots — degraded, with a warning — and seed
+    agents simply resolve as unknown (404), never a startup crash.
     """
+    from .. import paths
     from ..agent_spec import load_spec_file
-    from ..paths import agents_dir
 
-    for spec_path in sorted(agents_dir().glob("*.yaml")):
+    try:
+        agents = paths.agents_dir()
+    except FileNotFoundError as exc:
+        logger.warning("seed agents unavailable, registering none: %s", exc)
+        return
+    for spec_path in sorted(agents.glob("*.yaml")):
         tools.register_agent_spec(load_spec_file(spec_path))
 
 
 def build_app(tools: MetaAgentTools | None = None) -> Any:
     """Build the FastAPI app. Requires the ``api`` extra (fastapi, uvicorn)."""
-    from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
     tools = tools or MetaAgentTools()
     _register_repo_agent_specs(tools)
 
     # Bearer-token auth on every route (API-1). When BAKUDO_API_TOKEN is unset,
     # auth is disabled (dev only) — warned once here; set it in any shared
-    # environment.
+    # environment. HTTPBearer is a DECLARED security scheme (not a bare Header
+    # read), so /openapi.json documents the auth model and Swagger UI offers
+    # an Authorize button for try-it-out.
     api_token = os.environ.get("BAKUDO_API_TOKEN")
     if not api_token:
         logger.warning("API auth disabled: BAKUDO_API_TOKEN not set")
 
-    def require_auth(authorization: str | None = Header(default=None)) -> None:
+    bearer_scheme = HTTPBearer(auto_error=False)
+
+    def require_auth(
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),  # noqa: B008
+    ) -> None:
         if not api_token:
             return
-        supplied = (authorization or "").encode("utf-8")
-        expected = f"Bearer {api_token}".encode()
-        if not secrets.compare_digest(supplied, expected):
+        supplied = (credentials.credentials if credentials else "").encode("utf-8")
+        if not secrets.compare_digest(supplied, api_token.encode("utf-8")):
             raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
     from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
@@ -119,6 +132,14 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     # — they are disabled here and remounted below as real (authenticated)
     # routes: the schema names every route, model and constraint, and the
     # bearer policy applies to it like everything else.
+    #
+    # Docs posture: interactive docs are fully usable in tokenless dev mode.
+    # In token-secured deployments the docs pages 401 on plain browser
+    # navigation like the schema does; use the schema with the token
+    # (curl/codegen) or front the API with a header-injecting proxy — the
+    # proxy injects on the page load and on Swagger UI's /openapi.json XHR
+    # alike, and the declared HTTPBearer scheme provides the Authorize button
+    # for try-it-out requests.
     app = FastAPI(
         title="bakudo control plane",
         version="3.0.0",

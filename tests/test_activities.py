@@ -78,6 +78,18 @@ def test_load_agent_spec_rejects_path_traversal(spy):
     assert _impl.load_agent_spec("../agents/explore") is None
 
 
+def test_load_agent_spec_returns_none_when_seed_dir_missing(spy, monkeypatch):
+    """PR#48 review: on an install with no bundled agents data the documented
+    contract holds — return None so the workflow dead-letters the objective,
+    never crash the activity with FileNotFoundError."""
+
+    def _no_agents():
+        raise FileNotFoundError("no bundled agents anywhere")
+
+    monkeypatch.setattr(_impl.paths, "agents_dir", _no_agents)
+    assert _impl.load_agent_spec("explore") is None
+
+
 def test_load_agent_spec_prefers_ledger_active_version(monkeypatch):
     from bakudo.registry import InMemoryLedger
     from bakudo.registry.records import AgentVersionRecord

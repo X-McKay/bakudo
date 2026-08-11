@@ -106,6 +106,57 @@ def test_route_fail_open_when_token_unset(method, template, path, body):
     assert resp.status_code not in (401, 403), resp.text
 
 
+# --- PR#48 review: coherent posture for the schema/docs routes ---
+#
+# Posture: /openapi.json, /docs and /redoc obey the bearer policy like every
+# other route (the matrix above enforces it). Auth is a DECLARED HTTPBearer
+# security scheme, so the schema documents the auth model and Swagger UI has
+# an Authorize button for try-it-out. Interactive docs are fully usable in
+# tokenless dev mode; in token-secured deployments the docs pages (like the
+# schema) require the header — reachable via curl/codegen with the token or
+# behind a header-injecting proxy, which injects on the page load AND on
+# Swagger UI's /openapi.json XHR alike.
+
+
+def test_openapi_declares_bearer_security_scheme():
+    schema = TestClient(build_app()).get("/openapi.json").json()
+    schemes = schema.get("components", {}).get("securitySchemes", {})
+    assert any(
+        s.get("type") == "http" and s.get("scheme") == "bearer" for s in schemes.values()
+    ), f"no HTTP bearer security scheme declared: {schemes}"
+    (scheme_name,) = [
+        name for name, s in schemes.items()
+        if s.get("type") == "http" and s.get("scheme") == "bearer"
+    ]
+    for path, operations in schema["paths"].items():
+        for method, operation in operations.items():
+            assert {scheme_name: []} in operation.get("security", []), (
+                f"{method.upper()} {path} does not declare the bearer scheme"
+            )
+
+
+def test_docs_fully_usable_in_tokenless_dev_mode():
+    client = TestClient(build_app())
+    docs = client.get("/docs")
+    assert docs.status_code == 200
+    assert "swagger-ui" in docs.text
+    redoc = client.get("/redoc")
+    assert redoc.status_code == 200
+    assert "redoc" in redoc.text
+    assert client.get("/openapi.json").status_code == 200
+
+
+def test_docs_and_schema_load_with_the_bearer_header(monkeypatch):
+    """A header-injecting client (curl, proxy) gets the docs page AND the
+    schema it fetches — the pair works, or 401s, together."""
+    monkeypatch.setenv("BAKUDO_API_TOKEN", TOKEN)
+    client = TestClient(build_app())
+    assert client.get("/docs", headers=AUTH).status_code == 200
+    assert client.get("/openapi.json", headers=AUTH).status_code == 200
+    assert client.get("/docs").status_code == 401
+    assert client.get("/openapi.json").status_code == 401
+
+
 def test_startup_warns_once_when_auth_disabled(caplog):
     with caplog.at_level(logging.WARNING, logger="bakudo.api.server"):
         build_app()
@@ -264,6 +315,25 @@ def test_openapi_shows_request_bodies_not_query_params():
         assert not query_params.intersection(fields), (
             f"{path} binds {query_params & set(fields)} as query params"
         )
+
+
+def test_build_app_boots_when_seed_agents_are_missing(monkeypatch, caplog):
+    """PR#48 review: an install with no bundled agents data (stripped wheel,
+    src-only image) must boot degraded — seed registration is skipped with a
+    warning, and seed-agent-by-name is a 404, never a startup crash."""
+
+    def _no_agents():
+        raise FileNotFoundError("no bundled agents anywhere")
+
+    monkeypatch.setattr("bakudo.paths.agents_dir", _no_agents)
+    _dev_local_sandbox(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="bakudo.api.server"):
+        client = TestClient(build_app())  # must not raise
+    assert any("seed agents" in r.getMessage() for r in caplog.records)
+    obj = client.post("/objectives", json={"repo": "r", "type": "explore", "title": "t"})
+    assert obj.status_code == 200
+    resp = client.post("/runs", json={"objective_id": obj.json()["id"], "agent": "explore"})
+    assert resp.status_code == 404
 
 
 # --- API-9: invalid inputs are 422, not 500 ---
