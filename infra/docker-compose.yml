@@ -30,13 +30,18 @@ services:
   # Graph memory mirror (issue #29: replaces Neo4j). Constraints + the vector
   # index are applied programmatically by the worker at boot via
   # FalkorGraphMemory.ensure_schema(), dimensioned from the wired embedder.
+  # Auth is required (like the neo4j service it replaced): the published
+  # 6379 would otherwise be an open Redis anyone on the host/LAN could
+  # FLUSHALL. Credentials ride inside FALKORDB_URL.
   falkordb:
     image: falkordb/falkordb
+    environment:
+      REDIS_ARGS: --requirepass bakudo-dev-password
     ports: ["6379:6379"]
     volumes:
       - falkordb-data:/var/lib/falkordb/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "bakudo-dev-password", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -113,7 +118,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       BAKUDO_POSTGRES_DSN: postgresql://bakudo:bakudo@postgres:5432/bakudo
-      FALKORDB_URL: falkor://falkordb:6379
+      FALKORDB_URL: falkor://:bakudo-dev-password@falkordb:6379
       BAKUDO_SANDBOX: ${BAKUDO_SANDBOX:-unavailable}
       VLLM_BASE_URL: http://vllm-gateway:4000/v1
 
