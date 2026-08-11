@@ -69,12 +69,19 @@ services:
 
   # SANDBOX POSTURE — DEGRADED BY DEFAULT (TMP-13).
   # The worker image contains no abox binary and the container has no KVM, so
-  # sandbox runs are unavailable in the composed stack. BAKUDO_SANDBOX is set
-  # to `unavailable` to declare that truthfully: the worker starts and serves
-  # non-sandbox activities (ledger, evals on stored results, curriculum,
-  # memory compaction), logs the degraded posture loudly at startup, and every
-  # sandbox-requiring run fails fast with an actionable error — it never hangs
-  # or silently no-ops.
+  # sandbox runs are unavailable in the composed stack. BAKUDO_SANDBOX
+  # defaults to `unavailable` to declare that truthfully: the worker starts
+  # and serves non-sandbox activities (ledger, evals on stored results,
+  # curriculum, memory compaction), logs the degraded posture loudly at
+  # startup, and every sandbox-requiring run fails fast with an actionable
+  # error — it never hangs or silently no-ops.
+  #
+  # *** BREAKING DEFAULT CHANGE *** This file used to ship
+  # `BAKUDO_SANDBOX: abox` (which could not actually work without the mounts
+  # below). If you had enabled real sandboxing by only adding the abox mount
+  # and /dev/kvm, you must now ALSO set BAKUDO_SANDBOX=abox — via the
+  # environment or a `.env` file next to this compose file (the value below
+  # interpolates `${BAKUDO_SANDBOX:-unavailable}`), no file edit needed.
   #
   # To enable real sandboxing the host must have abox 0.6.0 and KVM; then:
   #   1. mount the host abox binary:
@@ -84,7 +91,7 @@ services:
   #        devices:
   #          - /dev/kvm:/dev/kvm
   #   3. mount the target repos and point BAKUDO_REPO_ROOT at them
-  #   4. set BAKUDO_SANDBOX: abox
+  #   4. export BAKUDO_SANDBOX=abox (or put it in infra/.env)
   worker:
     build:
       context: ..
@@ -98,7 +105,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       BAKUDO_POSTGRES_DSN: postgresql://bakudo:bakudo@postgres:5432/bakudo
-      BAKUDO_SANDBOX: unavailable
+      BAKUDO_SANDBOX: ${BAKUDO_SANDBOX:-unavailable}
       VLLM_BASE_URL: http://vllm-gateway:4000/v1
 
   api:
@@ -110,9 +117,10 @@ services:
     environment:
       BAKUDO_API_HOST: 0.0.0.0
       TEMPORAL_ADDRESS: temporal:7233
-      # Same degraded posture as the worker: POST /runs and /optimize return
-      # an actionable 409 instead of an opaque "BAKUDO_SANDBOX must be set".
-      BAKUDO_SANDBOX: unavailable
+      # Same posture as the worker: by default POST /runs and /optimize
+      # return an actionable 409 instead of an opaque "BAKUDO_SANDBOX must
+      # be set".
+      BAKUDO_SANDBOX: ${BAKUDO_SANDBOX:-unavailable}
     ports: ["8000:8000"]
 
 volumes:

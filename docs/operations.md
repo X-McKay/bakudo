@@ -65,8 +65,13 @@ return 409, sandbox activities raise — rather than hanging or silently
 no-opping. To enable real sandboxing, run on a KVM-capable host and, on the
 worker service: mount the host abox binary (`/usr/local/bin/abox:...:ro`),
 pass through `/dev/kvm`, mount the target repos (`BAKUDO_REPO_ROOT`), and set
-`BAKUDO_SANDBOX=abox` — the exact stanzas are in the comments in
-`infra/docker-compose.yml`.
+`BAKUDO_SANDBOX=abox` — the compose file interpolates
+`${BAKUDO_SANDBOX:-unavailable}`, so exporting the variable (or putting it in
+`infra/.env`) is enough; the exact stanzas are in the comments in
+`infra/docker-compose.yml`. **Breaking default change:** the compose file
+previously shipped `BAKUDO_SANDBOX: abox`; if you had enabled sandboxing by
+only adding the abox mount and `/dev/kvm`, you must now also set
+`BAKUDO_SANDBOX=abox` yourself.
 
 The worker connects to Temporal and, if `BAKUDO_POSTGRES_DSN` is set, wires the
 Postgres ledger and the durable `PgSemanticMemoryStore` into the activity layer
