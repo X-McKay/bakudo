@@ -2,11 +2,11 @@
 #
 #   cd infra && docker compose up -d
 #
-# Brings up Postgres (ledger), Neo4j (graph memory), the Temporal cluster + UI,
-# a vLLM gateway placeholder, and the bakudo worker + control API. Worker agents
-# run in abox microVMs out-of-band; abox is not part of this compose file —
-# see the worker service below for the default DEGRADED sandbox posture and
-# how to enable real sandboxing (mount host abox + /dev/kvm).
+# Brings up Postgres (ledger), FalkorDB (graph memory), the Temporal cluster +
+# UI, a vLLM gateway placeholder, and the bakudo worker + control API. Worker
+# agents run in abox microVMs out-of-band; abox is not part of this compose
+# file — see the worker service below for the default DEGRADED sandbox posture
+# and how to enable real sandboxing (mount host abox + /dev/kvm).
 
 name: bakudo
 
@@ -27,13 +27,24 @@ services:
       timeout: 5s
       retries: 10
 
-  neo4j:
-    image: neo4j:5
+  # Graph memory mirror (issue #29: replaces Neo4j). Constraints + the vector
+  # index are applied programmatically by the worker at boot via
+  # FalkorGraphMemory.ensure_schema(), dimensioned from the wired embedder.
+  # Auth is required (like the neo4j service it replaced): the published
+  # 6379 would otherwise be an open Redis anyone on the host/LAN could
+  # FLUSHALL. Credentials ride inside FALKORDB_URL.
+  falkordb:
+    image: falkordb/falkordb
     environment:
-      NEO4J_AUTH: neo4j/bakudo-dev-password
-    ports: ["7474:7474", "7687:7687"]
+      REDIS_ARGS: --requirepass bakudo-dev-password
+    ports: ["6379:6379"]
     volumes:
-      - neo4j-data:/data
+      - falkordb-data:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "bakudo-dev-password", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   # Temporal needs its own Postgres database; reuse the same server.
   temporal:
@@ -100,11 +111,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      falkordb:
+        condition: service_healthy
       temporal:
         condition: service_started
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       BAKUDO_POSTGRES_DSN: postgresql://bakudo:bakudo@postgres:5432/bakudo
+      FALKORDB_URL: falkor://:bakudo-dev-password@falkordb:6379
       BAKUDO_SANDBOX: ${BAKUDO_SANDBOX:-unavailable}
       VLLM_BASE_URL: http://vllm-gateway:4000/v1
 
@@ -125,4 +139,4 @@ services:
 
 volumes:
   pg-data:
-  neo4j-data:
+  falkordb-data:

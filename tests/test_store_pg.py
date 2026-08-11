@@ -51,12 +51,10 @@ class FakeCursor:
     def execute(self, sql: str, params: tuple = ()) -> None:
         if self._conn.fail_on and self._conn.fail_on in sql:
             raise RuntimeError(f"injected failure on: {self._conn.fail_on}")
-        if sql.lstrip().startswith("delete") and "created_at + ttl" in sql:
-            self.rowcount = self._conn.purge_count
         self._conn.executed.append((sql, params))
         if self._conn.transactions and self._conn.transactions[-1]["outcome"] is None:
             self._conn.transactions[-1]["stmts"].append(sql)
-        self._rows = self._conn.respond(sql)
+        self._rows = self._conn.respond(sql, params)
 
     def fetchone(self) -> tuple | None:
         return self._rows[0] if self._rows else None
@@ -102,8 +100,15 @@ class FakeConn:
         # atttypmod of memory_embeddings.embedding: -1 = untyped 'vector',
         # N > 0 = 'vector(N)', None = table missing.
         self.embedding_typmod: int | None = -1
-        # rowcount reported for the purge_expired delete.
-        self.purge_count = 0
+        # ids returned by the purge_expired delete's `returning id`.
+        self.purge_ids: list[str] = []
+        # A functional graph_mirror_outbox: inserts append, selects list
+        # pending rows, deletes/updates act by id — so the outbox drain
+        # logic (MEM-3) is exercised for real against the fake.
+        self.outbox: list[dict] = []
+        self._outbox_seq = 0
+        # pg_try_advisory_xact_lock answer for the single-drainer guard.
+        self.advisory_lock = True
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -111,7 +116,48 @@ class FakeConn:
     def transaction(self) -> FakeTransaction:
         return FakeTransaction(self)
 
-    def respond(self, sql: str) -> list[tuple]:
+    def _outbox_respond(self, sql: str, params: tuple) -> list[tuple]:
+        stripped = sql.lstrip()
+        if stripped.startswith("insert"):
+            self._outbox_seq += 1
+            op, memory_id, run_id, payload = params
+            self.outbox.append(
+                {
+                    "id": self._outbox_seq,
+                    "op": op,
+                    "memory_id": memory_id,
+                    "run_id": run_id,
+                    "payload": payload,
+                    "attempts": 0,
+                    "dead": False,
+                }
+            )
+            return []
+        if stripped.startswith("select"):
+            return [
+                (r["id"], r["op"], r["memory_id"], r["run_id"], r["payload"], r["attempts"])
+                for r in self.outbox
+                if not r["dead"]
+            ]
+        if stripped.startswith("delete"):
+            self.outbox = [r for r in self.outbox if r["id"] != params[0]]
+            return []
+        if stripped.startswith("update"):
+            for r in self.outbox:
+                if r["id"] == params[0]:
+                    r["attempts"] += 1
+                    if "dead = true" in sql:
+                        r["dead"] = True
+            return []
+        return []
+
+    def respond(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if "graph_mirror_outbox" in sql:
+            return self._outbox_respond(sql, params)
+        if "pg_try_advisory_xact_lock" in sql:
+            return [(self.advisory_lock,)]
+        if sql.lstrip().startswith("delete") and "created_at + ttl" in sql:
+            return [(i,) for i in self.purge_ids]
         if "pg_extension" in sql:
             return [(1,)] if self.pgvector_enabled else []
         if "atttypmod" in sql:
@@ -144,13 +190,47 @@ def make_item(
 
 
 class GraphStub:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, MemoryItem, list[float] | None]] = []
+    """Records mirror ops; can fail the next N upserts (mirror outage) or
+    fail specific memory ids forever (poison payloads)."""
 
-    def record_memory_edge(
-        self, run_id: str, memory: MemoryItem, embedding: list[float] | None = None
+    def __init__(self, fail_upserts: int = 0, fail_ids: set[str] | None = None) -> None:
+        self.upserts: list[dict] = []
+        self.removes: list[str] = []
+        self.fail_upserts = fail_upserts
+        self.fail_ids = fail_ids or set()
+        # The resulting graph state: which Memory nodes exist after all
+        # delivered ops (upsert adds, remove deletes) — lets tests assert
+        # convergence, not just op order.
+        self.nodes: set[str] = set()
+
+    def upsert_memory(
+        self,
+        *,
+        run_id: str,
+        memory_id: str,
+        memory_type: str,
+        confidence: float,
+        embedding: list[float] | None = None,
     ) -> None:
-        self.calls.append((run_id, memory, embedding))
+        if memory_id in self.fail_ids:
+            raise RuntimeError("poison payload")
+        if self.fail_upserts > 0:
+            self.fail_upserts -= 1
+            raise RuntimeError("mirror down")
+        self.upserts.append(
+            {
+                "run_id": run_id,
+                "memory_id": memory_id,
+                "memory_type": memory_type,
+                "confidence": confidence,
+                "embedding": embedding,
+            }
+        )
+        self.nodes.add(memory_id)
+
+    def remove_memory(self, memory_id: str) -> None:
+        self.removes.append(memory_id)
+        self.nodes.discard(memory_id)
 
 
 def make_store(conn: FakeConn, **kwargs) -> PgSemanticMemoryStore:
@@ -317,11 +397,15 @@ def test_write_mirrors_into_graph_with_embedding() -> None:
 
     store.write_candidate(item)
 
-    assert len(graph.calls) == 1
-    run_id, memory, embedding = graph.calls[0]
-    assert run_id == "run-42"
-    assert memory is item
-    assert embedding is not None and len(embedding) == store.embedder.dim
+    assert len(graph.upserts) == 1
+    up = graph.upserts[0]
+    assert up["run_id"] == "run-42"
+    assert up["memory_id"] == item.id
+    assert up["memory_type"] == item.type
+    assert up["confidence"] == item.confidence
+    assert up["embedding"] is not None and len(up["embedding"]) == store.embedder.dim
+    # Delivered ops leave no residue to re-deliver.
+    assert conn.outbox == []
 
 
 def test_graph_mirror_skipped_without_run_evidence() -> None:
@@ -330,7 +414,261 @@ def test_graph_mirror_skipped_without_run_evidence() -> None:
     store = make_store(conn, graph=graph)
 
     store.write_candidate(make_item(run_id=None))
-    assert graph.calls == []
+    assert graph.upserts == []
+    assert conn.outbox == []
+
+
+# --- graph-mirror outbox (MEM-3) + supersede removal (MEM-10) ---
+
+
+def test_store_with_graph_self_migrates_the_outbox_table() -> None:
+    """init.sql only runs at first database initialization: on an existing
+    database (compose volume upgrade, the live cluster) the outbox table
+    would be absent and the first graph-backed write would raise
+    UndefinedTable inside the write transaction, rolling back the durable
+    memory write. The store must create the table itself at connect time."""
+    conn = FakeConn()
+    make_store(conn, graph=GraphStub())
+
+    assert conn.statements("create table if not exists graph_mirror_outbox")
+    # Databases that got the earlier outbox revision (no dead column) are
+    # upgraded too.
+    assert conn.statements("add column if not exists dead")
+
+
+def test_store_without_graph_skips_outbox_migration() -> None:
+    """No mirror wired -> the store must not touch the database shape."""
+    conn = FakeConn()
+    make_store(conn)
+
+    assert not conn.statements("graph_mirror_outbox")
+
+
+def test_mirror_op_is_enqueued_in_the_write_transaction() -> None:
+    """MEM-3: the outbox row commits atomically with the memory row, so a
+    crash between commit and mirror delivery can never lose the graph write."""
+    conn = FakeConn()
+    store = make_store(conn, graph=GraphStub())
+
+    store.write_candidate(make_item(run_id="run-42"))
+
+    tx = conn.transactions[0]
+    assert any("insert into graph_mirror_outbox" in s for s in tx["stmts"])
+
+
+def test_no_outbox_rows_without_a_graph_mirror() -> None:
+    conn = FakeConn()
+    store = make_store(conn)  # graph=None
+
+    store.write_candidate(make_item(run_id="run-42"))
+
+    assert not conn.statements("graph_mirror_outbox")
+
+
+def test_supersede_removes_the_old_mirrored_node() -> None:
+    """MEM-10: superseding a memory must delete its graph node, not leave the
+    graph accumulating nodes Postgres already deleted."""
+    conn = FakeConn()
+    graph = GraphStub()
+    store = make_store(conn, graph=graph)
+    prior = make_item(
+        content="webhook retries any transient 5xx with backoff", confidence=0.6
+    )
+    conn.nearest_row = item_row(prior, similarity=0.97)
+    candidate = make_item(confidence=0.9)
+
+    store.write_candidate(candidate)
+
+    assert graph.removes == [prior.id]
+    assert [u["memory_id"] for u in graph.upserts] == [candidate.id]
+    # Both ops rode the supersede transaction's outbox.
+    tx = conn.transactions[0]
+    assert sum("graph_mirror_outbox" in s for s in tx["stmts"]) == 2
+    assert conn.outbox == []
+
+
+def test_mirror_failure_does_not_fail_the_write_and_row_survives() -> None:
+    """MEM-3: the durable write already committed; a mirror outage must not
+    raise (which would trigger a Temporal retry that gets rejected as a
+    repeat). The op stays queued instead."""
+    conn = FakeConn()
+    graph = GraphStub(fail_upserts=1)
+    store = make_store(conn, graph=graph)
+    item = make_item(run_id="run-42")
+
+    stored = store.write_candidate(item)  # no raise
+
+    assert stored is item
+    assert graph.upserts == []
+    assert len(conn.outbox) == 1
+    assert conn.outbox[0]["memory_id"] == item.id
+    assert conn.outbox[0]["attempts"] == 1
+
+
+def test_pending_mirror_ops_drain_on_the_next_write() -> None:
+    """MEM-3 retry semantics: a later write (e.g. the retried activity's next
+    candidate) delivers the backlog — nothing is permanently absent."""
+    conn = FakeConn()
+    graph = GraphStub(fail_upserts=1)
+    store = make_store(conn, graph=graph)
+    first = make_item(run_id="run-42")
+    store.write_candidate(first)
+    assert graph.upserts == []  # mirror was down
+
+    second = make_item(
+        content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-43"
+    )
+    store.write_candidate(second)
+
+    assert [u["memory_id"] for u in graph.upserts] == [first.id, second.id]
+    assert conn.outbox == []
+
+
+def test_flush_graph_mirror_drains_explicitly_and_reports_count() -> None:
+    conn = FakeConn()
+    graph = GraphStub(fail_upserts=1)
+    store = make_store(conn, graph=graph)
+    store.write_candidate(make_item(run_id="run-42"))
+    assert len(conn.outbox) == 1
+
+    assert store.flush_graph_mirror() == 1
+    assert len(graph.upserts) == 1
+    assert conn.outbox == []
+    # Nothing left: flushing again is a no-op.
+    assert store.flush_graph_mirror() == 0
+
+
+def test_flush_stops_at_first_failure_preserving_order() -> None:
+    conn = FakeConn()
+    # Every implicit flush during the two writes fails (3 attempts), plus one
+    # more failure for the first explicit flush below.
+    graph = GraphStub(fail_upserts=4)
+    store = make_store(conn, graph=graph)
+    first = make_item(run_id="run-1")
+    store.write_candidate(first)
+    second = make_item(
+        content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-2"
+    )
+    store.write_candidate(second)
+    assert len(conn.outbox) == 2
+
+    assert store.flush_graph_mirror() == 0  # still failing: stop, keep order
+    assert len(conn.outbox) == 2
+
+    assert store.flush_graph_mirror() == 2
+    assert [u["memory_id"] for u in graph.upserts] == [first.id, second.id]
+
+
+def test_flush_graph_mirror_without_graph_is_a_noop() -> None:
+    store = make_store(FakeConn())
+    assert store.flush_graph_mirror() == 0
+
+
+def test_supersede_of_unmirrorable_replacement_keeps_the_old_node() -> None:
+    """Delete + replacement-upsert must be atomic in intent: when the new
+    item carries no run evidence (so it will never be mirrored), the old
+    node's delete must be skipped too — otherwise a live memory vanishes
+    from the graph entirely."""
+    conn = FakeConn()
+    graph = GraphStub()
+    store = make_store(conn, graph=graph)
+    prior = make_item(
+        content="webhook retries any transient 5xx with backoff", confidence=0.6
+    )
+    conn.nearest_row = item_row(prior, similarity=0.97)
+
+    store.write_candidate(make_item(confidence=0.9, run_id=None))
+
+    assert graph.removes == []
+    assert graph.upserts == []
+    assert conn.outbox == []
+
+
+def test_poison_row_is_parked_after_max_attempts_and_stops_blocking() -> None:
+    """A permanently failing op must not wedge the mirror: after
+    mirror_max_attempts failures the row is parked (dead) and ops behind it
+    flow again."""
+    conn = FakeConn()
+    poison = make_item(run_id="run-1")
+    graph = GraphStub(fail_ids={poison.id})
+    store = make_store(conn, graph=graph)
+    store.mirror_max_attempts = 3
+
+    store.write_candidate(poison)  # attempt 1 (post-write flush)
+    healthy = make_item(
+        content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-2"
+    )
+    # Pre-write flush = attempt 2, post-write flush = attempt 3 -> parked,
+    # and the healthy op behind it delivers in the same drain.
+    store.write_candidate(healthy)
+
+    assert [u["memory_id"] for u in graph.upserts] == [healthy.id]
+    [parked] = conn.outbox
+    assert parked["memory_id"] == poison.id
+    assert parked["dead"] is True
+    assert parked["attempts"] == 3
+
+    # Parked rows are never retried: no further attempts, drains are no-ops.
+    assert store.flush_graph_mirror() == 0
+    assert parked["attempts"] == 3
+
+
+def test_flush_skips_when_another_drainer_holds_the_lock() -> None:
+    """Concurrent drainers must not interleave (a stale upsert re-applied
+    after its delete resurrects a zombie node): the advisory lock keeps a
+    single drainer at a time, preserving strict op order."""
+    conn = FakeConn()
+    graph = GraphStub(fail_upserts=1)  # the post-write flush fails: row stays
+    store = make_store(conn, graph=graph)
+    store.write_candidate(make_item(run_id="run-1"))
+    assert len(conn.outbox) == 1
+
+    conn.advisory_lock = False
+    assert store.flush_graph_mirror() == 0
+    assert len(conn.outbox) == 1
+    assert graph.upserts == []
+
+    conn.advisory_lock = True
+    assert store.flush_graph_mirror() == 1
+
+
+def test_flush_drains_inside_a_transaction_holding_the_lock() -> None:
+    conn = FakeConn()
+    graph = GraphStub(fail_upserts=1)
+    store = make_store(conn, graph=graph)
+    store.write_candidate(make_item(run_id="run-1"))
+
+    store.flush_graph_mirror()
+
+    # The successful drain (the last lock-guarded transaction) holds the
+    # lock acquisition and the row deletion in one transaction.
+    tx = [
+        t
+        for t in conn.transactions
+        if any("pg_try_advisory_xact_lock" in s for s in t["stmts"])
+    ][-1]
+    assert any("delete from graph_mirror_outbox" in s for s in tx["stmts"])
+
+
+def test_mirror_failures_are_logged_not_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The no-raise guarantee must not mean no-signal: delivery failures and
+    parked rows emit log records so a dead mirror is visible."""
+    conn = FakeConn()
+    poison = make_item(run_id="run-1")
+    graph = GraphStub(fail_ids={poison.id})
+    store = make_store(conn, graph=graph)
+    store.mirror_max_attempts = 2
+
+    with caplog.at_level("WARNING", logger="bakudo.memory.store_pg"):
+        store.write_candidate(poison)  # attempt 1: warning
+        store.flush_graph_mirror()  # attempt 2: parked -> error
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert warnings and poison.id in warnings[0].getMessage()
+    assert errors and poison.id in errors[0].getMessage()
 
 
 def test_insert_writes_item_and_embedding_in_one_transaction() -> None:
@@ -433,13 +771,82 @@ def test_query_round_trips_ttl() -> None:
 def test_purge_expired_deletes_only_expired_rows() -> None:
     conn = FakeConn()
     store = make_store(conn)
-    conn.purge_count = 3
+    conn.purge_ids = ["m1", "m2", "m3"]
 
     assert store.purge_expired() == 3
 
     (sql, _) = conn.statements("delete from memory_items")[0]
     assert "ttl is not null" in sql
     assert "created_at + ttl <= now()" in sql
+
+
+def test_purge_expired_enqueues_graph_removals_in_the_purge_transaction() -> None:
+    """Expired memories must leave the graph too: purging Postgres rows
+    without mirror deletes re-opens the MEM-10 accumulation via TTL."""
+    conn = FakeConn()
+    graph = GraphStub()
+    store = make_store(conn, graph=graph)
+    conn.purge_ids = ["m-exp-1", "m-exp-2"]
+
+    assert store.purge_expired() == 2
+
+    # Delete ops enqueued atomically with the purge delete.
+    tx = next(
+        t
+        for t in conn.transactions
+        if any("created_at + ttl" in s for s in t["stmts"])
+    )
+    assert sum("graph_mirror_outbox" in s for s in tx["stmts"]) == 2
+    assert [(r["op"], r["memory_id"]) for r in conn.outbox] == [
+        ("delete", "m-exp-1"),
+        ("delete", "m-exp-2"),
+    ]
+    # The next drain removes the nodes.
+    assert store.flush_graph_mirror() == 2
+    assert graph.removes == ["m-exp-1", "m-exp-2"]
+
+
+def test_stale_upsert_queued_during_outage_then_purge_converges_to_no_node() -> None:
+    """PR #47 P2 review scenario: a memory's upsert stays queued through a
+    mirror outage, its TTL expires, and compaction purges the Postgres row
+    before the backlog flushes. Because purge_expired enqueues its delete op
+    into the same FIFO — necessarily AFTER the stale upsert — the drain
+    delivers upsert(M) then delete(M) and the graph converges to no node."""
+    conn = FakeConn()
+    graph = GraphStub(fail_upserts=1)
+    store = make_store(conn, graph=graph)
+
+    item = make_item(run_id="run-1")
+    store.write_candidate(item)  # mirror down: upsert(M) stays queued
+    assert [r["op"] for r in conn.outbox] == ["upsert"]
+
+    # TTL elapses; compaction's purge deletes the Postgres row and enqueues
+    # the mirror delete behind the stale upsert (same order compact() uses:
+    # purge first, then flush).
+    conn.purge_ids = [item.id]
+    assert store.purge_expired() == 1
+    assert [(r["op"], r["memory_id"]) for r in conn.outbox] == [
+        ("upsert", item.id),
+        ("delete", item.id),
+    ]
+
+    assert store.flush_graph_mirror() == 2
+
+    # The stale upsert landed first, then the purge's delete removed it:
+    # nothing purged from Postgres survives in the graph.
+    assert [u["memory_id"] for u in graph.upserts] == [item.id]
+    assert graph.removes == [item.id]
+    assert graph.nodes == set()
+    assert conn.outbox == []
+
+
+def test_purge_expired_without_graph_enqueues_nothing() -> None:
+    conn = FakeConn()
+    store = make_store(conn)
+    conn.purge_ids = ["m-exp-1"]
+
+    assert store.purge_expired() == 1
+    assert not conn.statements("graph_mirror_outbox")
 
 
 def test_interval_to_ttl_round_trip() -> None:

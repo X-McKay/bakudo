@@ -185,6 +185,30 @@ create table if not exists promotion_decisions (
 );
 create index if not exists promotion_decisions_status on promotion_decisions (status);
 
+-- Graph-mirror outbox (MEM-3): each accepted memory write enqueues its
+-- FalkorDB mirror op here inside the same transaction as the memory row;
+-- PgSemanticMemoryStore.flush_graph_mirror() drains it best-effort after
+-- commit and from compaction (serialised via pg_try_advisory_xact_lock so
+-- drainers never interleave). A mirror outage therefore never loses the
+-- graph write, and a retried activity re-delivers instead of dropping it.
+-- Rows failing mirror_max_attempts times are parked (dead = true) so a
+-- poison payload cannot wedge the queue; parked rows are kept for operator
+-- inspection and never retried automatically.
+--
+-- CANONICAL DDL — mirrored by _GRAPH_MIRROR_OUTBOX_DDL in
+-- src/bakudo/memory/store_pg.py, which self-migrates existing databases
+-- (this file only runs at first initialization). Keep the two in sync.
+create table if not exists graph_mirror_outbox (
+  id bigserial primary key,
+  op text not null,                -- upsert | delete
+  memory_id text not null,
+  run_id text,
+  payload jsonb not null default '{}',  -- type, confidence, embedding
+  attempts int not null default 0,
+  dead boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
 -- Integration-event outbox (section 17.1): durable handoff to projections.
 create table if not exists outbox (
   id bigserial primary key,

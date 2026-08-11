@@ -115,6 +115,56 @@ def test_resolve_embedder_constructs_openai_embedder_when_available(monkeypatch)
     assert emb.base_url == "https://embeddings.example/v1"
 
 
+def test_resolve_graph_returns_none_without_falkordb_url(monkeypatch):
+    """The graph mirror is opt-in: no FALKORDB_URL, no graph wiring."""
+    from bakudo.temporal import worker
+
+    monkeypatch.delenv("FALKORDB_URL", raising=False)
+    assert worker._resolve_graph() is None
+
+
+def test_resolve_graph_connects_falkordb_with_group_id(monkeypatch):
+    """FALKORDB_URL replaces the retired NEO4J_URI/NEO4J_PASSWORD wiring;
+    BAKUDO_GRAPH_GROUP_ID namespaces the graph key (MEM-16)."""
+    from bakudo.memory import graph as graph_mod
+    from bakudo.temporal import worker
+
+    calls = {}
+
+    class FakeGraph:
+        pass
+
+    def fake_connect(url, *, group_id="default"):
+        calls["url"] = url
+        calls["group_id"] = group_id
+        return FakeGraph()
+
+    monkeypatch.setenv("FALKORDB_URL", "falkor://falkordb:6379")
+    monkeypatch.setenv("BAKUDO_GRAPH_GROUP_ID", "teamA")
+    monkeypatch.setattr(graph_mod.FalkorGraphMemory, "connect", staticmethod(fake_connect))
+
+    got = worker._resolve_graph()
+    assert isinstance(got, FakeGraph)
+    assert calls == {"url": "falkor://falkordb:6379", "group_id": "teamA"}
+
+
+def test_resolve_graph_defaults_group_id(monkeypatch):
+    from bakudo.memory import graph as graph_mod
+    from bakudo.temporal import worker
+
+    calls = {}
+    monkeypatch.setenv("FALKORDB_URL", "falkor://falkordb:6379")
+    monkeypatch.delenv("BAKUDO_GRAPH_GROUP_ID", raising=False)
+    monkeypatch.setattr(
+        graph_mod.FalkorGraphMemory,
+        "connect",
+        staticmethod(lambda url, *, group_id="default": calls.setdefault("group_id", group_id)),
+    )
+
+    worker._resolve_graph()
+    assert calls["group_id"] == "default"
+
+
 def test_resolve_embedder_builds_real_openai_embedder(monkeypatch):
     """Integration seam: with the real ``OpenAIEmbedder`` landed, the worker
     resolves it from ``VLLM_EMBED_URL`` (construction is lazy — no network
