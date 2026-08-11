@@ -30,9 +30,11 @@ def log_sandbox_posture() -> None:
     — this log makes that posture visible in ``docker compose logs worker``
     instead of surfacing only when the first run fails.
     """
-    mode = os.environ.get("BAKUDO_SANDBOX")
-    if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
-        mode = "abox"
+    # The same resolver and remediation text the runtime uses — the log must
+    # never describe a different reality than Deps.sandbox_fn enforces.
+    from ._impl import SANDBOX_REMEDIATION, resolve_sandbox_mode
+
+    mode = resolve_sandbox_mode()
 
     if mode == "unavailable":
         logger.warning(
@@ -40,9 +42,8 @@ def log_sandbox_posture() -> None:
             "runs are unavailable: this deployment has no abox binary and no "
             "KVM. The worker serves non-sandbox activities; every "
             "sandbox-requiring run will fail fast with an actionable error. "
-            "To enable real sandboxing, mount the host abox binary and "
-            "/dev/kvm into the worker and set BAKUDO_SANDBOX=abox "
-            "(see infra/docker-compose.yml)."
+            "%s",
+            SANDBOX_REMEDIATION,
         )
     elif mode == "abox":
         resolved = shutil.which("abox")
@@ -57,16 +58,31 @@ def log_sandbox_posture() -> None:
         else:
             logger.info("sandbox posture: abox microVM sandbox (%s)", resolved)
     elif mode == "local":
-        logger.info(
-            "sandbox posture: in-process local sandbox (dev-only; requires "
-            "BAKUDO_ENV=dev, not an isolation boundary)"
-        )
-    else:
+        if os.environ.get("BAKUDO_ENV") != "dev":
+            logger.warning(
+                "sandbox posture: BAKUDO_SANDBOX=local without BAKUDO_ENV=dev "
+                "— the in-process local sandbox is dev-only (it is not an "
+                "isolation boundary), so every sandbox-requiring run will be "
+                "refused. Set BAKUDO_ENV=dev on a dev box, or use abox."
+            )
+        else:
+            logger.info(
+                "sandbox posture: in-process local sandbox (dev-only, not an "
+                "isolation boundary)"
+            )
+    elif mode is None:
         logger.warning(
             "sandbox posture: BAKUDO_SANDBOX is not set (fail-closed) — "
             "every sandbox-requiring run will be refused. Set it to 'abox', "
             "'local' (dev-only), or 'unavailable' to declare a degraded "
             "deployment."
+        )
+    else:
+        logger.warning(
+            "sandbox posture: unknown BAKUDO_SANDBOX value %r — every "
+            "sandbox-requiring run will fail with 'Unknown BAKUDO_SANDBOX "
+            "value'. Valid values: 'abox', 'local' (dev-only), 'unavailable'.",
+            mode,
         )
 
 
