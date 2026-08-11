@@ -10,9 +10,8 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from .. import ids
+from .. import ids, paths
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome, AboxRunner
 from ..agent_spec import AgentSpec, parse_spec
@@ -40,6 +39,27 @@ from .shared import (
 
 SandboxFn = Callable[[TaskBundle], AboxOutcome]
 
+# How to turn a sandbox-less deployment into a sandboxed one (TMP-13). Shared
+# by the fail-fast RuntimeError below and the worker's startup posture log
+# (bakudo.temporal.worker.log_sandbox_posture) so the two can never drift.
+SANDBOX_REMEDIATION = (
+    "To enable real sandboxing, mount the host abox binary and /dev/kvm into "
+    "the worker and set BAKUDO_SANDBOX=abox (see infra/docker-compose.yml)."
+)
+
+
+def resolve_sandbox_mode() -> str | None:
+    """The configured sandbox mode: ``BAKUDO_SANDBOX``, honouring the
+    backwards-compatible ``BAKUDO_USE_ABOX=1`` alias; ``None`` when unset.
+
+    The single source of truth for mode resolution — :meth:`Deps.sandbox_fn`
+    (runtime behavior) and the worker's startup posture log both use it.
+    """
+    mode = os.environ.get("BAKUDO_SANDBOX")
+    if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
+        return "abox"
+    return mode
+
 
 @dataclass
 class Deps:
@@ -64,9 +84,7 @@ class Deps:
         if self.sandbox is not None:
             return self.sandbox
 
-        mode = os.environ.get("BAKUDO_SANDBOX")
-        if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
-            mode = "abox"  # backwards-compatible alias
+        mode = resolve_sandbox_mode()
 
         if mode == "abox":
             return AboxRunner().run
@@ -77,6 +95,16 @@ class Deps:
                     "sandbox is not an isolation boundary."
                 )
             return local_sandbox
+        if mode == "unavailable":
+            # TMP-13: the declared posture of deployments that cannot sandbox
+            # (e.g. the default docker-compose worker image, which ships no
+            # abox binary or KVM). Fail loud and actionable, never hang or
+            # silently no-op.
+            raise RuntimeError(
+                "sandbox runs are unavailable in this deployment "
+                "(BAKUDO_SANDBOX=unavailable): the worker image has no abox "
+                f"binary and no /dev/kvm. {SANDBOX_REMEDIATION}"
+            )
         if mode is None:
             raise RuntimeError(
                 "BAKUDO_SANDBOX must be set to 'abox' or 'local' "
@@ -194,7 +222,12 @@ def load_agent_spec(name: str, run_id: str | None = None) -> dict | None:
     # Repo seed specs; reject anything that is not a bare agent name.
     if not name or "/" in name or "\\" in name or ".." in name:
         return None
-    path = Path(__file__).resolve().parents[3] / "agents" / f"{name}.yaml"
+    try:
+        path = paths.agents_dir() / f"{name}.yaml"
+    except FileNotFoundError:
+        # No bundled agents data on this install: same contract as an unknown
+        # name — None dead-letters the objective instead of crashing.
+        return None
     if not path.is_file():
         return None
     doc = yaml.safe_load(path.read_text())

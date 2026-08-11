@@ -54,6 +54,25 @@ cd infra && docker compose up -d
 # Control API:  http://localhost:8000
 ```
 
+**Sandbox posture: the composed stack is degraded by default (TMP-13).** The
+worker/API image contains no abox binary and the containers get no KVM, so the
+compose file sets `BAKUDO_SANDBOX=unavailable` on both services. The worker
+starts and serves everything that does not need a sandbox (ledger writes,
+evals on stored results, curriculum, memory compaction), logs a loud
+`sandbox posture: DEGRADED` warning at startup, and every sandbox-requiring
+path fails fast with an actionable error — `POST /runs` / `POST /optimize`
+return 409, sandbox activities raise — rather than hanging or silently
+no-opping. To enable real sandboxing, run on a KVM-capable host and, on the
+worker service: mount the host abox binary (`/usr/local/bin/abox:...:ro`),
+pass through `/dev/kvm`, mount the target repos (`BAKUDO_REPO_ROOT`), and set
+`BAKUDO_SANDBOX=abox` — the compose file interpolates
+`${BAKUDO_SANDBOX:-unavailable}`, so exporting the variable (or putting it in
+`infra/.env`) is enough; the exact stanzas are in the comments in
+`infra/docker-compose.yml`. **Breaking default change:** the compose file
+previously shipped `BAKUDO_SANDBOX: abox`; if you had enabled sandboxing by
+only adding the abox mount and `/dev/kvm`, you must now also set
+`BAKUDO_SANDBOX=abox` yourself.
+
 The worker connects to Temporal and, if `BAKUDO_POSTGRES_DSN` is set, wires the
 Postgres ledger and the durable `PgSemanticMemoryStore` into the activity layer
 (`temporal/worker.py`) — `VLLM_EMBED_URL` is then mandatory (the worker fails

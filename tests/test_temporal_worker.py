@@ -9,7 +9,10 @@ for both task queues.
 from __future__ import annotations
 
 import inspect
+import logging
 from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from bakudo.temporal.activities import ALL_ACTIVITIES
 from bakudo.temporal.shared import TASK_QUEUE_CONTROL, TASK_QUEUE_RUNS
@@ -123,3 +126,108 @@ def test_resolve_embedder_builds_real_openai_embedder(monkeypatch):
     emb = worker._resolve_embedder()
     assert isinstance(emb, embeddings.OpenAIEmbedder)
     assert emb._base_url == "https://embeddings.example/v1"
+
+# --- TMP-13: the worker announces its sandbox posture loudly at startup ---
+#
+# The log exists so `docker compose logs worker` tells the truth about
+# whether sandbox runs can work. Each case pins the level (WARNING for any
+# doomed/degraded posture, INFO for a working one) and the substrings an
+# operator needs to act. The message must agree with what Deps.sandbox_fn
+# will actually do at run time.
+
+POSTURE_CASES = [
+    pytest.param(
+        {"BAKUDO_SANDBOX": "unavailable"},
+        None,
+        logging.WARNING,
+        ["DEGRADED", "/dev/kvm", "BAKUDO_SANDBOX=abox"],
+        id="unavailable-degraded",
+    ),
+    pytest.param(
+        {"BAKUDO_SANDBOX": "abox"},
+        None,
+        logging.WARNING,
+        ["abox", "not found"],
+        id="abox-binary-missing",
+    ),
+    pytest.param(
+        {"BAKUDO_SANDBOX": "abox"},
+        "/usr/local/bin/abox",
+        logging.INFO,
+        ["abox"],
+        id="abox-present",
+    ),
+    pytest.param(
+        {"BAKUDO_SANDBOX": "local", "BAKUDO_ENV": "dev"},
+        None,
+        logging.INFO,
+        ["local"],
+        id="local-dev",
+    ),
+    # PR#48 review: local without BAKUDO_ENV=dev is a doomed posture —
+    # sandbox_fn refuses it — and must WARN, not announce a working sandbox.
+    pytest.param(
+        {"BAKUDO_SANDBOX": "local"},
+        None,
+        logging.WARNING,
+        ["BAKUDO_ENV=dev", "refused"],
+        id="local-without-dev-doomed",
+    ),
+    pytest.param(
+        {},
+        None,
+        logging.WARNING,
+        ["BAKUDO_SANDBOX", "not set"],
+        id="unset-fail-closed",
+    ),
+    # PR#48 review: a set-but-unrecognized value must be reported as such
+    # (sandbox_fn raises 'Unknown BAKUDO_SANDBOX value'), not as "not set".
+    pytest.param(
+        {"BAKUDO_SANDBOX": "docker"},
+        None,
+        logging.WARNING,
+        ["'docker'", "nknown"],
+        id="unknown-value",
+    ),
+]
+
+
+@pytest.mark.parametrize("env,which_result,expected_level,expected_substrings", POSTURE_CASES)
+def test_log_sandbox_posture(
+    monkeypatch, caplog, env, which_result, expected_level, expected_substrings
+):
+    from bakudo.temporal import worker
+
+    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    monkeypatch.setattr(worker.shutil, "which", lambda _name: which_result)
+
+    with caplog.at_level(logging.INFO, logger="bakudo.temporal.worker"):
+        worker.log_sandbox_posture()
+
+    records = [r for r in caplog.records if "sandbox posture" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == expected_level
+    for substring in expected_substrings:
+        assert substring in records[0].getMessage()
+
+
+def test_posture_log_and_runtime_error_share_the_remediation(monkeypatch, caplog):
+    """PR#48 review: the startup log and the runtime failure must carry the
+    SAME remediation text, sourced from one constant, so they cannot drift."""
+    from bakudo.temporal import _impl, worker
+
+    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("BAKUDO_SANDBOX", "unavailable")
+
+    with caplog.at_level(logging.WARNING, logger="bakudo.temporal.worker"):
+        worker.log_sandbox_posture()
+    (record,) = [r for r in caplog.records if "sandbox posture" in r.getMessage()]
+    assert _impl.SANDBOX_REMEDIATION in record.getMessage()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _impl.Deps().sandbox_fn()
+    assert _impl.SANDBOX_REMEDIATION in str(excinfo.value)

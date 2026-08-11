@@ -11,7 +11,6 @@ import logging
 import os
 import secrets
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -75,50 +74,92 @@ def _resolve_sandbox() -> Callable[..., Any]:
 
 
 def _register_repo_agent_specs(tools: MetaAgentTools) -> None:
-    """Register the repo's seed agents (``agents/*.yaml``) at startup with the
-    same loader the CLI uses, so ``POST /runs`` resolves them by name and
+    """Register the seed agents (``agents/*.yaml``) at startup with the same
+    loader the CLI uses, so ``POST /runs`` resolves them by name and
     'Unknown agent' only means a genuinely unknown name (API-8).
 
-    Source-tree-relative like the CLI loaders; installs without an ``agents/``
-    directory register nothing (API-12 tracks that packaging gap).
+    Resolved via :func:`bakudo.paths.agents_dir`, which works from both a
+    source checkout and a wheel install (API-12). An install with no bundled
+    agents data at all still boots — degraded, with a warning — and seed
+    agents simply resolve as unknown (404), never a startup crash.
     """
+    from .. import paths
     from ..agent_spec import load_spec_file
 
-    agents_dir = Path(__file__).resolve().parents[3] / "agents"
-    if not agents_dir.is_dir():  # pragma: no cover - wheel installs
+    try:
+        agents = paths.agents_dir()
+    except FileNotFoundError as exc:
+        logger.warning("seed agents unavailable, registering none: %s", exc)
         return
-    for spec_path in sorted(agents_dir.glob("*.yaml")):
+    for spec_path in sorted(agents.glob("*.yaml")):
         tools.register_agent_spec(load_spec_file(spec_path))
 
 
 def build_app(tools: MetaAgentTools | None = None) -> Any:
     """Build the FastAPI app. Requires the ``api`` extra (fastapi, uvicorn)."""
-    from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
     tools = tools or MetaAgentTools()
     _register_repo_agent_specs(tools)
 
     # Bearer-token auth on every route (API-1). When BAKUDO_API_TOKEN is unset,
     # auth is disabled (dev only) — warned once here; set it in any shared
-    # environment.
+    # environment. HTTPBearer is a DECLARED security scheme (not a bare Header
+    # read), so /openapi.json documents the auth model and Swagger UI offers
+    # an Authorize button for try-it-out.
     api_token = os.environ.get("BAKUDO_API_TOKEN")
     if not api_token:
         logger.warning("API auth disabled: BAKUDO_API_TOKEN not set")
 
-    def require_auth(authorization: str | None = Header(default=None)) -> None:
+    bearer_scheme = HTTPBearer(auto_error=False)
+
+    def require_auth(
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),  # noqa: B008
+    ) -> None:
         if not api_token:
             return
-        supplied = (authorization or "").encode("utf-8")
-        expected = f"Bearer {api_token}".encode()
-        if not secrets.compare_digest(supplied, expected):
+        supplied = (credentials.credentials if credentials else "").encode("utf-8")
+        if not secrets.compare_digest(supplied, api_token.encode("utf-8")):
             raise HTTPException(status_code=401, detail="invalid or missing bearer token")
 
+    from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+    from fastapi.responses import HTMLResponse
+
     # App-level dependency: every route, read and write, requires the token
-    # when one is configured. (FastAPI's /openapi.json and /docs endpoints are
-    # not path operations and stay open; they expose the schema, not data.)
+    # when one is configured. FastAPI's default /openapi.json//docs//redoc
+    # endpoints are NOT path operations, so they would bypass this dependency
+    # — they are disabled here and remounted below as real (authenticated)
+    # routes: the schema names every route, model and constraint, and the
+    # bearer policy applies to it like everything else.
+    #
+    # Docs posture: interactive docs are fully usable in tokenless dev mode.
+    # In token-secured deployments the docs pages 401 on plain browser
+    # navigation like the schema does; use the schema with the token
+    # (curl/codegen) or front the API with a header-injecting proxy — the
+    # proxy injects on the page load and on Swagger UI's /openapi.json XHR
+    # alike, and the declared HTTPBearer scheme provides the Authorize button
+    # for try-it-out requests.
     app = FastAPI(
-        title="bakudo control plane", version="3.0.0", dependencies=[Depends(require_auth)]
+        title="bakudo control plane",
+        version="3.0.0",
+        dependencies=[Depends(require_auth)],
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
     )
+
+    @app.get("/openapi.json", include_in_schema=False)
+    def openapi_schema() -> dict[str, Any]:
+        return app.openapi()
+
+    @app.get("/docs", include_in_schema=False)
+    def swagger_docs() -> HTMLResponse:
+        return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - docs")
+
+    @app.get("/redoc", include_in_schema=False)
+    def redoc_docs() -> HTMLResponse:
+        return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - redoc")
 
     def resolve_sandbox() -> Callable[..., Any]:
         """Fail closed with a clear 409 instead of executing on the host."""

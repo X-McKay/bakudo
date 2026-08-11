@@ -41,3 +41,8 @@ jobs:
           bakudo validate-spec agents/optimize-attempt.yaml
           bakudo demo
           bakudo optimize --repo bakudo --title "CI smoke" --rounds 1
+      # API-12 regression guard: the wheel must be a complete install —
+      # builds it, installs into a throwaway venv, runs `bakudo demo`
+      # (offline) from an empty cwd.
+      - name: Wheel smoke
+        run: make wheel-smoke

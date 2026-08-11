@@ -226,12 +226,9 @@ def load_role_spec(name: str, path: str | None = None) -> Any:
     from pathlib import Path
 
     from ..agent_spec import load_spec_file
+    from ..paths import agents_dir
 
-    spec_path = (
-        Path(path)
-        if path
-        else Path(__file__).resolve().parents[3] / "agents" / f"{name}.yaml"
-    )
+    spec_path = Path(path) if path else agents_dir() / f"{name}.yaml"
     return load_spec_file(spec_path)
 
 

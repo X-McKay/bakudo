@@ -1,4 +1,4 @@
-.PHONY: install lint type test check demo wheel
+.PHONY: install lint type test check demo wheel wheel-smoke
 
 install:
 	pip install -e ".[dev]"
@@ -29,3 +29,8 @@ wheel:
 	pip wheel . -w dist --no-deps -q; \
 	git checkout -- pyproject.toml; \
 	ls -t dist/bakudo-*.whl | head -1
+
+# API-12 regression guard: build the wheel, install it into a throwaway venv,
+# and run `bakudo demo` (offline) + `optimize --help` from an empty cwd.
+wheel-smoke:
+	BAKUDO_WHEEL_TESTS=1 python3 -m pytest tests/test_wheel_install.py -v

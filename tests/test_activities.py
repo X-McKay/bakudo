@@ -78,6 +78,18 @@ def test_load_agent_spec_rejects_path_traversal(spy):
     assert _impl.load_agent_spec("../agents/explore") is None
 
 
+def test_load_agent_spec_returns_none_when_seed_dir_missing(spy, monkeypatch):
+    """PR#48 review: on an install with no bundled agents data the documented
+    contract holds — return None so the workflow dead-letters the objective,
+    never crash the activity with FileNotFoundError."""
+
+    def _no_agents():
+        raise FileNotFoundError("no bundled agents anywhere")
+
+    monkeypatch.setattr(_impl.paths, "agents_dir", _no_agents)
+    assert _impl.load_agent_spec("explore") is None
+
+
 def test_load_agent_spec_prefers_ledger_active_version(monkeypatch):
     from bakudo.registry import InMemoryLedger
     from bakudo.registry.records import AgentVersionRecord
@@ -391,6 +403,21 @@ def test_sandbox_abox_selected(monkeypatch):
     _clear_sandbox_env(monkeypatch)
     monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
     assert callable(Deps().sandbox_fn())
+
+
+def test_sandbox_unavailable_mode_fails_loud_and_actionable(monkeypatch):
+    """TMP-13: the compose worker image ships no abox binary, so the compose
+    stack declares BAKUDO_SANDBOX=unavailable. Sandbox-requiring paths must
+    fail fast with an error that says why and how to enable real sandboxing —
+    never hang or silently no-op."""
+    _clear_sandbox_env(monkeypatch)
+    monkeypatch.setenv("BAKUDO_SANDBOX", "unavailable")
+    with pytest.raises(RuntimeError) as excinfo:
+        Deps().sandbox_fn()
+    message = str(excinfo.value)
+    assert "unavailable" in message
+    assert "abox" in message
+    assert "/dev/kvm" in message  # names the fix, not just the failure
 
 
 def test_run_sandbox_dict_carries_error_and_stderr_tail(monkeypatch):
