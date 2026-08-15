@@ -1,5 +1,18 @@
 # Remediation plan: review findings (2026-08-15)
 
+> **Status: implemented.** All four phases below were carried out on branch
+> `claude/bakudo-repo-review-g67etw` (finding tags in the code/commits:
+> Phase 0 pins/dead-state, Phase 1 `MEM-17…21`/`TMP-14…16`, Phase 2
+> `TMP-17…23`, Phase 3 `SEC-1…4`). The offline gate (`ruff` + `mypy` +
+> `pytest` = 518 passed / 18 skipped), the operator smoke (`validate-spec`,
+> `demo`, `optimize`), and the wheel-install smoke all pass. Live-only paths
+> (real Postgres/FalkorDB round-trips, live vLLM) were validated by shape via
+> the scripted-connection and time-skipping-workflow suites; they still need
+> the opt-in live suites against real infrastructure. Two items were
+> deliberately scoped down and are noted inline: `record_run_edges` outboxing
+> (no production caller) and full per-`SandboxProfile` runtime enforcement
+> (a maintainer decision — the docs are now honest instead).
+
 This plan sequences fixes for the weaknesses and minor issues surfaced in the
 2026-08-15 in-depth review. It is grouped into four phases by risk and
 dependency order. Each item states the **problem**, **root cause**, **files**,
