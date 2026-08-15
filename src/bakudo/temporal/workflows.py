@@ -40,6 +40,7 @@ with workflow.unsafe.imports_passed_through():
         load_agent_spec,
         measure_winner_bench,
         persist_run,
+        reconcile_runs,
         render_bundle,
         run_agent_evolution,
         run_eval_suite,
@@ -293,10 +294,16 @@ class OptimizationWorkflow:
     def __init__(self) -> None:
         self._round = 0
         self._phase = "created"
+        # Tokens spent across every scout/attempt child run. Those children are
+        # parented by *this* workflow, so their own _notify_meta is skipped;
+        # this loop is the only budget notification the meta-agent gets for the
+        # whole optimize objective, so it must carry the accumulated cost
+        # (TMP-24) or optimize work would spend against a zero charge.
+        self._tokens_used = 0
 
     @workflow.query
     def status(self) -> dict:
-        return {"round": self._round, "phase": self._phase}
+        return {"round": self._round, "phase": self._phase, "tokens": self._tokens_used}
 
     async def _child_run(self, objective: dict, spec: dict, timeout: int) -> dict:
         run_id = workflow.uuid4().hex
@@ -311,7 +318,13 @@ class OptimizationWorkflow:
             id=f"run-{run_id}",
         )
         out = await handle
-        return out if isinstance(out, dict) else _as_dict(out)
+        data = out if isinstance(out, dict) else _as_dict(out)
+        metrics = (data.get("result") or {}).get("metrics") or {}
+        try:
+            self._tokens_used += int(metrics.get("tokens_used", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        return data
 
     @workflow.run
     async def run(self, inp: OptimizeInput) -> dict:
@@ -331,7 +344,11 @@ class OptimizationWorkflow:
             return
         try:
             handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
-            await handle.signal("run_completed", inp.tracking_run_id)
+            # Charge the whole optimize loop's token spend against the budget
+            # (TMP-24).
+            await handle.signal(
+                "run_completed", args=[inp.tracking_run_id, self._tokens_used]
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - best-effort notification
@@ -544,7 +561,12 @@ class MetaState:
     # signalled run_completed — is reconciled out after active_run_ttl_hours
     # instead of blocking dispatch forever (TMP-18).
     active_run_started: dict[str, str] = field(default_factory=dict)
-    active_run_ttl_hours: float = 3.0  # > the 2h sandbox start-to-close
+    # Time-TTL backstop only (TMP-18): the *primary* reconcile is against the
+    # ledger's terminal status (reconcile_runs activity), so this must sit
+    # safely above the true worst-case run lifetime — sandbox (2h) plus the
+    # eval child's retries (up to 3x2h) plus overhead — or it would drop a
+    # legitimately-running child and over-subscribe the concurrency slots.
+    active_run_ttl_hours: float = 24.0
     # Idle heartbeat: the run loop wakes at least this often even with no
     # dispatchable work, so stale-run reconciliation runs and a paused meta
     # under signal inflow still rolls history (bounds the CAN edge case).
@@ -738,17 +760,33 @@ class MetaAgentWorkflow:
         ]
 
     def _reconcile_active_runs(self, now: datetime) -> None:
-        """Drop leaked active-run entries older than the TTL (TMP-18).
-
-        AgentRunWorkflow signals run_completed on every terminal path, but an
-        ABANDON'd child whose worker died can never signal; without this its
-        run_id would occupy a concurrency slot forever (durably, across CAN).
+        """Time-TTL backstop: drop active-run entries far past any real run
+        lifetime (TMP-18). This only catches a run that never got a terminal
+        ledger record at all; the precise reconcile is
+        :meth:`_reconcile_via_ledger`, which drops runs the ledger reports as
+        terminal without waiting out this coarse TTL.
         """
         for run_id in self._stale_active_runs(now):
             workflow.logger.warning(
                 "reconciling leaked active run %s (no completion after %sh)",
                 run_id, self._state.active_run_ttl_hours,
             )
+            self._drop_active_run(run_id)
+
+    async def _reconcile_via_ledger(self) -> None:
+        """Free slots held by runs the ledger reports as terminal (TMP-18).
+
+        Reconciles against authoritative terminal *status*, not elapsed time,
+        so a still-running child (non-terminal ledger phase) is never dropped —
+        which the coarse time-TTL could do given the eval child's retry budget.
+        """
+        if not self._state.active_runs:
+            return
+        finished = await workflow.execute_activity(
+            reconcile_runs, list(self._state.active_runs), **_SHORT
+        )
+        for run_id in finished:
+            workflow.logger.info("reconciled finished run %s from active_runs", run_id)
             self._drop_active_run(run_id)
 
     @workflow.run
@@ -772,9 +810,12 @@ class MetaAgentWorkflow:
                     timeout=timedelta(minutes=self._state.idle_wake_minutes),
                 )
             except TimeoutError:
-                # Idle heartbeat: count it toward the CAN threshold so even a
-                # persistently paused/blocked meta eventually rolls history,
-                # then re-loop to reconcile.
+                # Idle heartbeat: reconcile leaked slots against the ledger's
+                # terminal status (TMP-18) — this is where a meta blocked by
+                # runs that finished-without-signalling gets unstuck — then
+                # count the wake toward the CAN threshold so even a persistently
+                # paused/blocked meta eventually rolls history, and re-loop.
+                await self._reconcile_via_ledger()
                 self._handled += 1
                 continue
 

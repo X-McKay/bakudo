@@ -21,25 +21,43 @@ class CommandDenied(Exception):
         super().__init__(f"Command denied ({reason}): {command}")
 
 
-# Per-program flags that turn an allowlisted, otherwise-safe program into an
-# arbitrary-code executor (SEC-1). Checked against the parsed argv, so tab/space
-# separators and quoting can't sneak past a raw-substring scan — e.g.
+# Interpreter inline-exec flags that turn an allowlisted, otherwise-safe program
+# into an arbitrary-code executor (SEC-1). Checked against the *parsed* argv, so
+# tab/space separators and quoting can't sneak past a raw-substring scan — e.g.
 # `python -c "import os; os.system(...)"`, `find . -exec rm {} \;`,
-# `bash -c '...'`, `node -e '...'`. This is defence-in-depth on top of abox,
-# not a jail: it closes the cheap, obvious interpreter bypasses of the argv[0]
+# `bash -c '...'`, `node -e '...'`. This is defence-in-depth on top of abox, not
+# a jail: it closes the cheap, obvious interpreter bypasses of the argv[0]
 # allowlist without pretending to sandbox.
-_ARBITRARY_CODE_FLAGS: dict[str, frozenset[str]] = {
-    "python": frozenset({"-c"}),
-    "python3": frozenset({"-c"}),
-    "bash": frozenset({"-c"}),
-    "sh": frozenset({"-c"}),
-    "zsh": frozenset({"-c"}),
-    "node": frozenset({"-e", "--eval", "-p", "--print"}),
+#
+# Two match modes, because short options *cluster*: `python3 -Ic '...'`,
+# `bash -lc '...'`, and `node -pe '...'` all execute inline code while no token
+# equals `-c`/`-e`/`-p`. So single-letter code flags are matched against every
+# letter of a short-option cluster, while long/multi-char flags match exactly.
+_CODE_FLAG_LETTERS: dict[str, frozenset[str]] = {
+    "python": frozenset("c"),
+    "python3": frozenset("c"),
+    "bash": frozenset("c"),
+    "sh": frozenset("c"),
+    "zsh": frozenset("c"),
+    "node": frozenset("ep"),
+    "perl": frozenset("eE"),
+    "ruby": frozenset("e"),
+}
+_CODE_FLAG_EXACT: dict[str, frozenset[str]] = {
+    "node": frozenset({"--eval", "--print"}),
     "deno": frozenset({"eval"}),
-    "perl": frozenset({"-e", "-E"}),
-    "ruby": frozenset({"-e"}),
     "find": frozenset({"-exec", "-execdir", "-ok", "-okdir"}),
 }
+
+
+def _is_short_cluster(token: str) -> bool:
+    """A single-dash short-option group like ``-Ic`` (not ``--long`` or ``-``)."""
+    return (
+        len(token) >= 2
+        and token[0] == "-"
+        and token[1] != "-"
+        and "=" not in token
+    )
 
 
 @dataclass(frozen=True)
@@ -77,17 +95,23 @@ class CommandPolicy:
         if self.allowed_programs and program not in self.allowed_programs:
             raise CommandDenied(command, f"program '{program}' not in allowlist")
 
-        # Close the interpreter inline-exec bypass (SEC-1): an allowlisted
-        # program invoked with a code-execution flag runs arbitrary code the
-        # argv[0] allowlist can't reason about.
-        code_flags = _ARBITRARY_CODE_FLAGS.get(program)
-        if code_flags:
-            for token in argv[1:]:
-                if token in code_flags:
-                    raise CommandDenied(
-                        command,
-                        f"'{program} {token}' can execute arbitrary code",
-                    )
+        # Close the interpreter inline-exec bypass (SEC-1), including clustered
+        # short options (`-Ic`, `-lc`, `-pe`): an allowlisted program invoked
+        # with a code-execution flag runs arbitrary code the argv[0] allowlist
+        # can't reason about.
+        letters = _CODE_FLAG_LETTERS.get(program, frozenset())
+        exact = _CODE_FLAG_EXACT.get(program, frozenset())
+        for token in argv[1:]:
+            if token in exact:
+                raise CommandDenied(
+                    command, f"'{program} {token}' can execute arbitrary code"
+                )
+            if letters and _is_short_cluster(token) and (set(token[1:]) & letters):
+                raise CommandDenied(
+                    command,
+                    f"'{program} {token}' bundles an inline-code flag "
+                    f"({', '.join(sorted(set(token[1:]) & letters))})",
+                )
         return argv
 
 

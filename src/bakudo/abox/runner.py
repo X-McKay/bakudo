@@ -201,22 +201,68 @@ def _tail(text: str) -> str:
     return text[-_TAIL_CHARS:]
 
 
+# Exit code recorded when a run is killed because its cancel_event was set
+# (distinct from 124 = timed out). Mirrors a SIGTERM-style stop (SEC-5).
+_CANCELLED_EXIT_CODE = 130
+
+# How often the cancellable executor polls the process while waiting (seconds).
+_CANCEL_POLL_SECONDS = 0.5
+
+
 def _subprocess_executor(
-    argv: list[str], timeout: float | None = None
+    argv: list[str],
+    timeout: float | None = None,
+    cancel_event: object | None = None,
 ) -> ExecResult:
-    """Run abox for real, mapping a host-side kill to exit 124 (ABOX-11)."""
+    """Run abox for real, mapping a host-side kill to exit 124 (ABOX-11).
+
+    When ``cancel_event`` (a ``threading.Event``) is supplied, the process is
+    run under a poll loop so a set event actually terminates it (SEC-5) —
+    cancelling the Temporal activity alone cannot interrupt a blocking
+    ``subprocess.run``, so a cancelled agent would otherwise keep running and
+    spending until the sandbox timeout. Without an event the original
+    fast-path ``subprocess.run`` is used unchanged.
+    """
+    if cancel_event is None:
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as expired:
+            out = expired.stdout or b""
+            err = expired.stderr or b""
+            return ExecResult(
+                124,
+                out.decode(errors="replace") if isinstance(out, bytes) else out,
+                err.decode(errors="replace") if isinstance(err, bytes) else err,
+                timed_out=True,
+            )
+        return ExecResult(proc.returncode, proc.stdout, proc.stderr)
+
+    popen: subprocess.Popen[str] = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    deadline = (time.monotonic() + timeout) if timeout else None
+    while True:
+        try:
+            done_out, done_err = popen.communicate(timeout=_CANCEL_POLL_SECONDS)
+            return ExecResult(popen.returncode, done_out or "", done_err or "")
+        except subprocess.TimeoutExpired:
+            if cancel_event.is_set():  # type: ignore[attr-defined]
+                killed_out, killed_err = _terminate(popen)
+                return ExecResult(_CANCELLED_EXIT_CODE, killed_out, killed_err)
+            if deadline is not None and time.monotonic() >= deadline:
+                killed_out, killed_err = _terminate(popen)
+                return ExecResult(124, killed_out, killed_err, timed_out=True)
+
+
+def _terminate(popen: subprocess.Popen[str]) -> tuple[str, str]:
+    """SIGTERM then SIGKILL a process, returning whatever output it flushed."""
+    popen.terminate()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as expired:
-        out = expired.stdout or b""
-        err = expired.stderr or b""
-        return ExecResult(
-            124,
-            out.decode(errors="replace") if isinstance(out, bytes) else out,
-            err.decode(errors="replace") if isinstance(err, bytes) else err,
-            timed_out=True,
-        )
-    return ExecResult(proc.returncode, proc.stdout, proc.stderr)
+        out, err = popen.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        popen.kill()
+        out, err = popen.communicate()
+    return out or "", err or ""
 
 
 class AboxRunner:
@@ -238,9 +284,10 @@ class AboxRunner:
         self._result_relpath = result_relpath
         self._executor: Executor = executor or _subprocess_executor
         self._scratch_root = scratch_root
-        # Only the real subprocess executor is auto-verified before a run: an
-        # injected executor (tests/dry-runs) is trusted by construction, so it
-        # is not subjected to the identity probe (SEC-3).
+        # Only the real subprocess executor is auto-verified before a run and
+        # driven with a cancel_event: an injected executor (tests/dry-runs) is
+        # trusted by construction and may not accept the extra argument (SEC-3/5).
+        self._default_executor = executor is None
         self._verify_default_binary = executor is None
         self._binary_verified = False
 
@@ -271,13 +318,16 @@ class AboxRunner:
                 f"`{self._abox_bin} --version` exited {res.exit_code} ({out!r}); "
                 "refusing to run an unverified binary as the sandbox boundary."
             )
-        match = re.search(r"\d+\.\d+(?:\.\d+)?", out)
-        if "abox" not in out.lower() and match is None:
+        # Require an abox-specific identifier (SEC-3): a bare version number is
+        # not enough — `python3 --version` prints "Python 3.x" and would
+        # otherwise pass, defeating the check for a wrong/substituted binary.
+        if "abox" not in out.lower():
             raise AboxError(
                 f"`{self._abox_bin} --version` output {out!r} does not identify "
                 "abox; refusing to run an unverified binary as the sandbox "
                 "boundary (set BAKUDO_ABOX_SKIP_VERSION_CHECK=1 to override)."
             )
+        match = re.search(r"\d+\.\d+(?:\.\d+)?", out)
         return match.group(0) if match else out
 
     def _ensure_binary_verified(self) -> None:
@@ -362,7 +412,9 @@ class AboxRunner:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def run(self, bundle: TaskBundle) -> AboxOutcome:
+    def run(
+        self, bundle: TaskBundle, cancel_event: object | None = None
+    ) -> AboxOutcome:
         started = time.monotonic()
         # Fail closed if the configured binary is not verifiably abox (SEC-3);
         # skipped for injected executors and when explicitly overridden.
@@ -381,7 +433,14 @@ class AboxRunner:
             argv = self.build_command(bundle, scratch, repo)
             timeout = spec.sandbox.timeout_seconds + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
             try:
-                exec_result = self._executor(argv, timeout)
+                # Only the default subprocess executor takes cancel_event; an
+                # injected executor may not accept it (SEC-5). The unconditional
+                # `abox stop --clean` in the finally still tears the microVM
+                # down after a cancel-kill.
+                if self._default_executor:
+                    exec_result = self._executor(argv, timeout, cancel_event=cancel_event)
+                else:
+                    exec_result = self._executor(argv, timeout)
             except FileNotFoundError as missing:
                 raise AboxNotFoundError(
                     f"abox binary not found: {self._abox_bin!r} is not on PATH "

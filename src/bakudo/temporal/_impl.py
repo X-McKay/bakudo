@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from .. import ids, paths
 from ..abox.local import local_sandbox
@@ -239,9 +240,31 @@ def render_bundle(inp: AgentRunInput) -> dict:
     return bundle.model_dump(by_alias=True, mode="json")
 
 
-def run_sandbox(bundle_dict: dict) -> dict:
+def _sandbox_accepts_cancel_event(fn: object) -> bool:
+    """Whether a sandbox callable takes a ``cancel_event`` (SEC-5).
+
+    The abox runner and local sandbox do; injected test stubs (``fn(bundle)``)
+    do not, so cancellation plumbing is passed only when supported rather than
+    breaking a stub with an unexpected kwarg.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return "cancel_event" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def run_sandbox(bundle_dict: dict, cancel_event: object | None = None) -> dict:
     bundle = TaskBundle.model_validate(bundle_dict)
-    outcome = DEPS.sandbox_fn()(bundle)
+    fn: Any = DEPS.sandbox_fn()
+    if cancel_event is not None and _sandbox_accepts_cancel_event(fn):
+        outcome = fn(bundle, cancel_event=cancel_event)
+    else:
+        outcome = fn(bundle)
     return {
         "run_id": outcome.run_id,
         "abox_task_id": outcome.abox_task_id,
@@ -536,6 +559,28 @@ def compact_memories(inp: CompactionInput) -> dict:
     result = RunResult.model_validate(inp.result)
     report = compact(result, DEPS.memory, repo=inp.repo)
     return {"written": report.written, "rejected": report.rejected}
+
+
+_TERMINAL_RUN_PHASES = {"completed", "failed", "cancelled", "archived"}
+
+
+def reconcile_runs(run_ids: list[str]) -> list[str]:
+    """Return the run ids whose ledger record is already terminal (TMP-18).
+
+    The meta-agent uses this to free concurrency slots held by runs that
+    finished but whose ``run_completed`` signal was lost — reconciling against
+    the authoritative terminal *status*, so a genuinely still-running child
+    (its ledger phase is non-terminal) is never dropped. A run with no ledger
+    record yet is left alone here (it may be mid-dispatch); the meta-agent's
+    coarse time-TTL is the backstop for a record that never appears.
+    """
+    ledger = DEPS.ledger
+    done: list[str] = []
+    for run_id in run_ids:
+        run = ledger.get_run(run_id)
+        if run is not None and run.phase.value in _TERMINAL_RUN_PHASES:
+            done.append(run_id)
+    return done
 
 
 def collect_signals(inp: ObserveInput) -> list[dict]:

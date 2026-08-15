@@ -846,3 +846,47 @@ async def test_cancel_signal_during_sandbox_records_cancelled(env, monkeypatch):
         run = ledger.get_run("run_CANCEL1")
         assert run.phase.value == "cancelled"
     release.set()  # let the leaked activity thread finish
+
+
+async def test_meta_optimize_charges_accumulated_tokens_to_budget(env, deps, monkeypatch):
+    """TMP-24: an optimize loop's scout/attempt child runs are parented by
+    OptimizationWorkflow (so their own _notify_meta is skipped); the loop must
+    still charge their accumulated tokens against the meta budget, or optimize
+    work would spend against a zero charge."""
+    base = _optimize_scripted_sandbox()
+
+    def scripted_with_tokens(bundle):
+        out = base(bundle)
+        out.result.setdefault("metrics", {})["tokens_used"] = 1000
+        return out
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", scripted_with_tokens)
+    monkeypatch.setattr(_impl.DEPS, "bench_measure", lambda d, b: (10.0, 4.0))
+
+    async with make_worker(
+        env, [MetaAgentWorkflow, OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        handle = await env.client.start_workflow(
+            MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
+        )
+        await handle.execute_update(MetaAgentWorkflow.change_budget, 100.0)
+        await handle.execute_update(MetaAgentWorkflow.change_token_price, 1.0)  # $1/1k
+        await handle.signal(
+            MetaAgentWorkflow.new_objective,
+            {
+                "id": "obj_OPTBUD", "type": "optimize", "repo": "bakudo",
+                "title": "optimize with cost",
+                "acceptanceCriteria": ["All existing tests pass"],
+                "constraints": {"benchCommand": "python3 bench.py"},
+            },
+        )
+
+        async def drained():
+            status = await handle.query(MetaAgentWorkflow.get_status)
+            return status["active_runs"] == [] and status["processed_objectives"] == 1
+
+        assert await _poll(drained, timeout=25.0)
+        budget = await handle.query(MetaAgentWorkflow.get_budget_state)
+        # scout + >=1 attempt, each 1000 tokens at $1/1k => at least $2 charged
+        # (the pre-fix behaviour charged exactly $0).
+        assert budget["budget_usd_remaining"] <= 98.0, budget

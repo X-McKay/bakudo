@@ -44,8 +44,14 @@ def local_sandbox(
     *,
     offline_driver: OfflineDriver | None = None,
     workspace_root: Path | None = None,
+    cancel_event: object | None = None,
 ) -> AboxOutcome:
-    """Run a bundle locally and return an :class:`AboxOutcome`."""
+    """Run a bundle locally and return an :class:`AboxOutcome`.
+
+    ``cancel_event`` is accepted for interface parity with the abox runner but
+    ignored: the local dev sandbox runs the agent in-process and is not
+    interruptible mid-run (it is a dev/test affordance, not a real boundary).
+    """
     if workspace_root is None:
         workspace_root = Path(tempfile.mkdtemp(prefix=f"{bundle.run_id}-ws-"))
         _git_init(workspace_root)

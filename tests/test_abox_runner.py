@@ -426,3 +426,46 @@ def test_verify_binary_nonzero_exit_is_rejected(tmp_path):
 
     with pytest.raises(AboxError):
         AboxRunner(executor=broken, repo_root=tmp_path).verify_binary()
+
+
+def test_verify_binary_rejects_generic_version_without_abox_identifier(tmp_path):
+    """A wrong binary that prints a bare version (e.g. `python3 --version` ->
+    'Python 3.11') must be rejected: the probe requires an abox identifier, not
+    just any version number (SEC-3, review follow-up)."""
+    from bakudo.abox.runner import AboxError
+
+    def python_like(argv, timeout=None):
+        return ExecResult(0, "Python 3.11.15\n", "")
+
+    with pytest.raises(AboxError):
+        AboxRunner(executor=python_like, repo_root=tmp_path).verify_binary()
+
+
+# --- cancellable executor actually kills the process (SEC-5) ---
+
+
+def test_subprocess_executor_kills_process_when_cancel_event_set():
+    """With a cancel_event, a set event terminates the running process rather
+    than waiting out the timeout — the fix for cancel-during-sandbox not
+    actually stopping the agent."""
+    import threading
+    import time
+
+    from bakudo.abox.runner import _CANCELLED_EXIT_CODE, _subprocess_executor
+
+    cancel = threading.Event()
+    # A process that would run for 30s; we cancel it almost immediately.
+    def cancel_soon():
+        time.sleep(0.3)
+        cancel.set()
+
+    threading.Thread(target=cancel_soon, daemon=True).start()
+    start = time.monotonic()
+    try:
+        result = _subprocess_executor(["sleep", "30"], timeout=30, cancel_event=cancel)
+    except FileNotFoundError:
+        pytest.skip("`sleep` not available")
+    elapsed = time.monotonic() - start
+    assert result.exit_code == _CANCELLED_EXIT_CODE
+    assert result.timed_out is False
+    assert elapsed < 10, "the process must be killed on cancel, not run to timeout"
