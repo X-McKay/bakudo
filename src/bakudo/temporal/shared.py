@@ -127,3 +127,7 @@ class OptimizeInput:
     max_rounds: int = 2
     max_approaches: int = 3
     timeout_seconds: int = 3600
+    # Set when the meta-agent dispatched this loop (TMP-19): the id to signal
+    # run_completed with so the meta-agent's active_runs drains. None when the
+    # loop was started out-of-band (bakudo optimize / POST /optimize).
+    tracking_run_id: str | None = None
