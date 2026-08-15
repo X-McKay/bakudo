@@ -112,15 +112,9 @@ class CompactionInput:
 
 @dataclass
 class ObserveInput:
-    """Collect repository signals and emit candidate objectives.
-
-    ``iterations`` counts Continue-As-New rollovers of the observer loop; it
-    lives here because ``continue_as_new`` takes exactly the workflow's run
-    arguments.
-    """
+    """Collect repository signals and emit candidate objectives."""
 
     repo: str
-    iterations: int = 0
 
 
 @dataclass

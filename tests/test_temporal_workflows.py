@@ -138,8 +138,11 @@ async def test_agent_run_workflow_happy_path_writes_full_event_log(env, deps):
     assert kinds[0] == "created" and kinds.count("created") == 1
     assert kinds.count("finished") == 1
     phases = [e.payload.get("phase") for e in events if e.event_type == "phase"]
+    # No `sandbox_starting`: it and `agent_running` were persisted back-to-back
+    # before the sandbox even booted, so the distinction was illusory. This now
+    # matches the synchronous pipeline mirror, which records the same sequence.
     assert phases == [
-        "bundle_rendered", "sandbox_starting", "agent_running",
+        "bundle_rendered", "agent_running",
         "collecting_artifacts", "evaluating",
     ]
     # Evals were recorded against the run.

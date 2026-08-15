@@ -166,7 +166,11 @@ class AgentRunWorkflow:
             await self._notify_meta(inp.run_id)
             return AgentRunOutput(inp.run_id, "cancelled", "", "")
 
-        await self._advance(inp.run_id, "sandbox_starting")
+        # `sandbox_starting` and `agent_running` used to be two back-to-back
+        # persist activities with no work between them (two ledger round-trips
+        # for no observable state change). Persist the single meaningful
+        # transition — the run is about to execute in the sandbox — as
+        # `agent_running`; the launch is instantaneous from the ledger's view.
         await self._advance(inp.run_id, "agent_running")
         sandbox = await workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
 
@@ -667,9 +671,8 @@ class RepoObserverWorkflow:
         for objective in objectives:
             await meta.signal("new_objective", objective)
 
-        # Poll on an interval; cap iterations per execution to keep history
-        # small. The counter rides on the input (continue_as_new takes exactly
-        # the workflow's run arguments) and resets when it rolls over.
+        # Poll on an interval, then Continue-As-New. Each execution does exactly
+        # one collect+sleep+CAN, so its own history stays tiny — no rollover
+        # counter is needed to bound it.
         await workflow.sleep(timedelta(minutes=15))
-        next_iterations = 0 if inp.iterations >= 32 else inp.iterations + 1
-        workflow.continue_as_new(ObserveInput(repo=inp.repo, iterations=next_iterations))
+        workflow.continue_as_new(ObserveInput(repo=inp.repo))
