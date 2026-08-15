@@ -61,8 +61,10 @@ build's `--version` output is unrecognised.
 role (network mode, max changed files, merge/ephemerality). The **enforced**
 controls are: the microVM boundary and its allowed commands/filesystem (abox,
 via the repo's `.abox/project.toml`), the outbound network (`--network` derived
-from the AgentSpec's `networkMode`, which can only *narrow* the project's
-allowlist, plus the project's `networkBundles`), and `maxChangedFiles` (checked
+from the AgentSpec's `networkMode` — note this *replaces* the project's default
+mode per run, so a spec asking for `open` does widen egress to abox's
+public-internet-only mode; scoped bundles/domains stay repo-owned), and
+`maxChangedFiles` (checked
 host-side when a candidate diff is scored, `evals/corpus.py`). Wiring every
 `SandboxProfile` dimension to a runtime check is future work (see
 `docs/HUMAN_TASKS.md`); today the profiles are documentation of intent, and this
@@ -90,7 +92,8 @@ access, raw secret access, unrestricted package installation, unrestricted
 outbound HTTP, direct access to production systems, or control-plane database
 write access. These are enforced by **abox** — its microVM boundary and the
 repo-owned `.abox/project.toml` (allowed commands, filesystem, package
-registries) — plus the run-level `--network` mode and `networkBundles` from the
-AgentSpec, which can only narrow that project policy. (`abox/runner.py::PROFILES`
+registries) — plus the run-level `--network` mode from the AgentSpec (which
+replaces the project's default mode per run; `open` still denies
+host/private/metadata ranges but does grant public HTTPS). (`abox/runner.py::PROFILES`
 documents the intended per-role policy but is not itself the enforcement point;
 see "Sandbox profiles are advisory metadata" above.)

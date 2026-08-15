@@ -51,7 +51,7 @@ def log_sandbox_posture() -> None:
             logger.warning(
                 "sandbox posture: BAKUDO_SANDBOX=abox but the abox binary "
                 "was not found on PATH — every sandbox run will fail with "
-                "AboxNotFoundError. Install abox 0.6.0 (and expose /dev/kvm "
+                "AboxNotFoundError. Install abox 0.7.0 (and expose /dev/kvm "
                 "when containerized) or set BAKUDO_SANDBOX=unavailable to "
                 "declare the degraded mode."
             )

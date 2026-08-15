@@ -1,4 +1,4 @@
-"""Offline in-sandbox e2e against the *real* abox 0.6.0 binary (plan Task 2.3).
+"""Offline in-sandbox e2e against the *real* abox 0.7.0 binary (plan Task 2.3).
 
 Skipped unless ``ABOX_LIVE=1``: these tests boot KVM microVMs and need the
 repo trusted (``abox project trust``) and warmed (``abox env warm``). They run

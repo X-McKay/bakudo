@@ -1,4 +1,5 @@
-# Repo-owned abox 0.6.0 configuration (review finding ABOX-4).
+# Repo-owned abox configuration (review finding ABOX-4); validated against
+# abox 0.7.0 (MicroSandbox runtime).
 #
 # Schema ground truth: abox-core/src/project.rs (validated with
 # `abox project validate` / `abox project explain`). Changes to this file (or
@@ -11,8 +12,9 @@ id = "bakudo"
 [network]
 # Scoped egress: package installs during prepare + the vLLM ingress endpoints
 # the worker forwards via VLLM_BASE_URL / BAKUDO_VLLM_* (direct keyless path).
-# Spec-level networkMode still narrows per run via `abox run --network`
-# (none -> safe), so explore runs get a loopback-only guest regardless.
+# Spec-level networkMode replaces this default per run via `abox run --network`
+# (none -> safe): explore runs get a host-mediated-only guest, while a spec
+# asking for `open` gets abox's public-internet-only mode.
 mode = "scoped"
 bundles = ["pypi-public"]
 domains = ["llm.almckay.io", "llm-fast.almckay.io", "embeddings.almckay.io"]
