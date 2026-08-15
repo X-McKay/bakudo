@@ -28,11 +28,45 @@ tools enforce an in-process `CommandPolicy` (`strands_tools/policy.py`):
 - `repo-safe` allowlists the common read/build/test toolchain and blocks
   destructive, privilege-escalating, and exfiltration-prone patterns.
 - `read-only` is used by the `explore`/`critic`/`optimize-scout` roles.
+- Both additionally reject the interpreter inline-exec bypasses of the argv[0]
+  allowlist (`python -c`, `bash -c`, `node -e`, `find -exec`, …) parsed from the
+  argv, so tabs/quoting can't smuggle arbitrary code past an allowlisted
+  program (SEC-1).
 - Every denial is recorded and fed to the **safety eval**, which is a hard gate
   in the promotion policy.
 
+This in-process policy is **defence-in-depth, not a jail**: it stops the naive,
+cheap bypasses, but the hard boundary is abox. Programs like `make`/`npm`/`git`
+can still run project-defined code by design; only the microVM and its network
+policy contain that.
+
 `Workspace` (`strands_tools/workspace.py`) additionally confines all file I/O to
-the worktree root and rejects `..`/absolute-path escapes.
+the worktree root, rejects `..`/absolute-path escapes, and refuses to write
+through a final symlink (SEC-2). This is the only filesystem guard in the
+in-process `local` dev sandbox; production runs rely on abox's filesystem
+isolation.
+
+## abox binary identity (SEC-3)
+
+The production sandbox is only a microVM because `argv[0]` resolves to a real
+abox binary. Before its first run, `AboxRunner` probes `abox --version` and
+fails closed (`AboxError`) unless the output identifies abox — turning a
+mis-pathed or wrong binary from a silent host-subprocess downgrade into a loud
+boot-time error. Set `BAKUDO_ABOX_SKIP_VERSION_CHECK=1` only if a specific abox
+build's `--version` output is unrecognised.
+
+## Sandbox profiles are advisory metadata, not the enforcement point
+
+`abox/runner.py::SandboxProfile` / `PROFILES` describe the *intended* policy per
+role (network mode, max changed files, merge/ephemerality). The **enforced**
+controls are: the microVM boundary and its allowed commands/filesystem (abox,
+via the repo's `.abox/project.toml`), the outbound network (`--network` derived
+from the AgentSpec's `networkMode`, which can only *narrow* the project's
+allowlist, plus the project's `networkBundles`), and `maxChangedFiles` (checked
+host-side when a candidate diff is scored, `evals/corpus.py`). Wiring every
+`SandboxProfile` dimension to a runtime check is future work (see
+`docs/HUMAN_TASKS.md`); today the profiles are documentation of intent, and this
+document no longer claims otherwise.
 
 ## Human-gated actions (spec §19.2, §27.2)
 
@@ -54,5 +88,9 @@ memories, or contain secrets (the secret detectors block common key formats).
 Worker agents must not have: unrestricted LAN access, raw host filesystem
 access, raw secret access, unrestricted package installation, unrestricted
 outbound HTTP, direct access to production systems, or control-plane database
-write access. These are enforced by the abox sandbox profile
-(`abox/runner.py::PROFILES`) and the network bundles in the AgentSpec.
+write access. These are enforced by **abox** — its microVM boundary and the
+repo-owned `.abox/project.toml` (allowed commands, filesystem, package
+registries) — plus the run-level `--network` mode and `networkBundles` from the
+AgentSpec, which can only narrow that project policy. (`abox/runner.py::PROFILES`
+documents the intended per-role policy but is not itself the enforcement point;
+see "Sandbox profiles are advisory metadata" above.)

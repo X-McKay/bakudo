@@ -236,6 +236,9 @@ def test_run_command_timeout_clamped_to_remaining_budget(tmp_path):
 def test_run_command_subprocess_timeout_reported_not_raised(tmp_path):
     spec, ctx = _ctx(tmp_path)
     tools = build_tool_callables(spec, ctx)
-    out = tools["run-command"](command="python -c 'import time; time.sleep(5)'", timeout=1)
+    # An allowlisted, long-running command (binds an ephemeral port and serves
+    # forever) — `python -c` is denied by the inline-exec guard (SEC-1), so use
+    # `python -m` to exercise the subprocess-timeout path.
+    out = tools["run-command"](command="python -m http.server 0", timeout=1)
     assert out["exit_code"] == 124
     assert out["timed_out"] is True

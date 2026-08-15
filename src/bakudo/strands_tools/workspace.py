@@ -36,6 +36,16 @@ class Workspace:
 
     def write(self, relative: str, content: str) -> int:
         path = self.resolve(relative)
+        # Defence-in-depth (SEC-2): refuse to write *through* a final symlink.
+        # resolve() confirms the fully-resolved target is under root, but a
+        # symlink at the write target is the classic confinement-bypass vector
+        # (swap it to repoint a subsequent write); the local dev sandbox — the
+        # only filesystem guard when not running under abox — writes real files
+        # only. mkdir(exist_ok) never *creates* a symlink, so guarding the leaf
+        # is sufficient.
+        raw = self.root / relative
+        if raw.is_symlink():
+            raise PathEscape(f"Path '{relative}' is a symlink; refusing to write through it.")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         return len(content)

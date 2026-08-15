@@ -437,3 +437,29 @@ def test_build_model_configures_retries_and_connect_timeout(monkeypatch):
     client_args = build_model(spec).client_args
     assert client_args["max_retries"] >= 5
     assert client_args["timeout"].connect >= 15.0
+
+
+# --- workspace symlink write guard (SEC-2) ---
+
+
+def test_workspace_refuses_to_write_through_a_symlink(tmp_path):
+    from bakudo.strands_tools.workspace import PathEscape, Workspace
+
+    outside = tmp_path.parent / "outside_secret.txt"
+    outside.write_text("original")
+    ws = Workspace(tmp_path)
+    # A symlink inside the workspace pointing at a file outside it.
+    link = tmp_path / "link.txt"
+    link.symlink_to(outside)
+
+    with pytest.raises(PathEscape):
+        ws.write("link.txt", "pwned")
+    assert outside.read_text() == "original", "write must not follow the symlink out"
+
+
+def test_workspace_still_writes_and_reads_real_files(tmp_path):
+    from bakudo.strands_tools.workspace import Workspace
+
+    ws = Workspace(tmp_path)
+    ws.write("sub/dir/file.txt", "hello")
+    assert ws.read("sub/dir/file.txt") == "hello"

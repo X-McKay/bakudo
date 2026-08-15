@@ -385,3 +385,44 @@ def test_base_ref_defaults_to_spec(tmp_path, monkeypatch):
     cmd = AboxRunner(repo_root=tmp_path).build_command(_bundle(), tmp_path / "s")
     i = cmd.index("--base")
     assert cmd[i + 1] == "main"
+
+
+# --- abox binary identity check (SEC-3) ---
+
+
+def test_verify_binary_accepts_real_abox_version(tmp_path):
+    def fake(argv, timeout=None):
+        assert argv[1] == "--version"
+        return ExecResult(0, "abox 0.6.0\n", "")
+
+    version = AboxRunner(executor=fake, repo_root=tmp_path).verify_binary()
+    assert version == "0.6.0"
+
+
+def test_verify_binary_rejects_a_wrong_binary(tmp_path):
+    from bakudo.abox.runner import AboxError
+
+    def not_abox(argv, timeout=None):
+        # A different tool that accepts --version but is not abox.
+        return ExecResult(0, "GNU coreutils echo\n", "")
+
+    with pytest.raises(AboxError):
+        AboxRunner(executor=not_abox, repo_root=tmp_path).verify_binary()
+
+
+def test_verify_binary_missing_raises_not_found(tmp_path):
+    def missing(argv, timeout=None):
+        raise FileNotFoundError(argv[0])
+
+    with pytest.raises(AboxNotFoundError):
+        AboxRunner(executor=missing, repo_root=tmp_path).verify_binary()
+
+
+def test_verify_binary_nonzero_exit_is_rejected(tmp_path):
+    from bakudo.abox.runner import AboxError
+
+    def broken(argv, timeout=None):
+        return ExecResult(2, "", "unknown flag --version")
+
+    with pytest.raises(AboxError):
+        AboxRunner(executor=broken, repo_root=tmp_path).verify_binary()

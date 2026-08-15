@@ -45,7 +45,9 @@ The canonical run id is reused as the abox task id (spec section 6.3).
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -58,6 +60,8 @@ from .. import ids
 from ..agent_spec.models import AgentSpec
 from ..bundle import TaskBundle
 from ..schema import SchemaValidationError, validate_result
+
+logger = logging.getLogger(__name__)
 
 # An executor runs the argv (with a kill timeout in seconds) and returns an
 # ExecResult. Swappable so tests and dry-runs need not have abox installed.
@@ -112,10 +116,18 @@ class ExecResult:
 class SandboxProfile:
     """A bakudo sandbox policy profile (spec section 6.4).
 
-    Note: these are *bakudo policy* profiles consumed by the in-guest tool
-    layer, never abox ``--template`` names (review finding ABOX-3). The guest
-    OS profile (e.g. ``python-glibc``) is repo-owned ``.abox/project.toml``
-    config.
+    Note: these are *bakudo policy* profiles, never abox ``--template`` names
+    (review finding ABOX-3). The guest OS profile (e.g. ``python-glibc``) is
+    repo-owned ``.abox/project.toml`` config.
+
+    **Advisory, not the enforcement point (SEC-4).** These fields document the
+    intended per-role policy. The enforced controls live elsewhere: the microVM
+    boundary and allowed commands/filesystem in abox's ``.abox/project.toml``;
+    the outbound network via ``build_command``'s ``--network`` (from the
+    AgentSpec's ``networkMode``, which can only narrow the project allowlist);
+    and ``maxChangedFiles`` when a candidate diff is scored (``evals/corpus.py``).
+    Wiring every dimension here to a runtime check is future work — see
+    ``docs/HUMAN_TASKS.md``. Do not read a value here as an active guarantee.
     """
 
     name: str
@@ -226,6 +238,57 @@ class AboxRunner:
         self._result_relpath = result_relpath
         self._executor: Executor = executor or _subprocess_executor
         self._scratch_root = scratch_root
+        # Only the real subprocess executor is auto-verified before a run: an
+        # injected executor (tests/dry-runs) is trusted by construction, so it
+        # is not subjected to the identity probe (SEC-3).
+        self._verify_default_binary = executor is None
+        self._binary_verified = False
+
+    # -- binary identity (SEC-3) ------------------------------------------
+
+    def verify_binary(self) -> str:
+        """Assert ``abox_bin`` is really abox and return its version.
+
+        The default executor is a plain host ``subprocess`` — the *only* thing
+        making a run a microVM is that ``argv[0]`` resolves to abox. A missing
+        binary already errors, but a *wrong* one would silently become a
+        hostile-code host subprocess. This probes ``abox --version`` and fails
+        closed unless the output identifies abox (the string ``abox`` or a
+        version number); a missing binary raises :class:`AboxNotFoundError`.
+        """
+        try:
+            res = self._executor(
+                [self._abox_bin, "--version"], _HOUSEKEEPING_TIMEOUT_SECONDS
+            )
+        except FileNotFoundError as missing:
+            raise AboxNotFoundError(
+                f"abox binary not found: {self._abox_bin!r} is not on PATH "
+                "(install abox 0.6.0 or set AboxRunner(abox_bin=...))."
+            ) from missing
+        out = f"{res.stdout} {res.stderr}".strip()
+        if res.exit_code != 0:
+            raise AboxError(
+                f"`{self._abox_bin} --version` exited {res.exit_code} ({out!r}); "
+                "refusing to run an unverified binary as the sandbox boundary."
+            )
+        match = re.search(r"\d+\.\d+(?:\.\d+)?", out)
+        if "abox" not in out.lower() and match is None:
+            raise AboxError(
+                f"`{self._abox_bin} --version` output {out!r} does not identify "
+                "abox; refusing to run an unverified binary as the sandbox "
+                "boundary (set BAKUDO_ABOX_SKIP_VERSION_CHECK=1 to override)."
+            )
+        return match.group(0) if match else out
+
+    def _ensure_binary_verified(self) -> None:
+        if self._binary_verified or not self._verify_default_binary:
+            return
+        if os.environ.get("BAKUDO_ABOX_SKIP_VERSION_CHECK") == "1":
+            self._binary_verified = True
+            return
+        version = self.verify_binary()
+        logger.info("verified abox binary %r: version %s", self._abox_bin, version)
+        self._binary_verified = True
 
     # -- routing -----------------------------------------------------------
 
@@ -301,6 +364,9 @@ class AboxRunner:
 
     def run(self, bundle: TaskBundle) -> AboxOutcome:
         started = time.monotonic()
+        # Fail closed if the configured binary is not verifiably abox (SEC-3);
+        # skipped for injected executors and when explicitly overridden.
+        self._ensure_binary_verified()
         if self._scratch_root is not None:
             self._scratch_root.mkdir(parents=True, exist_ok=True)
         scratch = Path(
