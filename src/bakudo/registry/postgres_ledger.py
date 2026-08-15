@@ -74,6 +74,14 @@ class PostgresLedger:
         with conn.cursor() as cur:
             cur.execute(sql, params)
 
+    @staticmethod
+    def _do_one(conn: Any, sql: str, params: tuple = ()) -> tuple | None:
+        """execute + fetchone on an already-open connection (for statements
+        inside a caller-held transaction)."""
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchone()
+
     def _exec(self, sql: str, params: tuple = ()) -> None:
         with self._connection() as conn:
             self._do(conn, sql, params)
@@ -173,24 +181,42 @@ class PostgresLedger:
         if status not in VERSION_STATUSES:
             raise ValueError(f"unknown version status {status!r}")
         with self._connection() as conn, conn.transaction():
-            self._do(
-                conn,
-                "update agent_spec_versions set status = %s, status_reason = %s, "
-                "decided_at = now() where name = %s and version = %s",
-                (status, reason, name, version),
-            )
-            self._do(
-                conn,
-                "insert into outbox (topic, payload) values (%s, %s)",
-                (
-                    "agent_version_status",
-                    json.dumps(
-                        {"name": name, "version": version,
-                         "status": status, "reason": reason}
-                    ),
-                ),
-            )
+            self._set_version_status(conn, name, version, status, reason=reason)
         return self.get_agent_version(name, version)
+
+    def _set_version_status(
+        self, conn: Any, name: str, version: int, status: str, *, reason: str | None
+    ) -> None:
+        """Transition a version on an already-open connection/transaction.
+
+        The ``update ... returning`` detects an unknown version by an empty
+        result and raises ``KeyError`` — matching :class:`InMemoryLedger`
+        (TMP-14). Because the raise happens before the outbox insert (and
+        rolls the transaction back), an unknown version can no longer leave a
+        phantom ``agent_version_status`` event asserting a change that never
+        happened. Shared by :meth:`set_version_status` (its own transaction)
+        and :meth:`resolve_promotion` (the resolver's transaction), so the
+        version transition is atomic with the decision that drives it.
+        """
+        updated = self._do_one(
+            conn,
+            "update agent_spec_versions set status = %s, status_reason = %s, "
+            "decided_at = now() where name = %s and version = %s returning version",
+            (status, reason, name, version),
+        )
+        if updated is None:
+            raise KeyError(f"unknown agent version {name}@{version}")
+        self._do(
+            conn,
+            "insert into outbox (topic, payload) values (%s, %s)",
+            (
+                "agent_version_status",
+                json.dumps(
+                    {"name": name, "version": version,
+                     "status": status, "reason": reason}
+                ),
+            ),
+        )
 
     @staticmethod
     def _version_row(row: tuple | None) -> AgentVersionRecord | None:
@@ -301,7 +327,10 @@ class PostgresLedger:
         return runs
 
     def set_phase(self, run_id: str, phase: RunPhase) -> None:
-        with self._connection() as conn:
+        # The status update and its phase event are one write (TMP-16): a
+        # crash between them must not leave the run advanced with no event
+        # (or vice versa), matching create_run/set_version_status.
+        with self._connection() as conn, conn.transaction():
             if phase == RunPhase.agent_running:
                 # Parity with InMemoryLedger (TMP-9): the first agent_running
                 # phase stamps started_at; coalesce keeps retries idempotent.
@@ -325,7 +354,8 @@ class PostgresLedger:
             )
 
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None:
-        with self._connection() as conn:
+        # The terminal update and its finished event are one write (TMP-16).
+        with self._connection() as conn, conn.transaction():
             # Parity with InMemoryLedger (TMP-9): the terminal result lives on
             # the run row, not only inside the finished event payload.
             self._do(
@@ -486,38 +516,56 @@ class PostgresLedger:
         """
         from datetime import UTC, datetime
 
-        row = self._one(
-            f"select {self._PROMOTION_COLUMNS} from promotion_decisions where id = %s",
-            (promotion_id,),
-        )
-        if row is None:
-            raise KeyError(f"Unknown promotion: {promotion_id}")
-        decision = self._promotion_row(row)
-        if decision.status != "pending":
-            raise ValueError(
-                f"Promotion {promotion_id} already resolved (status={decision.status})"
-            )
-
-        decision.status = "approved" if approved else "rejected"
-        decision.approved_by = approved_by
-        decision.comment = comment
-        decision.resolved_at = datetime.now(UTC)
-        self._exec(
-            "update promotion_decisions set status = %s, approved_by = %s, "
-            "comment = %s, resolved_at = now() where id = %s",
-            (decision.status, approved_by, comment, promotion_id),
-        )
-
         from ..evals.promotion import parse_subject_version
 
-        card = decision.scorecard
-        if card.subject_type == "agent_spec_version":
-            subject = parse_subject_version(card.subject_id)
-            if subject is not None:
-                verb = "approved" if approved else "rejected"
-                self.set_version_status(
-                    subject[0], subject[1],
-                    "canary" if approved else "rejected",
-                    reason=f"human {verb} by {approved_by}",
+        # One transaction on one connection (TMP-15): the read locks the row
+        # with ``for update`` so a concurrent resolver blocks until this
+        # commits and then sees a non-pending status; the decision update and
+        # the cascading version transition are atomic, so a crash between them
+        # can no longer leave the promotion resolved but the version un-moved.
+        # (The previous code ran the read, the update, and the cascade on three
+        # separate autocommit connections — a TOCTOU with no guard.)
+        with self._connection() as conn, conn.transaction():
+            row = self._do_one(
+                conn,
+                f"select {self._PROMOTION_COLUMNS} from promotion_decisions "
+                "where id = %s for update",
+                (promotion_id,),
+            )
+            if row is None:
+                raise KeyError(f"Unknown promotion: {promotion_id}")
+            decision = self._promotion_row(row)
+            if decision.status != "pending":
+                raise ValueError(
+                    f"Promotion {promotion_id} already resolved "
+                    f"(status={decision.status})"
                 )
+
+            decision.status = "approved" if approved else "rejected"
+            decision.approved_by = approved_by
+            decision.comment = comment
+            decision.resolved_at = datetime.now(UTC)
+            self._do(
+                conn,
+                "update promotion_decisions set status = %s, approved_by = %s, "
+                "comment = %s, resolved_at = now() where id = %s",
+                (decision.status, approved_by, comment, promotion_id),
+            )
+
+            card = decision.scorecard
+            if card.subject_type == "agent_spec_version":
+                subject = parse_subject_version(card.subject_id)
+                if subject is not None:
+                    verb = "approved" if approved else "rejected"
+                    try:
+                        self._set_version_status(
+                            conn, subject[0], subject[1],
+                            "canary" if approved else "rejected",
+                            reason=f"human {verb} by {approved_by}",
+                        )
+                    except KeyError:
+                        # The subject version isn't registered in this ledger
+                        # (ad-hoc scorecards in dev tooling); the resolution
+                        # still stands, matching InMemoryLedger.
+                        pass
         return decision

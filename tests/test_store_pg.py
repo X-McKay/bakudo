@@ -374,6 +374,9 @@ def test_query_by_text_ranks_server_side_and_filters_similarity() -> None:
     assert [m.id for m in got] == [close.id]
     (sql, params) = conn.statements("<=>")[-1]
     assert "order by e.embedding <=>" in sql
+    # The similarity cut is applied server-side in the WHERE clause, before the
+    # LIMIT (MEM-18) — not only in Python after the rows come back.
+    assert "1 - (e.embedding <=> %s::vector) >= %s" in sql
 
 
 def test_query_without_text_orders_by_confidence_with_scope() -> None:
@@ -564,11 +567,14 @@ def test_flush_graph_mirror_without_graph_is_a_noop() -> None:
     assert store.flush_graph_mirror() == 0
 
 
-def test_supersede_of_unmirrorable_replacement_keeps_the_old_node() -> None:
-    """Delete + replacement-upsert must be atomic in intent: when the new
-    item carries no run evidence (so it will never be mirrored), the old
-    node's delete must be skipped too — otherwise a live memory vanishes
-    from the graph entirely."""
+def test_supersede_removes_the_old_node_even_when_replacement_is_unmirrorable() -> None:
+    """The superseded memory row is deleted from Postgres, so its mirrored
+    node must be removed too (MEM-19) — otherwise the graph keeps an orphan
+    ``Memory`` node pointing at a row that no longer exists. The replacement
+    here carries no run evidence, so it is not mirrored (a memory with no run
+    cannot hang a PRODUCED_MEMORY edge); the net graph effect is the old
+    node's removal, and the delete op drains cleanly (idempotent even if the
+    old node was never mirrored)."""
     conn = FakeConn()
     graph = GraphStub()
     store = make_store(conn, graph=graph)
@@ -579,9 +585,9 @@ def test_supersede_of_unmirrorable_replacement_keeps_the_old_node() -> None:
 
     store.write_candidate(make_item(confidence=0.9, run_id=None))
 
-    assert graph.removes == []
+    assert graph.removes == [prior.id]
     assert graph.upserts == []
-    assert conn.outbox == []
+    assert conn.outbox == []  # the delete op was enqueued and drained
 
 
 def test_poison_row_is_parked_after_max_attempts_and_stops_blocking() -> None:
@@ -890,3 +896,45 @@ def test_vector_literal_coerces_numpy_style_scalars() -> None:
 
     literal = vector_literal([NumpyStyleScalar(0.25), NumpyStyleScalar(-1.0)])
     assert literal == "[0.25,-1.0]"
+
+
+# --- DSN mode: per-call connections for thread safety (MEM-17) ---
+
+
+class _RecordingConn(FakeConn):
+    """A FakeConn that records whether it was closed."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_dsn_mode_opens_and_closes_a_fresh_connection_per_call(monkeypatch) -> None:
+    """In DSN mode the store must hold no persistent connection: each public
+    call leases its own and closes it, so the store is safe to share across
+    the worker's activity threads (MEM-17, mirroring the ledger's TMP-1)."""
+    opened: list[_RecordingConn] = []
+
+    def fake_connect(dsn: str, **kwargs: object) -> _RecordingConn:
+        conn = _RecordingConn()
+        opened.append(conn)
+        return conn
+
+    import psycopg  # provided by the db extra in CI
+
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+
+    store = PgSemanticMemoryStore.connect("postgresql://x/y")
+    # Construction leased one connection (boot checks) and closed it.
+    assert len(opened) == 1 and opened[0].closed is True
+    assert store._conn is None  # no persistent connection is retained
+
+    store.write_candidate(make_item())
+    # write_candidate leased exactly one more connection and closed it.
+    assert len(opened) == 2 and opened[1].closed is True
+
+    store.query(scope={"repo": "payments-api"})
+    assert len(opened) == 3 and opened[2].closed is True

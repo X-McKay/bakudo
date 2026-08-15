@@ -109,3 +109,17 @@ def test_memories_from_result_attaches_run_provenance():
     items = memories_from_result(result, repo="r")
     assert items[0].scope == {"repo": "r"}
     assert any(e.run_id == "run_42" for e in items[0].evidence)
+    # MEM-21: the `repo_fact` shorthand is canonicalised onto the stable
+    # vocabulary the store/graph index on.
+    assert items[0].type == "semantic_memory"
+
+
+def test_memories_from_result_canonicalises_memory_types():
+    from bakudo.memory.models import MemoryType
+
+    assert MemoryType.canonical("repo_fact") == "semantic_memory"
+    assert MemoryType.canonical("semantic") == "semantic_memory"
+    assert MemoryType.canonical("episodic_memory") == "episodic_memory"
+    assert MemoryType.canonical("procedural_memory") == "procedural_memory"
+    assert MemoryType.canonical("something-novel") == "semantic_memory"
+    assert MemoryType.canonical("") == "semantic_memory"

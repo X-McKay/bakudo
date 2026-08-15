@@ -37,16 +37,27 @@ class SemanticMemoryStore:
             raise MemoryRejected("; ".join(reasons))
 
         embedding = self.embedder.embed(item.content)
+        # Consider the NEAREST existing memory (highest cosine), matching the
+        # durable Pg store's `_nearest` dedup (MEM-20). Superseding an
+        # arbitrary insertion-order match — as this did — made the in-memory
+        # and Postgres stores disagree on *which* memory a near-duplicate
+        # replaces; the nearest is the well-defined, store-agnostic choice.
+        nearest: _Entry | None = None
+        best = -1.0
         for entry in self._entries:
-            if cosine(embedding, entry.embedding) >= self.dedup_threshold:
-                # A near-duplicate already exists; reject unless this one is
-                # strictly more confident (in which case it supersedes).
-                if entry.item.confidence >= item.confidence:
-                    raise MemoryRejected(
-                        "near-duplicate of an equally/more confident memory"
-                    )
-                entry.item, entry.embedding = item, embedding
-                return item
+            sim = cosine(embedding, entry.embedding)
+            if sim > best:
+                best, nearest = sim, entry
+
+        if nearest is not None and best >= self.dedup_threshold:
+            # A near-duplicate already exists; reject unless this one is
+            # strictly more confident (in which case it supersedes).
+            if nearest.item.confidence >= item.confidence:
+                raise MemoryRejected(
+                    "near-duplicate of an equally/more confident memory"
+                )
+            nearest.item, nearest.embedding = item, embedding
+            return item
 
         self._entries.append(_Entry(item, embedding))
         return item
