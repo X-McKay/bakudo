@@ -803,3 +803,46 @@ async def test_meta_routes_optimize_objective_into_optimization_workflow(
         assert "optimize-attempt" in refs, (
             f"optimize objective did not fan out into the loop; runs={refs}"
         )
+
+
+async def test_cancel_signal_during_sandbox_records_cancelled(env, monkeypatch):
+    """A cancel signal that arrives while the sandbox activity is in flight
+    must cancel it and record a terminal `cancelled` phase (TMP-21), not be
+    ignored until the multi-hour sandbox returns."""
+    import threading
+
+    ledger = InMemoryLedger()
+    release = threading.Event()
+
+    def blocking_sandbox(bundle):
+        release.wait(timeout=10)  # held until the test releases it
+        return stub_sandbox(bundle)
+
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    monkeypatch.setattr(_impl.DEPS, "sandbox", blocking_sandbox)
+
+    async with make_worker(env, [AgentRunWorkflow, EvalWorkflow]):
+        from bakudo.temporal.shared import AgentRunInput
+
+        handle = await env.client.start_workflow(
+            AgentRunWorkflow.run,
+            AgentRunInput(
+                run_id="run_CANCEL1",
+                objective={"id": "obj_C", "type": "explore", "repo": "r", "title": "t"},
+                agent_spec=_impl.load_agent_spec("explore"),
+            ),
+            id="run-run_CANCEL1", task_queue=TASK_QUEUE_CONTROL,
+        )
+
+        async def in_sandbox():
+            run = ledger.get_run("run_CANCEL1")
+            return run is not None and run.phase.value == "agent_running"
+
+        assert await _poll(in_sandbox), "run never reached the agent_running phase"
+        await handle.signal(AgentRunWorkflow.cancel)
+
+        out = await handle.result()
+        assert out.phase == "cancelled"
+        run = ledger.get_run("run_CANCEL1")
+        assert run.phase.value == "cancelled"
+    release.set()  # let the leaked activity thread finish

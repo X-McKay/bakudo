@@ -1,9 +1,13 @@
 """A synchronous run pipeline mirroring :class:`AgentRunWorkflow`.
 
 This executes the full lifecycle (section 12.1) in-process: render bundle ->
-run sandbox -> collect -> evaluate. It is what the CLI/demo use and what the
-Temporal workflow's activities ultimately call, so the behaviour is identical
-whether or not a Temporal cluster is present.
+run sandbox -> collect -> evaluate. It is what the CLI/demo use and mirrors the
+Temporal ``AgentRunWorkflow``. The two share the same building blocks and the
+same eval assembler (:func:`assemble_suite`, TMP-22); they differ in exactly
+one, explicit way: the Temporal path assembles the sandboxed ``critic`` suite
+(it runs with a live sandbox+model) while this offline mirror does not, and
+canary graduation is invoked only from the Temporal completion path. Aside from
+those documented differences the scorecards match.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from ..abox.runner import AboxOutcome
 from ..agent_spec import AgentSpec
 from ..bundle import TaskBundle, budget_from_spec
 from ..curriculum.objective import Objective
-from ..evals import EvalContext, EvalResult, Scorecard, run_suite
+from ..evals import EvalContext, EvalResult, Scorecard, assemble_suite
 from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
 from ..registry.ledger import Ledger
 from ..runner.result import RunResult
@@ -106,8 +110,11 @@ def run_objective(
         runtime_seconds=outcome.runtime_seconds,
         tokens_used=outcome.tokens_used,
     )
-    # Suite selection keys off the objective type, matching the Temporal path.
-    eval_results = run_suite(ctx)
+    # Same assembler as the Temporal path (TMP-22), with the critic omitted:
+    # the in-process pipeline is the offline mirror and has no live sandbox+model
+    # to review with. The base (objective-type-aware) suite is identical; the
+    # only difference from the Temporal path is the availability-gated critic.
+    eval_results = assemble_suite(ctx, with_critic=False)
     for r in eval_results:
         ledger.record_eval(r)
     scorecard = Scorecard.from_results(eval_results)

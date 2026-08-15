@@ -326,3 +326,76 @@ def test_routes_to_canary_is_deterministic_and_percent_bounded():
     assert routes_to_canary("run_CANARYB", 0) is False
     # Same run id, same answer, every time (replay-safe inside Temporal).
     assert all(routes_to_canary("run_CANARYB", 10) for _ in range(5))
+
+
+# --- compare-and-set guard on version transitions (TMP-23) ---
+
+
+def test_set_version_status_expected_status_is_a_no_op_on_mismatch():
+    """The canary-graduation compare-and-set: transitioning with an
+    expected_status that no longer matches is a no-op returning None (a lost
+    race), and does not change the row."""
+    ledger = InMemoryLedger()
+    ledger.upsert_agent_version(_record(name="explore", version=2, status="candidate"))
+    ledger.set_version_status("explore", 2, "canary", reason="auto")
+
+    # First graduation wins.
+    first = ledger.set_version_status(
+        "explore", 2, "active", reason="graduated", expected_status="canary"
+    )
+    assert first is not None and first.status == "active"
+
+    # A second, concurrent graduation observes canary already gone -> no-op.
+    second = ledger.set_version_status(
+        "explore", 2, "active", reason="graduated again", expected_status="canary"
+    )
+    assert second is None
+    assert ledger.get_agent_version("explore", 2).status == "active"
+    assert ledger.get_agent_version("explore", 2).status_reason == "graduated"
+
+
+def test_repeated_canary_graduation_promotes_once(monkeypatch):
+    """check_canary_graduation is safe to call more than once for the same
+    canary: the first graduates (one promotion, one archive); a later call is a
+    clean no-op that records no duplicate. The compare-and-set primitive that
+    also closes the truly-concurrent window is covered by
+    test_set_version_status_expected_status_is_a_no_op_on_mismatch (TMP-23)."""
+    from bakudo.evals.promotion import PromotionPolicy
+    from bakudo.temporal import _impl
+
+    ledger = InMemoryLedger()
+    ledger.upsert_agent_version(_record(name="explore", version=1, status="active"))
+    ledger.upsert_agent_version(_record(name="explore", version=2, status="candidate"))
+    ledger.set_version_status("explore", 2, "canary", reason="auto")
+
+    # One completed canary run with a clean scorecard, enough to satisfy a
+    # min-runs-of-1 policy.
+    from bakudo.registry.records import RunPhase, RunRecord
+
+    ledger.create_run(
+        RunRecord(id="run_C1", temporal_workflow_id="wf", abox_task_id="run_C1",
+                  objective_id="obj", agent_ref="explore@2")
+    )
+    ledger.set_phase("run_C1", RunPhase.agent_running)
+    ledger.finish_run("run_C1", RunPhase.completed, {"status": "success"})
+    from bakudo.evals.result import EvalResult
+
+    ledger.record_eval(EvalResult(
+        subject_type="run", subject_id="run_C1", suite_name="task",
+        score=0.9, passed=True,
+    ))
+
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    monkeypatch.setattr(_impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=1))
+
+    first = _impl.check_canary_graduation("explore")
+    second = _impl.check_canary_graduation("explore")
+
+    assert first["status"] == "graduated"
+    # The canary is already active, so the repeat is a safe no-op — never a
+    # second graduation.
+    assert second["status"] in ("no-canary", "already-resolved")
+    assert ledger.get_agent_version("explore", 2).status == "active"
+    assert ledger.get_agent_version("explore", 1).status == "archived"
+    promotions = [d for d in ledger.promotions() if d.approved_by == "canary-graduation"]
+    assert len(promotions) == 1, "the second graduation must not record a duplicate"

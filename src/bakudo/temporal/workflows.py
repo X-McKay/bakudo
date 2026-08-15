@@ -203,7 +203,23 @@ class AgentRunWorkflow:
         # transition — the run is about to execute in the sandbox — as
         # `agent_running`; the launch is instantaneous from the ledger's view.
         await self._advance(inp.run_id, "agent_running")
-        sandbox = await workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
+        # Race the sandbox activity against the cancel signal (TMP-21): a
+        # cancel that arrives while the (multi-hour) sandbox is in flight now
+        # requests activity cancellation — abox tears the microVM down in its
+        # finally — and records a terminal `cancelled` phase, instead of the
+        # signal being observed only in the narrow pre-sandbox window.
+        sandbox_task = asyncio.ensure_future(
+            workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
+        )
+        await workflow.wait_condition(
+            lambda: sandbox_task.done() or self._cancelled
+        )
+        if self._cancelled and not sandbox_task.done():
+            sandbox_task.cancel()
+            await self._advance(inp.run_id, "cancelled")
+            await self._notify_meta(inp.run_id)
+            return AgentRunOutput(inp.run_id, "cancelled", agent_name, "")
+        sandbox = await sandbox_task
 
         await self._advance(inp.run_id, "collecting_artifacts")
         result = sandbox.get("result")

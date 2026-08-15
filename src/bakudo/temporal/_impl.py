@@ -19,7 +19,7 @@ from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum import build_default_collector, generate_objectives
 from ..curriculum.collectors import SignalCollector
 from ..curriculum.objective import Objective
-from ..evals import EvalContext, Scorecard, decide, run_suite
+from ..evals import EvalContext, Scorecard, assemble_suite, decide
 from ..evals.corpus import CaseRun, load_corpus
 from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
@@ -308,24 +308,17 @@ def run_eval_suite(inp: EvalInput) -> dict:
         tokens_used=inp.tokens_used,
         schema_valid=inp.schema_valid,
     )
-    # Suite selection keys off the objective: optimize runs add perf/simplicity.
-    results = run_suite(ctx)
-
-    # Sandboxed critic (design §5, OPT-8): reviewed by a real read-only agent
-    # through the same sandbox driver as the run itself. With no sandbox
-    # available (offline/dev) the suite is omitted; a policy requiring
-    # `critic` then fails loudly at decision time. Sandbox/schema failures
-    # surface as an ERRORED critic suite, never a silent pass.
-    from ..evals.critic import critic_eval
-
+    # Unified assembly (TMP-22): the objective-type-aware base suite plus the
+    # sandboxed critic (design §5, OPT-8) — reviewed by a real read-only agent
+    # through the same sandbox driver as the run. With no sandbox available
+    # (offline/dev) the critic is omitted and a policy requiring `critic` fails
+    # loudly at decision time. The Temporal path is the only one that runs with
+    # a live sandbox, hence the only one that assembles the critic.
     try:
         critic_sandbox: SandboxFn | None = DEPS.sandbox_fn()
     except RuntimeError:
         critic_sandbox = None
-    critic = critic_eval(ctx, critic_sandbox)
-    if critic is not None:
-        critic.validate_against_schema()
-        results.append(critic)
+    results = assemble_suite(ctx, sandbox=critic_sandbox, with_critic=True)
 
     scorecard = Scorecard.from_results(results)
     record_eval = getattr(DEPS.ledger, "record_eval", None)
@@ -453,7 +446,13 @@ def check_canary_graduation(name: str) -> dict:
                 f"below active baseline {baseline_mean:.3f}"
             )
         )
-        ledger.set_version_status(name, canary.version, "rejected", reason=reason)
+        # Same compare-and-set guard as graduation (TMP-23): only the first
+        # finisher rolls the canary back; a concurrent second is a no-op.
+        rolled = ledger.set_version_status(
+            name, canary.version, "rejected", reason=reason, expected_status="canary"
+        )
+        if rolled is None:
+            return {"status": "already-resolved", "agent": canary_ref}
         ledger.record_promotion(
             PromotionDecision(
                 Decision.reject, reason, card,
@@ -469,7 +468,15 @@ def check_canary_graduation(name: str) -> dict:
         + (f" >= active baseline {baseline_mean:.3f}" if baseline_mean is not None
            else " with no active baseline runs")
     )
-    ledger.set_version_status(name, canary.version, "active", reason=reason)
+    # Compare-and-set on the canary status (TMP-23): two runs finishing near-
+    # simultaneously both reach here, but only the first flips canary->active;
+    # the second's guarded transition is a no-op (returns None) and it bails
+    # without double-archiving the old active or recording a duplicate promotion.
+    graduated = ledger.set_version_status(
+        name, canary.version, "active", reason=reason, expected_status="canary"
+    )
+    if graduated is None:
+        return {"status": "already-resolved", "agent": canary_ref}
     if active is not None:
         ledger.set_version_status(
             name, active.version, "archived",

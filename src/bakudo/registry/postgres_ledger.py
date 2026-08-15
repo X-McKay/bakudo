@@ -168,44 +168,77 @@ class PostgresLedger:
         return self._version_row(row)
 
     def set_version_status(
-        self, name: str, version: int, status: str, *, reason: str | None = None
+        self,
+        name: str,
+        version: int,
+        status: str,
+        *,
+        reason: str | None = None,
+        expected_status: str | None = None,
     ) -> AgentVersionRecord | None:
         """Transition a version through the §1 state machine.
 
         The transition and its event are one ledger write: the row update and
         the outbox event (topic ``agent_version_status``, spec section 17.1)
-        share a transaction.
+        share a transaction. ``expected_status`` guards a compare-and-set
+        (TMP-23): the transition applies only if the version is currently in
+        that status, else it is a no-op returning ``None``.
         """
         from .records import VERSION_STATUSES
 
         if status not in VERSION_STATUSES:
             raise ValueError(f"unknown version status {status!r}")
         with self._connection() as conn, conn.transaction():
-            self._set_version_status(conn, name, version, status, reason=reason)
+            applied = self._set_version_status(
+                conn, name, version, status,
+                reason=reason, expected_status=expected_status,
+            )
+        if not applied:
+            if expected_status is not None:
+                # CAS miss: the version wasn't in the expected status (a
+                # concurrent writer moved it first). No-op, no event (TMP-23).
+                return None
+            raise KeyError(f"unknown agent version {name}@{version}")
         return self.get_agent_version(name, version)
 
     def _set_version_status(
-        self, conn: Any, name: str, version: int, status: str, *, reason: str | None
-    ) -> None:
+        self,
+        conn: Any,
+        name: str,
+        version: int,
+        status: str,
+        *,
+        reason: str | None,
+        expected_status: str | None = None,
+    ) -> bool:
         """Transition a version on an already-open connection/transaction.
 
-        The ``update ... returning`` detects an unknown version by an empty
-        result and raises ``KeyError`` — matching :class:`InMemoryLedger`
-        (TMP-14). Because the raise happens before the outbox insert (and
-        rolls the transaction back), an unknown version can no longer leave a
-        phantom ``agent_version_status`` event asserting a change that never
-        happened. Shared by :meth:`set_version_status` (its own transaction)
-        and :meth:`resolve_promotion` (the resolver's transaction), so the
-        version transition is atomic with the decision that drives it.
+        Returns whether the row was updated. The ``update ... returning``
+        detects a no-op by an empty result (TMP-14/TMP-23): an unknown version,
+        or — when ``expected_status`` is given — a version no longer in the
+        expected status (a lost compare-and-set race). The outbox event is
+        written only when the update applied, so a no-op can never leave a
+        phantom ``agent_version_status`` event. Shared by
+        :meth:`set_version_status`, :meth:`resolve_promotion`, and canary
+        graduation so the version transition is atomic with what drives it.
         """
-        updated = self._do_one(
-            conn,
-            "update agent_spec_versions set status = %s, status_reason = %s, "
-            "decided_at = now() where name = %s and version = %s returning version",
-            (status, reason, name, version),
-        )
+        if expected_status is not None:
+            updated = self._do_one(
+                conn,
+                "update agent_spec_versions set status = %s, status_reason = %s, "
+                "decided_at = now() where name = %s and version = %s "
+                "and status = %s returning version",
+                (status, reason, name, version, expected_status),
+            )
+        else:
+            updated = self._do_one(
+                conn,
+                "update agent_spec_versions set status = %s, status_reason = %s, "
+                "decided_at = now() where name = %s and version = %s returning version",
+                (status, reason, name, version),
+            )
         if updated is None:
-            raise KeyError(f"unknown agent version {name}@{version}")
+            return False
         self._do(
             conn,
             "insert into outbox (topic, payload) values (%s, %s)",
@@ -217,6 +250,7 @@ class PostgresLedger:
                 ),
             ),
         )
+        return True
 
     @staticmethod
     def _version_row(row: tuple | None) -> AgentVersionRecord | None:
@@ -557,15 +591,12 @@ class PostgresLedger:
                 subject = parse_subject_version(card.subject_id)
                 if subject is not None:
                     verb = "approved" if approved else "rejected"
-                    try:
-                        self._set_version_status(
-                            conn, subject[0], subject[1],
-                            "canary" if approved else "rejected",
-                            reason=f"human {verb} by {approved_by}",
-                        )
-                    except KeyError:
-                        # The subject version isn't registered in this ledger
-                        # (ad-hoc scorecards in dev tooling); the resolution
-                        # still stands, matching InMemoryLedger.
-                        pass
+                    # A missing subject version (ad-hoc scorecards in dev
+                    # tooling) is a no-op here — the resolution still stands,
+                    # matching InMemoryLedger.
+                    self._set_version_status(
+                        conn, subject[0], subject[1],
+                        "canary" if approved else "rejected",
+                        reason=f"human {verb} by {approved_by}",
+                    )
         return decision

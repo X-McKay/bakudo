@@ -3,6 +3,7 @@
 from .checks import (
     OPTIMIZE_SUITE,
     EvalContext,
+    assemble_suite,
     code_eval,
     cost_eval,
     perf_eval,
@@ -21,6 +22,7 @@ from .scorecard import Scorecard
 __all__ = [
     "EvalResult",
     "EvalContext",
+    "assemble_suite",
     "run_default_suite",
     "run_suite",
     "suite_for",
