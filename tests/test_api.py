@@ -40,6 +40,20 @@ ROUTES = [
         {"approved_by": "human", "comment": "too risky"},
     ),
     ("GET", "/promotions/pending", "/promotions/pending", None),
+    (
+        "POST",
+        "/experiments",
+        "/experiments",
+        {
+            "apiVersion": "bakudo.ai/v1alpha1",
+            "kind": "ExperimentSpec",
+            "metadata": {"name": "t"},
+            "subject": "agent-spec",
+            "baseline": "explore@1",
+        },
+    ),
+    ("GET", "/experiments/{experiment_id}", "/experiments/exp_x", None),
+    ("GET", "/trials/{trial_id}", "/trials/trial_x", None),
     ("GET", "/status", "/status", None),
     # Schema/docs routes: mounted as real path operations so they obey the
     # same bearer policy as everything else (schema-only exposure is still
@@ -218,6 +232,76 @@ def test_runs_409_when_local_sandbox_outside_dev(monkeypatch):
     client = TestClient(build_app())
     resp = client.post("/runs", json={"objective_id": "obj_x", "agent": "explore"})
     assert resp.status_code == 409
+
+
+_EXPERIMENT_BODY = {
+    "apiVersion": "bakudo.ai/v1alpha1",
+    "kind": "ExperimentSpec",
+    "metadata": {"name": "t"},
+    "subject": "agent-spec",
+    "baseline": "explore@1",
+}
+
+
+def test_experiments_409_when_sandbox_unset():
+    client = TestClient(build_app())
+    resp = client.post("/experiments", json=_EXPERIMENT_BODY)
+    assert resp.status_code == 409
+    assert "BAKUDO_SANDBOX" in resp.json()["detail"]
+
+
+def test_experiments_409_when_dev_env_unset(monkeypatch):
+    """R2: hidden-test grading always executes on this host via the local
+    test runner, independent of the sandbox mode driving the agent -- so
+    this 409 fires even once the sandbox itself resolves fine."""
+    monkeypatch.setattr("bakudo.api.server._resolve_sandbox", lambda: (lambda bundle: None))
+    client = TestClient(build_app())
+    resp = client.post("/experiments", json=_EXPERIMENT_BODY)
+    assert resp.status_code == 409
+    assert "BAKUDO_ENV" in resp.json()["detail"]
+
+
+def test_experiments_422_on_invalid_spec(monkeypatch):
+    _dev_local_sandbox(monkeypatch)
+    client = TestClient(build_app())
+    bad = {**_EXPERIMENT_BODY, "subject": "not-agent-spec"}
+    resp = client.post("/experiments", json=bad)
+    assert resp.status_code == 422
+
+
+def test_experiments_post_get_round_trip(monkeypatch):
+    from bakudo.control import MetaAgentTools
+
+    _dev_local_sandbox(monkeypatch)
+    tools = MetaAgentTools()
+    client = TestClient(build_app(tools))
+    body = {**_EXPERIMENT_BODY, "scenarioSelector": {"count": 1}}  # keep it fast: 1 trial
+    resp = client.post("/experiments", json=body)
+    assert resp.status_code == 200, resp.text
+    experiment_id = resp.json()["id"]
+    assert experiment_id.startswith("exp_")
+
+    got = client.get(f"/experiments/{experiment_id}")
+    assert got.status_code == 200
+    got_body = got.json()
+    assert got_body["status"] == "completed"
+    assert got_body["result"]["experimentId"] == experiment_id
+    assert got_body["result"]["profile"] is True
+
+    (trial,) = tools.ledger.list_trials(experiment_id)
+    trial_resp = client.get(f"/trials/{trial.id}")
+    assert trial_resp.status_code == 200
+    assert trial_resp.json()["experiment_id"] == experiment_id
+
+
+def test_get_experiment_unknown_is_404():
+    client = TestClient(build_app())
+    assert client.get("/experiments/exp_missing").status_code == 404
+
+
+def test_get_trial_unknown_is_404():
+    client = TestClient(build_app())
+    assert client.get("/trials/trial_missing").status_code == 404
 
 
 def test_optimize_threads_resolved_sandbox_into_loop(monkeypatch):

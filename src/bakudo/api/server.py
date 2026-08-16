@@ -49,6 +49,22 @@ class RunIn(BaseModel):
     agent: str
 
 
+class ExperimentSpecIn(BaseModel):
+    """Body of POST /experiments: an ExperimentSpec document (spec §7.1).
+
+    Deliberately typed ``dict``-shaped (``model_config`` below) rather than
+    re-declared field by field: the JSON Schema
+    (:func:`bakudo.schema.validate_experiment_spec`) is the authoritative
+    contract, checked explicitly in the handler before the pydantic model
+    parse -- this wrapper exists only so FastAPI treats the payload as a
+    real request body (module-scope model, per the 37c5db6 lesson at the
+    top of this file), not so it re-validates structure fastapi already
+    delegates onward.
+    """
+
+    model_config = {"extra": "allow"}
+
+
 class PromotionResolutionIn(BaseModel):
     """Body of POST /promotions/{promotion_id}/approve|reject (spec §25.3).
 
@@ -301,6 +317,89 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         """Promotion decisions awaiting a human gate (spec sections 19.2, 26),
         read from the durable ledger (API-6)."""
         return [p.to_dict() for p in tools.ledger.promotions(status="pending")]
+
+    @app.post("/experiments")
+    def submit_experiment(body: ExperimentSpecIn) -> dict[str, str]:
+        """Run an ExperimentSpec synchronously (design doc §7, T10): schema
+        + pydantic validated, then executed in process against the
+        LEDGER-backed ``tools.ledger`` so GET /experiments/{id} and
+        GET /trials/{id} can read it back. Same fail-closed sandbox policy
+        as /runs and /optimize (OPT-10) gates live execution -- 409 when
+        unresolvable, exactly like the existing sandbox-unavailable
+        handling. Hidden-test grading additionally requires
+        ``BAKUDO_ENV=dev`` (ruling R2): it always executes scenario
+        fixture/agent code directly on this host via the local test
+        runner, independent of whichever sandbox drives the AGENT.
+        """
+        import os
+
+        from .. import paths
+        from ..experiments.models import ExperimentSpec
+        from ..experiments.runner import (
+            adapt_sandbox_fn,
+            resolve_arm_pipeline_fn,
+            run_experiment,
+        )
+        from ..scenarios.registry import ScenarioRegistry
+        from ..scenarios.testrun import local_test_runner
+        from ..schema import validate_experiment_spec
+
+        sandbox = resolve_sandbox()
+        if os.environ.get("BAKUDO_ENV") != "dev":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "POST /experiments grades hidden tests with the local test "
+                    "runner, which executes scenario fixture/agent code "
+                    "directly on this host; set BAKUDO_ENV=dev to allow it."
+                ),
+            )
+
+        document = body.model_dump()
+        try:
+            validate_experiment_spec(document)
+            spec = ExperimentSpec.model_validate(document)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            registry = ScenarioRegistry(paths.scenarios_dir())
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            pipeline_fn = resolve_arm_pipeline_fn(
+                spec, sandbox_fn=adapt_sandbox_fn(sandbox), agents_root=paths.agents_dir()
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        result = run_experiment(
+            spec,
+            registry=registry,
+            ledger=tools.ledger,
+            pipeline_fn=pipeline_fn,
+            test_runner=local_test_runner,
+        )
+        return {"id": result["experimentId"]}
+
+    @app.get("/experiments/{experiment_id}")
+    def get_experiment(experiment_id: str) -> dict[str, Any]:
+        experiment = tools.ledger.get_experiment(experiment_id)
+        if experiment is None:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown experiment: {experiment_id}"
+            )
+        return experiment
+
+    @app.get("/trials/{trial_id}")
+    def get_trial(trial_id: str) -> dict[str, Any]:
+        trial = tools.ledger.get_trial(trial_id)
+        if trial is None:
+            raise HTTPException(status_code=404, detail=f"Unknown trial: {trial_id}")
+        return trial.model_dump(mode="json")
 
     @app.get("/status")
     def status() -> dict[str, Any]:
