@@ -345,6 +345,113 @@ def _cmd_scenario_scaffold(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_trial_run(args: argparse.Namespace) -> int:
+    """Run one scenario against one agent version and record a TrialRecord.
+
+    Offline (``BAKUDO_OFFLINE=1``, the default -- same as ``bakudo demo``):
+    the in-process pipeline (:func:`bakudo.control.pipeline.run_objective`
+    over :func:`bakudo.abox.local.local_sandbox`) drives the agent, reusing
+    the scenario's own provisioned workspace as the sandbox root. Hidden-test
+    grading always uses the local test runner, which is guarded behind
+    ``BAKUDO_ENV=dev`` (ruling R2) since it executes scenario fixture/agent
+    code directly on this host -- so that variable must be set regardless of
+    online/offline mode.
+    """
+    import os
+    from types import SimpleNamespace
+
+    from .abox.local import local_sandbox
+    from .agent_spec import load_spec_file
+    from .agent_spec.models import SpecBudget
+    from .control.pipeline import run_objective
+    from .paths import agents_dir, scenarios_dir
+    from .registry import InMemoryLedger
+    from .scenarios.registry import ScenarioRegistry
+    from .scenarios.testrun import local_test_runner
+    from .trials.runner import intersect_budgets, intersect_network, run_trial
+
+    os.environ.setdefault("BAKUDO_OFFLINE", "1")
+
+    if os.environ.get("BAKUDO_ENV") != "dev":
+        print(
+            "error: `bakudo trial run` grades hidden tests with the local test "
+            "runner, which executes scenario fixture/agent code directly on "
+            "this host; set BAKUDO_ENV=dev to allow it.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        registry = ScenarioRegistry(scenarios_dir())
+        scenario = registry.get(args.scenario)
+    except (KeyError, Exception) as exc:  # noqa: BLE001 - reported, not raised
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    agent_name = args.agent.split("@", 1)[0]
+    try:
+        spec = load_spec_file(agents_dir() / f"{agent_name}.yaml")
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    def pipeline_fn(objective, agent_ref, budgets, network):
+        merged_budget = intersect_budgets(spec.budget, budgets)
+        merged_network = intersect_network(spec.sandbox.network_mode.value, network)
+
+        budget_updates = dict(spec.budget.model_dump()) if spec.budget else {}
+        if "tokens" in merged_budget:
+            budget_updates["max_tokens"] = merged_budget["tokens"]
+        if "tool_calls" in merged_budget:
+            budget_updates["max_tool_calls"] = merged_budget["tool_calls"]
+        sandbox_updates: dict = {"network_mode": merged_network}
+        if "wall_seconds" in merged_budget:
+            sandbox_updates["timeout_seconds"] = merged_budget["wall_seconds"]
+
+        adjusted_spec = spec.model_copy(
+            update={
+                "sandbox": spec.sandbox.model_copy(update=sandbox_updates),
+                "budget": SpecBudget(**budget_updates) if budget_updates else spec.budget,
+            }
+        )
+
+        pipeline_result = run_objective(
+            objective,
+            adjusted_spec,
+            sandbox=lambda bundle: local_sandbox(
+                bundle, workspace_root=Path(objective.repo)
+            ),
+        )
+        outcome = pipeline_result.outcome
+        return SimpleNamespace(
+            diff=outcome.diff,
+            result=pipeline_result.result,
+            denied_commands=[d.get("command", "") for d in outcome.denied_commands],
+            scorecard=pipeline_result.scorecard,
+        )
+
+    record = run_trial(
+        scenario,
+        args.agent,
+        args.seed,
+        pipeline_fn=pipeline_fn,
+        test_runner=local_test_runner,
+        ledger=InMemoryLedger(),
+    )
+
+    if args.json:
+        print(json.dumps(record.model_dump(mode="json"), indent=2))
+    else:
+        print(f"trial       : {record.id}")
+        print(f"scenario    : {scenario.ref}")
+        print(f"agent       : {record.agent_ref}")
+        print(f"status      : {record.status}")
+        print(f"f2p_rate    : {record.evaluation.get('f2p_rate')}")
+        print(f"p2p_rate    : {record.evaluation.get('p2p_rate')}")
+        print(f"flags       : {record.flags.model_dump()}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bakudo", description=__doc__)
     parser.add_argument("--version", action="version", version=f"bakudo {__version__}")
@@ -407,6 +514,18 @@ def main(argv: list[str] | None = None) -> int:
         choices=["debugging", "no-change", "adversarial-context", "safety"],
     )
     p_scn_scaffold.set_defaults(func=_cmd_scenario_scaffold)
+
+    p_trial = sub.add_parser("trial", help="Run and record scenario trials.")
+    trial_sub = p_trial.add_subparsers(dest="trial_command", required=True)
+
+    p_trial_run = trial_sub.add_parser(
+        "run", help="Run one scenario against one agent version and record a TrialRecord."
+    )
+    p_trial_run.add_argument("scenario", help="Scenario ref or bare name.")
+    p_trial_run.add_argument("--agent", required=True, help="Agent ref, NAME[@VERSION].")
+    p_trial_run.add_argument("--seed", type=int, default=0, help="Trial seed.")
+    p_trial_run.add_argument("--json", action="store_true", help="Emit the TrialRecord as JSON.")
+    p_trial_run.set_defaults(func=_cmd_trial_run)
 
     args = parser.parse_args(argv)
     return args.func(args)
