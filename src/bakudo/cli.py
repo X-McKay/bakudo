@@ -362,7 +362,7 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
     from .abox.local import local_sandbox
     from .agent_spec import load_spec_file
     from .paths import agents_dir, scenarios_dir
-    from .registry import InMemoryLedger
+    from .registry.factory import ledger_from_env
     from .scenarios.registry import ScenarioRegistry
     from .scenarios.testrun import local_test_runner
     from .trials.runner import build_pipeline_fn, run_trial
@@ -425,13 +425,19 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
         sandbox_fn=lambda bundle, repo_path: local_sandbox(bundle, workspace_root=repo_path),
     )
 
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     record = run_trial(
         scenario,
         spec.ref,  # the ref ACTUALLY loaded, not the raw --agent argument
         args.seed,
         pipeline_fn=pipeline_fn,
         test_runner=local_test_runner,
-        ledger=InMemoryLedger(),
+        ledger=ledger,
     )
 
     if args.json:
@@ -448,13 +454,13 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
 
 
 def _repo_ledger():
-    from .registry import InMemoryLedger
+    from .registry.factory import ledger_from_env
 
-    # TODO(task-2): ledger_from_env() -- durable ledger CLI wiring lands in
-    # Task 2. Until then every `bakudo repo` invocation gets a fresh
-    # in-process ledger (same limitation as `bakudo trial run`/`experiment
-    # run`), so `repo add` only persists for the lifetime of this process.
-    return InMemoryLedger()
+    # Durable when BAKUDO_POSTGRES_DSN is set (P2 Task 2); otherwise a fresh
+    # in-process InMemoryLedger, so `repo add` only persists for the
+    # lifetime of this process (same limitation as `bakudo trial run`/
+    # `experiment run` without a DSN configured).
+    return ledger_from_env()
 
 
 def _cmd_repo_add(args: argparse.Namespace) -> int:
@@ -468,6 +474,9 @@ def _cmd_repo_add(args: argparse.Namespace) -> int:
             base_ref=args.base_ref,
             ledger=_repo_ledger(),
         )
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except (RepoAddError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -480,7 +489,11 @@ def _cmd_repo_add(args: argparse.Namespace) -> int:
 
 
 def _cmd_repo_list(args: argparse.Namespace) -> int:
-    repos = _repo_ledger().list_repos()
+    try:
+        repos = _repo_ledger().list_repos()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps([r.model_dump(mode="json") for r in repos], indent=2))
     else:
@@ -490,7 +503,11 @@ def _cmd_repo_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_repo_remove(args: argparse.Namespace) -> int:
-    ledger = _repo_ledger()
+    try:
+        ledger = _repo_ledger()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     record = ledger.get_repo(args.name)
     try:
         ledger.deregister_repo(args.name)
@@ -508,7 +525,7 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
     from .abox.local import local_sandbox
     from .experiments.runner import resolve_arm_pipeline_fn, run_experiment
     from .paths import agents_dir, scenarios_dir
-    from .registry import InMemoryLedger
+    from .registry.factory import ledger_from_env
     from .scenarios.registry import ScenarioRegistry
     from .scenarios.testrun import local_test_runner
 
@@ -528,10 +545,16 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     result = run_experiment(
         resolved_spec,
         registry=registry,
-        ledger=InMemoryLedger(),
+        ledger=ledger,
         pipeline_fn=pipeline_fn,
         test_runner=local_test_runner,
     )
@@ -656,15 +679,32 @@ def _cmd_experiment_profile(args: argparse.Namespace) -> int:
 def _cmd_experiment_result(args: argparse.Namespace) -> int:
     """Look up a previously recorded experiment's result.
 
-    The CLI has no durable ledger of its own (every ``bakudo experiment
-    run``/``compare``/``profile`` invocation records to a throwaway
-    in-process ledger, same as ``bakudo trial run``), so this only finds
-    anything against a process that shares a ledger -- e.g. `bakudo serve`'s
-    API. This subcommand exists for that operator workflow's CLI parity.
+    Durable when ``BAKUDO_POSTGRES_DSN`` is configured (P2 Task 2): finds
+    experiments recorded by any process sharing that database, including
+    ``bakudo experiment run``/``compare``/``profile`` and `bakudo serve`'s
+    API. Without a DSN, every ``bakudo`` invocation gets its own throwaway
+    in-process ledger, so this can only ever find an experiment recorded
+    earlier in this same process -- which, for a fresh CLI invocation, is
+    never; a one-line warning makes that limitation explicit instead of
+    letting "unknown experiment" read as a real 404.
     """
-    from .registry import InMemoryLedger
+    from .registry.factory import ledger_from_env
+    from .registry.ledger import InMemoryLedger
 
-    experiment = InMemoryLedger().get_experiment(args.experiment_id)
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if isinstance(ledger, InMemoryLedger):
+        print(
+            "warning: no DSN configured; results from other processes are "
+            "not visible",
+            file=sys.stderr,
+        )
+
+    experiment = ledger.get_experiment(args.experiment_id)
     if experiment is None:
         print(f"error: unknown experiment: {args.experiment_id}", file=sys.stderr)
         return 1
