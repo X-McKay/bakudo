@@ -22,11 +22,15 @@ def trial_seed(experiment_id: str, scenario_name: str, repetition: int) -> int:
     """A deterministic, hash-derived seed for one (experiment, scenario,
     repetition) cell. Baseline and every candidate arm of that cell call this
     with the same arguments and so share the same seed (see
-    :func:`build_matrix`)."""
+    :func:`build_matrix`).
+
+    Masked to 63 bits so the value always fits a signed 64-bit integer —
+    the ledger persists it into a Postgres ``bigint`` column, which an
+    unsigned 64-bit value overflows about half the time."""
     digest = hashlib.sha256(
         f"{experiment_id}:{scenario_name}:{repetition}".encode()
     ).digest()
-    return int.from_bytes(digest[:8], "big")
+    return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
 def _holdout_ok(spec: ExperimentSpec, scenario: LoadedScenario) -> bool:

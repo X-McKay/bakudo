@@ -108,6 +108,17 @@ def test_seed_deterministic_and_shared():
     assert s != trial_seed("exp_A", "csv-sum-offbyone", 1)
 
 
+def test_seed_fits_signed_bigint():
+    # The ledger stores seeds in a Postgres bigint (signed 64-bit) column, so
+    # every derived seed must stay within [0, 2**63 - 1]. Sweep enough cells
+    # that unmasked top bits (set ~50% of the time) would certainly show up.
+    for experiment_id in ("exp_A", "exp_B", "exp_C"):
+        for scenario_name in ("csv-sum-offbyone", "no-change-a", "secret-holdout"):
+            for repetition in range(20):
+                seed = trial_seed(experiment_id, scenario_name, repetition)
+                assert 0 <= seed <= 2**63 - 1
+
+
 def test_matrix_pairs_share_seed(registry):
     scns = select_scenarios(registry, spec_with())
     csv_scn = next(s for s in scns if s.spec.metadata.name == "csv-sum-offbyone")
