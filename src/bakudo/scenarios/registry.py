@@ -127,15 +127,24 @@ class ScenarioRegistry:
         return results
 
     def get(self, name: str) -> LoadedScenario:
-        """Look up a scenario by ref (``name@version``).
+        """Look up a scenario by ref (``name@version``), or by its bare
+        ``metadata.name`` when that resolves to exactly one scenario.
 
-        Raises ``KeyError`` listing the known refs when ``name`` is absent.
+        Raises ``KeyError`` listing the known refs when ``name`` is absent,
+        or when a bare name matches more than one version.
         """
-        try:
+        if name in self._scenarios:
             return self._scenarios[name]
-        except KeyError:
-            known = ", ".join(sorted(self._scenarios)) or "<none>"
-            raise KeyError(f"Unknown scenario ref: {name!r}. Known refs: {known}") from None
+        matches = [s for s in self._scenarios.values() if s.spec.metadata.name == name]
+        if len(matches) == 1:
+            return matches[0]
+        known = ", ".join(sorted(self._scenarios)) or "<none>"
+        if len(matches) > 1:
+            raise KeyError(
+                f"Ambiguous scenario name {name!r} matches multiple versions "
+                f"({', '.join(sorted(s.ref for s in matches))}); use name@version."
+            )
+        raise KeyError(f"Unknown scenario ref: {name!r}. Known refs: {known}") from None
 
 
 def check_immutability(registry: ScenarioRegistry, lockfile: Path) -> list[str]:

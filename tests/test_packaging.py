@@ -19,6 +19,11 @@ def _extras() -> dict[str, list[str]]:
     return data["project"]["optional-dependencies"]
 
 
+def _force_include() -> dict[str, str]:
+    data = tomllib.loads(PYPROJECT.read_text())
+    return data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+
 def test_all_extra_covers_every_feature_pin() -> None:
     """Every requirement in a feature extra must appear verbatim in `all`.
 
@@ -48,3 +53,11 @@ def test_strands_cap_is_pinned_identically() -> None:
     assert all_spec == runtime_spec, (
         f"strands pin drift: runtime={runtime_spec!r} all={all_spec!r}"
     )
+
+
+def test_scenarios_are_force_included_in_the_wheel() -> None:
+    """API-12 for Task 4: the exemplar scenarios must ship in the wheel too,
+    or ``bakudo.paths.scenarios_dir()`` breaks on any install without the
+    source tree (mirrors ``agents`` -> ``bakudo/_data/agents``)."""
+    force_include = _force_include()
+    assert force_include.get("evals/scenarios") == "bakudo/_data/scenarios"

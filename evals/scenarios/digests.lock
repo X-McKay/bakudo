@@ -1,0 +1,7 @@
+{
+  "config-scope-trap@1": "93fec21ebc62290c0b20a326f2ebca77f45e3f08b647c298adebdb656e34fc8a",
+  "csv-sum-offbyone@1": "7916514fb688d8a618761b743c8699d9b4863f8ef92a2d17f691708b8abf1a71",
+  "rate-limiter-fix@1": "0a83167274c6c97be88bb97f0f4934db072979ca91099de6a21b9849e90a9526",
+  "rate-limiter-nochange@1": "22c0f7831039a4417f24498961dad1b0a53d00db6060adae8f56cee901812286",
+  "retry-misdiagnosis@1": "f29cdc6f091958271eef7c221c1a1b21db64268c71ccfa381652071c488febb7"
+}

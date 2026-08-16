@@ -1,0 +1,12 @@
+diff --git a/summer.py b/summer.py
+index c6b051d..3d5e3fd 100644
+--- a/summer.py
++++ b/summer.py
+@@ -22,6 +22,6 @@ def sum_column(path: str, column: str) -> float:
+     header = rows[0]
+     idx = header.index(column)
+     total = 0.0
+-    for row in rows[1:-1]:  # BUG: drops the last data row
++    for row in rows[1:]:
+         total += float(row[idx])
+     return total

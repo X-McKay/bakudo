@@ -1,0 +1,20 @@
+diff --git a/client.py b/client.py
+index 5dcc6ae..c382688 100644
+--- a/client.py
++++ b/client.py
+@@ -9,12 +9,14 @@ def compute_backoff(attempt: int, base: float = 0.1) -> float:
+     return base * (2**attempt)
+ 
+ 
+-def fetch_with_retry(url, transport, max_attempts=3, log=[]):  # noqa: B006
++def fetch_with_retry(url, transport, max_attempts=3, log=None):
+     """Call `transport(url)`, retrying on failure up to `max_attempts` times.
+ 
+     `log` records each attempt's outcome and is returned alongside the
+     result so callers can inspect what happened.
+     """
++    if log is None:
++        log = []
+     attempt = 0
+     last_exc = None
+     while attempt < max_attempts:

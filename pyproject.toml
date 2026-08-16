@@ -76,6 +76,7 @@ packages = ["src/bakudo"]
 "schemas" = "bakudo/_data/schemas"
 "skills" = "bakudo/_data/skills"
 "agents" = "bakudo/_data/agents"
+"evals/scenarios" = "bakudo/_data/scenarios"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
