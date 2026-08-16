@@ -10,15 +10,22 @@ from __future__ import annotations
 
 import fnmatch
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from ..curriculum.objective import Objective
-from ..runner.result import RunResult
+from ..runner.result import RunResult, RunStatus
 from .checks import DEFAULT_SUITE, EvalContext, Grader
 from .result import EvalResult
+
+if TYPE_CHECKING:
+    from ..scenarios.registry import LoadedScenario, ScenarioRegistry
+    from ..scenarios.testrun import TestRunner
+    from ..trials.runner import PipelineFn
 
 
 @dataclass
@@ -166,8 +173,26 @@ def run_corpus(
 
 
 def load_corpus(path: str | Path) -> tuple[str, list[EvalCase]]:
-    """Load a corpus YAML into (suite_name, cases)."""
-    doc = yaml.safe_load(Path(path).read_text())
+    """Load a corpus YAML into (suite_name, cases).
+
+    A missing file raises a clear, actionable error rather than a bare
+    ``FileNotFoundError`` -- the two fictional/unrunnable example corpora
+    that used to live under ``evals/corpora/`` are retired (real corpora now
+    come from the scenario registry), so a caller hitting this is almost
+    always looking for :func:`load_corpus_from_scenarios` instead of a
+    genuinely out-of-tree legacy YAML corpus.
+    """
+    corpus_path = Path(path)
+    if not corpus_path.is_file():
+        raise FileNotFoundError(
+            f"No corpus file at {corpus_path}. The bundled example corpora "
+            "(evals/corpora/*.yaml) were retired in favor of the scenario "
+            "registry -- use load_corpus_from_scenarios(...) "
+            "(bakudo.evals.corpus) to build a corpus from evals/scenarios/ "
+            "instead, or pass the path to a real, out-of-tree legacy corpus "
+            "YAML."
+        )
+    doc = yaml.safe_load(corpus_path.read_text())
     suite_name = doc["name"]
     cases: list[EvalCase] = []
     for raw in doc.get("cases", []):
@@ -185,3 +210,188 @@ def load_corpus(path: str | Path) -> tuple[str, list[EvalCase]]:
             )
         )
     return suite_name, cases
+
+
+# --------------------------------------------------------------------------
+# Scenario-backed adapter (Task 7): the scenario registry (evals/scenarios/)
+# is now the source of real corpora. load_corpus_from_scenarios() maps it
+# onto the EvalCase shape above; scenario_run_fn() bridges the resulting
+# EvalCase.objective back to a real run via bakudo.trials.runner.run_trial,
+# so the exact same run_corpus() aggregation runs unchanged over either
+# source.
+# --------------------------------------------------------------------------
+
+# EvalCase.objective built by load_corpus_from_scenarios() is a placeholder:
+# objective_from_scenario() needs a repo path, but no workspace has been
+# provisioned yet at corpus-build time (that only happens per-run, inside
+# run_trial, with a fresh seed each time). The scenario's own (unprovisioned)
+# directory stands in -- it must NEVER be treated as a runnable checkout (it
+# holds scenario.yaml/hidden/reference alongside the fixture) -- purely as a
+# stable, unique key. scenario_run_fn()'s returned run_fn only ever receives
+# that placeholder Objective back (run_corpus's calling convention is
+# run_fn(case.objective)), so it recovers the real LoadedScenario from this
+# module-level lookup keyed by that same placeholder objective.repo, and lets
+# run_trial do the real (correctly-scoped) provisioning.
+_SCENARIO_BY_OBJECTIVE_REPO: dict[str, LoadedScenario] = {}
+
+
+def load_corpus_from_scenarios(
+    *,
+    families: Sequence[str] | None = None,
+    partitions: Sequence[str] = ("dev",),
+    registry: ScenarioRegistry | None = None,
+) -> list[EvalCase]:
+    """Adapt the scenario registry into the ``EvalCase``/``run_corpus`` shape.
+
+    Every scenario matching ``families`` (all families when ``None``) and
+    ``partitions`` becomes one ``EvalCase``: ``name`` is the scenario's ref
+    (``name@version``), ``objective`` comes from
+    ``bakudo.trials.runner.objective_from_scenario`` (see the module note
+    above for why its ``repo`` is a placeholder), and ``expect`` mirrors the
+    scenario's own ``spec.expect``. ``registry`` defaults to a fresh
+    ``ScenarioRegistry(scenarios_dir())`` (the exemplar corpus).
+    """
+    from ..paths import scenarios_dir
+    from ..scenarios.registry import ScenarioRegistry
+    from ..trials.runner import objective_from_scenario
+
+    reg = registry if registry is not None else ScenarioRegistry(scenarios_dir())
+    family_filters: list[str | None] = list(families) if families is not None else [None]
+
+    by_ref: dict[str, Any] = {}
+    for family in family_filters:
+        for scenario in reg.list(family=family, partitions=partitions):
+            by_ref.setdefault(scenario.ref, scenario)
+
+    cases: list[EvalCase] = []
+    for ref in sorted(by_ref):
+        scenario = by_ref[ref]
+        objective = objective_from_scenario(scenario, scenario.path)
+        _SCENARIO_BY_OBJECTIVE_REPO[objective.repo] = scenario
+        expect = scenario.spec.expect
+        cases.append(
+            EvalCase(
+                name=scenario.ref,
+                objective=objective,
+                expect=Expectations(
+                    status=expect.status,
+                    changes_paths=list(expect.changes_paths),
+                    forbids_denied_commands=expect.forbids_denied_commands,
+                    max_changed_files=expect.max_changed_files,
+                ),
+            )
+        )
+    return cases
+
+
+def _coerce_run_result(pipeline_result_value: Any, trial_record: Any) -> RunResult:
+    """Best-effort coercion of a ``pipeline_fn`` return's ``.result`` into a
+    real :class:`RunResult`, for grading.
+
+    A real caller's ``pipeline_fn`` (``build_pipeline_fn``'s adapter) already
+    returns a proper ``RunResult`` here, which passes through unchanged. A
+    bare test double (some of ``run_trial``'s own stubs only set
+    ``status``/``changed_files``) is topped up from the recorded
+    ``TrialRecord`` so grading never crashes on a missing field.
+    """
+    if isinstance(pipeline_result_value, RunResult):
+        return pipeline_result_value
+
+    data: dict[str, Any] | None = None
+    if isinstance(pipeline_result_value, dict):
+        data = pipeline_result_value
+    elif hasattr(pipeline_result_value, "model_dump"):
+        data = pipeline_result_value.model_dump()
+    if data is not None:
+        try:
+            return RunResult.model_validate(data)
+        except Exception:  # noqa: BLE001 - fall through to the synthesized shape below
+            pass
+
+    status_value = getattr(pipeline_result_value, "status", None)
+    status_str = getattr(status_value, "value", status_value) or trial_record.evaluation.get(
+        "actual_status"
+    )
+    try:
+        status = RunStatus(status_str)
+    except ValueError:
+        status = RunStatus.failed
+    return RunResult(
+        run_id=trial_record.run_id or trial_record.id,
+        agent=trial_record.agent_ref,
+        objective_id=trial_record.objective_id or "",
+        status=status,
+        summary=str(trial_record.evaluation.get("detail", "")),
+        changed_files=list(getattr(pipeline_result_value, "changed_files", None) or []),
+    )
+
+
+def scenario_run_fn(
+    *,
+    test_runner: TestRunner,
+    pipeline_factory: Callable[[], PipelineFn],
+) -> Callable[[Objective], CaseRun]:
+    """Bridge a ``run_corpus``-style ``run_fn(objective) -> CaseRun`` to
+    :func:`bakudo.trials.runner.run_trial`.
+
+    ``pipeline_factory() -> PipelineFn`` builds the pipeline for one case
+    (e.g. ``lambda: build_pipeline_fn(spec, sandbox_fn=...)``); ``test_runner``
+    is ``run_trial``'s hidden-test runner. The returned callable recovers the
+    ``LoadedScenario`` a placeholder ``objective`` came from (see the
+    module-level lookup above -- raises ``KeyError`` for an objective
+    ``load_corpus_from_scenarios`` never built), runs one trial (a fresh,
+    ephemeral ``InMemoryLedger`` records it -- callers that need the
+    immutable trial history persisted should use the trial/experiment
+    substrate directly instead of this eval-corpus bridge), and maps the
+    ``TrialRecord`` -> ``CaseRun``: ``result``/``diff``/``denied_commands``
+    come from the pipeline result itself (the trusted, unabridged source --
+    a ``TrialRecord`` only durably keeps counts/summaries of these, not the
+    full diff text or file list), while ``runtime_seconds``/``tokens_used``
+    come from the recorded trial's ``metrics`` (``duration_s``/``tokens``).
+    """
+    from ..registry import InMemoryLedger
+    from ..trials.runner import run_trial
+
+    ledger = InMemoryLedger()
+
+    def run(objective: Objective) -> CaseRun:
+        scenario = _SCENARIO_BY_OBJECTIVE_REPO.get(objective.repo)
+        if scenario is None:
+            raise KeyError(
+                f"No scenario registered for objective.repo={objective.repo!r}. "
+                "scenario_run_fn() only runs objectives built by "
+                "load_corpus_from_scenarios(); build the corpus with that "
+                "function first."
+            )
+
+        pipeline_fn = pipeline_factory()
+        captured: dict[str, Any] = {}
+
+        def capturing_pipeline_fn(obj, agent_ref, budgets, network):
+            pr = pipeline_fn(obj, agent_ref, budgets, network)
+            captured["pr"] = pr
+            return pr
+
+        record = run_trial(
+            scenario,
+            "corpus-eval@0",
+            0,
+            pipeline_fn=capturing_pipeline_fn,
+            test_runner=test_runner,
+            ledger=ledger,
+        )
+
+        pr = captured.get("pr")
+        result = _coerce_run_result(getattr(pr, "result", None), record)
+        diff = getattr(pr, "diff", "") or ""
+        denied_commands = [{"command": c} for c in (getattr(pr, "denied_commands", None) or [])]
+        metrics = record.metrics
+        return CaseRun(
+            result=result,
+            diff=diff,
+            denied_commands=denied_commands,
+            runtime_seconds=float(metrics.get("duration_s", 0.0)),
+            tokens_used=int(metrics.get("tokens", 0.0)),
+        )
+
+    return run

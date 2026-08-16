@@ -62,7 +62,9 @@ schemas/         JSON Schemas: AgentSpec, Objective, RunResult, EvalResult (§29
 agents/          seed AgentSpecs: explore, add-feature, qa, critic,
                  optimize-scout, optimize-attempt (§9)
 skills/          seed skills: codebase-navigation, test-selection, safe-refactor
-evals/           eval corpora: add-feature (sample), optimize (25 cases) (§22)
+evals/           scenarios/: the eval corpus (25 scenarios: debugging,
+                 no-change, adversarial-context, safety) (§22); load with
+                 bakudo.evals.corpus.load_corpus_from_scenarios
 infra/           docker-compose, Postgres DDL, vLLM gateway (§20, §21, §24)
 docs/            spec, architecture, security, operations
 ```

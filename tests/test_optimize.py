@@ -3,8 +3,6 @@ logic behind OptimizationWorkflow (all pure, no Temporal worker needed)."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from bakudo.control.optimize import (
     attempt_objective,
     round_feedback,
@@ -20,10 +18,8 @@ from bakudo.evals import (
     simplicity_eval,
     suite_for,
 )
-from bakudo.evals.corpus import load_corpus
+from bakudo.evals.corpus import EvalCase, Expectations
 from bakudo.runner.result import RunResult
-
-CORPUS = Path(__file__).resolve().parents[1] / "evals" / "corpora" / "optimize.yaml"
 
 
 def make_objective(**overrides) -> Objective:
@@ -227,13 +223,64 @@ def test_round_feedback_names_each_failure():
 
 
 # --- corpus ---
+#
+# Task 7 retired the checked-in evals/corpora/optimize.yaml fixture (fictional,
+# unrunnable) in favor of the scenario registry -- but the "optimize" role has
+# no scenario-registry equivalent (scenarios only cover the debugging/
+# no-change/adversarial-context/safety families), so the OPT-4 decoy-churn
+# regression coverage below is preserved with an inline, Python-built corpus
+# instead of a deleted YAML file.
+
+
+def _optimize_cases(n_planted: int = 20, n_decoys: int = 5) -> list[EvalCase]:
+    """The same shape the retired optimize.yaml corpus had: N "planted"
+    cases (a real inefficiency to fix, ``maxChangedFiles`` > 0) plus M
+    "decoy" cases (already optimal -- any change is churn, ``maxChangedFiles``
+    == 0), each constraining the diff to one ``targetPaths`` glob."""
+    cases: list[EvalCase] = []
+    for i in range(n_planted):
+        cases.append(
+            EvalCase(
+                name=f"planted-{i}",
+                objective=Objective(
+                    type="optimize",
+                    repo="payments-api",
+                    title=f"Optimize hot path {i}",
+                    constraints={
+                        "maxFilesChanged": 4,
+                        "benchCommand": "pytest tests/benchmarks -q",
+                        "targetPaths": [f"src/billing/mod_{i}/**"],
+                    },
+                ),
+                expect=Expectations(
+                    changes_paths=[f"src/billing/mod_{i}/x.py"], max_changed_files=4
+                ),
+            )
+        )
+    for i in range(n_decoys):
+        cases.append(
+            EvalCase(
+                name=f"decoy-{i}",
+                objective=Objective(
+                    type="optimize",
+                    repo="payments-api",
+                    title=f"Already-optimal path {i}",
+                    constraints={
+                        "maxFilesChanged": 0,
+                        "benchCommand": "pytest tests/benchmarks -q",
+                        "targetPaths": [f"src/billing/decoy_{i}/**"],
+                    },
+                ),
+                expect=Expectations(changes_paths=[], max_changed_files=0),
+            )
+        )
+    return cases
 
 
 def test_optimize_corpus_loads_and_validates():
     from bakudo.evals.promotion import PromotionPolicy
 
-    suite_name, cases = load_corpus(CORPUS)
-    assert suite_name == "optimize-regression"
+    cases = _optimize_cases()
     # The corpus must be large enough for promotion decisions to be eligible.
     assert len(cases) >= PromotionPolicy().min_eval_cases
     assert len({c.name for c in cases}) == len(cases), "case names must be unique"
@@ -250,10 +297,10 @@ def test_optimize_corpus_loads_and_validates():
 
 
 def test_optimize_corpus_constraints_are_typed():
-    _, cases = load_corpus(CORPUS)
+    cases = _optimize_cases()
     first = cases[0]
     assert first.objective.constraints.bench_command is not None
-    assert first.objective.constraints.target_paths == ["src/billing/**"]
+    assert first.objective.constraints.target_paths == ["src/billing/mod_0/**"]
 
 
 # --- OPT-4: the decoy guarantee is real — churn blocks promotion ---
@@ -286,7 +333,7 @@ def test_decoy_churning_candidate_is_rejected():
     from bakudo.evals.corpus import run_corpus
     from bakudo.evals.promotion import Decision
 
-    _, cases = load_corpus(CORPUS)
+    cases = _optimize_cases()
     results = run_corpus(
         "optimize-regression", cases, _corpus_run_fn(churn_decoys=True),
         subject_id="optimize-attempt@2",
@@ -305,7 +352,7 @@ def test_decoy_respecting_candidate_is_eligible():
     from bakudo.evals.corpus import run_corpus
     from bakudo.evals.promotion import Decision
 
-    _, cases = load_corpus(CORPUS)
+    cases = _optimize_cases()
     results = run_corpus(
         "optimize-regression", cases, _corpus_run_fn(churn_decoys=False),
         subject_id="optimize-attempt@2",
