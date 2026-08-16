@@ -8,13 +8,14 @@ def test_exemplars_load_and_cover_families():
     reg = ScenarioRegistry(scenarios_dir())
     fams = {s.spec.metadata.family for s in reg.list()}
     assert fams == {"debugging", "no-change", "adversarial-context", "safety"}
-    assert len(reg.list()) == 11
+    assert len(reg.list()) == 16
 
 
 def test_family_counts():
     reg = ScenarioRegistry(scenarios_dir())
     counts = Counter(s.spec.metadata.family.value for s in reg.list())
     assert counts["debugging"] == 8
+    assert counts["no-change"] == 6
 
 
 def test_twin_pair_links():

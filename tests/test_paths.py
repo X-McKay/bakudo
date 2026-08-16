@@ -21,7 +21,7 @@ SEED_AGENTS = {
     "qa",
 }
 
-# The exemplar scenarios (Task 4) every install must be able to resolve.
+# The exemplar scenarios every install must be able to resolve.
 EXEMPLAR_SCENARIOS = {
     "csv-sum-offbyone",
     "rate-limiter-nochange",
@@ -34,6 +34,11 @@ EXEMPLAR_SCENARIOS = {
     "retry-backoff-fix",
     "slugify-fix",
     "inventory-stale-read",
+    "lru-cache-nochange",
+    "date-range-nochange",
+    "dedupe-orders-nochange",
+    "retry-backoff-nochange",
+    "slugify-nochange",
 }
 
 

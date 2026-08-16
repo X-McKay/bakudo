@@ -266,7 +266,7 @@ def test_cli_scenario_list_json(monkeypatch, capsys):
     rc = main(["scenario", "list", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert len(out) == 11
+    assert len(out) == 16
     assert {"csv-sum-offbyone@1", "rate-limiter-fix@1"} <= {e["ref"] for e in out}
 
 
@@ -274,7 +274,14 @@ def test_cli_scenario_list_filters_by_family(monkeypatch, capsys):
     rc = main(["scenario", "list", "--family", "no-change", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert [e["ref"] for e in out] == ["rate-limiter-nochange@1"]
+    assert [e["ref"] for e in out] == [
+        "date-range-nochange@1",
+        "dedupe-orders-nochange@1",
+        "lru-cache-nochange@1",
+        "rate-limiter-nochange@1",
+        "retry-backoff-nochange@1",
+        "slugify-nochange@1",
+    ]
 
 
 def test_cli_verify_json(monkeypatch, capsys):
