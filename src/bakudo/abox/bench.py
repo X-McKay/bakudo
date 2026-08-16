@@ -27,12 +27,15 @@ from pathlib import Path
 from .. import ids
 from .runner import (
     IN_GUEST_SETUP_HEADROOM_SECONDS,
+    SUBPROCESS_TIMEOUT_HEADROOM_SECONDS,
     Executor,
     _subprocess_executor,
 )
 
-# Wall clock granted beyond the guest deadline for image pull/boot/teardown.
-_VERIFY_TIMEOUT_HEADROOM_SECONDS = 120
+# Wall clock granted beyond the guest deadline for image pull, the host-side
+# auto-warm refresh, boot, and teardown — same budget the runner grants, and
+# for the same reason: a cold warm refresh under 0.7.0 can take minutes.
+_VERIFY_TIMEOUT_HEADROOM_SECONDS = SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
 
 _MARKER = "verify_bench"
 

@@ -196,7 +196,7 @@ def test_build_command_never_passes_ephemeral(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("spec_mode", "abox_mode"),
-    [("none", "safe"), ("scoped", "scoped"), ("open", "open")],
+    [("none", "safe"), ("scoped", "scoped")],
 )
 def test_network_mode_maps_to_abox_vocabulary(tmp_path, monkeypatch, spec_mode, abox_mode):
     # ABOX-6: spec says none|scoped|open; abox 0.7.0 says safe|scoped|open.
@@ -206,6 +206,26 @@ def test_network_mode_maps_to_abox_vocabulary(tmp_path, monkeypatch, spec_mode, 
     bundle = _bundle(network_mode=NetworkMode(spec_mode))
     cmd = AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
     assert cmd[cmd.index("--network") + 1] == abox_mode
+
+
+def test_network_mode_open_fails_closed_without_operator_opt_in(
+    tmp_path, monkeypatch
+):
+    # The run-level --network replaces the repo's trusted scoped allowlist, so
+    # a (possibly model-authored) spec asking for `open` must not silently get
+    # public-internet egress.
+    _clear_model_env(monkeypatch)
+    from bakudo.abox.runner import AboxError
+    from bakudo.agent_spec.models import NetworkMode
+
+    bundle = _bundle(network_mode=NetworkMode("open"))
+    monkeypatch.delenv("BAKUDO_ALLOW_NETWORK_OPEN", raising=False)
+    with pytest.raises(AboxError, match="BAKUDO_ALLOW_NETWORK_OPEN"):
+        AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
+
+    monkeypatch.setenv("BAKUDO_ALLOW_NETWORK_OPEN", "1")
+    cmd = AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
+    assert cmd[cmd.index("--network") + 1] == "open"
 
 
 # ---------------------------------------------------------------------------

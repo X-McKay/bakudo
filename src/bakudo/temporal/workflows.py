@@ -76,8 +76,14 @@ _SHORT: dict[str, Any] = dict(
 # control plane to re-dispatch under a fresh run_id instead. The activity
 # heartbeats every 30s (activities.run_sandbox), so heartbeat_timeout detects
 # a crashed worker in minutes rather than after the 2h start-to-close.
+# start_to_close must exceed the activity's own worst case: the spec-schema
+# cap on timeoutSeconds (10800s) + abox 0.7.0's in-guest setup headroom (300s)
+# + the host-side kill headroom (600s) = 11700s, rounded up. Keeping the
+# margin here rather than trusting specs stays honest with maximum_attempts=1:
+# a Temporal-killed sandbox records a terminal failure with no result.json
+# while the microVM keeps running to its own deadline.
 _SANDBOX: dict[str, Any] = dict(
-    start_to_close_timeout=timedelta(hours=2),
+    start_to_close_timeout=timedelta(seconds=12_600),
     heartbeat_timeout=timedelta(minutes=5),
     retry_policy=RetryPolicy(maximum_attempts=1),
 )
@@ -203,6 +209,10 @@ class AgentRunWorkflow:
         # for no observable state change). Persist the single meaningful
         # transition — the run is about to execute in the sandbox — as
         # `agent_running`; the launch is instantaneous from the ledger's view.
+        # patched(): runs already in flight when this build deploys must
+        # replay the old two-persist history without a NondeterminismError.
+        if not workflow.patched("collapse-sandbox-starting-persist"):
+            await self._advance(inp.run_id, "sandbox_starting")
         await self._advance(inp.run_id, "agent_running")
         # Race the sandbox activity against the cancel signal (TMP-21): a
         # cancel that arrives while the (multi-hour) sandbox is in flight now
@@ -796,6 +806,15 @@ class MetaAgentWorkflow:
             # Restore any backlog carried across the Continue-As-New boundary.
             self._backlog = list(carried.pending_backlog)
             self._state.pending_backlog = []
+            # A payload carried from a build that predates active_run_started
+            # deserializes those maps empty while active_runs still counts
+            # against max_concurrent_runs — such ids would be exempt from the
+            # TTL sweep forever and could block dispatch permanently. Stamp
+            # them now so the TTL backstop (and role accounting) covers them.
+            for run_id in self._state.active_runs:
+                self._state.active_run_started.setdefault(
+                    run_id, workflow.now().isoformat()
+                )
 
         while True:
             self._reconcile_active_runs(workflow.now())
@@ -804,18 +823,37 @@ class MetaAgentWorkflow:
             # reconciliation still runs (and a paused meta under inflow still
             # rolls history). Backlog is never dropped while paused/observing.
             try:
-                await workflow.wait_condition(
-                    lambda: self._dispatch_candidate() is not None
-                    or self._handled >= self._state.continue_as_new_threshold,
-                    timeout=timedelta(minutes=self._state.idle_wake_minutes),
-                )
+                # patched(): the timeout= arm schedules a timer the pre-idle-
+                # heartbeat meta singleton's history does not contain; the
+                # long-lived META_WORKFLOW_ID must replay that history cleanly
+                # across this deploy.
+                if workflow.patched("idle-heartbeat-wake"):
+                    await workflow.wait_condition(
+                        lambda: self._dispatch_candidate() is not None
+                        or self._handled >= self._state.continue_as_new_threshold,
+                        timeout=timedelta(minutes=self._state.idle_wake_minutes),
+                    )
+                else:
+                    await workflow.wait_condition(
+                        lambda: self._dispatch_candidate() is not None
+                        or self._handled >= self._state.continue_as_new_threshold
+                    )
             except TimeoutError:
                 # Idle heartbeat: reconcile leaked slots against the ledger's
                 # terminal status (TMP-18) — this is where a meta blocked by
                 # runs that finished-without-signalling gets unstuck — then
                 # count the wake toward the CAN threshold so even a persistently
                 # paused/blocked meta eventually rolls history, and re-loop.
-                await self._reconcile_via_ledger()
+                # Best-effort like every other housekeeping activity: a ledger
+                # outage during the wake must not fail the long-lived meta
+                # singleton (its backlog/budget state only survives CAN).
+                try:
+                    await self._reconcile_via_ledger()
+                except ActivityError as exc:
+                    workflow.logger.warning(
+                        "ledger reconcile failed on idle wake; retrying next "
+                        "heartbeat: %s", exc,
+                    )
                 self._handled += 1
                 continue
 

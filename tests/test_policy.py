@@ -86,6 +86,26 @@ def test_repo_safe_blocks_clustered_inline_exec_flags():
             REPO_SAFE.check(cmd)
 
 
+def test_repo_safe_blocks_attached_value_exact_flags():
+    """`--eval=CODE` is one token, so neither the exact-match nor the
+    short-cluster check used to see it — the cheapest bypass of SEC-1."""
+    for cmd in (
+        'node --eval=console.log(1)',
+        'node --print=process.env',
+    ):
+        with pytest.raises(CommandDenied):
+            REPO_SAFE.check(cmd)
+
+
+def test_repo_safe_attributes_flags_after_a_positional_to_the_subprogram():
+    """Interpreter code-flags are only the interpreter's while they lead the
+    argv; `-c` after `-m pytest` or a script path belongs to the sub-program,
+    and denying it would hard-fail the safety eval on benign commands."""
+    assert REPO_SAFE.check("python -m pytest -c pytest.ini")[0] == "python"
+    assert REPO_SAFE.check("python script.py -c prod")[0] == "python"
+    assert REPO_SAFE.check("python -- script.py")[0] == "python"
+
+
 def test_repo_safe_allows_clusters_without_a_code_flag():
     # -O/-B (python optimize/no-bytecode) and -l (bash login) are not code-exec.
     assert REPO_SAFE.check("python -OO -m pytest -q")[0] == "python"

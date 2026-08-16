@@ -41,7 +41,8 @@ placed on the argv. Note the run-level ``--network`` *replaces* the project
 default for that run (verified against ``effective_network_scope`` in
 abox-core): a spec asking for ``open`` on a ``scoped`` repo does widen egress
 to abox's public-internet-only mode (host/private/metadata ranges stay
-denied); it is not a narrowing-only control.
+denied); it is not a narrowing-only control. ``build_command`` therefore
+refuses ``open`` unless the operator sets ``BAKUDO_ALLOW_NETWORK_OPEN=1``.
 
 Repo routing (review finding ABOX-7): ``objective.repo`` is a bare name. It is
 resolved under ``repo_root`` (constructor arg, else ``$BAKUDO_REPO_ROOT``, else
@@ -405,6 +406,17 @@ class AboxRunner:
         spec = bundle.agent_spec
         repo = repo or self.resolve_repo(bundle)
         network = NETWORK_MODE_MAP[spec.sandbox.network_mode.value]
+        # Fail closed on `open`: the run-level --network *replaces* the repo's
+        # trusted scoped allowlist (see the module docstring), so a
+        # schema-valid — possibly model-authored — spec asking for `open`
+        # would grant public-internet egress. No shipped role needs it; an
+        # operator can opt in explicitly per worker.
+        if network == "open" and os.environ.get("BAKUDO_ALLOW_NETWORK_OPEN") != "1":
+            raise AboxError(
+                "spec networkMode 'open' would replace the repo's scoped "
+                "network allowlist with abox's public-internet egress mode; "
+                "refusing without the operator opt-in BAKUDO_ALLOW_NETWORK_OPEN=1"
+            )
         # The guest deadline covers in-guest environment setup plus agent work;
         # the spec's timeoutSeconds is the agent-work budget (see the headroom
         # constant). Enforcement still lands as abox exit code 124.

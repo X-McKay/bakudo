@@ -62,8 +62,8 @@ role (network mode, max changed files, merge/ephemerality). The **enforced**
 controls are: the microVM boundary and its allowed commands/filesystem (abox,
 via the repo's `.abox/project.toml`), the outbound network (`--network` derived
 from the AgentSpec's `networkMode` — note this *replaces* the project's default
-mode per run, so a spec asking for `open` does widen egress to abox's
-public-internet-only mode; scoped bundles/domains stay repo-owned), and
+mode per run, so `AboxRunner` refuses `open` unless the operator sets
+`BAKUDO_ALLOW_NETWORK_OPEN=1`; scoped bundles/domains stay repo-owned), and
 `maxChangedFiles` (checked
 host-side when a candidate diff is scored, `evals/corpus.py`). Wiring every
 `SandboxProfile` dimension to a runtime check is future work (see
@@ -93,7 +93,12 @@ outbound HTTP, direct access to production systems, or control-plane database
 write access. These are enforced by **abox** — its microVM boundary and the
 repo-owned `.abox/project.toml` (allowed commands, filesystem, package
 registries) — plus the run-level `--network` mode from the AgentSpec (which
-replaces the project's default mode per run; `open` still denies
-host/private/metadata ranges but does grant public HTTPS). (`abox/runner.py::PROFILES`
+replaces the project's default mode per run; `open` is refused by `AboxRunner`
+without the explicit `BAKUDO_ALLOW_NETWORK_OPEN=1` opt-in, and even then still
+denies host/private/metadata ranges). Note that under abox 0.7.0 spec
+`networkMode: none` maps to abox `safe`, which is *host-mediated egress*, not
+the 0.6.0 loopback-only guest: a cooperating client inside the guest can still
+reach host-managed domains through the audited abox proxy, so `none` means
+"no repo-approved egress", not "zero egress". (`abox/runner.py::PROFILES`
 documents the intended per-role policy but is not itself the enforcement point;
 see "Sandbox profiles are advisory metadata" above.)

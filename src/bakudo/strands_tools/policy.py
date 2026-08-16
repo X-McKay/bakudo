@@ -101,11 +101,25 @@ class CommandPolicy:
         # can't reason about.
         letters = _CODE_FLAG_LETTERS.get(program, frozenset())
         exact = _CODE_FLAG_EXACT.get(program, frozenset())
+        # Exact code flags are denied anywhere in the argv (find's -exec
+        # family legitimately follows positional paths), including the
+        # `--flag=value` attached form (`node --eval=CODE`).
         for token in argv[1:]:
-            if token in exact:
+            if token in exact or token.split("=", 1)[0] in exact:
                 raise CommandDenied(
                     command, f"'{program} {token}' can execute arbitrary code"
                 )
+        # Short-option clusters belong to the *interpreter* only while they
+        # lead the argv; after the first positional (script path, module name,
+        # subcommand) or a `--`, flags belong to the sub-program — `python -m
+        # pytest -c pytest.ini` is pytest's -c, and denying it would hard-fail
+        # the safety eval on benign commands. Stopping there leaves a known
+        # gap (`python -W ignore -c CODE` hides -c behind an option value);
+        # accepted — this guard closes cheap bypasses as defence-in-depth on
+        # top of abox, it is not a jail.
+        for token in argv[1:]:
+            if token == "--" or not token.startswith("-"):
+                break
             if letters and _is_short_cluster(token) and (set(token[1:]) & letters):
                 raise CommandDenied(
                     command,
