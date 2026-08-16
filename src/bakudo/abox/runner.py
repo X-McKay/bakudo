@@ -120,6 +120,26 @@ _OBSERVABILITY_METRIC_KEYS = (
 )
 
 
+# Registry-first repo lookup (repo onboarding, P2 Task 1), consulted by
+# resolve_repo() before the legacy $BAKUDO_REPO_ROOT/<name> search. Module
+# level because AboxRunner is constructed fresh per activity call (see
+# Deps.sandbox_fn in temporal/_impl.py) with no surviving reference a caller
+# could configure later -- set once at process start (Task 2 wires this to
+# the ledger's get_repo).
+_repo_resolver: Callable[[str], str | None] | None = None
+
+
+def set_repo_resolver(fn: Callable[[str], str | None] | None) -> None:
+    """Install (or, with ``None``, clear) the registry-first repo lookup.
+
+    ``fn(name)`` returns the registered checkout path for a bare repo name,
+    or ``None`` when the name has no registry entry (falls back to
+    ``$BAKUDO_REPO_ROOT/<name>``, unchanged from the pre-registry behavior).
+    """
+    global _repo_resolver
+    _repo_resolver = fn
+
+
 class AboxError(RuntimeError):
     """A failure driving the abox CLI."""
 
@@ -368,12 +388,30 @@ class AboxRunner:
     # -- routing -----------------------------------------------------------
 
     def resolve_repo(self, bundle: TaskBundle) -> Path:
-        """Resolve ``objective.repo`` (a bare name) to a host repo path (ABOX-7)."""
+        """Resolve ``objective.repo`` to a host repo path (ABOX-7).
+
+        Registry-first (repo onboarding, P2 Task 1): when a resolver is
+        installed via :func:`set_repo_resolver` and returns a path for this
+        name, that path is used. Otherwise (no resolver, or the name has no
+        registry entry) resolution falls back to the original
+        ``$BAKUDO_REPO_ROOT/<name>`` search, unchanged.
+
+        An absolute-path objective bypasses BOTH the resolver and
+        ``BAKUDO_REPO_ROOT`` -- existing behavior Temporal trials depend on:
+        pathlib's ``root / abs_path`` already discards ``root``, so the
+        registry lookup is skipped here to match rather than querying it
+        with a path the fallback would ignore anyway.
+        """
+        name = bundle.objective.repo
+        if _repo_resolver is not None and not Path(name).is_absolute():
+            looked_up = _repo_resolver(name)
+            if looked_up is not None:
+                return Path(looked_up)
         root = self._repo_root
         if root is None:
             env_root = os.environ.get("BAKUDO_REPO_ROOT")
             root = Path(env_root) if env_root else Path.cwd()
-        candidate = root / bundle.objective.repo
+        candidate = root / name
         if (candidate / ".git").exists():
             return candidate
         return root

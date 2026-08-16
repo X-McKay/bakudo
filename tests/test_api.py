@@ -54,6 +54,8 @@ ROUTES = [
     ),
     ("GET", "/experiments/{experiment_id}", "/experiments/exp_x", None),
     ("GET", "/trials/{trial_id}", "/trials/trial_x", None),
+    ("POST", "/repos", "/repos", {"source": "/nonexistent/repo/path"}),
+    ("GET", "/repos", "/repos", None),
     ("GET", "/status", "/status", None),
     # Schema/docs routes: mounted as real path operations so they obey the
     # same bearer policy as everything else (schema-only exposure is still
@@ -571,3 +573,69 @@ def test_read_routes_open_and_pending_promotions_empty():
     client = TestClient(build_app())
     assert client.get("/status").status_code == 200
     assert client.get("/promotions/pending").json() == []
+
+
+# --- POST/GET /repos (repo onboarding, P2 Task 1) ---
+
+
+def _init_git_repo(path):
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "commit.gpgsign", "false"], check=True)
+    (path / "README.md").write_text("hi\n")
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True)
+    return path
+
+
+def test_post_repos_registers_local_checkout_then_get_lists_it(tmp_path):
+    repo = _init_git_repo(tmp_path / "myrepo")
+    client = TestClient(build_app())
+
+    resp = client.post("/repos", json={"source": str(repo)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "myrepo"
+    assert body["path"] == str(repo.resolve())
+
+    listed = client.get("/repos").json()
+    assert [r["name"] for r in listed] == ["myrepo"]
+
+
+def test_post_repos_conflicting_path_for_same_name_is_409(tmp_path):
+    repo_a = _init_git_repo(tmp_path / "a")
+    repo_b = _init_git_repo(tmp_path / "b")
+    client = TestClient(build_app())
+
+    assert client.post(
+        "/repos", json={"source": str(repo_a), "name": "dup"}
+    ).status_code == 200
+    resp = client.post("/repos", json={"source": str(repo_b), "name": "dup"})
+    assert resp.status_code == 409
+
+
+def test_post_repos_missing_local_path_is_404(tmp_path):
+    client = TestClient(build_app())
+    resp = client.post("/repos", json={"source": str(tmp_path / "does-not-exist")})
+    assert resp.status_code == 404
+
+
+def test_post_repos_url_clones_via_file_scheme(tmp_path, monkeypatch):
+    """No network required: git supports file:// clones."""
+    source = _init_git_repo(tmp_path / "source-repo")
+    dest_root = tmp_path / "checkouts"
+    dest_root.mkdir()
+    monkeypatch.setenv("BAKUDO_REPO_ROOT", str(dest_root))
+
+    client = TestClient(build_app())
+    resp = client.post("/repos", json={"source": f"file://{source}"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "source-repo"
+    cloned = dest_root / "source-repo"
+    assert cloned.is_dir()
+    assert (cloned / ".git").is_dir()

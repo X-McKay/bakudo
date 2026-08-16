@@ -258,6 +258,24 @@ create table if not exists experiments (
   updated_at timestamptz not null default now()
 );
 
+-- Repos (repo onboarding, P2 Task 1): the registry an objective's bare
+-- `repo` name resolves against (AboxRunner.resolve_repo's registry-first
+-- lookup), falling back to $BAKUDO_REPO_ROOT/<name> when a name has no
+-- entry here. Rows are added via `bakudo repo add` / POST /repos.
+--
+-- CANONICAL DDL — mirrored by _REPOS_DDL in
+-- src/bakudo/registry/postgres_ledger.py, which self-migrates existing
+-- databases (this file only runs at first initialization). Keep the two in
+-- sync.
+create table if not exists repos (
+  name text primary key,
+  source text not null,
+  path text not null,
+  default_base_ref text not null default 'main',
+  provenance jsonb not null default '{}'::jsonb,
+  added_at timestamptz not null default now()
+);
+
 -- Integration-event outbox (section 17.1): durable handoff to projections.
 create table if not exists outbox (
   id bigserial primary key,

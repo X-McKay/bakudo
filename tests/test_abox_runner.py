@@ -253,6 +253,64 @@ def test_repo_root_defaults_to_env_then_cwd(tmp_path, monkeypatch):
     assert AboxRunner().resolve_repo(_bundle()) == Path.cwd()
 
 
+# --- registry-first resolution (repo onboarding, P2 Task 1) ---------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_repo_resolver():
+    """`set_repo_resolver` installs process-wide (module-level) state; reset
+    it after every test in this file so a resolver set by one test can never
+    leak into another test's resolve_repo() call."""
+    from bakudo.abox.runner import set_repo_resolver
+
+    yield
+    set_repo_resolver(None)
+
+
+def test_resolve_repo_uses_registry_lookup_when_present(tmp_path):
+    from bakudo.abox.runner import set_repo_resolver
+
+    registered = tmp_path / "elsewhere"
+    registered.mkdir()
+    set_repo_resolver(lambda name: str(registered) if name == "bakudo" else None)
+
+    runner = AboxRunner(repo_root=tmp_path)
+    assert runner.resolve_repo(_bundle()) == registered
+
+
+def test_resolve_repo_falls_back_to_repo_root_when_lookup_returns_none(tmp_path):
+    from bakudo.abox.runner import set_repo_resolver
+
+    repo = tmp_path / "bakudo"
+    _make_worktree(repo)
+    set_repo_resolver(lambda name: None)
+
+    runner = AboxRunner(repo_root=tmp_path)
+    assert runner.resolve_repo(_bundle()) == repo
+
+
+def test_resolve_repo_absolute_objective_bypasses_registry_lookup(tmp_path):
+    """Absolute-path objectives keep bypassing both the resolver and
+    BAKUDO_REPO_ROOT (existing behavior Temporal trials depend on)."""
+    from bakudo.abox.runner import set_repo_resolver
+
+    abs_repo = tmp_path / "abs-repo"
+    _make_worktree(abs_repo)
+    calls: list[str] = []
+
+    def resolver(name: str) -> str:
+        calls.append(name)
+        return str(tmp_path / "should-not-be-used")
+
+    set_repo_resolver(resolver)
+
+    bundle = _bundle()
+    bundle.objective.repo = str(abs_repo)
+    runner = AboxRunner(repo_root=tmp_path)
+    assert runner.resolve_repo(bundle) == abs_repo
+    assert calls == [], "absolute-path objectives must never reach the registry lookup"
+
+
 # ---------------------------------------------------------------------------
 # run(): staging, collection, lifecycle (ABOX-2/8/10/11)
 # ---------------------------------------------------------------------------

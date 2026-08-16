@@ -11,6 +11,7 @@ import logging
 import os
 import secrets
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -63,6 +64,15 @@ class ExperimentSpecIn(BaseModel):
     """
 
     model_config = {"extra": "allow"}
+
+
+class RepoIn(BaseModel):
+    """Body of POST /repos: same semantics as ``bakudo repo add`` (repo
+    onboarding, P2 Task 1)."""
+
+    source: str
+    name: str | None = None
+    baseRef: str | None = None
 
 
 class PromotionResolutionIn(BaseModel):
@@ -400,6 +410,66 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         if trial is None:
             raise HTTPException(status_code=404, detail=f"Unknown trial: {trial_id}")
         return trial.model_dump(mode="json")
+
+    @app.post("/repos")
+    def add_repo(body: RepoIn) -> dict[str, Any]:
+        """Clone (URL) or register in place (local path) a repo checkout --
+        same semantics as ``bakudo repo add`` (repo onboarding, P2 Task 1).
+        Clone only, never execute: a plain ``git clone`` subprocess."""
+        import os
+        import re
+        import subprocess
+
+        from ..registry.records import RepoRecord
+
+        source = body.source
+        if re.match(r"^(https?://|git@|file://)", source):
+            tail = source.rstrip("/").rsplit("/", 1)[-1]
+            if tail.endswith(".git"):
+                tail = tail[: -len(".git")]
+            name = body.name or tail
+            root_env = os.environ.get("BAKUDO_REPO_ROOT")
+            root = Path(root_env) if root_env else Path.cwd()
+            target = root / name
+            if target.exists():
+                raise HTTPException(
+                    status_code=409, detail=f"{target} already exists"
+                )
+            try:
+                subprocess.run(
+                    ["git", "clone", source, str(target)], check=True, capture_output=True
+                )
+            except subprocess.CalledProcessError as exc:
+                stderr = (
+                    exc.stderr.decode(errors="replace")
+                    if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+                )
+                raise HTTPException(
+                    status_code=422, detail=f"git clone failed: {stderr.strip() or exc}"
+                ) from exc
+            path = target.resolve()
+        else:
+            candidate = Path(source)
+            if not candidate.exists() or not (candidate / ".git").exists():
+                raise HTTPException(
+                    status_code=404, detail=f"{candidate} is not a git checkout"
+                )
+            name = body.name or candidate.resolve().name
+            path = candidate.resolve()
+
+        record = RepoRecord(
+            name=name, source=source, path=str(path),
+            default_base_ref=body.baseRef or "main",
+        )
+        try:
+            tools.ledger.register_repo(record)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return record.model_dump(mode="json")
+
+    @app.get("/repos")
+    def list_repos() -> list[dict[str, Any]]:
+        return [r.model_dump(mode="json") for r in tools.ledger.list_repos()]
 
     @app.get("/status")
     def status() -> dict[str, Any]:

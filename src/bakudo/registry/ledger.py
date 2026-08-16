@@ -13,7 +13,14 @@ from typing import Any, Protocol
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
 from ..trials.models import TrialRecord
-from .records import VERSION_STATUSES, AgentVersionRecord, RunEvent, RunPhase, RunRecord
+from .records import (
+    VERSION_STATUSES,
+    AgentVersionRecord,
+    RepoRecord,
+    RunEvent,
+    RunPhase,
+    RunRecord,
+)
 
 
 class Ledger(Protocol):
@@ -86,6 +93,19 @@ class Ledger(Protocol):
     ) -> None: ...
     def get_experiment(self, experiment_id: str) -> dict | None: ...
 
+    # Repos (repo onboarding, P2 Task 1): the registry an objective's bare
+    # ``repo`` name resolves against (see AboxRunner.resolve_repo's
+    # registry-first lookup). register_repo is idempotent when the name+path
+    # both match an existing entry (a retried `bakudo repo add` is a no-op);
+    # a conflicting path for an already-registered name raises ValueError
+    # rather than silently repointing where runs execute.
+    # deregister_repo only removes the ledger's routing entry -- it never
+    # touches the filesystem, so the checkout is left exactly where it was.
+    def register_repo(self, r: RepoRecord) -> None: ...
+    def get_repo(self, name: str) -> RepoRecord | None: ...
+    def list_repos(self) -> list[RepoRecord]: ...
+    def deregister_repo(self, name: str) -> None: ...
+
 
 class InMemoryLedger:
     """A dependency-free ledger for tests and single-process dev."""
@@ -99,6 +119,7 @@ class InMemoryLedger:
         self._promotions: list[PromotionDecision] = []
         self._trials: dict[str, TrialRecord] = {}
         self._experiments: dict[str, dict[str, Any]] = {}
+        self._repos: dict[str, RepoRecord] = {}
 
     @staticmethod
     def _vkey(name: str, version: int) -> str:
@@ -367,3 +388,30 @@ class InMemoryLedger:
     def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
         record = self._experiments.get(experiment_id)
         return dict(record) if record is not None else None
+
+    # --- repos ---
+    def register_repo(self, r: RepoRecord) -> None:
+        existing = self._repos.get(r.name)
+        if existing is not None:
+            if existing.path != r.path:
+                raise ValueError(
+                    f"repo {r.name!r} is already registered at {existing.path!r}; "
+                    f"refusing to re-register it at conflicting path {r.path!r}"
+                )
+            return  # idempotent: same name+path, nothing to do
+        stamped = (
+            r if r.added_at is not None
+            else r.model_copy(update={"added_at": datetime.now(UTC).isoformat()})
+        )
+        self._repos[r.name] = stamped
+
+    def get_repo(self, name: str) -> RepoRecord | None:
+        return self._repos.get(name)
+
+    def list_repos(self) -> list[RepoRecord]:
+        return list(self._repos.values())
+
+    def deregister_repo(self, name: str) -> None:
+        if name not in self._repos:
+            raise KeyError(f"unknown repo: {name!r}")
+        del self._repos[name]  # never touches the filesystem

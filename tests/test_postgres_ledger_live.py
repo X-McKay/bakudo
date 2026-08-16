@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from bakudo.registry.postgres_ledger import PostgresLedger
+from bakudo.registry.postgres_ledger import _REPOS_DDL, PostgresLedger
 from bakudo.registry.records import RunPhase, RunRecord
 
 DSN = os.environ.get("BAKUDO_POSTGRES_DSN")
@@ -27,6 +27,7 @@ TRIAL_A1_ID = "trial_E2ELEDGERA1"
 TRIAL_A2_ID = "trial_E2ELEDGERA2"
 TRIAL_B1_ID = "trial_E2ELEDGERB1"
 EXPERIMENT_ID = "exp_E2ELEDGER1"
+REPO_NAME = "repo_E2ELEDGER1"
 
 
 @pytest.fixture
@@ -48,6 +49,10 @@ def _cleanup(lg: PostgresLedger) -> None:
             ([TRIAL_A1_ID, TRIAL_A2_ID, TRIAL_B1_ID],),
         )
         cur.execute("delete from experiments where id = %s", (EXPERIMENT_ID,))
+        # repos may not exist yet on a DB that predates this table (its DDL
+        # self-migrates lazily in register_repo, never on a bare delete).
+        cur.execute(_REPOS_DDL)
+        cur.execute("delete from repos where name = %s", (REPO_NAME,))
 
 
 def _record() -> RunRecord:
@@ -198,3 +203,35 @@ def test_experiment_roundtrip_and_unknown_id_raises(ledger):
     assert ledger.get_experiment("exp_E2ELEDGER_UNKNOWN") is None
     with pytest.raises(KeyError):
         ledger.update_experiment_result("exp_E2ELEDGER_UNKNOWN", "completed", {})
+
+
+# --- repos (repo onboarding, P2 Task 1) ---
+
+
+def test_repo_roundtrip_idempotent_conflict_and_deregister(ledger):
+    from bakudo.registry.records import RepoRecord
+
+    record = RepoRecord(
+        name=REPO_NAME, source="https://example.invalid/x.git", path="/checkouts/e2e-x"
+    )
+    ledger.register_repo(record)
+    got = ledger.get_repo(REPO_NAME)
+    assert got is not None
+    assert got.path == "/checkouts/e2e-x"
+    assert got.added_at is not None
+
+    # idempotent: same name+path is a no-op re-register
+    ledger.register_repo(record)
+    assert len([r for r in ledger.list_repos() if r.name == REPO_NAME]) == 1
+
+    # a conflicting path for the same name raises rather than repointing it
+    with pytest.raises(ValueError):
+        ledger.register_repo(
+            RepoRecord(name=REPO_NAME, source="other", path="/checkouts/CONFLICT")
+        )
+    assert ledger.get_repo(REPO_NAME).path == "/checkouts/e2e-x"
+
+    ledger.deregister_repo(REPO_NAME)
+    assert ledger.get_repo(REPO_NAME) is None
+    with pytest.raises(KeyError):
+        ledger.deregister_repo(REPO_NAME)

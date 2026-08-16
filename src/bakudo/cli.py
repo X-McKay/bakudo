@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -447,6 +448,105 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _repo_ledger():
+    from .registry import InMemoryLedger
+
+    # TODO(task-2): ledger_from_env() -- durable ledger CLI wiring lands in
+    # Task 2. Until then every `bakudo repo` invocation gets a fresh
+    # in-process ledger (same limitation as `bakudo trial run`/`experiment
+    # run`), so `repo add` only persists for the lifetime of this process.
+    return InMemoryLedger()
+
+
+# A real remote URL (https://, git@...) or a file:// URL -- the latter
+# included so `bakudo repo add` can be exercised end-to-end (clone + all)
+# without network access, using `git clone file://...` against a local repo.
+_REPO_URL_RE = re.compile(r"^(https?://|git@|file://)")
+
+
+def _cmd_repo_add(args: argparse.Namespace) -> int:
+    """Clone (URL) or register in place (local path) a repo checkout."""
+    import os
+    import subprocess
+
+    from .registry.records import RepoRecord
+
+    source = args.source
+    if _REPO_URL_RE.match(source):
+        tail = source.rstrip("/").rsplit("/", 1)[-1]
+        if tail.endswith(".git"):
+            tail = tail[: -len(".git")]
+        name = args.name or tail
+        root_env = os.environ.get("BAKUDO_REPO_ROOT")
+        root = Path(root_env) if root_env else Path.cwd()
+        target = root / name
+        if target.exists():
+            print(f"error: {target} already exists; refusing to clone over it", file=sys.stderr)
+            return 1
+        try:
+            subprocess.run(
+                ["git", "clone", source, str(target)], check=True, capture_output=True
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (
+                exc.stderr or ""
+            )
+            print(f"error: git clone failed: {stderr.strip() or exc}", file=sys.stderr)
+            return 1
+        path = target.resolve()
+    else:
+        candidate = Path(source)
+        if not candidate.exists():
+            print(f"error: {candidate} does not exist", file=sys.stderr)
+            return 1
+        if not (candidate / ".git").exists():
+            print(f"error: {candidate} is not a git checkout (no .git)", file=sys.stderr)
+            return 1
+        name = args.name or candidate.resolve().name
+        path = candidate.resolve()
+
+    record = RepoRecord(
+        name=name,
+        source=source,
+        path=str(path),
+        default_base_ref=args.base_ref or "main",
+    )
+    try:
+        _repo_ledger().register_repo(record)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(record.model_dump(mode="json"), indent=2))
+    else:
+        print(f"registered {name!r} -> {path}")
+    return 0
+
+
+def _cmd_repo_list(args: argparse.Namespace) -> int:
+    repos = _repo_ledger().list_repos()
+    if args.json:
+        print(json.dumps([r.model_dump(mode="json") for r in repos], indent=2))
+    else:
+        for r in repos:
+            print(f"{r.name}  path={r.path}  base_ref={r.default_base_ref}")
+    return 0
+
+
+def _cmd_repo_remove(args: argparse.Namespace) -> int:
+    ledger = _repo_ledger()
+    record = ledger.get_repo(args.name)
+    try:
+        ledger.deregister_repo(args.name)
+    except KeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    path = record.path if record is not None else "?"
+    print(f"deregistered {args.name!r}; files left in place at {path}")
+    return 0
+
+
 def _run_experiment_and_report(spec, as_json: bool) -> int:
     """Shared tail of every ``bakudo experiment ...`` subcommand: resolve the
     scenario registry + per-arm pipeline_fn, run the experiment, print."""
@@ -685,6 +785,32 @@ def main(argv: list[str] | None = None) -> int:
         choices=["debugging", "no-change", "adversarial-context", "safety"],
     )
     p_scn_scaffold.set_defaults(func=_cmd_scenario_scaffold)
+
+    p_repo = sub.add_parser("repo", help="Onboard and manage known repository checkouts.")
+    repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)
+
+    p_repo_add = repo_sub.add_parser(
+        "add", help="Clone (URL) or register in place (local path) a repo checkout."
+    )
+    p_repo_add.add_argument("source", help="Git URL (https://, git@, file://) or local path.")
+    p_repo_add.add_argument("--name", default=None, help="Registry name (default: inferred).")
+    p_repo_add.add_argument(
+        "--base-ref", default=None, help="Default base ref for sandbox runs (default: main)."
+    )
+    p_repo_add.add_argument(
+        "--json", action="store_true", help="Emit the registered repo record as JSON."
+    )
+    p_repo_add.set_defaults(func=_cmd_repo_add)
+
+    p_repo_list = repo_sub.add_parser("list", help="List registered repos.")
+    p_repo_list.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_repo_list.set_defaults(func=_cmd_repo_list)
+
+    p_repo_remove = repo_sub.add_parser(
+        "remove", help="Deregister a repo (files are left in place)."
+    )
+    p_repo_remove.add_argument("name", help="Registry name to deregister.")
+    p_repo_remove.set_defaults(func=_cmd_repo_remove)
 
     p_trial = sub.add_parser("trial", help="Run and record scenario trials.")
     trial_sub = p_trial.add_subparsers(dest="trial_command", required=True)
