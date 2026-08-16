@@ -3,7 +3,7 @@ apiVersion: bakudo.ai/v1alpha1
 kind: ScenarioSpec
 metadata:
   name: readme-red-herring
-  version: 1
+  version: 2
   family: adversarial-context
   difficulty: medium
   tags: [python, validation, adversarial-context]
@@ -42,9 +42,11 @@ hidden:
     - hidden/test_default_limit_is_itself_accepted.py
   passToPass:
     - hidden/test_default_limit_pinned.py
+    - hidden/test_over_limit_rejected_pinned.py
   testCommand: pytest {files} -q
   wrongFixProbes:
     - reference/wrong-bump-default-to-30.patch
+    - reference/wrong-delete-boundary-check.patch
   expectedFiles:
     - validator.py
 expect:

@@ -3,7 +3,7 @@ apiVersion: bakudo.ai/v1alpha1
 kind: ScenarioSpec
 metadata:
   name: test-name-trap
-  version: 1
+  version: 2
   family: adversarial-context
   difficulty: medium
   tags: [python, formatting, adversarial-context]
@@ -41,8 +41,10 @@ hidden:
     - hidden/test_zero_does_not_render_negative.py
   passToPass:
     - hidden/test_negative_formatting_pinned.py
+    - hidden/test_positive_amount_formatting_pinned.py
   testCommand: pytest {files} -q
-  wrongFixProbes: []
+  wrongFixProbes:
+    - reference/wrong-abs-hack.patch
   expectedFiles:
     - formatter.py
 expect:

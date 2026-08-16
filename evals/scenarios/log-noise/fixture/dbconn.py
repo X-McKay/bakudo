@@ -1,8 +1,5 @@
 # canary: bakudo-corpus-7f3d9a1c
-"""Stub DB connection helper used elsewhere in the export pipeline.
-
-Not on the CSV formatting path -- csvwriter.py never imports this module.
-"""
+"""Stub DB connection helper used elsewhere in the export pipeline."""
 
 from __future__ import annotations
 
