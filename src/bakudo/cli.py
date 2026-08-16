@@ -14,8 +14,46 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .scenarios.testrun import TestRunner
+
+
+def _resolve_hidden_test_runner(command: str) -> tuple[TestRunner | None, str | None]:
+    """Resolve which ``TestRunner`` grades hidden tests for a ``bakudo
+    <command>`` invocation, mirroring ``_default_hidden_eval_fn``'s
+    resolution ladder (``temporal/_impl.py``): ``BAKUDO_ENV=dev`` -> the
+    local, host-executing runner (unchanged); else ``resolve_sandbox_mode()
+    == "abox"`` -> the real abox-guest runner (Task 8); else no runner, with
+    an actionable message the caller should print and exit 2 on.
+
+    Kept as the single place the CLI's trial/experiment commands resolve
+    this, so the ladder can't drift between them the way the pre-Task-8
+    per-command dev-only guards could have.
+    """
+    import os
+
+    if os.environ.get("BAKUDO_ENV") == "dev":
+        from .scenarios.testrun import local_test_runner
+
+        return local_test_runner, None
+
+    from .temporal._impl import resolve_sandbox_mode
+
+    if resolve_sandbox_mode() == "abox":
+        from .abox.hidden_bench import abox_test_runner
+
+        return abox_test_runner, None
+
+    return None, (
+        f"error: `bakudo {command}` grades hidden tests and needs a "
+        "trusted test runner: set BAKUDO_ENV=dev to use the local "
+        "(host-executing, dev-only) test runner, or BAKUDO_SANDBOX=abox to "
+        "grade inside a real abox sandbox."
+    )
 
 
 def _cmd_validate_spec(args: argparse.Namespace) -> int:
@@ -352,10 +390,10 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
     the in-process pipeline (:func:`bakudo.control.pipeline.run_objective`
     over :func:`bakudo.abox.local.local_sandbox`) drives the agent, reusing
     the scenario's own provisioned workspace as the sandbox root. Hidden-test
-    grading always uses the local test runner, which is guarded behind
-    ``BAKUDO_ENV=dev`` (ruling R2) since it executes scenario fixture/agent
-    code directly on this host -- so that variable must be set regardless of
-    online/offline mode.
+    grading resolves a runner via :func:`_resolve_hidden_test_runner`:
+    ``BAKUDO_ENV=dev`` (ruling R2) opts into the local, host-executing
+    runner; otherwise ``BAKUDO_SANDBOX=abox`` opts into the real abox-guest
+    runner (Task 8), so live trials are no longer local-only.
     """
     import os
 
@@ -364,18 +402,13 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
     from .paths import agents_dir, scenarios_dir
     from .registry.factory import ledger_from_env
     from .scenarios.registry import ScenarioRegistry
-    from .scenarios.testrun import local_test_runner
     from .trials.runner import build_pipeline_fn, run_trial
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo trial run` grades hidden tests with the local test "
-            "runner, which executes scenario fixture/agent code directly on "
-            "this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
+    test_runner, err = _resolve_hidden_test_runner("trial run")
+    if test_runner is None:
+        print(err, file=sys.stderr)
         return 2
 
     try:
@@ -436,7 +469,7 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
         spec.ref,  # the ref ACTUALLY loaded, not the raw --agent argument
         args.seed,
         pipeline_fn=pipeline_fn,
-        test_runner=local_test_runner,
+        test_runner=test_runner,
         ledger=ledger,
     )
 
@@ -519,15 +552,22 @@ def _cmd_repo_remove(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_experiment_and_report(spec, as_json: bool) -> int:
+def _run_experiment_and_report(spec, as_json: bool, *, command_label: str) -> int:
     """Shared tail of every ``bakudo experiment ...`` subcommand: resolve the
-    scenario registry + per-arm pipeline_fn, run the experiment, print."""
+    hidden-test runner + scenario registry + per-arm pipeline_fn, run the
+    experiment, print. ``command_label`` (e.g. ``"experiment run"``) names
+    the invoking subcommand for :func:`_resolve_hidden_test_runner`'s error
+    message."""
     from .abox.local import local_sandbox
     from .experiments.runner import resolve_arm_pipeline_fn, run_experiment
     from .paths import agents_dir, scenarios_dir
     from .registry.factory import ledger_from_env
     from .scenarios.registry import ScenarioRegistry
-    from .scenarios.testrun import local_test_runner
+
+    test_runner, err = _resolve_hidden_test_runner(command_label)
+    if test_runner is None:
+        print(err, file=sys.stderr)
+        return 2
 
     try:
         registry = ScenarioRegistry(scenarios_dir())
@@ -556,7 +596,7 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
         registry=registry,
         ledger=ledger,
         pipeline_fn=pipeline_fn,
-        test_runner=local_test_runner,
+        test_runner=test_runner,
     )
 
     if as_json:
@@ -579,8 +619,10 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
 def _cmd_experiment_run(args: argparse.Namespace) -> int:
     """Run an experiment from a spec YAML file end to end (offline unless
     ``BAKUDO_OFFLINE=0``); prints (or ``--json`` emits) the assembled
-    result. Grades hidden tests with the local test runner, same
-    ``BAKUDO_ENV=dev`` guard as ``bakudo trial run`` (ruling R2)."""
+    result. Hidden-test grading resolves a runner via
+    :func:`_resolve_hidden_test_runner` (``BAKUDO_ENV=dev`` local runner, or
+    ``BAKUDO_SANDBOX=abox`` real abox-guest runner -- ruling R2, extended by
+    Task 8)."""
     import os
 
     import yaml
@@ -590,15 +632,6 @@ def _cmd_experiment_run(args: argparse.Namespace) -> int:
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo experiment run` grades hidden tests with the local "
-            "test runner, which executes scenario fixture/agent code directly "
-            "on this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
-        return 2
-
     try:
         document = yaml.safe_load(Path(args.spec).read_text())
         validate_experiment_spec(document)
@@ -607,7 +640,7 @@ def _cmd_experiment_run(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    return _run_experiment_and_report(spec, args.json)
+    return _run_experiment_and_report(spec, args.json, command_label="experiment run")
 
 
 def _cmd_experiment_compare(args: argparse.Namespace) -> int:
@@ -618,15 +651,6 @@ def _cmd_experiment_compare(args: argparse.Namespace) -> int:
     from .experiments.models import ExperimentMetadata, ExperimentSpec, ScenarioSelector
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
-
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo experiment compare` grades hidden tests with the "
-            "local test runner, which executes scenario fixture/agent code "
-            "directly on this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
-        return 2
 
     selector_kwargs: dict = {}
     if args.family:
@@ -641,7 +665,7 @@ def _cmd_experiment_compare(args: argparse.Namespace) -> int:
         candidates=[args.candidate],
         scenario_selector=ScenarioSelector(**selector_kwargs),
     )
-    return _run_experiment_and_report(spec, args.json)
+    return _run_experiment_and_report(spec, args.json, command_label="experiment compare")
 
 
 def _cmd_experiment_profile(args: argparse.Namespace) -> int:
@@ -653,18 +677,11 @@ def _cmd_experiment_profile(args: argparse.Namespace) -> int:
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo experiment profile` grades hidden tests with the "
-            "local test runner, which executes scenario fixture/agent code "
-            "directly on this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
-        return 2
-
     selector_kwargs: dict = {}
     if args.family:
         selector_kwargs["families"] = [args.family]
+    if args.count is not None:
+        selector_kwargs["count"] = args.count
 
     spec = ExperimentSpec(
         metadata=ExperimentMetadata(name=f"{args.agent}-profile"),
@@ -673,7 +690,7 @@ def _cmd_experiment_profile(args: argparse.Namespace) -> int:
         candidates=[],
         scenario_selector=ScenarioSelector(**selector_kwargs),
     )
-    return _run_experiment_and_report(spec, args.json)
+    return _run_experiment_and_report(spec, args.json, command_label="experiment profile")
 
 
 def _cmd_experiment_result(args: argparse.Namespace) -> int:
@@ -844,6 +861,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_exp_profile.add_argument("agent", help="Agent ref, NAME[@VERSION].")
     p_exp_profile.add_argument("--family", default=None, help="Scenario family filter.")
+    p_exp_profile.add_argument("--count", type=int, default=None, help="Scenario count.")
     p_exp_profile.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     p_exp_profile.set_defaults(func=_cmd_experiment_profile)
 

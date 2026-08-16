@@ -62,11 +62,11 @@ SANDBOX_REMEDIATION = (
 # fail-closed message, shared by Deps.resolve_hidden_eval_fn (runtime) and
 # any future worker startup posture log, so the two can never drift.
 HIDDEN_EVAL_REMEDIATION = (
-    "TODO(follow-up plan: corpus & integration): grading hidden tests "
-    "outside BAKUDO_ENV=dev requires a first-class abox-backed hidden-test "
-    "runner (bench-style sandbox exec), which does not exist yet. Set "
-    "BAKUDO_ENV=dev to use the local (host-executing, dev-only) test runner, "
-    "or inject Deps.hidden_eval_fn with a trusted runner."
+    "grading hidden tests outside BAKUDO_ENV=dev requires a resolvable "
+    "sandbox posture: set BAKUDO_ENV=dev to use the local (host-executing, "
+    "dev-only) test runner, or BAKUDO_SANDBOX=abox to grade inside a real "
+    "abox guest (bakudo.abox.hidden_bench.abox_test_runner), or inject "
+    "Deps.hidden_eval_fn with a trusted runner."
 )
 
 
@@ -102,14 +102,23 @@ def _default_hidden_eval_fn(workspace: Any, command: str) -> TestRunResult:
     resolution pattern, :func:`resolve_sandbox_mode`).
 
     ``BAKUDO_ENV=dev`` opts into the local, host-executing runner (the same
-    one ``bakudo trial run``/``bakudo experiment run`` use, and the only one
-    safe for scenario fixture/agent code today). Any other posture refuses
-    rather than silently executing untrusted diff-adjacent code on the host.
+    one ``bakudo trial run``/``bakudo experiment run`` use in dev mode).
+    Otherwise, ``resolve_sandbox_mode() == "abox"`` opts into the real
+    abox-backed guest runner (:func:`bakudo.abox.hidden_bench.abox_test_runner`,
+    Task 8) -- the same posture check ``Deps.sandbox_fn`` uses for the agent
+    sandbox itself, so hidden-test grading and agent execution can never
+    silently disagree about whether abox is the live boundary. Any other
+    posture refuses rather than silently executing untrusted diff-adjacent
+    code on the host.
     """
     if os.environ.get("BAKUDO_ENV") == "dev":
         from ..scenarios.testrun import local_test_runner
 
         return local_test_runner(workspace, command)
+    if resolve_sandbox_mode() == "abox":
+        from ..abox.hidden_bench import abox_test_runner
+
+        return abox_test_runner(workspace, command)
     raise RuntimeError(HIDDEN_EVAL_REMEDIATION)
 
 
@@ -902,8 +911,8 @@ def evaluate_trial_hidden(input: dict) -> dict:
     the expected/actual status comparison, all folded in here since they
     require the scenario (registry file I/O) that workflow code may not
     load itself (R1). Uses ``Deps.hidden_eval_fn`` -- fails closed outside
-    ``BAKUDO_ENV=dev`` until a first-class abox hidden-test runner lands
-    (see :data:`HIDDEN_EVAL_REMEDIATION`).
+    ``BAKUDO_ENV=dev``/``BAKUDO_SANDBOX=abox`` (see
+    :data:`HIDDEN_EVAL_REMEDIATION`).
     """
     from ..trials import hidden
     from ..trials.runner import compute_hack_flags
