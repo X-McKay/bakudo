@@ -618,6 +618,19 @@ def test_post_repos_conflicting_path_for_same_name_is_409(tmp_path):
     assert resp.status_code == 409
 
 
+def test_post_repos_target_already_exists_is_409(tmp_path, monkeypatch):
+    """Code review finding 4: the pre-clone existing-target-dir branch."""
+    source = _init_git_repo(tmp_path / "source-repo")
+    dest_root = tmp_path / "checkouts"
+    (dest_root / "source-repo").mkdir(parents=True)
+    monkeypatch.setenv("BAKUDO_REPO_ROOT", str(dest_root))
+
+    client = TestClient(build_app())
+    resp = client.post("/repos", json={"source": f"file://{source}"})
+    assert resp.status_code == 409
+    assert "already exists" in resp.json()["detail"]
+
+
 def test_post_repos_missing_local_path_is_404(tmp_path):
     client = TestClient(build_app())
     resp = client.post("/repos", json={"source": str(tmp_path / "does-not-exist")})

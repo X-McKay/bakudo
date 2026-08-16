@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -458,69 +457,25 @@ def _repo_ledger():
     return InMemoryLedger()
 
 
-# A real remote URL (https://, git@...) or a file:// URL -- the latter
-# included so `bakudo repo add` can be exercised end-to-end (clone + all)
-# without network access, using `git clone file://...` against a local repo.
-_REPO_URL_RE = re.compile(r"^(https?://|git@|file://)")
-
-
 def _cmd_repo_add(args: argparse.Namespace) -> int:
     """Clone (URL) or register in place (local path) a repo checkout."""
-    import os
-    import subprocess
+    from .registry.repos import RepoAddError, add_repo
 
-    from .registry.records import RepoRecord
-
-    source = args.source
-    if _REPO_URL_RE.match(source):
-        tail = source.rstrip("/").rsplit("/", 1)[-1]
-        if tail.endswith(".git"):
-            tail = tail[: -len(".git")]
-        name = args.name or tail
-        root_env = os.environ.get("BAKUDO_REPO_ROOT")
-        root = Path(root_env) if root_env else Path.cwd()
-        target = root / name
-        if target.exists():
-            print(f"error: {target} already exists; refusing to clone over it", file=sys.stderr)
-            return 1
-        try:
-            subprocess.run(
-                ["git", "clone", source, str(target)], check=True, capture_output=True
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (
-                exc.stderr or ""
-            )
-            print(f"error: git clone failed: {stderr.strip() or exc}", file=sys.stderr)
-            return 1
-        path = target.resolve()
-    else:
-        candidate = Path(source)
-        if not candidate.exists():
-            print(f"error: {candidate} does not exist", file=sys.stderr)
-            return 1
-        if not (candidate / ".git").exists():
-            print(f"error: {candidate} is not a git checkout (no .git)", file=sys.stderr)
-            return 1
-        name = args.name or candidate.resolve().name
-        path = candidate.resolve()
-
-    record = RepoRecord(
-        name=name,
-        source=source,
-        path=str(path),
-        default_base_ref=args.base_ref or "main",
-    )
     try:
-        _repo_ledger().register_repo(record)
-    except ValueError as exc:
+        record = add_repo(
+            args.source,
+            name=args.name,
+            base_ref=args.base_ref,
+            ledger=_repo_ledger(),
+        )
+    except (RepoAddError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
         print(json.dumps(record.model_dump(mode="json"), indent=2))
     else:
-        print(f"registered {name!r} -> {path}")
+        print(f"registered {record.name!r} -> {record.path}")
     return 0
 
 

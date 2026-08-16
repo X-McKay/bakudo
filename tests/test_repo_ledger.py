@@ -102,6 +102,62 @@ def test_deregister_unknown_name_raises_key_error(ledger):
 
 
 # --------------------------------------------------------------------------
+# add_repo() helper: rollback-on-register-failure (code review finding 1)
+# --------------------------------------------------------------------------
+
+
+def test_add_repo_rolls_back_clone_on_register_conflict(tmp_path):
+    from bakudo.registry.repos import add_repo
+
+    ledger = InMemoryLedger()
+    # name "dup" already registered at a different path -- register_repo
+    # will reject the clone's record with a ValueError.
+    ledger.register_repo(
+        RepoRecord(name="dup", source="/other", path=str(tmp_path / "A"))
+    )
+
+    source = _init_git_repo(tmp_path / "source-repo")
+    dest_root = tmp_path / "checkouts"
+    dest_root.mkdir()
+
+    with pytest.raises(ValueError):
+        add_repo(f"file://{source}", name="dup", ledger=ledger, repo_root=dest_root)
+
+    cloned = dest_root / "dup"
+    assert not cloned.exists(), "a clone made by a rejected register must be rolled back"
+
+    # Retrying with the SAME name must reach the real conflict again (a
+    # plain ValueError), not RepoTargetExistsError from an orphaned clone
+    # directory left behind by the first attempt.
+    with pytest.raises(ValueError):
+        add_repo(f"file://{source}", name="dup", ledger=ledger, repo_root=dest_root)
+    assert not cloned.exists()
+
+    # A fresh name still succeeds cleanly.
+    record = add_repo(f"file://{source}", name="dup2", ledger=ledger, repo_root=dest_root)
+    assert record.path == str((dest_root / "dup2").resolve())
+
+
+def test_add_repo_local_path_conflict_never_touches_filesystem(tmp_path):
+    """Rollback only removes a directory THIS call cloned -- a local path
+    registered in place must never be deleted, conflict or not."""
+    from bakudo.registry.repos import add_repo
+
+    ledger = InMemoryLedger()
+    other = tmp_path / "other"
+    other.mkdir()
+    ledger.register_repo(RepoRecord(name="dup", source="/other", path=str(other)))
+
+    local = _init_git_repo(tmp_path / "local-repo")
+    with pytest.raises(ValueError):
+        add_repo(str(local), name="dup", ledger=ledger)
+
+    assert local.exists() and (local / ".git").exists(), (
+        "register-in-place must never be deleted on a register conflict"
+    )
+
+
+# --------------------------------------------------------------------------
 # `bakudo repo` CLI
 # --------------------------------------------------------------------------
 
@@ -222,4 +278,35 @@ def test_cli_repo_remove_unknown_name_exits_1(capsys, shared_ledger):
 
     rc = main(["repo", "remove", "does-not-exist"])
     assert rc == 1
-    assert "does-not-exist" in capsys.readouterr().err
+
+
+def test_cli_repo_add_rolls_back_clone_on_register_conflict(
+    monkeypatch, tmp_path, capsys, shared_ledger
+):
+    """Code review finding 1: register a repo under name X at path A, then
+    `repo add` a file:// URL with --name X -> error AND the clone target
+    does not remain on disk (so a retry reaches the real conflict again,
+    not a misleading 'target already exists')."""
+    from bakudo.cli import main
+
+    other = tmp_path / "other-checkout"
+    other.mkdir()
+    shared_ledger.register_repo(RepoRecord(name="dup", source="/other", path=str(other)))
+
+    source = _init_git_repo(tmp_path / "source-repo")
+    dest_root = tmp_path / "checkouts"
+    dest_root.mkdir()
+    monkeypatch.setenv("BAKUDO_REPO_ROOT", str(dest_root))
+
+    rc = main(["repo", "add", f"file://{source}", "--name", "dup"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "already registered" in err
+    assert not (dest_root / "dup").exists(), "the orphaned clone must be rolled back"
+
+    # Retry must reach the same real conflict, not "target already exists".
+    rc = main(["repo", "add", f"file://{source}", "--name", "dup"])
+    assert rc == 1
+    err2 = capsys.readouterr().err
+    assert "already registered" in err2
+    assert "already exists" not in err2

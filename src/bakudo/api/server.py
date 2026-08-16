@@ -11,7 +11,6 @@ import logging
 import os
 import secrets
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -416,53 +415,23 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         """Clone (URL) or register in place (local path) a repo checkout --
         same semantics as ``bakudo repo add`` (repo onboarding, P2 Task 1).
         Clone only, never execute: a plain ``git clone`` subprocess."""
-        import os
-        import re
-        import subprocess
-
-        from ..registry.records import RepoRecord
-
-        source = body.source
-        if re.match(r"^(https?://|git@|file://)", source):
-            tail = source.rstrip("/").rsplit("/", 1)[-1]
-            if tail.endswith(".git"):
-                tail = tail[: -len(".git")]
-            name = body.name or tail
-            root_env = os.environ.get("BAKUDO_REPO_ROOT")
-            root = Path(root_env) if root_env else Path.cwd()
-            target = root / name
-            if target.exists():
-                raise HTTPException(
-                    status_code=409, detail=f"{target} already exists"
-                )
-            try:
-                subprocess.run(
-                    ["git", "clone", source, str(target)], check=True, capture_output=True
-                )
-            except subprocess.CalledProcessError as exc:
-                stderr = (
-                    exc.stderr.decode(errors="replace")
-                    if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-                )
-                raise HTTPException(
-                    status_code=422, detail=f"git clone failed: {stderr.strip() or exc}"
-                ) from exc
-            path = target.resolve()
-        else:
-            candidate = Path(source)
-            if not candidate.exists() or not (candidate / ".git").exists():
-                raise HTTPException(
-                    status_code=404, detail=f"{candidate} is not a git checkout"
-                )
-            name = body.name or candidate.resolve().name
-            path = candidate.resolve()
-
-        record = RepoRecord(
-            name=name, source=source, path=str(path),
-            default_base_ref=body.baseRef or "main",
+        from ..registry.repos import (
+            RepoCloneError,
+            RepoSourceInvalidError,
+            RepoTargetExistsError,
         )
+        from ..registry.repos import add_repo as add_repo_record
+
         try:
-            tools.ledger.register_repo(record)
+            record = add_repo_record(
+                body.source, name=body.name, base_ref=body.baseRef, ledger=tools.ledger,
+            )
+        except RepoTargetExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RepoSourceInvalidError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RepoCloneError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return record.model_dump(mode="json")
