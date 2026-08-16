@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .. import __version__ as bakudo_version
 from .. import ids, paths
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome, AboxRunner
@@ -673,17 +674,26 @@ def collect_signals(inp: ObserveInput) -> list[dict]:
 # bakudo.experiments.design.trial_seed helper.
 
 
-def resolve_experiment_scenarios(input: dict) -> list[dict]:
-    """Resolve an ExperimentSpec's scenario selection to plain descriptors.
+def resolve_experiment_scenarios(input: dict) -> dict:
+    """Resolve an ExperimentSpec's scenario selection AND its arm refs.
 
     Runs :func:`bakudo.experiments.design.select_scenarios` (registry file
-    I/O) so ``ExperimentWorkflow`` never has to (R1). Returns one descriptor
-    per selected scenario, in the same deterministic order
-    ``select_scenarios`` produces, carrying everything ``ExperimentWorkflow``
-    and the other trial activities need without themselves touching the
-    registry: the ref components, its content digest (immutability), and the
-    family/twin_of metadata :func:`bakudo.experiments.runner.assemble_result`
-    keys its per-family/twin-pair sections on.
+    I/O) so ``ExperimentWorkflow`` never has to (R1), and resolves every arm
+    ref (``spec.baseline`` + ``spec.candidates``) the same on-disk,
+    pinned-version-checked way :func:`provision_trial`
+    (``_resolve_trial_agent_spec``) does. Returns
+    ``{"scenarios": [descriptor, ...], "resolvedArms": {raw_ref: resolved_ref}}``.
+
+    The arm resolution matters beyond labelling: every ``TrialRecord`` a
+    ``TrialWorkflow`` child records carries the RESOLVED ref (whatever
+    ``provision_trial``/``_resolve_trial_agent_spec`` actually loaded off
+    disk), so if ``ExperimentWorkflow`` built its trial matrix and handed
+    ``analyze_experiment`` the RAW (possibly unpinned) ``spec.baseline``/
+    ``candidates`` instead, every ``TrialRecord.agent_ref == spec.baseline``
+    comparison inside :func:`bakudo.experiments.runner.assemble_result`
+    would silently fail to match and zero every statistic. Resolving once,
+    here, keeps the trial matrix's arms and the spec ``analyze_experiment``/
+    the persisted experiment row carry in lockstep with what actually ran.
     """
     from ..experiments.design import select_scenarios
     from ..experiments.models import ExperimentSpec
@@ -691,7 +701,7 @@ def resolve_experiment_scenarios(input: dict) -> list[dict]:
     spec = ExperimentSpec.model_validate(input["spec"])
     registry = DEPS.scenario_registry_fn()
     scenarios = select_scenarios(registry, spec)
-    return [
+    descriptors = [
         {
             "name": s.spec.metadata.name,
             "version": s.spec.metadata.version,
@@ -701,6 +711,14 @@ def resolve_experiment_scenarios(input: dict) -> list[dict]:
         }
         for s in scenarios
     ]
+
+    resolved_arms: dict[str, str] = {}
+    for raw_ref in (spec.baseline, *spec.candidates):
+        if raw_ref in resolved_arms:
+            continue
+        resolved_arms[raw_ref] = _resolve_trial_agent_spec(raw_ref).ref
+
+    return {"scenarios": descriptors, "resolvedArms": resolved_arms}
 
 
 def _resolve_trial_agent_spec(agent_ref: str) -> AgentSpec:
@@ -793,13 +811,29 @@ def provision_trial(input: dict) -> dict:
     return {
         "repo_path": str(ws.repo_path),
         "objective": objective.to_dict(),
-        "agent_spec": adjusted_spec.model_dump(by_alias=True, mode="json"),
+        # AgentSpec.to_dict() (exclude_none=True) -- a bare model_dump would
+        # serialize every unset-optional field as JSON null, which the
+        # schema rejects for typed fields like budget/maxUsd or
+        # tools[].policy (bakudo.schema.validate_agent_spec, invoked by
+        # parse_spec inside render_bundle).
+        "agent_spec": adjusted_spec.to_dict(),
         "agent_ref": agent_spec.ref,
         "scenario_name": scenario.spec.metadata.name,
         "scenario_version": scenario.spec.metadata.version,
         "scenario_digest": scenario.digest,
         "budgets": scenario.spec.budgets.model_dump(mode="json"),
         "network": scenario.spec.environment.network,
+        # Same pins the sync run_trial records (bakudo/trials/runner.py):
+        # {"bakudo": __version__, "scenario_digest_algo": "sha256"} merged
+        # with build_pipeline_fn's PipelineResultLike.pins
+        # ({"model_id": ..., "sandbox_profile": ...}). Built here (not in
+        # workflow code) since it needs the resolved AgentSpec object.
+        "pins": {
+            "bakudo": bakudo_version,
+            "scenario_digest_algo": "sha256",
+            "model_id": adjusted_spec.model.model_id,
+            "sandbox_profile": adjusted_spec.sandbox.profile,
+        },
         "timeout_seconds": timeout_seconds,
     }
 

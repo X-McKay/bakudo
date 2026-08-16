@@ -162,7 +162,7 @@ def reconcile_runs(run_ids: list[str]) -> list[str]:
 
 
 @_DEFN(name="resolve_experiment_scenarios")
-def resolve_experiment_scenarios(input: dict) -> list[dict]:
+def resolve_experiment_scenarios(input: dict) -> dict:
     return _impl.resolve_experiment_scenarios(input)
 
 

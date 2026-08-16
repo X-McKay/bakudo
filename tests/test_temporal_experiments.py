@@ -14,7 +14,9 @@ persistence), not the trial/hidden-eval internals Tasks 6/7 already cover.
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -122,6 +124,12 @@ def _provision_stub(fail_for: tuple[str, str] | None = None):
             "budgets": {},
             "network": "none",
             "timeout_seconds": 60,
+            "pins": {
+                "bakudo": "0.0.0-stub",
+                "scenario_digest_algo": "sha256",
+                "model_id": agent_spec_doc["model"]["modelId"],
+                "sandbox_profile": agent_spec_doc["sandbox"]["profile"],
+            },
         }
 
     return _stub
@@ -145,13 +153,22 @@ def _hidden_stub(input: dict) -> dict:
     }
 
 
-def _scenarios_stub(input: dict) -> list[dict]:
-    return [
-        {"name": "scenario-a", "version": 1, "digest": "da", "family": "debugging",
-         "twin_of": None},
-        {"name": "scenario-b", "version": 1, "digest": "db", "family": "debugging",
-         "twin_of": None},
-    ]
+def _scenarios_stub(input: dict) -> dict:
+    """Identity arm resolution (every test spec here already uses pinned
+    refs) -- ``resolvedArms`` is still built from ``input["spec"]`` so a
+    test can also exercise Finding #4's resolution contract by asserting on
+    it directly, without special-casing this stub further."""
+    spec = input["spec"]
+    arm_refs = [spec["baseline"], *spec.get("candidates", [])]
+    return {
+        "scenarios": [
+            {"name": "scenario-a", "version": 1, "digest": "da", "family": "debugging",
+             "twin_of": None},
+            {"name": "scenario-b", "version": 1, "digest": "db", "family": "debugging",
+             "twin_of": None},
+        ],
+        "resolvedArms": {ref: ref for ref in arm_refs},
+    }
 
 
 @pytest.fixture
@@ -211,10 +228,24 @@ async def test_trial_workflow_happy_path(env, deps, monkeypatch):
     assert out["evaluation"]["f2p_rate"] == 1.0
     assert out["seed"] == 7
 
+    # Finding #2: pins must carry the same provenance fields the sync
+    # run_trial path records, not be dropped to {}.
+    assert out["pins"], "pins must not be empty on the Temporal trial path"
+    assert out["pins"]["bakudo"] == "0.0.0-stub"
+    assert out["pins"]["scenario_digest_algo"] == "sha256"
+    assert out["pins"]["model_id"]
+    assert out["pins"]["sandbox_profile"]
+
+    # Finding #3: the AgentRunWorkflow child's scorecard must not be
+    # silently dropped from evaluation.
+    assert out["evaluation"]["scorecard"] is not None
+
     recorded = deps.get_trial(out["id"])
     assert recorded is not None
     assert recorded.status == "completed"
     assert recorded.agent_ref == "explore@1"
+    assert recorded.pins == out["pins"]
+    assert recorded.evaluation.get("scorecard") is not None
 
 
 # --- ExperimentWorkflow ---
@@ -302,6 +333,129 @@ async def test_experiment_child_crash_recorded(env, deps, monkeypatch):
     assert failed[0].scenario_name == "scenario-b"
     assert failed[0].agent_ref == "explore-candidate@1"
     assert "error" in failed[0].evaluation
+
+
+# --- CRITICAL fix: dev-mode local_sandbox must run against the provisioned
+# fixture, not a fresh empty throwaway repo (abox/local.py workspace_root
+# resolution) ---
+
+
+def test_provision_trial_local_sandbox_uses_provisioned_fixture(monkeypatch):
+    """Non-stubbed integration test: real ``provision_trial`` + real
+    ``local_sandbox`` for csv-sum-offbyone, called with the EXACT shape
+    ``_impl.run_sandbox`` uses (``bundle`` only, no ``workspace_root``).
+
+    Before the fix, ``local_sandbox`` ignored ``bundle.objective.repo``
+    whenever ``workspace_root`` was omitted and always fabricated a fresh,
+    empty git repo -- so a Temporal-driven dev-mode trial's tool calls never
+    saw the scenario fixture at all. A custom ``offline_driver`` reads
+    ``summer.py`` through the agent's own ``read-file`` tool and the test
+    asserts its content is the REAL fixture content, not a
+    file-not-found/empty read against an unrelated throwaway repo.
+    """
+    monkeypatch.setenv("BAKUDO_ENV", "dev")
+
+    from bakudo.abox.local import local_sandbox
+    from bakudo.agent_spec import parse_spec
+    from bakudo.bundle import Budget, TaskBundle
+    from bakudo.curriculum.objective import Objective
+
+    provisioned = _impl.provision_trial(
+        {"scenario": "csv-sum-offbyone@1", "agent": "explore", "seed": 1}
+    )
+    expected_content = (Path(provisioned["repo_path"]) / "summer.py").read_text()
+    assert expected_content, "the provisioned fixture must actually contain summer.py"
+
+    objective = Objective.model_validate(provisioned["objective"])
+    agent_spec = parse_spec(provisioned["agent_spec"])
+    bundle = TaskBundle(
+        run_id="run_localfixture1",
+        objective_id=objective.id,
+        objective=objective,
+        agent_spec=agent_spec,
+        budget=Budget(timeoutSeconds=60),
+    )
+
+    seen: dict = {}
+
+    def offline_driver(system_prompt, user_prompt, tool_callables):
+        seen["content"] = tool_callables["read-file"](path="summer.py")["content"]
+        return json.dumps(
+            {
+                "status": "success",
+                "summary": "read summer.py",
+                "changedFiles": [],
+                "proposedFollowups": [],
+                "memoriesToWrite": [],
+            }
+        )
+
+    outcome = local_sandbox(bundle, offline_driver=offline_driver)
+
+    assert seen.get("content") == expected_content, (
+        "local_sandbox must run the agent against the provisioned fixture "
+        "workspace, not a fresh empty throwaway repo"
+    )
+    assert outcome.result["status"] == "success"
+
+
+# --- Finding #4: unpinned arm refs must resolve once, in lockstep with what
+# TrialRecord.agent_ref actually records ---
+
+
+async def test_experiment_workflow_resolves_unpinned_arm_refs(env, deps):
+    """An experiment spec with an UNPINNED baseline ref ("explore", no
+    ``@version``) must resolve to the actual on-disk version ("explore@1")
+    for the trial matrix's agent refs AND for ``analyze_experiment``'s
+    spec/the persisted experiment row -- otherwise every (resolved)
+    ``TrialRecord.agent_ref`` never equals the (raw, unpinned)
+    ``spec.baseline`` ``assemble_result`` compares against, and every
+    per-family/comparison statistic silently zeroes.
+
+    Real (non-stubbed) ``resolve_experiment_scenarios`` / ``provision_trial``
+    / ``evaluate_trial_hidden`` / ``analyze_experiment`` against the real
+    on-disk registry + agents dir; only the ``AgentRunWorkflow`` sandbox is
+    stubbed (the ``deps`` fixture) to avoid a live model. Selects the real
+    ``rate-limiter-nochange`` scenario, whose empty ``failToPass`` makes its
+    f2p_rate -- and so ``perFamily["no-change"]["baselineMean"]`` -- vacuously
+    ``1.0`` regardless of what the stubbed agent's diff actually did, so a
+    non-zero result here can only mean the resolved-ref match worked, not
+    that the agent happened to "solve" anything.
+    """
+    spec = {
+        "apiVersion": "bakudo.ai/v1alpha1",
+        "kind": "ExperimentSpec",
+        "metadata": {"name": "unpinned-exp"},
+        "subject": "agent-spec",
+        "baseline": "explore",  # deliberately unpinned
+        "candidates": [],
+        "scenarioSelector": {"families": ["no-change"], "count": 1},
+        "repetitions": 1,
+    }
+
+    async with make_worker(
+        env, [ExperimentWorkflow, TrialWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        result = await env.client.execute_workflow(
+            ExperimentWorkflow.run,
+            ExperimentInput(spec=spec),
+            id="experiment-run_UNPINNED1",
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert result["baseline"] == "explore@1", "result.baseline must carry the resolved ref"
+    assert result["candidates"] == []
+
+    experiment = next(iter(deps._experiments.values()))
+    assert experiment["spec"]["baseline"] == "explore@1", (
+        "persisted experiment spec must carry the resolved ref, not the raw unpinned one"
+    )
+
+    trials = deps.list_trials(experiment["id"])
+    assert trials, "no trials recorded"
+    assert all(t.agent_ref == "explore@1" for t in trials), [t.agent_ref for t in trials]
+
+    assert result["perFamily"]["no-change"]["baselineMean"] == 1.0, result["perFamily"]
 
 
 # --- registration / starters ---

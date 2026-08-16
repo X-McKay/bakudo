@@ -632,7 +632,7 @@ class TrialWorkflow:
             "scenario_version": provisioned["scenario_version"],
             "scenario_digest": provisioned["scenario_digest"],
             "seed": inp.seed,
-            "pins": {},
+            "pins": provisioned.get("pins") or {},
             "metrics": metrics,
             "evaluation": {
                 "f2p_rate": hidden_result["f2p_rate"],
@@ -642,6 +642,9 @@ class TrialWorkflow:
                 "expected_status": hidden_result["expected_status"],
                 "actual_status": hidden_result["actual_status"],
                 "status_match": hidden_result["status_match"],
+                # Same key the sync run_trial path uses
+                # (bakudo/trials/runner.py's evaluation["scorecard"]).
+                "scorecard": out.get("scorecard"),
             },
             "flags": hidden_result["hack_flags"],
             "status": "completed",
@@ -773,8 +776,26 @@ class ExperimentWorkflow:
             )
 
     async def _run(self, inp: ExperimentInput) -> dict:
-        spec = inp.spec
+        raw_spec = inp.spec
         experiment_id = f"exp_{workflow.uuid4().hex}"
+
+        # Resolve scenarios AND every arm ref (baseline + candidates) up
+        # front, same as the sync path (resolve_arm_pipeline_fn runs before
+        # run_experiment is ever called -- ruling (4)): every TrialRecord a
+        # TrialWorkflow child records carries the resolved
+        # (pinned-version-checked, on-disk) ref, so `spec` from here on is
+        # the RESOLVED spec, never the caller's possibly-unpinned one --
+        # analyze_experiment's comparisons and the persisted experiment row
+        # must both match what the trials actually recorded, or every
+        # statistic silently zeroes on a raw-vs-resolved ref mismatch.
+        resolved = await workflow.execute_activity(
+            resolve_experiment_scenarios, {"spec": raw_spec}, **_SHORT,
+        )
+        scenario_descriptors = resolved["scenarios"]
+        resolved_arms = resolved["resolvedArms"]
+        spec = dict(raw_spec)
+        spec["baseline"] = resolved_arms[raw_spec["baseline"]]
+        spec["candidates"] = [resolved_arms[c] for c in raw_spec.get("candidates", [])]
 
         await workflow.execute_activity(
             persist_experiment,
@@ -787,9 +808,6 @@ class ExperimentWorkflow:
             **_SHORT,
         )
 
-        scenario_descriptors = await workflow.execute_activity(
-            resolve_experiment_scenarios, {"spec": spec}, **_SHORT,
-        )
         matrix = _build_trial_matrix(spec, scenario_descriptors, experiment_id)
 
         semaphore = asyncio.Semaphore(_EXPERIMENT_CONCURRENCY)
