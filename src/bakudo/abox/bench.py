@@ -8,7 +8,12 @@ and times the bench again. Both timings happen in the same guest back to
 back, so they are directly comparable.
 
 The diff is model-authored code, so it is never executed host-side and the
-verification guest gets ``--network safe`` (loopback only).
+verification guest gets ``--network safe`` (host-mediated egress only).
+
+Under abox 0.7.0 every sandbox boots a fresh OCI guest (warm persists caches
+only), so each verification guest first runs the target repo's
+``.abox/prepare.sh`` — routed to stderr so pip output can never collide with
+the stdout timing marker — before timing the bench command.
 """
 
 from __future__ import annotations
@@ -20,10 +25,17 @@ import tempfile
 from pathlib import Path
 
 from .. import ids
-from .runner import Executor, _subprocess_executor
+from .runner import (
+    IN_GUEST_SETUP_HEADROOM_SECONDS,
+    SUBPROCESS_TIMEOUT_HEADROOM_SECONDS,
+    Executor,
+    _subprocess_executor,
+)
 
-# Wall clock granted beyond the guest bench work for boot/prepare/teardown.
-_VERIFY_TIMEOUT_HEADROOM_SECONDS = 120
+# Wall clock granted beyond the guest deadline for image pull, the host-side
+# auto-warm refresh, boot, and teardown — same budget the runner grants, and
+# for the same reason: a cold warm refresh under 0.7.0 can take minutes.
+_VERIFY_TIMEOUT_HEADROOM_SECONDS = SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
 
 _MARKER = "verify_bench"
 
@@ -84,18 +96,26 @@ def abox_bench_measure(
         timer = _TIMER_TEMPLATE.format(
             bench=bench_command, marker=_MARKER, repeats=_BENCH_REPEATS
         )
+        # The timer source is passed as a separate argv element ($1), never
+        # interpolated into the shell script — no quoting hazards. Prepare
+        # output goes to stderr so pip logs cannot fake the stdout marker.
+        guest_timeout = timeout + IN_GUEST_SETUP_HEADROOM_SECONDS
         argv = [
             abox_bin, "run",
             "--repo", str(repo),
             "--task", task,
             "--base", ref,
-            "--timeout", str(timeout),
+            "--timeout", str(guest_timeout),
             "--network", "safe",
             "--",
-            "python3", "-c", timer,
+            "sh", "-c",
+            "set -e; "
+            "[ ! -f /workspace/.abox/prepare.sh ] || sh /workspace/.abox/prepare.sh >&2; "
+            'exec python3 -c "$1"',
+            "sh", timer,
         ]
         try:
-            result = executor(argv, timeout + _VERIFY_TIMEOUT_HEADROOM_SECONDS)
+            result = executor(argv, guest_timeout + _VERIFY_TIMEOUT_HEADROOM_SECONDS)
             if result.exit_code != 0:
                 # Guest console interleaves into abox stdout; the actionable
                 # failure text is as likely there as on stderr.

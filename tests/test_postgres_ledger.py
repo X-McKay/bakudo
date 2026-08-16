@@ -296,6 +296,8 @@ def test_upsert_agent_version_checks_for_first_version_of_name():
 
 def test_set_version_status_updates_row_and_writes_outbox_event():
     conn = FakeConn()
+    # The `update ... returning version` finds the row (TMP-14).
+    conn.rows = [(2,)]
     PostgresLedger(conn).set_version_status(
         "add-feature", 2, "rejected", reason="safety regression"
     )
@@ -305,6 +307,7 @@ def test_set_version_status_updates_row_and_writes_outbox_event():
     assert "status = %s" in update_sql
     assert "status_reason = %s" in update_sql
     assert "decided_at = now()" in update_sql
+    assert "returning version" in update_sql
     assert update_params[:2] == ("rejected", "safety regression")
 
     outbox_sql, outbox_params = next(
@@ -323,6 +326,16 @@ def test_set_version_status_updates_row_and_writes_outbox_event():
 def test_set_version_status_rejects_unknown_status():
     with pytest.raises(ValueError):
         PostgresLedger(FakeConn()).set_version_status("add-feature", 2, "bogus")
+
+
+def test_set_version_status_unknown_version_raises_and_writes_no_event():
+    """TMP-14: an unknown name/version must raise KeyError (parity with
+    InMemoryLedger) and must NOT emit a phantom agent_version_status event
+    asserting a change that never happened."""
+    conn = FakeConn()  # no rows preloaded -> `update ... returning` finds none
+    with pytest.raises(KeyError):
+        PostgresLedger(conn).set_version_status("add-feature", 99, "canary")
+    assert not any("insert into outbox" in s for s, _ in conn.executed)
 
 
 def test_canary_version_selects_canary_status():
@@ -395,13 +408,22 @@ def _promotion_row(status="pending"):
 
 def test_resolve_promotion_updates_row_and_transitions_version():
     conn = FakeConn()
-    conn.rows = [_promotion_row()]
+    # Row queue consumed in order: the `select ... for update` (promotion
+    # row), then the cascading `update agent_spec_versions ... returning
+    # version` (TMP-15/TMP-14).
+    conn.rows = [_promotion_row(), (2,)]
     ledger = PostgresLedger(conn)
     resolved = ledger.resolve_promotion(
         "prom_T1", approved=True, approved_by="al", comment="ok"
     )
     assert resolved.status == "approved"
     assert resolved.approved_by == "al"
+
+    # The whole resolution rides one transaction (TMP-15).
+    assert conn.executed[0] == ("BEGIN", ())
+    assert conn.executed[-1] == ("COMMIT", ())
+    select_sql = next(s for s, _ in conn.executed if "from promotion_decisions" in s)
+    assert "for update" in select_sql
 
     update_sql, update_params = next(
         (s, p) for s, p in conn.executed if "update promotion_decisions" in s
@@ -420,7 +442,7 @@ def test_resolve_promotion_updates_row_and_transitions_version():
 
 def test_resolve_promotion_reject_transitions_version_to_rejected():
     conn = FakeConn()
-    conn.rows = [_promotion_row()]
+    conn.rows = [_promotion_row(), (2,)]
     PostgresLedger(conn).resolve_promotion(
         "prom_T1", approved=False, approved_by="al", comment="no"
     )

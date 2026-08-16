@@ -15,7 +15,7 @@ from typing import Any
 from .. import ids
 from ..agent_spec import AgentSpec, parse_spec
 from ..curriculum import Objective, ObjectiveQueues, QueueName
-from ..evals import EvalContext, Scorecard, decide, run_default_suite
+from ..evals import EvalContext, Scorecard, assemble_suite, decide
 from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
 from ..memory import InMemoryStore, MemoryItem, MemoryRejected, MemoryStore
 from ..registry import InMemoryLedger, RunPhase
@@ -175,7 +175,10 @@ class MetaAgentTools:
         ctx = EvalContext(
             result=pipeline.result, objective=self._objectives[pipeline.result.objective_id]
         )
-        results = run_default_suite(ctx)
+        # Same assembler as the run paths (TMP-22): objective-type-aware, so an
+        # optimize run gets perf/simplicity here too. No critic — the meta-agent
+        # tool surface has no live sandbox.
+        results = assemble_suite(ctx, with_critic=False)
         scorecard = Scorecard.from_results(results)
         return {
             "eval_results": [r.to_dict() for r in results],

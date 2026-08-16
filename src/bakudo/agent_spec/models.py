@@ -75,7 +75,13 @@ class SandboxConfig(_Strict):
     base_ref: str = Field(default="main", alias="baseRef")
     network_mode: NetworkMode = Field(default=NetworkMode.scoped, alias="networkMode")
     network_bundles: list[str] = Field(default_factory=list, alias="networkBundles")
-    timeout_seconds: int = Field(default=3600, alias="timeoutSeconds", ge=1)
+    # Upper bound keeps spec timeout + the abox setup/kill headroom inside the
+    # run_sandbox activity's start_to_close_timeout (workflows._SANDBOX) — an
+    # unbounded spec would let Temporal kill the activity mid-run with no
+    # result while the microVM keeps executing.
+    timeout_seconds: int = Field(
+        default=3600, alias="timeoutSeconds", ge=1, le=10_800
+    )
     ephemeral: bool = False
     max_changed_files: int | None = Field(default=None, alias="maxChangedFiles", ge=0)
     max_diff_bytes: int | None = Field(default=None, alias="maxDiffBytes", ge=0)

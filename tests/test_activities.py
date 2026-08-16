@@ -442,3 +442,29 @@ def test_run_sandbox_dict_carries_error_and_stderr_tail(monkeypatch):
     out = _impl.run_sandbox(_impl.render_bundle(inp))
     assert out["error"] == "no result.json at /w/.agent/result.json"
     assert out["stderr"].endswith("the real cause") and len(out["stderr"]) <= 2000
+
+
+def test_reconcile_runs_reports_only_terminal_runs(monkeypatch):
+    """reconcile_runs returns the run ids the ledger reports as terminal, so
+    the meta-agent frees only slots for finished runs — never a still-running
+    child (TMP-18, review follow-up)."""
+    from bakudo.registry import InMemoryLedger
+    from bakudo.registry.records import RunPhase, RunRecord
+
+    ledger = InMemoryLedger()
+
+    def _run(rid):
+        return RunRecord(id=rid, temporal_workflow_id="wf", abox_task_id=rid,
+                         objective_id="obj", agent_ref="explore@1")
+
+    ledger.create_run(_run("done"))
+    ledger.finish_run("done", RunPhase.completed, {"status": "success"})
+    ledger.create_run(_run("failed"))
+    ledger.finish_run("failed", RunPhase.failed, None)
+    ledger.create_run(_run("running"))
+    ledger.set_phase("running", RunPhase.agent_running)
+
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    # "missing" has no ledger record and must be left alone (may be mid-dispatch).
+    finished = set(_impl.reconcile_runs(["done", "failed", "running", "missing"]))
+    assert finished == {"done", "failed"}

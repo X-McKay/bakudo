@@ -67,7 +67,19 @@ def test_run_sandbox_activity_options_pin_heartbeat_and_single_attempt():
     assert _SANDBOX["retry_policy"].maximum_attempts == 1
     assert _SANDBOX["heartbeat_timeout"] is not None
     assert _SANDBOX["heartbeat_timeout"] <= timedelta(minutes=10)
-    assert _SANDBOX["start_to_close_timeout"] == timedelta(hours=2)
+    # Must exceed the worst-case abox subprocess: the spec-schema cap on
+    # timeoutSeconds (10800s) + in-guest setup headroom + host kill headroom.
+    from bakudo.abox.runner import (
+        IN_GUEST_SETUP_HEADROOM_SECONDS,
+        SUBPROCESS_TIMEOUT_HEADROOM_SECONDS,
+    )
+
+    worst_case = timedelta(
+        seconds=10_800
+        + IN_GUEST_SETUP_HEADROOM_SECONDS
+        + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
+    )
+    assert _SANDBOX["start_to_close_timeout"] >= worst_case
 
 
 def test_worker_configs_use_thread_pool_executor():

@@ -92,7 +92,13 @@ DEFAULT_POLICY = PromotionPolicy()
 
 
 # decide() outcome -> candidate version status (design §1): the decision and
-# the version state machine move together.
+# the version state machine move together. The mapping is kept *total* over
+# ``Decision`` so ``apply_decision`` can index it for any decision without a
+# KeyError. Note ``decide()`` itself never returns ``Decision.promote`` — it
+# only ever yields reject/needs_human/canary. The ``promote -> active``
+# transition is reached exclusively by ``check_canary_graduation`` calling
+# ``set_version_status`` directly once a canary clears its window; the entry
+# exists for totality, not because auto-decide produces it.
 DECISION_TO_VERSION_STATUS: dict[Decision, str] = {
     Decision.reject: "rejected",
     Decision.needs_human: "pending_human",

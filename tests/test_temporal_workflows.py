@@ -138,8 +138,11 @@ async def test_agent_run_workflow_happy_path_writes_full_event_log(env, deps):
     assert kinds[0] == "created" and kinds.count("created") == 1
     assert kinds.count("finished") == 1
     phases = [e.payload.get("phase") for e in events if e.event_type == "phase"]
+    # No `sandbox_starting`: it and `agent_running` were persisted back-to-back
+    # before the sandbox even booted, so the distinction was illusory. This now
+    # matches the synchronous pipeline mirror, which records the same sequence.
     assert phases == [
-        "bundle_rendered", "sandbox_starting", "agent_running",
+        "bundle_rendered", "agent_running",
         "collecting_artifacts", "evaluating",
     ]
     # Evals were recorded against the run.
@@ -618,3 +621,272 @@ async def test_continue_as_new_abandons_in_flight_children(env, deps, monkeypatc
             attrs.parent_close_policy == ProtoPolicy.PARENT_CLOSE_POLICY_ABANDON
             for attrs in initiated
         ), "children must be started with ParentClosePolicy.ABANDON (TMP-6)"
+
+
+# --- governance that actually governs (TMP-17/18/19/20) ---
+
+
+def _meta_with_state(**state_kwargs):
+    """A MetaAgentWorkflow instance for unit-testing the pure gating helpers
+    (no Temporal env needed — these methods touch no workflow.* APIs)."""
+    wf = MetaAgentWorkflow()
+    for k, v in state_kwargs.items():
+        setattr(wf._state, k, v)
+    return wf
+
+
+def test_dispatch_candidate_respects_global_concurrency_cap():
+    wf = _meta_with_state(max_concurrent_runs=2)
+    wf._backlog = [{"id": "o1", "type": "explore"}]
+    wf._state.active_runs = ["r1", "r2"]
+    wf._state.active_run_roles = {"r1": "explore", "r2": "explore"}
+    assert wf._dispatch_candidate() is None  # global cap reached
+    wf._state.active_runs = ["r1"]
+    wf._state.active_run_roles = {"r1": "explore"}
+    assert wf._dispatch_candidate()["id"] == "o1"
+
+
+def test_dispatch_candidate_respects_per_role_cap_without_head_of_line_block():
+    """A capped role must not block an unrelated objective behind it while
+    global capacity remains (TMP-17)."""
+    wf = _meta_with_state(max_concurrent_runs=5, role_concurrency={"add-feature": 1})
+    wf._state.active_runs = ["r1"]
+    wf._state.active_run_roles = {"r1": "add-feature"}
+    wf._backlog = [
+        {"id": "blocked", "type": "add-feature"},   # role at cap
+        {"id": "ok", "type": "explore"},            # unrelated, has capacity
+    ]
+    assert wf._dispatch_candidate()["id"] == "ok"
+
+
+def test_dispatch_candidate_blocks_when_budget_exhausted():
+    wf = _meta_with_state(budget_usd_remaining=0.0)
+    wf._backlog = [{"id": "o1", "type": "explore"}]
+    assert wf._dispatch_candidate() is None
+    wf._state.budget_usd_remaining = 5.0
+    assert wf._dispatch_candidate()["id"] == "o1"
+
+
+def test_dispatch_candidate_blocks_while_paused_or_observing():
+    wf = _meta_with_state()
+    wf._backlog = [{"id": "o1", "type": "explore"}]
+    wf._paused = True
+    assert wf._dispatch_candidate() is None
+    wf._paused = False
+    wf._state.mode = "observe"
+    assert wf._dispatch_candidate() is None
+    wf._state.mode = "sandbox-autonomous"
+    assert wf._dispatch_candidate()["id"] == "o1"
+
+
+def test_run_completed_decrements_priced_budget_and_drains_state():
+    wf = _meta_with_state(budget_usd_remaining=10.0, usd_per_1k_tokens=2.0)
+    wf._state.active_runs = ["r1"]
+    wf._state.active_run_roles = {"r1": "explore"}
+    wf._state.active_run_started = {"r1": "2026-08-15T00:00:00+00:00"}
+    wf.run_completed("r1", tokens_used=1000)
+    assert wf._state.budget_usd_remaining == 8.0  # 1000/1000 * 2.0
+    assert wf._state.active_runs == []
+    assert wf._state.active_run_roles == {} and wf._state.active_run_started == {}
+
+
+def test_run_completed_default_rate_is_a_noop_on_budget():
+    wf = _meta_with_state(budget_usd_remaining=10.0)  # rate defaults to 0.0
+    wf._state.active_runs = ["r1"]
+    wf.run_completed("r1", tokens_used=100000)
+    assert wf._state.budget_usd_remaining == 10.0
+
+
+def test_stale_active_runs_selects_only_expired_entries():
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)
+    wf = _meta_with_state(active_run_ttl_hours=3.0)
+    wf._state.active_run_started = {
+        "fresh": (now - timedelta(hours=1)).isoformat(),
+        "stale": (now - timedelta(hours=4)).isoformat(),
+    }
+    assert wf._stale_active_runs(now) == ["stale"]
+
+
+def test_drop_active_run_clears_all_tracking_maps():
+    wf = _meta_with_state()
+    wf._state.active_runs = ["fresh", "stale"]
+    wf._state.active_run_roles = {"fresh": "explore", "stale": "explore"}
+    wf._state.active_run_started = {"fresh": "t1", "stale": "t2"}
+    wf._drop_active_run("stale")
+    assert wf._state.active_runs == ["fresh"]
+    assert "stale" not in wf._state.active_run_roles
+    assert "stale" not in wf._state.active_run_started
+
+
+def test_spec_name_version_extracts_or_raises_malformed():
+    from bakudo.temporal.workflows import _MalformedSpec
+
+    good = {"agent_spec": {"metadata": {"name": "explore", "version": 3}}}
+    assert AgentRunWorkflow._spec_name_version(good) == ("explore", 3)
+    for bad in (
+        {"agent_spec": {"metadata": {"version": 1}}},   # no name
+        {"agent_spec": {"metadata": {"name": "x"}}},     # no version
+        {"agent_spec": {}},                              # no metadata
+        {},                                              # no agent_spec
+    ):
+        with pytest.raises(_MalformedSpec):
+            AgentRunWorkflow._spec_name_version(bad)
+
+
+async def test_meta_budget_zero_blocks_dispatch(env, deps):
+    """change_budget(0) must actually halt dispatch — the budget knob is a
+    real kill-switch, not decorative (TMP-17)."""
+    async with make_worker(env, [MetaAgentWorkflow, AgentRunWorkflow, EvalWorkflow]):
+        handle = await env.client.start_workflow(
+            MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
+        )
+        await handle.execute_update(MetaAgentWorkflow.change_budget, 0.0)
+        await handle.signal(
+            MetaAgentWorkflow.new_objective,
+            {"id": "obj_B0", "type": "explore", "repo": "r", "title": "t",
+             "suggestedAgents": ["explore"]},
+        )
+        await asyncio.sleep(0.5)
+        status = await handle.query(MetaAgentWorkflow.get_status)
+        budget = await handle.query(MetaAgentWorkflow.get_budget_state)
+        assert status["backlog"] == 1, "objective must stay queued while budget is 0"
+        assert deps._runs == {}, "no run may dispatch on an exhausted budget"
+        assert budget["budget_exhausted"] is True
+
+        # Restoring the budget releases the queued objective.
+        await handle.execute_update(MetaAgentWorkflow.change_budget, 50.0)
+
+        async def dispatched():
+            return bool(deps._runs)
+
+        assert await _poll(dispatched), "dispatch must resume once budget is restored"
+
+
+async def test_meta_routes_optimize_objective_into_optimization_workflow(
+    env, deps, monkeypatch
+):
+    """An optimize objective must drive OptimizationWorkflow (scout->attempt->
+    verify), not a single AgentRunWorkflow (TMP-19); and the loop notifies
+    run_completed so the meta active_runs drains."""
+    monkeypatch.setattr(_impl.DEPS, "sandbox", _optimize_scripted_sandbox())
+    monkeypatch.setattr(_impl.DEPS, "bench_measure", lambda d, b: (10.0, 4.0))
+
+    async with make_worker(
+        env, [MetaAgentWorkflow, OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        handle = await env.client.start_workflow(
+            MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
+        )
+        await handle.signal(
+            MetaAgentWorkflow.new_objective,
+            {
+                "id": "obj_OPTR", "type": "optimize", "repo": "bakudo",
+                "title": "optimize the thing",
+                "acceptanceCriteria": ["All existing tests pass"],
+                "constraints": {"benchCommand": "python3 bench.py"},
+            },
+        )
+
+        async def drained_after_optimize():
+            status = await handle.query(MetaAgentWorkflow.get_status)
+            return status["active_runs"] == [] and status["processed_objectives"] == 1
+
+        assert await _poll(drained_after_optimize, timeout=25.0), (
+            "optimize loop never completed / meta active_runs never drained"
+        )
+        # Routing proof: only the scout->attempt loop produces an
+        # `optimize-attempt` run. A single AgentRunWorkflow (the old behaviour)
+        # would run the scout alone.
+        refs = {r.agent_ref.split("@")[0] for r in deps._runs.values()}
+        assert "optimize-attempt" in refs, (
+            f"optimize objective did not fan out into the loop; runs={refs}"
+        )
+
+
+async def test_cancel_signal_during_sandbox_records_cancelled(env, monkeypatch):
+    """A cancel signal that arrives while the sandbox activity is in flight
+    must cancel it and record a terminal `cancelled` phase (TMP-21), not be
+    ignored until the multi-hour sandbox returns."""
+    import threading
+
+    ledger = InMemoryLedger()
+    release = threading.Event()
+
+    def blocking_sandbox(bundle):
+        release.wait(timeout=10)  # held until the test releases it
+        return stub_sandbox(bundle)
+
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    monkeypatch.setattr(_impl.DEPS, "sandbox", blocking_sandbox)
+
+    async with make_worker(env, [AgentRunWorkflow, EvalWorkflow]):
+        from bakudo.temporal.shared import AgentRunInput
+
+        handle = await env.client.start_workflow(
+            AgentRunWorkflow.run,
+            AgentRunInput(
+                run_id="run_CANCEL1",
+                objective={"id": "obj_C", "type": "explore", "repo": "r", "title": "t"},
+                agent_spec=_impl.load_agent_spec("explore"),
+            ),
+            id="run-run_CANCEL1", task_queue=TASK_QUEUE_CONTROL,
+        )
+
+        async def in_sandbox():
+            run = ledger.get_run("run_CANCEL1")
+            return run is not None and run.phase.value == "agent_running"
+
+        assert await _poll(in_sandbox), "run never reached the agent_running phase"
+        await handle.signal(AgentRunWorkflow.cancel)
+
+        out = await handle.result()
+        assert out.phase == "cancelled"
+        run = ledger.get_run("run_CANCEL1")
+        assert run.phase.value == "cancelled"
+    release.set()  # let the leaked activity thread finish
+
+
+async def test_meta_optimize_charges_accumulated_tokens_to_budget(env, deps, monkeypatch):
+    """TMP-24: an optimize loop's scout/attempt child runs are parented by
+    OptimizationWorkflow (so their own _notify_meta is skipped); the loop must
+    still charge their accumulated tokens against the meta budget, or optimize
+    work would spend against a zero charge."""
+    base = _optimize_scripted_sandbox()
+
+    def scripted_with_tokens(bundle):
+        out = base(bundle)
+        out.result.setdefault("metrics", {})["tokens_used"] = 1000
+        return out
+
+    monkeypatch.setattr(_impl.DEPS, "sandbox", scripted_with_tokens)
+    monkeypatch.setattr(_impl.DEPS, "bench_measure", lambda d, b: (10.0, 4.0))
+
+    async with make_worker(
+        env, [MetaAgentWorkflow, OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+    ):
+        handle = await env.client.start_workflow(
+            MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
+        )
+        await handle.execute_update(MetaAgentWorkflow.change_budget, 100.0)
+        await handle.execute_update(MetaAgentWorkflow.change_token_price, 1.0)  # $1/1k
+        await handle.signal(
+            MetaAgentWorkflow.new_objective,
+            {
+                "id": "obj_OPTBUD", "type": "optimize", "repo": "bakudo",
+                "title": "optimize with cost",
+                "acceptanceCriteria": ["All existing tests pass"],
+                "constraints": {"benchCommand": "python3 bench.py"},
+            },
+        )
+
+        async def drained():
+            status = await handle.query(MetaAgentWorkflow.get_status)
+            return status["active_runs"] == [] and status["processed_objectives"] == 1
+
+        assert await _poll(drained, timeout=25.0)
+        budget = await handle.query(MetaAgentWorkflow.get_budget_state)
+        # scout + >=1 attempt, each 1000 tokens at $1/1k => at least $2 charged
+        # (the pre-fix behaviour charged exactly $0).
+        assert budget["budget_usd_remaining"] <= 98.0, budget

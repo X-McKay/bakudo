@@ -102,7 +102,10 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 
 - [x] Install the `abox` binary on the worker host (see
       https://github.com/X-McKay/abox). *(0.6.0 validated end-to-end
-      2026-08-09: offline + live-model runs through real microVMs.)*
+      2026-08-09: offline + live-model runs through real microVMs. Upgraded to
+      0.7.1 — the MicroSandbox runtime, ADR-008 — 2026-08-15: warm state no
+      longer persists site-packages, so the runner now executes the repo's
+      `.abox/prepare.sh` in-guest at the start of every run.)*
 - [x] Set `BAKUDO_SANDBOX=abox` (never `local` outside `BAKUDO_ENV=dev`).
 - [ ] **Every target repo agents operate on needs its own `.abox/project.toml`**
       with a prepare flow that installs the bakudo runner in-guest (vendor the
@@ -123,7 +126,9 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 - [x] Validate the real `abox run` flags against `AboxRunner.build_command`.
       *(Done on the 2026-08-09 validation branch: the runner speaks the real
       0.6.0 protocol — `--repo/--task/--base/--timeout/--network/--input-file`,
-      results collected via `abox path`.)*
+      results collected via `abox path`. Revalidated against 0.7.1 2026-08-15:
+      the flag surface is unchanged; the guest command now chains the in-guest
+      prepare before `python3 -m bakudo.runner.main`.)*
 - [x] **Acceptance:** a real sandboxed run produces a diff on the
       `agent/<run_id>` branch and a collected `result.json`; denied commands and
       denied egress appear in the run's audit log. *(Proven live; note the

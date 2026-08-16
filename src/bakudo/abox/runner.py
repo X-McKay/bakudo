@@ -1,15 +1,22 @@
-"""Drive a real ``abox`` (0.6.0) sandbox run for a task bundle (spec section 6).
+"""Drive a real ``abox`` (0.7.1) sandbox run for a task bundle (spec section 6).
 
 This is invoked from a Temporal *activity* (non-deterministic external work),
-never from workflow code. Protocol, verified against the abox 0.6.0 CLI:
+never from workflow code. Protocol, verified against the abox 0.7.1 CLI
+(MicroSandbox runtime, ADR-008):
 
 1. the rendered ``bundle.json`` is written to a host scratch dir and staged
    into the guest via ``--input-file`` (it appears read-only under
    ``/abox-meta/inputs/``);
-2. the guest command is ``python3 -m bakudo.runner.main --bundle
-   /abox-meta/inputs/bundle.json --result /workspace/.agent/result.json``
-   (the module form of the ``agent-runner`` entrypoint; pip's user bin where
-   the prepare flow installs console scripts is off the fixed guest PATH);
+2. the guest command first runs the repo's ``.abox/prepare.sh`` (when present
+   in the worktree) and then ``exec``\\ s ``python3 -m bakudo.runner.main
+   --bundle /abox-meta/inputs/bundle.json --result
+   /workspace/.agent/result.json``. Under 0.7.0 every run sandbox boots a
+   fresh OCI-image guest — ``abox env warm`` persists only the declared
+   durable caches (e.g. the pip download cache), *not* installed
+   site-packages, so the editable install must happen in-run (the warm cache
+   keeps it fast). ``python3 -m`` is used rather than the ``agent-runner``
+   console script so the invocation works whether pip lands the script on or
+   off the guest PATH;
 3. abox forks branch ``agent/<task>`` from ``--base`` into a host worktree;
    after the run the worktree is resolved with ``abox path <task>`` and
    ``<worktree>/.agent/result.json`` is collected and schema-validated;
@@ -26,12 +33,16 @@ via ``-e``. Secret values are never written into files this module creates and
 never logged; they only transit the abox argv, which this module never echoes.
 
 Network mapping (review finding ABOX-6): the spec vocabulary is
-``none|scoped|open``; abox 0.6.0 takes ``--network safe|scoped|open``. ``none``
-maps to ``safe`` (loopback-only guest), the other two map verbatim. Scoped
-*bundles/domains* cannot be granted per-run in 0.6.0 — they are repo-owned
+``none|scoped|open``; abox 0.7.1 takes ``--network safe|scoped|open``. ``none``
+maps to ``safe`` (host-mediated egress only), the other two map verbatim.
+Scoped *bundles/domains* cannot be granted per-run — they are repo-owned
 config in ``.abox/project.toml`` — so the spec's ``networkBundles`` are not
-placed on the argv; the run-level ``--network`` can only narrow, never widen,
-what the trusted project config allows.
+placed on the argv. Note the run-level ``--network`` *replaces* the project
+default for that run (verified against ``effective_network_scope`` in
+abox-core): a spec asking for ``open`` on a ``scoped`` repo does widen egress
+to abox's public-internet-only mode (host/private/metadata ranges stay
+denied); it is not a narrowing-only control. ``build_command`` therefore
+refuses ``open`` unless the operator sets ``BAKUDO_ALLOW_NETWORK_OPEN=1``.
 
 Repo routing (review finding ABOX-7): ``objective.repo`` is a bare name. It is
 resolved under ``repo_root`` (constructor arg, else ``$BAKUDO_REPO_ROOT``, else
@@ -45,7 +56,9 @@ The canonical run id is reused as the abox task id (spec section 6.3).
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -59,13 +72,23 @@ from ..agent_spec.models import AgentSpec
 from ..bundle import TaskBundle
 from ..schema import SchemaValidationError, validate_result
 
+logger = logging.getLogger(__name__)
+
 # An executor runs the argv (with a kill timeout in seconds) and returns an
 # ExecResult. Swappable so tests and dry-runs need not have abox installed.
 Executor = Callable[..., "ExecResult"]
 
 # Extra wall clock granted to the abox process beyond the sandbox --timeout:
-# boot, prepare refresh, and teardown happen outside the guest deadline.
-SUBPROCESS_TIMEOUT_HEADROOM_SECONDS = 120
+# guest-image pull, the automatic host-side warm refresh (`abox run` re-runs
+# the prepare flow in a separate warm sandbox when watch files changed), boot,
+# and teardown all happen outside the guest deadline. A cold warm refresh can
+# take minutes, hence well above the old 0.6.0 value of 120.
+SUBPROCESS_TIMEOUT_HEADROOM_SECONDS = 600
+
+# Extra guest deadline granted beyond the spec's timeoutSeconds: under abox
+# 0.7.0 the in-guest environment setup (prepare.sh against warm caches) runs
+# inside the sandbox --timeout, and the spec's budget is meant for agent work.
+IN_GUEST_SETUP_HEADROOM_SECONDS = 300
 
 # Timeout for the short bookkeeping calls (abox path / abox stop).
 _HOUSEKEEPING_TIMEOUT_SECONDS = 120
@@ -73,8 +96,13 @@ _HOUSEKEEPING_TIMEOUT_SECONDS = 120
 # How many characters of console output to keep for diagnostics (ABOX-11).
 _TAIL_CHARS = 20_000
 
-# Spec networkMode -> abox 0.6.0 --network value (ABOX-6).
+# Spec networkMode -> abox 0.7.1 --network value (ABOX-6).
 NETWORK_MODE_MAP = {"none": "safe", "scoped": "scoped", "open": "open"}
+
+# Where the repo's prepare script appears inside the guest (the worktree is
+# mounted at /workspace). Run when present: 0.7.0 sandboxes boot fresh OCI
+# guests, so site-packages installed during `abox env warm` do not persist.
+_GUEST_PREPARE_SCRIPT = "/workspace/.abox/prepare.sh"
 
 # Env var names forwarded from the worker process into the guest, by name.
 _FORWARD_ENV = ("BAKUDO_OFFLINE", "VLLM_BASE_URL", "VLLM_API_KEY")
@@ -112,10 +140,19 @@ class ExecResult:
 class SandboxProfile:
     """A bakudo sandbox policy profile (spec section 6.4).
 
-    Note: these are *bakudo policy* profiles consumed by the in-guest tool
-    layer, never abox ``--template`` names (review finding ABOX-3). The guest
-    OS profile (e.g. ``python-glibc``) is repo-owned ``.abox/project.toml``
-    config.
+    Note: these are *bakudo policy* profiles, never abox ``--template`` names
+    (review finding ABOX-3). The guest OS profile (e.g. ``python-glibc``) is
+    repo-owned ``.abox/project.toml`` config.
+
+    **Advisory, not the enforcement point (SEC-4).** These fields document the
+    intended per-role policy. The enforced controls live elsewhere: the microVM
+    boundary and allowed commands/filesystem in abox's ``.abox/project.toml``;
+    the outbound network via ``build_command``'s ``--network`` (from the
+    AgentSpec's ``networkMode``, which *replaces* the project default per run —
+    see the module docstring's network-mapping note);
+    and ``maxChangedFiles`` when a candidate diff is scored (``evals/corpus.py``).
+    Wiring every dimension here to a runtime check is future work — see
+    ``docs/HUMAN_TASKS.md``. Do not read a value here as an active guarantee.
     """
 
     name: str
@@ -189,26 +226,72 @@ def _tail(text: str) -> str:
     return text[-_TAIL_CHARS:]
 
 
+# Exit code recorded when a run is killed because its cancel_event was set
+# (distinct from 124 = timed out). Mirrors a SIGTERM-style stop (SEC-5).
+_CANCELLED_EXIT_CODE = 130
+
+# How often the cancellable executor polls the process while waiting (seconds).
+_CANCEL_POLL_SECONDS = 0.5
+
+
 def _subprocess_executor(
-    argv: list[str], timeout: float | None = None
+    argv: list[str],
+    timeout: float | None = None,
+    cancel_event: object | None = None,
 ) -> ExecResult:
-    """Run abox for real, mapping a host-side kill to exit 124 (ABOX-11)."""
+    """Run abox for real, mapping a host-side kill to exit 124 (ABOX-11).
+
+    When ``cancel_event`` (a ``threading.Event``) is supplied, the process is
+    run under a poll loop so a set event actually terminates it (SEC-5) —
+    cancelling the Temporal activity alone cannot interrupt a blocking
+    ``subprocess.run``, so a cancelled agent would otherwise keep running and
+    spending until the sandbox timeout. Without an event the original
+    fast-path ``subprocess.run`` is used unchanged.
+    """
+    if cancel_event is None:
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as expired:
+            out = expired.stdout or b""
+            err = expired.stderr or b""
+            return ExecResult(
+                124,
+                out.decode(errors="replace") if isinstance(out, bytes) else out,
+                err.decode(errors="replace") if isinstance(err, bytes) else err,
+                timed_out=True,
+            )
+        return ExecResult(proc.returncode, proc.stdout, proc.stderr)
+
+    popen: subprocess.Popen[str] = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    deadline = (time.monotonic() + timeout) if timeout else None
+    while True:
+        try:
+            done_out, done_err = popen.communicate(timeout=_CANCEL_POLL_SECONDS)
+            return ExecResult(popen.returncode, done_out or "", done_err or "")
+        except subprocess.TimeoutExpired:
+            if cancel_event.is_set():  # type: ignore[attr-defined]
+                killed_out, killed_err = _terminate(popen)
+                return ExecResult(_CANCELLED_EXIT_CODE, killed_out, killed_err)
+            if deadline is not None and time.monotonic() >= deadline:
+                killed_out, killed_err = _terminate(popen)
+                return ExecResult(124, killed_out, killed_err, timed_out=True)
+
+
+def _terminate(popen: subprocess.Popen[str]) -> tuple[str, str]:
+    """SIGTERM then SIGKILL a process, returning whatever output it flushed."""
+    popen.terminate()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as expired:
-        out = expired.stdout or b""
-        err = expired.stderr or b""
-        return ExecResult(
-            124,
-            out.decode(errors="replace") if isinstance(out, bytes) else out,
-            err.decode(errors="replace") if isinstance(err, bytes) else err,
-            timed_out=True,
-        )
-    return ExecResult(proc.returncode, proc.stdout, proc.stderr)
+        out, err = popen.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        popen.kill()
+        out, err = popen.communicate()
+    return out or "", err or ""
 
 
 class AboxRunner:
-    """Builds and drives a single abox 0.6.0 sandbox run for a task bundle."""
+    """Builds and drives a single abox 0.7.1 sandbox run for a task bundle."""
 
     def __init__(
         self,
@@ -226,6 +309,61 @@ class AboxRunner:
         self._result_relpath = result_relpath
         self._executor: Executor = executor or _subprocess_executor
         self._scratch_root = scratch_root
+        # Only the real subprocess executor is auto-verified before a run and
+        # driven with a cancel_event: an injected executor (tests/dry-runs) is
+        # trusted by construction and may not accept the extra argument (SEC-3/5).
+        self._default_executor = executor is None
+        self._verify_default_binary = executor is None
+        self._binary_verified = False
+
+    # -- binary identity (SEC-3) ------------------------------------------
+
+    def verify_binary(self) -> str:
+        """Assert ``abox_bin`` is really abox and return its version.
+
+        The default executor is a plain host ``subprocess`` — the *only* thing
+        making a run a microVM is that ``argv[0]`` resolves to abox. A missing
+        binary already errors, but a *wrong* one would silently become a
+        hostile-code host subprocess. This probes ``abox --version`` and fails
+        closed unless the output identifies abox (the string ``abox`` or a
+        version number); a missing binary raises :class:`AboxNotFoundError`.
+        """
+        try:
+            res = self._executor(
+                [self._abox_bin, "--version"], _HOUSEKEEPING_TIMEOUT_SECONDS
+            )
+        except FileNotFoundError as missing:
+            raise AboxNotFoundError(
+                f"abox binary not found: {self._abox_bin!r} is not on PATH "
+                "(install abox 0.7.1 or set AboxRunner(abox_bin=...))."
+            ) from missing
+        out = f"{res.stdout} {res.stderr}".strip()
+        if res.exit_code != 0:
+            raise AboxError(
+                f"`{self._abox_bin} --version` exited {res.exit_code} ({out!r}); "
+                "refusing to run an unverified binary as the sandbox boundary."
+            )
+        # Require an abox-specific identifier (SEC-3): a bare version number is
+        # not enough — `python3 --version` prints "Python 3.x" and would
+        # otherwise pass, defeating the check for a wrong/substituted binary.
+        if "abox" not in out.lower():
+            raise AboxError(
+                f"`{self._abox_bin} --version` output {out!r} does not identify "
+                "abox; refusing to run an unverified binary as the sandbox "
+                "boundary (set BAKUDO_ABOX_SKIP_VERSION_CHECK=1 to override)."
+            )
+        match = re.search(r"\d+\.\d+(?:\.\d+)?", out)
+        return match.group(0) if match else out
+
+    def _ensure_binary_verified(self) -> None:
+        if self._binary_verified or not self._verify_default_binary:
+            return
+        if os.environ.get("BAKUDO_ABOX_SKIP_VERSION_CHECK") == "1":
+            self._binary_verified = True
+            return
+        version = self.verify_binary()
+        logger.info("verified abox binary %r: version %s", self._abox_bin, version)
+        self._binary_verified = True
 
     # -- routing -----------------------------------------------------------
 
@@ -264,17 +402,32 @@ class AboxRunner:
     def build_command(
         self, bundle: TaskBundle, scratch_dir: Path, repo: Path | None = None
     ) -> list[str]:
-        """Construct the abox 0.6.0 ``run`` argv (spec section 6.2)."""
+        """Construct the abox 0.7.1 ``run`` argv (spec section 6.2)."""
         spec = bundle.agent_spec
         repo = repo or self.resolve_repo(bundle)
         network = NETWORK_MODE_MAP[spec.sandbox.network_mode.value]
+        # Fail closed on `open`: the run-level --network *replaces* the repo's
+        # trusted scoped allowlist (see the module docstring), so a
+        # schema-valid — possibly model-authored — spec asking for `open`
+        # would grant public-internet egress. No shipped role needs it; an
+        # operator can opt in explicitly per worker.
+        if network == "open" and os.environ.get("BAKUDO_ALLOW_NETWORK_OPEN") != "1":
+            raise AboxError(
+                "spec networkMode 'open' would replace the repo's scoped "
+                "network allowlist with abox's public-internet egress mode; "
+                "refusing without the operator opt-in BAKUDO_ALLOW_NETWORK_OPEN=1"
+            )
+        # The guest deadline covers in-guest environment setup plus agent work;
+        # the spec's timeoutSeconds is the agent-work budget (see the headroom
+        # constant). Enforcement still lands as abox exit code 124.
+        guest_timeout = spec.sandbox.timeout_seconds + IN_GUEST_SETUP_HEADROOM_SECONDS
 
         argv = [
             self._abox_bin, "run",
             "--repo", str(repo),
             "--task", bundle.run_id,
             "--base", self._base_ref(spec),
-            "--timeout", str(spec.sandbox.timeout_seconds),
+            "--timeout", str(guest_timeout),
             "--network", network,
         ]
         # Never `--ephemeral`: abox would remove the worktree+branch the moment
@@ -284,23 +437,33 @@ class AboxRunner:
         argv += ["--input-file", f"{scratch_dir / 'bundle.json'}:bundle.json"]
         for name in self._forwarded_env():
             argv += ["-e", f"{name}={os.environ[name]}"]
-        argv += [
-            "--",
-            # Equivalent to the `agent-runner` console script, but PATH-proof:
-            # in the 0.6.0 guest the pip *user* bin (~/.local/bin) where the
-            # prepare flow's editable install drops console scripts is not on
-            # the fixed guest PATH, while `python3 -m` resolves through user
-            # site-packages regardless (verified in-guest).
-            "python3", "-m", "bakudo.runner.main",
-            "--bundle", self._guest_bundle_path,
-            "--result", "/workspace/.agent/result.json",
-        ]
+        # 0.7.0 run sandboxes boot fresh OCI guests (warm persists caches only,
+        # not site-packages), so the repo's prepare flow must run in-guest
+        # first — fast against the warm pip cache. Repos without a prepare
+        # script skip straight to the runner (and fail at import, as before,
+        # unless the guest image already carries the runner). `python3 -m` is
+        # PATH-proof: it resolves through site-packages wherever pip installed
+        # (system or user), while the `agent-runner` console script may land
+        # off the guest PATH.
+        guest_script = (
+            "set -e; "
+            f"[ ! -f {_GUEST_PREPARE_SCRIPT} ] || sh {_GUEST_PREPARE_SCRIPT}; "
+            "exec python3 -m bakudo.runner.main "
+            f"--bundle {self._guest_bundle_path} "
+            "--result /workspace/.agent/result.json"
+        )
+        argv += ["--", "sh", "-c", guest_script]
         return argv
 
     # -- lifecycle ---------------------------------------------------------
 
-    def run(self, bundle: TaskBundle) -> AboxOutcome:
+    def run(
+        self, bundle: TaskBundle, cancel_event: object | None = None
+    ) -> AboxOutcome:
         started = time.monotonic()
+        # Fail closed if the configured binary is not verifiably abox (SEC-3);
+        # skipped for injected executors and when explicitly overridden.
+        self._ensure_binary_verified()
         if self._scratch_root is not None:
             self._scratch_root.mkdir(parents=True, exist_ok=True)
         scratch = Path(
@@ -313,20 +476,34 @@ class AboxRunner:
                 json.dumps(bundle.model_dump(by_alias=True, mode="json"), indent=2)
             )
             argv = self.build_command(bundle, scratch, repo)
-            timeout = spec.sandbox.timeout_seconds + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
+            timeout = (
+                spec.sandbox.timeout_seconds
+                + IN_GUEST_SETUP_HEADROOM_SECONDS
+                + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
+            )
             try:
-                exec_result = self._executor(argv, timeout)
+                # Only the default subprocess executor takes cancel_event; an
+                # injected executor may not accept it (SEC-5). The unconditional
+                # `abox stop --clean` in the finally still tears the microVM
+                # down after a cancel-kill.
+                if self._default_executor:
+                    exec_result = self._executor(argv, timeout, cancel_event=cancel_event)
+                else:
+                    exec_result = self._executor(argv, timeout)
             except FileNotFoundError as missing:
                 raise AboxNotFoundError(
                     f"abox binary not found: {self._abox_bin!r} is not on PATH "
-                    "(install abox 0.6.0 or set AboxRunner(abox_bin=...))."
+                    "(install abox 0.7.1 or set AboxRunner(abox_bin=...))."
                 ) from missing
 
             timed_out = exec_result.timed_out or exec_result.exit_code == 124
             errors: list[str] = []
             if timed_out:
                 errors.append(
-                    f"sandbox timed out (abox --timeout {spec.sandbox.timeout_seconds}s)"
+                    "sandbox timed out (abox --timeout "
+                    f"{spec.sandbox.timeout_seconds + IN_GUEST_SETUP_HEADROOM_SECONDS}s"
+                    f" = spec timeoutSeconds {spec.sandbox.timeout_seconds}s"
+                    " + in-guest setup headroom)"
                 )
 
             result: dict | None = None

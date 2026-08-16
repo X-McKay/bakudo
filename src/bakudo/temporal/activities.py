@@ -83,6 +83,11 @@ def run_sandbox(bundle: dict) -> dict:
     Outside an activity (unit tests, tooling) no thread is started.
     """
     stop = threading.Event()
+    # Set when Temporal cancels the activity; threaded into the sandbox so the
+    # abox subprocess is actually terminated (SEC-5) — cancelling the activity
+    # alone cannot interrupt the blocking subprocess, so a cancelled agent would
+    # otherwise keep running and spending until the sandbox timeout.
+    cancel_event = threading.Event()
     beat_thread: threading.Thread | None = None
     if _in_activity():
         ctx = contextvars.copy_context()
@@ -90,6 +95,9 @@ def run_sandbox(bundle: dict) -> dict:
         def _beat() -> None:
             while not stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
                 activity.heartbeat()
+                if activity.is_cancelled():
+                    cancel_event.set()
+                    return
 
         beat_thread = threading.Thread(
             target=lambda: ctx.run(_beat),
@@ -98,7 +106,7 @@ def run_sandbox(bundle: dict) -> dict:
         )
         beat_thread.start()
     try:
-        return _impl.run_sandbox(bundle)
+        return _impl.run_sandbox(bundle, cancel_event=cancel_event)
     finally:
         stop.set()
         if beat_thread is not None:
@@ -145,6 +153,11 @@ def collect_signals(inp: ObserveInput) -> list[dict]:
     return _impl.collect_signals(inp)
 
 
+@_DEFN(name="reconcile_runs")
+def reconcile_runs(run_ids: list[str]) -> list[str]:
+    return _impl.reconcile_runs(run_ids)
+
+
 ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     create_run,
     load_agent_spec,
@@ -158,4 +171,5 @@ ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     run_agent_evolution,
     compact_memories,
     collect_signals,
+    reconcile_runs,
 ]

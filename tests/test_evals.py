@@ -109,3 +109,44 @@ def test_human_gate_for_privileged_mutation():
     d = decide(_card(0.9), _card(0.5), mutation_kinds=["new-secret-access"])
     assert d.decision is Decision.needs_human
     assert d.requires_human is True
+
+
+# --- unified eval assembly (TMP-22) ---
+
+
+def _optimize_objective():
+    return Objective(
+        type="optimize", repo="r", title="t",
+        acceptanceCriteria=["All existing tests pass"],
+    )
+
+
+def test_assemble_suite_is_objective_type_aware():
+    """The one assembler every run path uses is objective-type-aware: an
+    optimize objective picks up perf/simplicity, an add-feature one does not."""
+    from bakudo.evals import assemble_suite
+
+    add_feature = assemble_suite(
+        EvalContext(result=_result(), objective=_objective()), with_critic=False
+    )
+    optimize = assemble_suite(
+        EvalContext(result=_result(), objective=_optimize_objective()),
+        with_critic=False,
+    )
+    add_suites = {r.suite_name for r in add_feature}
+    opt_suites = {r.suite_name for r in optimize}
+    assert "perf" not in add_suites and "simplicity" not in add_suites
+    assert {"perf", "simplicity"} <= opt_suites
+
+
+def test_assemble_suite_omits_critic_without_a_sandbox():
+    """with_critic is availability-gated: no sandbox -> no critic suite, so the
+    offline paths never silently differ from the Temporal path by an errored
+    critic (they differ only by the critic's presence, explicitly)."""
+    from bakudo.evals import assemble_suite
+
+    ctx = EvalContext(result=_result(), objective=_objective())
+    with_flag_no_sandbox = assemble_suite(ctx, sandbox=None, with_critic=True)
+    plain = assemble_suite(ctx, with_critic=False)
+    assert {r.suite_name for r in with_flag_no_sandbox} == {r.suite_name for r in plain}
+    assert "critic" not in {r.suite_name for r in with_flag_no_sandbox}

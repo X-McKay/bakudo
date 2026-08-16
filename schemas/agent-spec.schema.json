@@ -60,7 +60,7 @@
         "baseRef": { "type": "string", "default": "main" },
         "networkMode": { "enum": ["none", "scoped", "open"], "default": "scoped" },
         "networkBundles": { "type": "array", "items": { "type": "string" } },
-        "timeoutSeconds": { "type": "integer", "minimum": 1, "default": 3600 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 10800, "default": 3600 },
         "ephemeral": { "type": "boolean", "default": false },
         "maxChangedFiles": { "type": "integer", "minimum": 0 },
         "maxDiffBytes": { "type": "integer", "minimum": 0 },

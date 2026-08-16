@@ -1,12 +1,16 @@
-"""Pin the real abox 0.6.0 CLI protocol (review findings ABOX-1/2/3/5/8/11/12).
+"""Pin the real abox 0.7.1 CLI protocol (review findings ABOX-1/2/3/5/8/11/12).
 
-Verified against ``abox 0.6.0`` (`abox run --help`):
+Verified against ``abox 0.7.1`` (`abox run --help`, MicroSandbox runtime):
 
 - staging goes through ``--input-file <host>[:<guestname>]`` which lands in
   ``/abox-meta/inputs/`` (read-only) inside the guest — no ``--mount``;
 - there is no ``--branch``; the branch is derived from ``--task`` as
   ``agent/<task>``;
-- ``--template`` means "VM snapshot template", never a bakudo policy profile;
+- ``--template``/``--snapshot`` do not exist (0.7.0 deleted VM snapshots and
+  templates), and bakudo policy profiles were never abox flags;
+- run sandboxes boot fresh OCI-image guests: ``abox env warm`` persists only
+  declared caches, so the guest command runs the repo's ``.abox/prepare.sh``
+  before the runner (verified live: without it the runner module is absent);
 - results are collected host-side from the worktree ``abox path <task>``
   resolves, where the guest wrote ``/workspace/.agent/result.json``;
 - ``--network`` takes ``safe|scoped|open`` (spec ``none`` maps to ``safe``);
@@ -86,7 +90,7 @@ def _make_worktree(path: Path, base: str = "main") -> Path:
 
 @dataclass
 class FakeAbox:
-    """Fake executor speaking the abox 0.6.0 argv surface the runner uses."""
+    """Fake executor speaking the abox 0.7.1 argv surface the runner uses."""
 
     worktree: Path
     run_exit: int = 0
@@ -122,11 +126,11 @@ class FakeAbox:
 
 
 # ---------------------------------------------------------------------------
-# build_command: the exact 0.6.0 argv (ABOX-1/2/3/5)
+# build_command: the exact 0.7.0 argv (ABOX-1/2/3/5)
 # ---------------------------------------------------------------------------
 
 
-def test_build_command_matches_abox_0_6_contract(tmp_path, monkeypatch):
+def test_build_command_matches_abox_0_7_contract(tmp_path, monkeypatch):
     _clear_model_env(monkeypatch)
     monkeypatch.setenv("BAKUDO_OFFLINE", "1")
     monkeypatch.setenv("VLLM_BASE_URL", "https://llm.example/v1")
@@ -142,7 +146,9 @@ def test_build_command_matches_abox_0_6_contract(tmp_path, monkeypatch):
         "--repo", str(tmp_path),
         "--task", "run_TEST01",
         "--base", "main",
-        "--timeout", "1800",
+        # spec timeoutSeconds 1800 + IN_GUEST_SETUP_HEADROOM_SECONDS (the
+        # in-guest prepare now spends guest deadline before agent work starts).
+        "--timeout", "2100",
         "--network", "scoped",
         "--input-file", f"{tmp_path / 'scratch' / 'bundle.json'}:bundle.json",
         "-e", "BAKUDO_OFFLINE=1",
@@ -150,12 +156,15 @@ def test_build_command_matches_abox_0_6_contract(tmp_path, monkeypatch):
         "-e", "VLLM_API_KEY=sk-test",
         "-e", "BAKUDO_VLLM_QWEN_CODER=https://llm-fast.example/v1",
         "--",
-        # The `agent-runner` console script lands in the guest's pip *user*
-        # bin (~/.local/bin), which abox 0.6.0 keeps off the fixed guest PATH;
-        # the module invocation is PATH-independent (verified in-guest).
-        "python3", "-m", "bakudo.runner.main",
-        "--bundle", "/abox-meta/inputs/bundle.json",
-        "--result", "/workspace/.agent/result.json",
+        # 0.7.0 guests boot fresh from OCI images, so the repo prepare flow
+        # (fast against the warm pip cache) must run in-guest before the
+        # runner; `python3 -m` stays PATH-proof for the runner itself.
+        "sh", "-c",
+        "set -e; "
+        "[ ! -f /workspace/.abox/prepare.sh ] || sh /workspace/.abox/prepare.sh; "
+        "exec python3 -m bakudo.runner.main "
+        "--bundle /abox-meta/inputs/bundle.json "
+        "--result /workspace/.agent/result.json",
     ]
 
 
@@ -187,16 +196,36 @@ def test_build_command_never_passes_ephemeral(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("spec_mode", "abox_mode"),
-    [("none", "safe"), ("scoped", "scoped"), ("open", "open")],
+    [("none", "safe"), ("scoped", "scoped")],
 )
 def test_network_mode_maps_to_abox_vocabulary(tmp_path, monkeypatch, spec_mode, abox_mode):
-    # ABOX-6: spec says none|scoped|open; abox 0.6.0 says safe|scoped|open.
+    # ABOX-6: spec says none|scoped|open; abox 0.7.1 says safe|scoped|open.
     _clear_model_env(monkeypatch)
     from bakudo.agent_spec.models import NetworkMode
 
     bundle = _bundle(network_mode=NetworkMode(spec_mode))
     cmd = AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
     assert cmd[cmd.index("--network") + 1] == abox_mode
+
+
+def test_network_mode_open_fails_closed_without_operator_opt_in(
+    tmp_path, monkeypatch
+):
+    # The run-level --network replaces the repo's trusted scoped allowlist, so
+    # a (possibly model-authored) spec asking for `open` must not silently get
+    # public-internet egress.
+    _clear_model_env(monkeypatch)
+    from bakudo.abox.runner import AboxError
+    from bakudo.agent_spec.models import NetworkMode
+
+    bundle = _bundle(network_mode=NetworkMode("open"))
+    monkeypatch.delenv("BAKUDO_ALLOW_NETWORK_OPEN", raising=False)
+    with pytest.raises(AboxError, match="BAKUDO_ALLOW_NETWORK_OPEN"):
+        AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
+
+    monkeypatch.setenv("BAKUDO_ALLOW_NETWORK_OPEN", "1")
+    cmd = AboxRunner(repo_root=tmp_path).build_command(bundle, tmp_path / "s")
+    assert cmd[cmd.index("--network") + 1] == "open"
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +283,8 @@ def test_run_passes_headroom_timeout_to_executor(tmp_path, monkeypatch):
     fake = FakeAbox(worktree=_make_worktree(tmp_path / "wt"))
     AboxRunner(executor=fake, repo_root=tmp_path).run(_bundle())
     _, timeout = fake.calls[0]
-    assert timeout == 1800 + 120  # spec timeout + kill headroom
+    # spec timeout + in-guest setup headroom + host-side kill headroom
+    assert timeout == 1800 + 300 + 600
 
 
 def test_run_always_stops_clean_with_repo(tmp_path, monkeypatch):
@@ -385,3 +415,87 @@ def test_base_ref_defaults_to_spec(tmp_path, monkeypatch):
     cmd = AboxRunner(repo_root=tmp_path).build_command(_bundle(), tmp_path / "s")
     i = cmd.index("--base")
     assert cmd[i + 1] == "main"
+
+
+# --- abox binary identity check (SEC-3) ---
+
+
+def test_verify_binary_accepts_real_abox_version(tmp_path):
+    def fake(argv, timeout=None):
+        assert argv[1] == "--version"
+        return ExecResult(0, "abox 0.7.1\n", "")
+
+    version = AboxRunner(executor=fake, repo_root=tmp_path).verify_binary()
+    assert version == "0.7.1"
+
+
+def test_verify_binary_rejects_a_wrong_binary(tmp_path):
+    from bakudo.abox.runner import AboxError
+
+    def not_abox(argv, timeout=None):
+        # A different tool that accepts --version but is not abox.
+        return ExecResult(0, "GNU coreutils echo\n", "")
+
+    with pytest.raises(AboxError):
+        AboxRunner(executor=not_abox, repo_root=tmp_path).verify_binary()
+
+
+def test_verify_binary_missing_raises_not_found(tmp_path):
+    def missing(argv, timeout=None):
+        raise FileNotFoundError(argv[0])
+
+    with pytest.raises(AboxNotFoundError):
+        AboxRunner(executor=missing, repo_root=tmp_path).verify_binary()
+
+
+def test_verify_binary_nonzero_exit_is_rejected(tmp_path):
+    from bakudo.abox.runner import AboxError
+
+    def broken(argv, timeout=None):
+        return ExecResult(2, "", "unknown flag --version")
+
+    with pytest.raises(AboxError):
+        AboxRunner(executor=broken, repo_root=tmp_path).verify_binary()
+
+
+def test_verify_binary_rejects_generic_version_without_abox_identifier(tmp_path):
+    """A wrong binary that prints a bare version (e.g. `python3 --version` ->
+    'Python 3.11') must be rejected: the probe requires an abox identifier, not
+    just any version number (SEC-3, review follow-up)."""
+    from bakudo.abox.runner import AboxError
+
+    def python_like(argv, timeout=None):
+        return ExecResult(0, "Python 3.11.15\n", "")
+
+    with pytest.raises(AboxError):
+        AboxRunner(executor=python_like, repo_root=tmp_path).verify_binary()
+
+
+# --- cancellable executor actually kills the process (SEC-5) ---
+
+
+def test_subprocess_executor_kills_process_when_cancel_event_set():
+    """With a cancel_event, a set event terminates the running process rather
+    than waiting out the timeout — the fix for cancel-during-sandbox not
+    actually stopping the agent."""
+    import threading
+    import time
+
+    from bakudo.abox.runner import _CANCELLED_EXIT_CODE, _subprocess_executor
+
+    cancel = threading.Event()
+    # A process that would run for 30s; we cancel it almost immediately.
+    def cancel_soon():
+        time.sleep(0.3)
+        cancel.set()
+
+    threading.Thread(target=cancel_soon, daemon=True).start()
+    start = time.monotonic()
+    try:
+        result = _subprocess_executor(["sleep", "30"], timeout=30, cancel_event=cancel)
+    except FileNotFoundError:
+        pytest.skip("`sleep` not available")
+    elapsed = time.monotonic() - start
+    assert result.exit_code == _CANCELLED_EXIT_CODE
+    assert result.timed_out is False
+    assert elapsed < 10, "the process must be killed on cancel, not run to timeout"

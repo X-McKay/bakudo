@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..curriculum.objective import Objective
 from ..runner.result import RunResult
@@ -179,4 +180,34 @@ def run_default_suite(ctx: EvalContext) -> list[EvalResult]:
     results = [grader(ctx) for grader in DEFAULT_SUITE]
     for r in results:
         r.validate_against_schema()
+    return results
+
+
+def assemble_suite(
+    ctx: EvalContext,
+    *,
+    sandbox: Callable[..., Any] | None = None,
+    with_critic: bool = False,
+) -> list[EvalResult]:
+    """The single eval-assembly entry point used by every run path (TMP-22).
+
+    The base suite is always the objective-type-aware :func:`run_suite`
+    (optimize objectives get perf/simplicity). The only permitted variation is
+    the sandboxed ``critic`` suite, which requires a live sandbox+model: it is
+    appended only when ``with_critic`` is set *and* a ``sandbox`` is available;
+    a schema/sandbox failure surfaces as an ERRORED critic result, never a
+    silent pass. Routing all three entry points (the Temporal eval activity,
+    the in-process pipeline, and the meta-agent tool) through this function
+    keeps their scorecards identical except for that one explicit, availability-
+    gated suite — the previous three hand-rolled assemblies could disagree for
+    the same run.
+    """
+    results = run_suite(ctx)
+    if with_critic and sandbox is not None:
+        from .critic import critic_eval
+
+        critic = critic_eval(ctx, sandbox)
+        if critic is not None:
+            critic.validate_against_schema()
+            results.append(critic)
     return results

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..runner.result import RunResult
-from .models import Evidence, MemoryItem
+from .models import Evidence, MemoryItem, MemoryType
 from .policy import MemoryRejected
 
 
@@ -29,7 +29,9 @@ def memories_from_result(
                 evidence.append(Evidence(**{k: ev[k] for k in ev if k in Evidence.model_fields}))
         items.append(
             MemoryItem(
-                type=raw.type,
+                # Canonicalise the worker-emitted shorthand onto the stable
+                # vocabulary (MEM-21): `repo_fact`/unknown -> `semantic_memory`.
+                type=MemoryType.canonical(raw.type),
                 content=raw.content,
                 scope={"repo": repo},
                 evidence=evidence,

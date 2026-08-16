@@ -74,6 +74,14 @@ class PostgresLedger:
         with conn.cursor() as cur:
             cur.execute(sql, params)
 
+    @staticmethod
+    def _do_one(conn: Any, sql: str, params: tuple = ()) -> tuple | None:
+        """execute + fetchone on an already-open connection (for statements
+        inside a caller-held transaction)."""
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchone()
+
     def _exec(self, sql: str, params: tuple = ()) -> None:
         with self._connection() as conn:
             self._do(conn, sql, params)
@@ -160,37 +168,89 @@ class PostgresLedger:
         return self._version_row(row)
 
     def set_version_status(
-        self, name: str, version: int, status: str, *, reason: str | None = None
+        self,
+        name: str,
+        version: int,
+        status: str,
+        *,
+        reason: str | None = None,
+        expected_status: str | None = None,
     ) -> AgentVersionRecord | None:
         """Transition a version through the §1 state machine.
 
         The transition and its event are one ledger write: the row update and
         the outbox event (topic ``agent_version_status``, spec section 17.1)
-        share a transaction.
+        share a transaction. ``expected_status`` guards a compare-and-set
+        (TMP-23): the transition applies only if the version is currently in
+        that status, else it is a no-op returning ``None``.
         """
         from .records import VERSION_STATUSES
 
         if status not in VERSION_STATUSES:
             raise ValueError(f"unknown version status {status!r}")
         with self._connection() as conn, conn.transaction():
-            self._do(
+            applied = self._set_version_status(
+                conn, name, version, status,
+                reason=reason, expected_status=expected_status,
+            )
+        if not applied:
+            if expected_status is not None:
+                # CAS miss: the version wasn't in the expected status (a
+                # concurrent writer moved it first). No-op, no event (TMP-23).
+                return None
+            raise KeyError(f"unknown agent version {name}@{version}")
+        return self.get_agent_version(name, version)
+
+    def _set_version_status(
+        self,
+        conn: Any,
+        name: str,
+        version: int,
+        status: str,
+        *,
+        reason: str | None,
+        expected_status: str | None = None,
+    ) -> bool:
+        """Transition a version on an already-open connection/transaction.
+
+        Returns whether the row was updated. The ``update ... returning``
+        detects a no-op by an empty result (TMP-14/TMP-23): an unknown version,
+        or — when ``expected_status`` is given — a version no longer in the
+        expected status (a lost compare-and-set race). The outbox event is
+        written only when the update applied, so a no-op can never leave a
+        phantom ``agent_version_status`` event. Shared by
+        :meth:`set_version_status`, :meth:`resolve_promotion`, and canary
+        graduation so the version transition is atomic with what drives it.
+        """
+        if expected_status is not None:
+            updated = self._do_one(
                 conn,
                 "update agent_spec_versions set status = %s, status_reason = %s, "
-                "decided_at = now() where name = %s and version = %s",
+                "decided_at = now() where name = %s and version = %s "
+                "and status = %s returning version",
+                (status, reason, name, version, expected_status),
+            )
+        else:
+            updated = self._do_one(
+                conn,
+                "update agent_spec_versions set status = %s, status_reason = %s, "
+                "decided_at = now() where name = %s and version = %s returning version",
                 (status, reason, name, version),
             )
-            self._do(
-                conn,
-                "insert into outbox (topic, payload) values (%s, %s)",
-                (
-                    "agent_version_status",
-                    json.dumps(
-                        {"name": name, "version": version,
-                         "status": status, "reason": reason}
-                    ),
+        if updated is None:
+            return False
+        self._do(
+            conn,
+            "insert into outbox (topic, payload) values (%s, %s)",
+            (
+                "agent_version_status",
+                json.dumps(
+                    {"name": name, "version": version,
+                     "status": status, "reason": reason}
                 ),
-            )
-        return self.get_agent_version(name, version)
+            ),
+        )
+        return True
 
     @staticmethod
     def _version_row(row: tuple | None) -> AgentVersionRecord | None:
@@ -301,7 +361,10 @@ class PostgresLedger:
         return runs
 
     def set_phase(self, run_id: str, phase: RunPhase) -> None:
-        with self._connection() as conn:
+        # The status update and its phase event are one write (TMP-16): a
+        # crash between them must not leave the run advanced with no event
+        # (or vice versa), matching create_run/set_version_status.
+        with self._connection() as conn, conn.transaction():
             if phase == RunPhase.agent_running:
                 # Parity with InMemoryLedger (TMP-9): the first agent_running
                 # phase stamps started_at; coalesce keeps retries idempotent.
@@ -325,7 +388,8 @@ class PostgresLedger:
             )
 
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None:
-        with self._connection() as conn:
+        # The terminal update and its finished event are one write (TMP-16).
+        with self._connection() as conn, conn.transaction():
             # Parity with InMemoryLedger (TMP-9): the terminal result lives on
             # the run row, not only inside the finished event payload.
             self._do(
@@ -486,38 +550,53 @@ class PostgresLedger:
         """
         from datetime import UTC, datetime
 
-        row = self._one(
-            f"select {self._PROMOTION_COLUMNS} from promotion_decisions where id = %s",
-            (promotion_id,),
-        )
-        if row is None:
-            raise KeyError(f"Unknown promotion: {promotion_id}")
-        decision = self._promotion_row(row)
-        if decision.status != "pending":
-            raise ValueError(
-                f"Promotion {promotion_id} already resolved (status={decision.status})"
-            )
-
-        decision.status = "approved" if approved else "rejected"
-        decision.approved_by = approved_by
-        decision.comment = comment
-        decision.resolved_at = datetime.now(UTC)
-        self._exec(
-            "update promotion_decisions set status = %s, approved_by = %s, "
-            "comment = %s, resolved_at = now() where id = %s",
-            (decision.status, approved_by, comment, promotion_id),
-        )
-
         from ..evals.promotion import parse_subject_version
 
-        card = decision.scorecard
-        if card.subject_type == "agent_spec_version":
-            subject = parse_subject_version(card.subject_id)
-            if subject is not None:
-                verb = "approved" if approved else "rejected"
-                self.set_version_status(
-                    subject[0], subject[1],
-                    "canary" if approved else "rejected",
-                    reason=f"human {verb} by {approved_by}",
+        # One transaction on one connection (TMP-15): the read locks the row
+        # with ``for update`` so a concurrent resolver blocks until this
+        # commits and then sees a non-pending status; the decision update and
+        # the cascading version transition are atomic, so a crash between them
+        # can no longer leave the promotion resolved but the version un-moved.
+        # (The previous code ran the read, the update, and the cascade on three
+        # separate autocommit connections — a TOCTOU with no guard.)
+        with self._connection() as conn, conn.transaction():
+            row = self._do_one(
+                conn,
+                f"select {self._PROMOTION_COLUMNS} from promotion_decisions "
+                "where id = %s for update",
+                (promotion_id,),
+            )
+            if row is None:
+                raise KeyError(f"Unknown promotion: {promotion_id}")
+            decision = self._promotion_row(row)
+            if decision.status != "pending":
+                raise ValueError(
+                    f"Promotion {promotion_id} already resolved "
+                    f"(status={decision.status})"
                 )
+
+            decision.status = "approved" if approved else "rejected"
+            decision.approved_by = approved_by
+            decision.comment = comment
+            decision.resolved_at = datetime.now(UTC)
+            self._do(
+                conn,
+                "update promotion_decisions set status = %s, approved_by = %s, "
+                "comment = %s, resolved_at = now() where id = %s",
+                (decision.status, approved_by, comment, promotion_id),
+            )
+
+            card = decision.scorecard
+            if card.subject_type == "agent_spec_version":
+                subject = parse_subject_version(card.subject_id)
+                if subject is not None:
+                    verb = "approved" if approved else "rejected"
+                    # A missing subject version (ad-hoc scorecards in dev
+                    # tooling) is a no-op here — the resolution still stands,
+                    # matching InMemoryLedger.
+                    self._set_version_status(
+                        conn, subject[0], subject[1],
+                        "canary" if approved else "rejected",
+                        reason=f"human {verb} by {approved_by}",
+                    )
         return decision

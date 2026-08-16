@@ -26,6 +26,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any
 
@@ -123,25 +125,43 @@ def vector_literal(embedding: list[float]) -> str:
 
 
 class PgSemanticMemoryStore:
-    """A sync, durable semantic memory store. Construct via :meth:`connect`."""
+    """A sync, durable semantic memory store. Construct via :meth:`connect`.
+
+    Thread safety (MEM-17, mirroring :class:`PostgresLedger`'s TMP-1): the
+    worker runs activities concurrently on a thread pool, and a single psycopg
+    connection is **not** thread-safe. In DSN mode every public call opens a
+    short-lived connection (all of that call's statements — including the ones
+    inside its transaction — run on that one connection) and closes it when
+    done. An explicitly injected connection is still supported for tests/tools
+    and is caller-owned: the caller must not share such a store across threads.
+    (``psycopg_pool`` is not a project dependency; per-call connections are the
+    simple safe default, exactly as the ledger chose.)
+    """
 
     def __init__(
         self,
-        conn: Any,
+        conn: Any = None,
         *,
+        dsn: str | None = None,
+        connect_kwargs: dict[str, Any] | None = None,
         embedder: Embedder | None = None,
         dedup_threshold: float = DEFAULT_DEDUP_THRESHOLD,
         graph: FalkorGraphMemory | None = None,
     ) -> None:
+        if conn is None and dsn is None:
+            raise ValueError("PgSemanticMemoryStore requires a connection or a DSN")
         self._conn = conn
+        self._dsn = dsn
+        self._connect_kwargs = connect_kwargs or {}
         self.embedder = embedder or HashingEmbedder()
         self.dedup_threshold = dedup_threshold
         self._graph = graph
         self.mirror_max_attempts = DEFAULT_MIRROR_MAX_ATTEMPTS
-        self._require_pgvector()
-        self._require_embedding_dim()
-        if self._graph is not None:
-            self._ensure_outbox_table()
+        with self._connection() as conn_:
+            self._require_pgvector(conn_)
+            self._require_embedding_dim(conn_)
+            if self._graph is not None:
+                self._ensure_outbox_table(conn_)
 
     @classmethod
     def connect(
@@ -153,44 +173,68 @@ class PgSemanticMemoryStore:
         graph: FalkorGraphMemory | None = None,
         **kwargs: Any,
     ) -> PgSemanticMemoryStore:
-        import psycopg  # lazy
-
-        conn = psycopg.connect(dsn, autocommit=True, **kwargs)
+        # DSN mode: no persistent connection is held; each call leases its own
+        # (MEM-17). Safe to share the returned store across activity threads.
         return cls(
-            conn, embedder=embedder, dedup_threshold=dedup_threshold, graph=graph
+            dsn=dsn,
+            connect_kwargs=kwargs,
+            embedder=embedder,
+            dedup_threshold=dedup_threshold,
+            graph=graph,
         )
 
     def close(self) -> None:
-        self._conn.close()
+        # Only an injected connection is owned by the store; DSN-mode
+        # connections are opened and closed per call.
+        if self._conn is not None:
+            self._conn.close()
+
+    @contextmanager
+    def _connection(self) -> Iterator[Any]:
+        """Yield a connection: the injected one, or a fresh per-call one."""
+        if self._conn is not None:
+            yield self._conn
+            return
+        import psycopg  # lazy so bakudo imports without the db extra
+
+        assert self._dsn is not None  # guaranteed by __init__
+        conn = psycopg.connect(self._dsn, autocommit=True, **self._connect_kwargs)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     # --- store protocol ---
 
     def write_candidate(self, item: MemoryItem) -> MemoryItem:
-        # Drain any mirror backlog first (MEM-3): a retried activity whose
-        # candidate is now rejected as a repeat still pushes the pending
-        # graph ops from its earlier, committed attempt.
-        self._flush_mirror_quietly()
+        with self._connection() as conn:
+            # Drain any mirror backlog first (MEM-3): a retried activity whose
+            # candidate is now rejected as a repeat still pushes the pending
+            # graph ops from its earlier, committed attempt.
+            self._flush_mirror_quietly(conn)
 
-        reasons = validate_memory_candidate(item, self._same_content_items(item))
-        if reasons:
-            raise MemoryRejected("; ".join(reasons))
+            reasons = validate_memory_candidate(
+                item, self._same_content_items(conn, item)
+            )
+            if reasons:
+                raise MemoryRejected("; ".join(reasons))
 
-        embedding = self.embedder.embed(item.content)
-        near = self._nearest(embedding, scope=item.scope)
-        if near is not None:
-            near_item, similarity = near
-            if similarity >= self.dedup_threshold:
-                if near_item.confidence >= item.confidence:
-                    raise MemoryRejected(
-                        "near-duplicate of an equally/more confident memory"
-                    )
-                self._supersede(near_item.id, item, embedding)
-                self._flush_mirror_quietly()
-                return item
+            embedding = self.embedder.embed(item.content)
+            near = self._nearest(conn, embedding, scope=item.scope)
+            if near is not None:
+                near_item, similarity = near
+                if similarity >= self.dedup_threshold:
+                    if near_item.confidence >= item.confidence:
+                        raise MemoryRejected(
+                            "near-duplicate of an equally/more confident memory"
+                        )
+                    self._supersede(conn, near_item.id, item, embedding)
+                    self._flush_mirror_quietly(conn)
+                    return item
 
-        self._insert(item, embedding)
-        self._flush_mirror_quietly()
-        return item
+            self._insert(conn, item, embedding)
+            self._flush_mirror_quietly(conn)
+            return item
 
     def query(
         self,
@@ -202,22 +246,32 @@ class PgSemanticMemoryStore:
     ) -> list[MemoryItem]:
         """Retrieve live memories; TTL-expired rows are filtered server-side."""
         where, params = self._live_where(scope)
-        if text is None:
-            rows = self._all_rows(
-                f"select {_ITEM_COLUMNS} from memory_items{where} "
-                "order by confidence desc limit %s",
-                (*params, limit),
-            )
-            return [self._item_from_row(row) for row in rows]
+        with self._connection() as conn:
+            if text is None:
+                rows = self._all(
+                    conn,
+                    f"select {_ITEM_COLUMNS} from memory_items{where} "
+                    "order by confidence desc limit %s",
+                    (*params, limit),
+                )
+                return [self._item_from_row(row) for row in rows]
 
-        q = vector_literal(self.embedder.embed(text))
-        rows = self._all_rows(
-            f"select {_ITEM_COLUMNS}, 1 - (e.embedding <=> %s::vector) as similarity "
-            "from memory_items "
-            f"join memory_embeddings e on e.memory_id = memory_items.id{where} "
-            "order by e.embedding <=> %s::vector limit %s",
-            (q, *params, q, limit),
-        )
+            # The ``min_similarity`` cut happens server-side in the WHERE clause
+            # (MEM-18): filtering *after* the LIMIT — as this did — could drop
+            # every qualifying row when the nearest ``limit`` rows were all
+            # below threshold, returning empty while matches existed past the
+            # cut. The Python guard below is a redundant belt (harmless against
+            # real PG; it also keeps the scripted-conn tests meaningful).
+            q = vector_literal(self.embedder.embed(text))
+            rows = self._all(
+                conn,
+                f"select {_ITEM_COLUMNS}, 1 - (e.embedding <=> %s::vector) as similarity "
+                "from memory_items "
+                f"join memory_embeddings e on e.memory_id = memory_items.id{where} "
+                "and 1 - (e.embedding <=> %s::vector) >= %s "
+                "order by e.embedding <=> %s::vector limit %s",
+                (q, *params, q, min_similarity, q, limit),
+            )
         return [
             self._item_from_row(row)
             for row in rows
@@ -227,9 +281,12 @@ class PgSemanticMemoryStore:
     def all(self) -> list[MemoryItem]:
         """Dump every stored row, including TTL-expired ones (debug/admin
         surface; retrieval paths all filter expiry)."""
-        rows = self._all_rows(
-            f"select {_ITEM_COLUMNS} from memory_items order by created_at", ()
-        )
+        with self._connection() as conn:
+            rows = self._all(
+                conn,
+                f"select {_ITEM_COLUMNS} from memory_items order by created_at",
+                (),
+            )
         return [self._item_from_row(row) for row in rows]
 
     def purge_expired(self) -> int:
@@ -240,18 +297,19 @@ class PgSemanticMemoryStore:
         transaction: the graph must not keep nodes Postgres expired (the
         TTL flavour of MEM-10).
         """
-        with self._conn.transaction():
-            rows = self._all_rows(
+        with self._connection() as conn, conn.transaction():
+            rows = self._all(
+                conn,
                 "delete from memory_items "
                 "where ttl is not null and created_at + ttl <= now() "
                 "returning id",
                 (),
             )
             for (mem_id,) in rows:
-                self._enqueue_mirror_remove(mem_id)
+                self._enqueue_mirror_remove(conn, mem_id)
         return len(rows)
 
-    def flush_graph_mirror(self, limit: int = 100) -> int:
+    def flush_graph_mirror(self, limit: int = 100, *, conn: Any = None) -> int:
         """Drain pending graph-mirror ops from the outbox, oldest first.
 
         Runs in one transaction under a ``pg_try_advisory_xact_lock`` so at
@@ -266,22 +324,33 @@ class PgSemanticMemoryStore:
         are idempotent (MERGE / MATCH-delete), so at-least-once delivery is
         safe. Returns the number of ops delivered. Called opportunistically
         on every write and from compaction (MEM-3).
+
+        ``conn`` lets an in-progress public call drain on its own leased
+        connection; external callers omit it and get a fresh one.
         """
         if self._graph is None:
             return 0
-        pending = self._one_row(
-            "select 1 from graph_mirror_outbox where not dead limit 1", ()
+        if conn is None:
+            with self._connection() as leased:
+                return self._flush_graph_mirror(leased, limit)
+        return self._flush_graph_mirror(conn, limit)
+
+    def _flush_graph_mirror(self, conn: Any, limit: int) -> int:
+        assert self._graph is not None
+        pending = self._one(
+            conn, "select 1 from graph_mirror_outbox where not dead limit 1", ()
         )
         if pending is None:
             return 0
         delivered = 0
-        with self._conn.transaction():
-            lock = self._one_row(
-                "select pg_try_advisory_xact_lock(%s)", (_OUTBOX_DRAIN_LOCK,)
+        with conn.transaction():
+            lock = self._one(
+                conn, "select pg_try_advisory_xact_lock(%s)", (_OUTBOX_DRAIN_LOCK,)
             )
             if lock is None or not lock[0]:
                 return 0  # another drainer is at it; strict order preserved
-            rows = self._all_rows(
+            rows = self._all(
+                conn,
                 "select id, op, memory_id, run_id, payload, attempts "
                 "from graph_mirror_outbox where not dead order by id limit %s",
                 (limit,),
@@ -308,7 +377,8 @@ class PgSemanticMemoryStore:
                             "attempts (outbox row %s, op=%s, memory_id=%s): %s",
                             int(attempts) + 1, row_id, op, memory_id, exc,
                         )
-                        self._exec(
+                        self._do(
+                            conn,
                             "update graph_mirror_outbox "
                             "set attempts = attempts + 1, dead = true "
                             "where id = %s",
@@ -321,23 +391,24 @@ class PgSemanticMemoryStore:
                         row_id, op, memory_id, int(attempts) + 1,
                         self.mirror_max_attempts, exc,
                     )
-                    self._exec(
+                    self._do(
+                        conn,
                         "update graph_mirror_outbox set attempts = attempts + 1 "
                         "where id = %s",
                         (row_id,),
                     )
                     break
-                self._exec(
-                    "delete from graph_mirror_outbox where id = %s", (row_id,)
+                self._do(
+                    conn, "delete from graph_mirror_outbox where id = %s", (row_id,)
                 )
                 delivered += 1
         return delivered
 
     # --- internals ---
 
-    def _require_pgvector(self) -> None:
-        row = self._one_row(
-            "select 1 from pg_extension where extname = 'vector'", ()
+    def _require_pgvector(self, conn: Any) -> None:
+        row = self._one(
+            conn, "select 1 from pg_extension where extname = 'vector'", ()
         )
         if row is None:
             raise RuntimeError(
@@ -346,7 +417,7 @@ class PgSemanticMemoryStore:
                 "durable semantic memory requires it."
             )
 
-    def _require_embedding_dim(self) -> None:
+    def _require_embedding_dim(self, conn: Any) -> None:
         """Fail fast when the embedder's dimension cannot fit the schema.
 
         The production schema types ``memory_embeddings.embedding`` as
@@ -360,7 +431,8 @@ class PgSemanticMemoryStore:
         Untyped dev columns (typmod ``-1``) and a not-yet-created table skip
         the check — there is no server-side dimension to enforce yet.
         """
-        row = self._one_row(
+        row = self._one(
+            conn,
             "select atttypmod from pg_attribute "
             "where attrelid = to_regclass('memory_embeddings') "
             "and attname = 'embedding'",
@@ -382,21 +454,22 @@ class PgSemanticMemoryStore:
                 "typed production schema."
             )
 
-    def _ensure_outbox_table(self) -> None:
+    def _ensure_outbox_table(self, conn: Any) -> None:
         """Self-migrate the graph-mirror outbox (idempotent).
 
         Runs only when a graph mirror is wired — an unwired store never
         touches the database shape. The ``add column`` covers databases that
         were initialized with the pre-dead-letter outbox revision.
         """
-        self._exec(_GRAPH_MIRROR_OUTBOX_DDL, ())
-        self._exec(
+        self._do(conn, _GRAPH_MIRROR_OUTBOX_DDL, ())
+        self._do(
+            conn,
             "alter table graph_mirror_outbox "
             "add column if not exists dead boolean not null default false",
             (),
         )
 
-    def _same_content_items(self, item: MemoryItem) -> list[MemoryItem]:
+    def _same_content_items(self, conn: Any, item: MemoryItem) -> list[MemoryItem]:
         """Fetch stored items with identical normalised content.
 
         The write policy only consults ``existing`` for its exact-repeat check,
@@ -406,7 +479,8 @@ class PgSemanticMemoryStore:
         never return the other row anyway. Expired rows are ignored (MEM-5).
         """
         where, params = self._live_where(item.scope)
-        rows = self._all_rows(
+        rows = self._all(
+            conn,
             f"select {_ITEM_COLUMNS} from memory_items"
             f"{where} and lower(trim(content)) = lower(trim(%s))",
             (*params, item.content),
@@ -414,11 +488,12 @@ class PgSemanticMemoryStore:
         return [self._item_from_row(row) for row in rows]
 
     def _nearest(
-        self, embedding: list[float], *, scope: dict
+        self, conn: Any, embedding: list[float], *, scope: dict
     ) -> tuple[MemoryItem, float] | None:
         where, params = self._live_where(scope)
         q = vector_literal(embedding)
-        row = self._one_row(
+        row = self._one(
+            conn,
             f"select {_ITEM_COLUMNS}, 1 - (e.embedding <=> %s::vector) as similarity "
             "from memory_items "
             f"join memory_embeddings e on e.memory_id = memory_items.id{where} "
@@ -429,16 +504,17 @@ class PgSemanticMemoryStore:
             return None
         return self._item_from_row(row), float(row[-1])
 
-    def _insert(self, item: MemoryItem, embedding: list[float]) -> None:
+    def _insert(self, conn: Any, item: MemoryItem, embedding: list[float]) -> None:
         """Insert item + embedding atomically: a split write leaves a zombie
         row that blocks re-writes forever (MEM-2). The graph-mirror op is
         enqueued in the same transaction (MEM-3)."""
-        with self._conn.transaction():
-            self._insert_rows(item, embedding)
-            self._enqueue_mirror_upsert(item, embedding)
+        with conn.transaction():
+            self._insert_rows(conn, item, embedding)
+            self._enqueue_mirror_upsert(conn, item, embedding)
 
-    def _insert_rows(self, item: MemoryItem, embedding: list[float]) -> None:
-        self._exec(
+    def _insert_rows(self, conn: Any, item: MemoryItem, embedding: list[float]) -> None:
+        self._do(
+            conn,
             "insert into memory_items "
             "(id, memory_type, scope, content, evidence, confidence, ttl, created_by) "
             "values (%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -453,31 +529,34 @@ class PgSemanticMemoryStore:
                 item.created_by,
             ),
         )
-        self._exec(
+        self._do(
+            conn,
             "insert into memory_embeddings (memory_id, embedding) values (%s, %s::vector)",
             (item.id, vector_literal(embedding)),
         )
 
     def _supersede(
-        self, old_id: str, item: MemoryItem, embedding: list[float]
+        self, conn: Any, old_id: str, item: MemoryItem, embedding: list[float]
     ) -> None:
         """Replace a less-confident near-duplicate in place (cascade cleans
         the old embedding row).
 
         Delete + replacement insert run in one transaction: the old memory is
         never destroyed unless the new item and its embedding both land
-        (MEM-2). The mirror ops — remove the superseded node (MEM-10), then
-        upsert the replacement — ride the same transaction's outbox (MEM-3),
-        and are atomic in intent: when the replacement will not be mirrored
-        (no run evidence), the old node's delete is skipped too — deleting
-        without replacing would make a live memory vanish from the graph.
+        (MEM-2). The superseded node's graph delete is **always** enqueued
+        (MEM-19): the old memory row is gone, so leaving its mirrored node
+        behind would orphan a graph node pointing at a deleted row — and the
+        delete is idempotent, harmless even if the node was never mirrored.
+        The replacement's upsert is conditional on run evidence (a memory with
+        no run cannot hang a ``PRODUCED_MEMORY`` edge and is not mirrored by
+        design); both ops ride the same transaction's outbox (MEM-3).
         """
-        with self._conn.transaction():
-            self._exec("delete from memory_items where id = %s", (old_id,))
-            self._insert_rows(item, embedding)
+        with conn.transaction():
+            self._do(conn, "delete from memory_items where id = %s", (old_id,))
+            self._insert_rows(conn, item, embedding)
+            self._enqueue_mirror_remove(conn, old_id)
             if self._mirror_run_id(item) is not None:
-                self._enqueue_mirror_remove(old_id)
-                self._enqueue_mirror_upsert(item, embedding)
+                self._enqueue_mirror_upsert(conn, item, embedding)
 
     def _mirror_run_id(self, item: MemoryItem) -> str | None:
         """The run to hang the mirror edge off — None means "not mirrored"
@@ -486,7 +565,9 @@ class PgSemanticMemoryStore:
             return None
         return next((e.run_id for e in item.evidence if e.run_id), None)
 
-    def _enqueue_mirror_upsert(self, item: MemoryItem, embedding: list[float]) -> None:
+    def _enqueue_mirror_upsert(
+        self, conn: Any, item: MemoryItem, embedding: list[float]
+    ) -> None:
         run_id = self._mirror_run_id(item)
         if run_id is None:
             return
@@ -495,29 +576,31 @@ class PgSemanticMemoryStore:
             "confidence": item.confidence,
             "embedding": [float(v) for v in embedding],
         }
-        self._exec(
+        self._do(
+            conn,
             "insert into graph_mirror_outbox (op, memory_id, run_id, payload) "
             "values (%s, %s, %s, %s)",
             ("upsert", item.id, run_id, json.dumps(payload)),
         )
 
-    def _enqueue_mirror_remove(self, memory_id: str) -> None:
+    def _enqueue_mirror_remove(self, conn: Any, memory_id: str) -> None:
         if self._graph is None:
             return
-        self._exec(
+        self._do(
+            conn,
             "insert into graph_mirror_outbox (op, memory_id, run_id, payload) "
             "values (%s, %s, %s, %s)",
             ("delete", memory_id, None, json.dumps({})),
         )
 
-    def _flush_mirror_quietly(self) -> None:
+    def _flush_mirror_quietly(self, conn: Any) -> None:
         """Best-effort drain: mirror delivery must never fail the durable
         write path — undelivered ops stay queued for the next drain.
         Per-op failures are logged inside :meth:`flush_graph_mirror`; this
         guard logs drain-machinery failures (e.g. the outbox query itself)
         so a dead mirror is never silent."""
         try:
-            self.flush_graph_mirror()
+            self.flush_graph_mirror(conn=conn)
         except Exception:
             logger.warning(
                 "graph-mirror drain failed; pending ops stay queued in "
@@ -554,16 +637,19 @@ class PgSemanticMemoryStore:
             created_by=row[7],
         )
 
-    def _exec(self, sql: str, params: tuple) -> None:
-        with self._conn.cursor() as cur:
+    @staticmethod
+    def _do(conn: Any, sql: str, params: tuple) -> None:
+        with conn.cursor() as cur:
             cur.execute(sql, params)
 
-    def _one_row(self, sql: str, params: tuple) -> tuple | None:
-        with self._conn.cursor() as cur:
+    @staticmethod
+    def _one(conn: Any, sql: str, params: tuple) -> tuple | None:
+        with conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchone()
 
-    def _all_rows(self, sql: str, params: tuple) -> list[tuple]:
-        with self._conn.cursor() as cur:
+    @staticmethod
+    def _all(conn: Any, sql: str, params: tuple) -> list[tuple]:
+        with conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.fetchall()

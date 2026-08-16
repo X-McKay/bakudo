@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
@@ -40,6 +40,7 @@ with workflow.unsafe.imports_passed_through():
         load_agent_spec,
         measure_winner_bench,
         persist_run,
+        reconcile_runs,
         render_bundle,
         run_agent_evolution,
         run_eval_suite,
@@ -75,11 +76,23 @@ _SHORT: dict[str, Any] = dict(
 # control plane to re-dispatch under a fresh run_id instead. The activity
 # heartbeats every 30s (activities.run_sandbox), so heartbeat_timeout detects
 # a crashed worker in minutes rather than after the 2h start-to-close.
+# start_to_close must exceed the activity's own worst case: the spec-schema
+# cap on timeoutSeconds (10800s) + abox 0.7.0's in-guest setup headroom (300s)
+# + the host-side kill headroom (600s) = 11700s, rounded up. Keeping the
+# margin here rather than trusting specs stays honest with maximum_attempts=1:
+# a Temporal-killed sandbox records a terminal failure with no result.json
+# while the microVM keeps running to its own deadline.
 _SANDBOX: dict[str, Any] = dict(
-    start_to_close_timeout=timedelta(hours=2),
+    start_to_close_timeout=timedelta(seconds=12_600),
     heartbeat_timeout=timedelta(minutes=5),
     retry_policy=RetryPolicy(maximum_attempts=1),
 )
+
+
+class _MalformedSpec(Exception):
+    """Raised when a rendered bundle's agent spec lacks a usable
+    name/version (TMP-20). Caught inside AgentRunWorkflow to dead-letter the
+    run rather than crash the workflow task into an infinite retry."""
 
 
 @workflow.defn
@@ -111,20 +124,21 @@ class AgentRunWorkflow:
             persist_run, args=[run_id, phase, payload or {}], **_SHORT
         )
 
-    async def _notify_meta(self, run_id: str) -> None:
+    async def _notify_meta(self, run_id: str, tokens_used: int = 0) -> None:
         """Signal run_completed to the meta workflow so active_runs drains (TMP-5).
 
         Guard: only when this run was dispatched *by* the meta workflow — the
         parent workflow id is deterministic workflow state, so this needs no
         input flag and cannot misfire for CLI/API-started runs. Best-effort:
         a missing/closed meta singleton must not fail a finished run.
+        ``tokens_used`` charges the run against the meta budget (TMP-17).
         """
         parent = workflow.info().parent
         if parent is None or parent.workflow_id != META_WORKFLOW_ID:
             return
         try:
             handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
-            await handle.signal("run_completed", run_id)
+            await handle.signal("run_completed", args=[run_id, tokens_used])
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - best-effort notification
@@ -132,24 +146,44 @@ class AgentRunWorkflow:
                 "run_completed signal to %s failed: %s", META_WORKFLOW_ID, exc
             )
 
+    @staticmethod
+    def _spec_name_version(bundle: dict) -> tuple[str, int]:
+        """Extract the agent name/version from the rendered bundle, raising a
+        clear error on a malformed spec (TMP-20) so the run can be dead-lettered
+        instead of KeyError-crashing the workflow task into an infinite retry."""
+        try:
+            meta = bundle["agent_spec"]["metadata"]
+            return str(meta["name"]), int(meta["version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _MalformedSpec(str(exc)) from exc
+
     @workflow.run
     async def run(self, inp: AgentRunInput) -> AgentRunOutput:
         try:
             return await self._run_lifecycle(inp)
+        except _MalformedSpec as err:
+            # TMP-20: a malformed spec is a permanent, data-shaped failure —
+            # retrying can never fix it. Record a terminal failed phase and
+            # return a failed output (do NOT re-raise into an infinite retry).
+            await self._fail_terminally(inp.run_id, f"malformed_spec: {err}")
+            return AgentRunOutput(inp.run_id, "failed", "", "")
         except (ActivityError, ChildWorkflowError) as err:
             # TMP-10: retry exhaustion must not leave the ledger stuck at a
             # non-terminal phase forever — record a terminal failed phase (and
             # its finished event) best-effort, then let the workflow fail.
             cause = getattr(err, "cause", None) or err
-            try:
-                await self._advance(inp.run_id, "failed", {"error": str(cause)})
-            except (ActivityError, ChildWorkflowError) as persist_err:
-                workflow.logger.warning(
-                    "could not persist terminal failed phase for %s: %s",
-                    inp.run_id, persist_err,
-                )
-            await self._notify_meta(inp.run_id)
+            await self._fail_terminally(inp.run_id, str(cause))
             raise
+
+    async def _fail_terminally(self, run_id: str, error: str) -> None:
+        try:
+            await self._advance(run_id, "failed", {"error": error})
+        except (ActivityError, ChildWorkflowError) as persist_err:
+            workflow.logger.warning(
+                "could not persist terminal failed phase for %s: %s",
+                run_id, persist_err,
+            )
+        await self._notify_meta(run_id)
 
     async def _run_lifecycle(self, inp: AgentRunInput) -> AgentRunOutput:
         workflow_id = workflow.info().workflow_id
@@ -159,6 +193,10 @@ class AgentRunWorkflow:
         self._phase = "created"
 
         bundle = await workflow.execute_activity(render_bundle, inp, **_SHORT)
+        # Validate the spec shape up front (TMP-20): a bundle whose agent spec
+        # lacks a usable name/version raises _MalformedSpec here, which the run
+        # wrapper dead-letters, instead of a bare KeyError deep in the flow.
+        agent_name, agent_version = self._spec_name_version(bundle)
         await self._advance(inp.run_id, "bundle_rendered")
 
         if self._cancelled:
@@ -166,18 +204,42 @@ class AgentRunWorkflow:
             await self._notify_meta(inp.run_id)
             return AgentRunOutput(inp.run_id, "cancelled", "", "")
 
-        await self._advance(inp.run_id, "sandbox_starting")
+        # `sandbox_starting` and `agent_running` used to be two back-to-back
+        # persist activities with no work between them (two ledger round-trips
+        # for no observable state change). Persist the single meaningful
+        # transition — the run is about to execute in the sandbox — as
+        # `agent_running`; the launch is instantaneous from the ledger's view.
+        # patched(): runs already in flight when this build deploys must
+        # replay the old two-persist history without a NondeterminismError.
+        if not workflow.patched("collapse-sandbox-starting-persist"):
+            await self._advance(inp.run_id, "sandbox_starting")
         await self._advance(inp.run_id, "agent_running")
-        sandbox = await workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
+        # Race the sandbox activity against the cancel signal (TMP-21): a
+        # cancel that arrives while the (multi-hour) sandbox is in flight now
+        # requests activity cancellation — abox tears the microVM down in its
+        # finally — and records a terminal `cancelled` phase, instead of the
+        # signal being observed only in the narrow pre-sandbox window.
+        sandbox_task = asyncio.ensure_future(
+            workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
+        )
+        await workflow.wait_condition(
+            lambda: sandbox_task.done() or self._cancelled
+        )
+        if self._cancelled and not sandbox_task.done():
+            sandbox_task.cancel()
+            await self._advance(inp.run_id, "cancelled")
+            await self._notify_meta(inp.run_id)
+            return AgentRunOutput(inp.run_id, "cancelled", agent_name, "")
+        sandbox = await sandbox_task
 
         await self._advance(inp.run_id, "collecting_artifacts")
         result = sandbox.get("result")
         if not sandbox.get("succeeded") or result is None:
             await self._advance(inp.run_id, "failed", {"result": result})
-            await self._notify_meta(inp.run_id)
+            await self._notify_meta(inp.run_id, sandbox.get("tokens_used", 0))
             return AgentRunOutput(
                 inp.run_id, "failed",
-                bundle["agent_spec"]["metadata"]["name"], sandbox.get("git_branch", ""),
+                agent_name, sandbox.get("git_branch", ""),
                 result=result,
             )
 
@@ -206,7 +268,7 @@ class AgentRunWorkflow:
         try:
             await workflow.execute_activity(
                 check_canary_graduation,
-                bundle["agent_spec"]["metadata"]["name"],
+                agent_name,
                 **_SHORT,
             )
         except (ActivityError, ChildWorkflowError) as exc:
@@ -214,12 +276,11 @@ class AgentRunWorkflow:
                 "canary graduation check failed for %s: %s", inp.run_id, exc
             )
 
-        await self._notify_meta(inp.run_id)
+        await self._notify_meta(inp.run_id, sandbox.get("tokens_used", 0))
         return AgentRunOutput(
             run_id=inp.run_id,
             phase="completed",
-            agent_ref=f"{bundle['agent_spec']['metadata']['name']}@"
-            f"{bundle['agent_spec']['metadata']['version']}",
+            agent_ref=f"{agent_name}@{agent_version}",
             git_branch=sandbox.get("git_branch", ""),
             result=result,
             scorecard=eval_out.get("scorecard"),
@@ -243,10 +304,16 @@ class OptimizationWorkflow:
     def __init__(self) -> None:
         self._round = 0
         self._phase = "created"
+        # Tokens spent across every scout/attempt child run. Those children are
+        # parented by *this* workflow, so their own _notify_meta is skipped;
+        # this loop is the only budget notification the meta-agent gets for the
+        # whole optimize objective, so it must carry the accumulated cost
+        # (TMP-24) or optimize work would spend against a zero charge.
+        self._tokens_used = 0
 
     @workflow.query
     def status(self) -> dict:
-        return {"round": self._round, "phase": self._phase}
+        return {"round": self._round, "phase": self._phase, "tokens": self._tokens_used}
 
     async def _child_run(self, objective: dict, spec: dict, timeout: int) -> dict:
         run_id = workflow.uuid4().hex
@@ -261,10 +328,46 @@ class OptimizationWorkflow:
             id=f"run-{run_id}",
         )
         out = await handle
-        return out if isinstance(out, dict) else _as_dict(out)
+        data = out if isinstance(out, dict) else _as_dict(out)
+        metrics = (data.get("result") or {}).get("metrics") or {}
+        try:
+            self._tokens_used += int(metrics.get("tokens_used", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        return data
 
     @workflow.run
     async def run(self, inp: OptimizeInput) -> dict:
+        # When the meta-agent dispatched this loop, signal run_completed on
+        # every exit so its active_runs slot drains (TMP-19) — symmetric with
+        # AgentRunWorkflow._notify_meta.
+        try:
+            return await self._run(inp)
+        finally:
+            await self._notify_meta(inp)
+
+    async def _notify_meta(self, inp: OptimizeInput) -> None:
+        if inp.tracking_run_id is None:
+            return
+        parent = workflow.info().parent
+        if parent is None or parent.workflow_id != META_WORKFLOW_ID:
+            return
+        try:
+            handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
+            # Charge the whole optimize loop's token spend against the budget
+            # (TMP-24).
+            await handle.signal(
+                "run_completed", args=[inp.tracking_run_id, self._tokens_used]
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - best-effort notification
+            workflow.logger.warning(
+                "optimize run_completed signal to %s failed: %s",
+                META_WORKFLOW_ID, exc,
+            )
+
+    async def _run(self, inp: OptimizeInput) -> dict:
         feedback: list[str] = []
         while self._round < inp.max_rounds:
             self._round += 1
@@ -456,6 +559,35 @@ class MetaState:
     # operators) can lower it without patching module globals.
     continue_as_new_threshold: int = _CONTINUE_AS_NEW_THRESHOLD
 
+    # --- governance that actually governs (TMP-17) ---
+    # Global ceiling on concurrently dispatched runs. role_concurrency caps a
+    # single role; a role with no explicit cap falls back to this global one.
+    max_concurrent_runs: int = 4
+    # Role of each active run, so per-role concurrency can be counted. Kept in
+    # lockstep with active_runs (added on dispatch, dropped on completion).
+    active_run_roles: dict[str, str] = field(default_factory=dict)
+    # Deterministic dispatch time (workflow.now().isoformat()) of each active
+    # run, so a leaked entry — an ABANDON'd child whose worker died and never
+    # signalled run_completed — is reconciled out after active_run_ttl_hours
+    # instead of blocking dispatch forever (TMP-18).
+    active_run_started: dict[str, str] = field(default_factory=dict)
+    # Time-TTL backstop only (TMP-18): the *primary* reconcile is against the
+    # ledger's terminal status (reconcile_runs activity), so this must sit
+    # safely above the true worst-case run lifetime — sandbox (2h) plus the
+    # eval child's retries (up to 3x2h) plus overhead — or it would drop a
+    # legitimately-running child and over-subscribe the concurrency slots.
+    active_run_ttl_hours: float = 24.0
+    # Idle heartbeat: the run loop wakes at least this often even with no
+    # dispatchable work, so stale-run reconciliation runs and a paused meta
+    # under signal inflow still rolls history (bounds the CAN edge case).
+    idle_wake_minutes: float = 30.0
+    # Budget accounting: each completed run decrements budget_usd_remaining by
+    # tokens_used/1000 * usd_per_1k_tokens. The rate defaults to 0.0 (budget is
+    # a manual kill-switch only) so behaviour is unchanged until an operator
+    # prices tokens via change_token_price; once priced, the budget is a hard
+    # dispatch gate — no run starts while budget_usd_remaining <= 0.
+    usd_per_1k_tokens: float = 0.0
+
 
 @workflow.defn
 class MetaAgentWorkflow:
@@ -494,10 +626,22 @@ class MetaAgentWorkflow:
         self._backlog.append(objective)
 
     @workflow.signal
-    def run_completed(self, run_id: str) -> None:
+    def run_completed(self, run_id: str, tokens_used: int = 0) -> None:
+        self._drop_active_run(run_id)
+        self._state.processed_objectives += 1
+        # Charge the run against the budget (TMP-17). With the default 0.0 rate
+        # this is a no-op; once tokens are priced it decrements the ceiling
+        # that gates dispatch.
+        if tokens_used and self._state.usd_per_1k_tokens:
+            self._state.budget_usd_remaining -= (
+                tokens_used / 1000.0 * self._state.usd_per_1k_tokens
+            )
+
+    def _drop_active_run(self, run_id: str) -> None:
         if run_id in self._state.active_runs:
             self._state.active_runs.remove(run_id)
-        self._state.processed_objectives += 1
+        self._state.active_run_roles.pop(run_id, None)
+        self._state.active_run_started.pop(run_id, None)
 
     @workflow.signal
     def pause_autonomy(self) -> None:
@@ -529,6 +673,22 @@ class MetaAgentWorkflow:
     def get_dead_letter(self) -> list[dict[str, Any]]:
         return list(self._state.dead_letter)
 
+    @workflow.query
+    def get_budget_state(self) -> dict[str, Any]:
+        """Real budget/concurrency state (spec §11.4 get_budget_state)."""
+        role_active: dict[str, int] = {}
+        for role in self._state.active_run_roles.values():
+            role_active[role] = role_active.get(role, 0) + 1
+        return {
+            "budget_usd_remaining": self._state.budget_usd_remaining,
+            "usd_per_1k_tokens": self._state.usd_per_1k_tokens,
+            "budget_exhausted": self._budget_exhausted(),
+            "active_runs": len(self._state.active_runs),
+            "max_concurrent_runs": self._state.max_concurrent_runs,
+            "role_concurrency": dict(self._state.role_concurrency),
+            "role_active": role_active,
+        }
+
     # --- Updates (validated state changes returning a result, section 11.4) ---
     @workflow.update
     def submit_objective(self, objective: dict[str, Any]) -> str:
@@ -551,13 +711,93 @@ class MetaAgentWorkflow:
         self._state.role_concurrency[role] = limit
         return dict(self._state.role_concurrency)
 
-    def _can_dispatch(self) -> bool:
-        # observe = signals only; propose = human approval required before runs.
-        return (
-            not self._paused
-            and self._state.mode not in ("observe", "propose")
-            and bool(self._backlog)
+    @workflow.update
+    def change_max_concurrent_runs(self, limit: int) -> int:
+        self._state.max_concurrent_runs = limit
+        return limit
+
+    @workflow.update
+    def change_token_price(self, usd_per_1k_tokens: float) -> float:
+        """Price tokens so the USD budget becomes a real dispatch gate (TMP-17)."""
+        self._state.usd_per_1k_tokens = usd_per_1k_tokens
+        return usd_per_1k_tokens
+
+    # --- dispatch gating (TMP-17) ---
+    def _budget_exhausted(self) -> bool:
+        return self._state.budget_usd_remaining <= 0
+
+    @staticmethod
+    def _role_of(objective: dict[str, Any]) -> str:
+        return resolve_agent_name(objective) or objective.get("type") or "default"
+
+    def _role_cap(self, role: str) -> int:
+        # A role with no explicit cap is limited only by the global ceiling.
+        return self._state.role_concurrency.get(role, self._state.max_concurrent_runs)
+
+    def _role_active_count(self, role: str) -> int:
+        return sum(1 for r in self._state.active_run_roles.values() if r == role)
+
+    def _dispatch_candidate(self) -> dict[str, Any] | None:
+        """The next backlog objective that may dispatch *now*, or None.
+
+        Enforces the governance knobs that used to be decorative (TMP-17): the
+        mode/pause gate, the USD budget ceiling, the global concurrency cap,
+        and per-role concurrency. Scans the backlog in order and returns the
+        first objective whose role still has capacity, so a single capped role
+        does not head-of-line-block unrelated work while global capacity
+        remains.
+        """
+        if self._paused or self._state.mode in ("observe", "propose"):
+            return None
+        if self._budget_exhausted():
+            return None
+        if len(self._state.active_runs) >= self._state.max_concurrent_runs:
+            return None
+        for objective in self._backlog:
+            role = self._role_of(objective)
+            if self._role_active_count(role) < self._role_cap(role):
+                return objective
+        return None
+
+    def _stale_active_runs(self, now: datetime) -> list[str]:
+        """Active-run ids older than the TTL (pure; unit-testable off a
+        workflow). ``now`` is the deterministic ``workflow.now()``."""
+        ttl = timedelta(hours=self._state.active_run_ttl_hours)
+        return [
+            run_id
+            for run_id, ts in self._state.active_run_started.items()
+            if now - datetime.fromisoformat(ts) > ttl
+        ]
+
+    def _reconcile_active_runs(self, now: datetime) -> None:
+        """Time-TTL backstop: drop active-run entries far past any real run
+        lifetime (TMP-18). This only catches a run that never got a terminal
+        ledger record at all; the precise reconcile is
+        :meth:`_reconcile_via_ledger`, which drops runs the ledger reports as
+        terminal without waiting out this coarse TTL.
+        """
+        for run_id in self._stale_active_runs(now):
+            workflow.logger.warning(
+                "reconciling leaked active run %s (no completion after %sh)",
+                run_id, self._state.active_run_ttl_hours,
+            )
+            self._drop_active_run(run_id)
+
+    async def _reconcile_via_ledger(self) -> None:
+        """Free slots held by runs the ledger reports as terminal (TMP-18).
+
+        Reconciles against authoritative terminal *status*, not elapsed time,
+        so a still-running child (non-terminal ledger phase) is never dropped —
+        which the coarse time-TTL could do given the eval child's retry budget.
+        """
+        if not self._state.active_runs:
+            return
+        finished = await workflow.execute_activity(
+            reconcile_runs, list(self._state.active_runs), **_SHORT
         )
+        for run_id in finished:
+            workflow.logger.info("reconciled finished run %s from active_runs", run_id)
+            self._drop_active_run(run_id)
 
     @workflow.run
     async def run(self, carried: MetaState | None = None) -> None:
@@ -566,26 +806,73 @@ class MetaAgentWorkflow:
             # Restore any backlog carried across the Continue-As-New boundary.
             self._backlog = list(carried.pending_backlog)
             self._state.pending_backlog = []
+            # A payload carried from a build that predates active_run_started
+            # deserializes those maps empty while active_runs still counts
+            # against max_concurrent_runs — such ids would be exempt from the
+            # TTL sweep forever and could block dispatch permanently. Stamp
+            # them now so the TTL backstop (and role accounting) covers them.
+            for run_id in self._state.active_runs:
+                self._state.active_run_started.setdefault(
+                    run_id, workflow.now().isoformat()
+                )
 
         while True:
-            # Wake only when there is dispatchable work or it is time to roll
-            # history. Backlog is never dropped while paused/observing.
-            await workflow.wait_condition(
-                lambda: self._can_dispatch()
-                or self._handled >= self._state.continue_as_new_threshold
-            )
+            self._reconcile_active_runs(workflow.now())
+            # Wake when there is dispatchable work or it is time to roll
+            # history; otherwise wake on the idle heartbeat so stale-run
+            # reconciliation still runs (and a paused meta under inflow still
+            # rolls history). Backlog is never dropped while paused/observing.
+            try:
+                # patched(): the timeout= arm schedules a timer the pre-idle-
+                # heartbeat meta singleton's history does not contain; the
+                # long-lived META_WORKFLOW_ID must replay that history cleanly
+                # across this deploy.
+                if workflow.patched("idle-heartbeat-wake"):
+                    await workflow.wait_condition(
+                        lambda: self._dispatch_candidate() is not None
+                        or self._handled >= self._state.continue_as_new_threshold,
+                        timeout=timedelta(minutes=self._state.idle_wake_minutes),
+                    )
+                else:
+                    await workflow.wait_condition(
+                        lambda: self._dispatch_candidate() is not None
+                        or self._handled >= self._state.continue_as_new_threshold
+                    )
+            except TimeoutError:
+                # Idle heartbeat: reconcile leaked slots against the ledger's
+                # terminal status (TMP-18) — this is where a meta blocked by
+                # runs that finished-without-signalling gets unstuck — then
+                # count the wake toward the CAN threshold so even a persistently
+                # paused/blocked meta eventually rolls history, and re-loop.
+                # Best-effort like every other housekeeping activity: a ledger
+                # outage during the wake must not fail the long-lived meta
+                # singleton (its backlog/budget state only survives CAN).
+                try:
+                    await self._reconcile_via_ledger()
+                except ActivityError as exc:
+                    workflow.logger.warning(
+                        "ledger reconcile failed on idle wake; retrying next "
+                        "heartbeat: %s", exc,
+                    )
+                self._handled += 1
+                continue
+
             if self._handled >= self._state.continue_as_new_threshold:
                 # Carry the full state, including any undispatched backlog.
                 self._state.pending_backlog = list(self._backlog)
                 workflow.continue_as_new(self._state)
 
-            objective = self._backlog.pop(0)
+            objective = self._dispatch_candidate()
+            if objective is None:
+                continue  # nothing dispatchable right now; re-evaluate
+            self._backlog.remove(objective)
             self._handled += 1
             self._mark_processed(objective)
 
             # The run id is minted before spec resolution so canary routing is
             # deterministic per run (design §2).
             run_id = objective.get("run_id") or workflow.uuid4().hex
+            role = self._role_of(objective)
 
             # Resolve the agent spec (TMP-3): an inline agent_spec wins, then
             # suggestedAgents[0] / the per-type default, loaded via activity
@@ -613,7 +900,15 @@ class MetaAgentWorkflow:
                     )
                     continue
 
-            self._state.active_runs.append(run_id)
+            self._track_active_run(run_id, role)
+
+            # An `optimize` objective drives the scout->attempt->verify loop
+            # (TMP-19): dispatching it as a plain AgentRunWorkflow would run a
+            # single scout and never fan out. OptimizationWorkflow notifies
+            # run_completed itself so active_runs still drains.
+            if objective.get("type") == "optimize":
+                await self._dispatch_optimize(run_id, objective, spec)
+                continue
 
             # Dispatch the run as a child workflow; the meta-agent does not block
             # on it — completion arrives via the run_completed signal. ABANDON
@@ -629,6 +924,45 @@ class MetaAgentWorkflow:
                 id=f"run-{run_id}",
                 parent_close_policy=workflow.ParentClosePolicy.ABANDON,
             )
+
+    def _track_active_run(self, run_id: str, role: str) -> None:
+        self._state.active_runs.append(run_id)
+        self._state.active_run_roles[run_id] = role
+        self._state.active_run_started[run_id] = workflow.now().isoformat()
+
+    async def _dispatch_optimize(
+        self, run_id: str, objective: dict[str, Any], scout_spec: dict[str, Any]
+    ) -> None:
+        """Route an optimize objective into OptimizationWorkflow (TMP-19).
+
+        The scout spec is the one already resolved for the objective; the
+        attempt spec is loaded the same active-only way. If the attempt spec
+        can't be resolved the objective is dead-lettered (and its active-run
+        slot released) rather than starting a loop that can never attempt.
+        """
+        attempt_spec = await workflow.execute_activity(
+            load_agent_spec, args=["optimize-attempt", run_id], **_SHORT
+        )
+        if not isinstance(attempt_spec, dict):
+            self._drop_active_run(run_id)
+            reason = "no optimize-attempt spec resolvable for optimize objective"
+            workflow.logger.warning(
+                "dead-lettering optimize objective %s: %s",
+                objective.get("id"), reason,
+            )
+            self._state.dead_letter.append({"objective": objective, "reason": reason})
+            return
+        await workflow.start_child_workflow(
+            OptimizationWorkflow.run,
+            OptimizeInput(
+                objective=objective,
+                scout_spec=scout_spec,
+                attempt_spec=attempt_spec,
+                tracking_run_id=run_id,
+            ),
+            id=f"optimize-{run_id}",
+            parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+        )
 
 
 # --- Evolution & curriculum workflows (spec sections 11.1, 15, 16) ---
@@ -667,9 +1001,8 @@ class RepoObserverWorkflow:
         for objective in objectives:
             await meta.signal("new_objective", objective)
 
-        # Poll on an interval; cap iterations per execution to keep history
-        # small. The counter rides on the input (continue_as_new takes exactly
-        # the workflow's run arguments) and resets when it rolls over.
+        # Poll on an interval, then Continue-As-New. Each execution does exactly
+        # one collect+sleep+CAN, so its own history stays tiny — no rollover
+        # counter is needed to bound it.
         await workflow.sleep(timedelta(minutes=15))
-        next_iterations = 0 if inp.iterations >= 32 else inp.iterations + 1
-        workflow.continue_as_new(ObserveInput(repo=inp.repo, iterations=next_iterations))
+        workflow.continue_as_new(ObserveInput(repo=inp.repo))

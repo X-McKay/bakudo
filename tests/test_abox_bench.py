@@ -75,8 +75,16 @@ def test_measure_times_base_and_patched_refs(tmp_path):
     for joined in (first, second):
         assert "--network safe" in joined  # model-authored code: no egress
         assert f"--repo {repo}" in joined
-    # The guest command is a python timer, never the raw bench on the host.
-    assert "python3" in runs[0][runs[0].index("--") + 1]
+    # The guest command chains the repo prepare (0.7.0 guests boot fresh; pip
+    # output routed to stderr) into the python timer — never the raw bench on
+    # the host. The timer source rides as its own argv element ($1).
+    guest_cmd = runs[0][runs[0].index("--") + 1 :]
+    assert guest_cmd[0] == "sh" and guest_cmd[1] == "-c"
+    assert "prepare.sh >&2" in guest_cmd[2]
+    assert 'exec python3 -c "$1"' in guest_cmd[2]
+    assert "verify_bench" in guest_cmd[-1]  # the rendered timer script
+    # Spec timeout 300 + in-guest setup headroom lands on the abox --timeout.
+    assert "--timeout 600" in first
 
 
 def test_measure_cleans_up_sandboxes_branch_and_worktree(tmp_path):

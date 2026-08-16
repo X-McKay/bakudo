@@ -19,6 +19,26 @@ class MemoryType(str, Enum):
     # Worker-emitted shorthand types (from result.json) map onto semantic.
     repo_fact = "repo_fact"
 
+    @classmethod
+    def canonical(cls, raw: str) -> str:
+        """Normalise a worker-emitted type string to a stable vocabulary value
+        (MEM-21). Recognised canonical values (``semantic_memory``) and enum
+        member names (``semantic``) pass through to their canonical value; the
+        ``repo_fact`` shorthand — and any string outside the vocabulary — maps
+        onto ``semantic_memory``, applying the mapping the docstring above (and
+        compaction) always claimed but never enforced. Empty input also maps to
+        semantic. This is applied on the worker → compaction path; directly
+        constructed :class:`MemoryItem` objects keep whatever ``type`` they are
+        given (the field stays a free ``str`` so existing callers are
+        unaffected)."""
+        if not raw:
+            return cls.semantic.value
+        try:
+            member = cls(raw)
+        except ValueError:
+            member = cls.__members__.get(raw, cls.semantic)
+        return cls.semantic.value if member is cls.repo_fact else member.value
+
 
 class Evidence(BaseModel):
     """A pointer to the artifact/run/line range that supports a memory."""

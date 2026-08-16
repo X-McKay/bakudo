@@ -25,7 +25,13 @@ class Ledger(Protocol):
     def canary_version(self, name: str) -> AgentVersionRecord | None: ...
     def get_agent_version(self, name: str, version: int) -> AgentVersionRecord | None: ...
     def set_version_status(
-        self, name: str, version: int, status: str, *, reason: str | None = None
+        self,
+        name: str,
+        version: int,
+        status: str,
+        *,
+        reason: str | None = None,
+        expected_status: str | None = None,
     ) -> AgentVersionRecord | None: ...
 
     # Runs. ``objective`` is the objective document backing the run: durable
@@ -107,13 +113,27 @@ class InMemoryLedger:
         return self._versions.get(self._vkey(name, version))
 
     def set_version_status(
-        self, name: str, version: int, status: str, *, reason: str | None = None
-    ) -> AgentVersionRecord:
-        """Transition a version through the §1 state machine, with an event."""
+        self,
+        name: str,
+        version: int,
+        status: str,
+        *,
+        reason: str | None = None,
+        expected_status: str | None = None,
+    ) -> AgentVersionRecord | None:
+        """Transition a version through the §1 state machine, with an event.
+
+        ``expected_status`` guards a compare-and-set (TMP-23): when given, the
+        transition applies only if the version is currently in that status,
+        else it is a no-op returning ``None`` (the caller lost a race). Used by
+        canary graduation so two runs finishing together can't both graduate.
+        """
         if status not in VERSION_STATUSES:
             raise ValueError(f"unknown version status {status!r}")
         key = self._vkey(name, version)
         record = self._versions[key]  # KeyError on unknown version
+        if expected_status is not None and record.status != expected_status:
+            return None
         updated = record.model_copy(
             update={
                 "status": status,
