@@ -8,7 +8,7 @@ from bakudo.cli import main
 from bakudo.paths import scenarios_dir
 from bakudo.scenarios.registry import ScenarioRegistry
 from bakudo.scenarios.testrun import local_test_runner
-from bakudo.scenarios.verify import verify_scenario
+from bakudo.scenarios.verify import CHECK_ORDER, verify_scenario
 
 # A tiny, self-contained "add" bug used by the synthetic scenarios below.
 # Both patches are real `git diff` output (verified to `git apply` cleanly
@@ -139,17 +139,10 @@ def test_check_order_is_stable(tmp_path, monkeypatch):
     monkeypatch.setenv("BAKUDO_ENV", "dev")
     scn = load_loaded_scenario(tmp_path)
     report = verify_scenario(scn, local_test_runner)
-    assert [c.name for c in report.checks] == [
-        "schema",
-        "determinism",
-        "fail_to_pass_pristine",
-        "fail_to_pass_patched",
-        "pass_to_pass",
-        "wrong_fix_probes",
-        "solution_leak",
-        "spec_sufficiency",
-        "immutability",
-    ]
+    # CHECK_ORDER is the single source of truth for both the doc comment and
+    # the runtime assertion in verify_scenario -- exercise it here too so it
+    # can't silently drift out of sync with what actually gets emitted.
+    assert [c.name for c in report.checks] == list(CHECK_ORDER)
 
 
 def test_well_formed_scenario_verifies_clean(tmp_path, monkeypatch):
@@ -290,13 +283,7 @@ def test_cli_verify_json(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert out["ok"] is True
-    assert {c["name"] for c in out["checks"]} == set(
-        [
-            "schema", "determinism", "fail_to_pass_pristine", "fail_to_pass_patched",
-            "pass_to_pass", "wrong_fix_probes", "solution_leak", "spec_sufficiency",
-            "immutability",
-        ]
-    )
+    assert [c["name"] for c in out["checks"]] == list(CHECK_ORDER)
 
 
 def test_cli_verify_exits_nonzero_without_dev_env(monkeypatch, capsys):
@@ -323,3 +310,52 @@ def test_cli_scenario_scaffold_writes_template_and_refuses_overwrite(tmp_path, m
 
     rc = main(["scenario", "scaffold", "new-scenario", "--family", "debugging"])
     assert rc == 1
+
+
+def test_missing_hidden_test_file_fails_cleanly_not_crash(tmp_path, monkeypatch):
+    """hidden.failToPass naming a file that isn't actually on disk (a stale
+    entry, or -- as review found -- exactly what `bakudo scenario scaffold`
+    leaves behind before its hidden/test_TODO.py placeholder is filled in)
+    must surface as a failing check with an actionable path, never a raw
+    FileNotFoundError traceback."""
+    monkeypatch.setenv("BAKUDO_ENV", "dev")
+    root = tmp_path / "scenarios"
+    root.mkdir()
+    make_bug_scenario(root)
+
+    scenario_yaml = root / "add-bug" / "scenario.yaml"
+    spec = yaml.safe_load(scenario_yaml.read_text())
+    spec["hidden"]["failToPass"] = ["hidden/does-not-exist.py"]
+    scenario_yaml.write_text(yaml.safe_dump(spec, sort_keys=False))
+
+    registry = ScenarioRegistry(root)
+    scn = registry.get("add-bug@1")
+
+    report = verify_scenario(scn, local_test_runner)  # must not raise
+
+    ftp = next(c for c in report.checks if c.name == "fail_to_pass_pristine")
+    assert not ftp.ok
+    assert "does-not-exist.py" in ftp.detail
+    assert not report.ok
+
+
+def test_cli_scaffold_then_verify_fails_cleanly_with_exit_code_1(tmp_path, monkeypatch, capsys):
+    """End-to-end repro from review: `scaffold` then `verify` on the
+    untouched placeholder must yield a clean failing report (rc=1) through
+    main(), not a crash -- and doubles as the CLI-level exit-code-1 test for
+    a failing non-advisory check."""
+    monkeypatch.setenv("BAKUDO_ENV", "dev")
+    monkeypatch.setattr("bakudo.paths.scenarios_dir", lambda: tmp_path)
+
+    rc = main(["scenario", "scaffold", "demo", "--family", "debugging"])
+    assert rc == 0
+    capsys.readouterr()  # discard scaffold's own stdout
+
+    rc = main(["scenario", "verify", "demo", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    out = json.loads(captured.out)
+    assert out["ok"] is False
+    failing = [c for c in out["checks"] if not c["ok"]]
+    assert failing
+    assert any("hidden test file not found" in c["detail"] for c in failing)

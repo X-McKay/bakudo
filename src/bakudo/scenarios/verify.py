@@ -49,6 +49,16 @@ _LEAK_MIN_LINE_LEN = 12
 _LEAK_NGRAM_SIZE = 8
 
 
+class _SetupError(Exception):
+    """A hidden test file or reference/probe patch a scenario's
+    scenario.yaml names doesn't exist (or can't be read) on disk.
+
+    This is a scenario-authoring bug, not a test outcome -- callers must
+    catch it and turn it into a failing ``CheckResult`` naming the missing
+    path, never let it propagate as a raw traceback.
+    """
+
+
 @dataclass
 class CheckResult:
     name: str
@@ -90,6 +100,13 @@ def verify_scenario(
         checks.append(_check_solution_leak(scenario, ref_patch))
         checks.append(_check_spec_sufficiency(scenario, llm_check))
         checks.append(_check_immutability(scenario))
+
+    # Every check always contributes exactly one CheckResult (inapplicable
+    # checks -- e.g. no-change families, or no llm_check -- report
+    # ok=True/skipped rather than being omitted), so the emitted names must
+    # match CHECK_ORDER exactly; this keeps CHECK_ORDER authoritative rather
+    # than documentation nobody enforces.
+    assert tuple(c.name for c in checks) == CHECK_ORDER, [c.name for c in checks]
 
     ok = all(c.ok for c in checks if not c.advisory)
     return VerifyReport(checks=checks, ok=ok)
@@ -147,7 +164,19 @@ def _run_one_hidden_test(
 ) -> TestRunResult:
     """Provision a fresh scratch workspace, optionally apply ``patch``, copy
     the single hidden test file at ``rel_path`` into ``hidden/``, and run it.
+
+    Raises ``_SetupError`` (never a raw ``FileNotFoundError``/``OSError``)
+    when ``rel_path`` or ``patch`` doesn't exist or can't be read -- that's a
+    scenario-authoring bug (e.g. a stale ``hidden.failToPass`` entry, or a
+    scaffolded scenario whose placeholder hidden test was never filled in),
+    not a test outcome, and callers must surface it as a failing check
+    rather than a run result.
     """
+    src = scenario.path / rel_path
+    if not src.is_file():
+        raise _SetupError(f"hidden test file not found: {src}")
+    if patch is not None and not patch.is_file():
+        raise _SetupError(f"patch not found: {patch}")
     try:
         ws: ProvisionedWorkspace = provision(scenario, dest, seed=0)
         if patch is not None:
@@ -156,7 +185,7 @@ def _run_one_hidden_test(
         hidden_dir = ws.repo_path / "hidden"
         hidden_dir.mkdir(exist_ok=True)
         name = Path(rel_path).name
-        shutil.copy2(scenario.path / rel_path, hidden_dir / name)
+        shutil.copy2(src, hidden_dir / name)
         command = scenario.spec.hidden.test_command.format(files=f"hidden/{name}")
         return runner(ws.repo_path, command)
     except subprocess.CalledProcessError as exc:
@@ -164,6 +193,10 @@ def _run_one_hidden_test(
         return TestRunResult(passed=False, exit_code=exc.returncode, output=detail or str(exc))
     except subprocess.TimeoutExpired as exc:
         return TestRunResult(passed=False, exit_code=-1, output=str(exc))
+    except OSError as exc:
+        # Any other unreadable-file condition (permissions, races, ...) --
+        # still a setup problem, not a test outcome.
+        raise _SetupError(f"{rel_path}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -204,7 +237,10 @@ def _check_fail_to_pass_pristine(
     already_passing = []
     for i, rel in enumerate(fail_list):
         dest = scratch / f"ftp-pristine-{i}"
-        result = _run_one_hidden_test(scenario, dest, rel, runner, patch=None)
+        try:
+            result = _run_one_hidden_test(scenario, dest, rel, runner, patch=None)
+        except _SetupError as exc:
+            return CheckResult(name, False, False, str(exc))
         if result.passed:
             already_passing.append(rel)
     if already_passing:
@@ -234,7 +270,10 @@ def _check_fail_to_pass_patched(
     still_failing = []
     for i, rel in enumerate(fail_list):
         dest = scratch / f"ftp-patched-{i}"
-        result = _run_one_hidden_test(scenario, dest, rel, runner, patch=ref_patch)
+        try:
+            result = _run_one_hidden_test(scenario, dest, rel, runner, patch=ref_patch)
+        except _SetupError as exc:
+            return CheckResult(name, False, False, str(exc))
         if not result.passed:
             still_failing.append(rel)
     if still_failing:
@@ -267,7 +306,11 @@ def _check_pass_to_pass(
         patch, state = ref_patch, "patched"
     failing = []
     for i, rel in enumerate(pass_list):
-        result = _run_one_hidden_test(scenario, scratch / f"ptp-{i}", rel, runner, patch=patch)
+        dest = scratch / f"ptp-{i}"
+        try:
+            result = _run_one_hidden_test(scenario, dest, rel, runner, patch=patch)
+        except _SetupError as exc:
+            return CheckResult(name, False, False, str(exc))
         if not result.passed:
             failing.append(rel)
     if failing:
@@ -295,7 +338,10 @@ def _check_wrong_fix_probes(
         all_pass = True
         for ti, rel in enumerate(fail_list):
             dest = scratch / f"probe-{pi}-{ti}"
-            result = _run_one_hidden_test(scenario, dest, rel, runner, patch=probe_patch)
+            try:
+                result = _run_one_hidden_test(scenario, dest, rel, runner, patch=probe_patch)
+            except _SetupError as exc:
+                return CheckResult(name, False, False, str(exc))
             if not result.passed:
                 all_pass = False
                 break
