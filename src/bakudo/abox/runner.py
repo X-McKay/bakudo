@@ -1,7 +1,7 @@
-"""Drive a real ``abox`` (0.7.0) sandbox run for a task bundle (spec section 6).
+"""Drive a real ``abox`` (0.7.1) sandbox run for a task bundle (spec section 6).
 
 This is invoked from a Temporal *activity* (non-deterministic external work),
-never from workflow code. Protocol, verified against the abox 0.7.0 CLI
+never from workflow code. Protocol, verified against the abox 0.7.1 CLI
 (MicroSandbox runtime, ADR-008):
 
 1. the rendered ``bundle.json`` is written to a host scratch dir and staged
@@ -33,7 +33,7 @@ via ``-e``. Secret values are never written into files this module creates and
 never logged; they only transit the abox argv, which this module never echoes.
 
 Network mapping (review finding ABOX-6): the spec vocabulary is
-``none|scoped|open``; abox 0.7.0 takes ``--network safe|scoped|open``. ``none``
+``none|scoped|open``; abox 0.7.1 takes ``--network safe|scoped|open``. ``none``
 maps to ``safe`` (host-mediated egress only), the other two map verbatim.
 Scoped *bundles/domains* cannot be granted per-run — they are repo-owned
 config in ``.abox/project.toml`` — so the spec's ``networkBundles`` are not
@@ -96,7 +96,7 @@ _HOUSEKEEPING_TIMEOUT_SECONDS = 120
 # How many characters of console output to keep for diagnostics (ABOX-11).
 _TAIL_CHARS = 20_000
 
-# Spec networkMode -> abox 0.7.0 --network value (ABOX-6).
+# Spec networkMode -> abox 0.7.1 --network value (ABOX-6).
 NETWORK_MODE_MAP = {"none": "safe", "scoped": "scoped", "open": "open"}
 
 # Where the repo's prepare script appears inside the guest (the worktree is
@@ -291,7 +291,7 @@ def _terminate(popen: subprocess.Popen[str]) -> tuple[str, str]:
 
 
 class AboxRunner:
-    """Builds and drives a single abox 0.7.0 sandbox run for a task bundle."""
+    """Builds and drives a single abox 0.7.1 sandbox run for a task bundle."""
 
     def __init__(
         self,
@@ -335,7 +335,7 @@ class AboxRunner:
         except FileNotFoundError as missing:
             raise AboxNotFoundError(
                 f"abox binary not found: {self._abox_bin!r} is not on PATH "
-                "(install abox 0.7.0 or set AboxRunner(abox_bin=...))."
+                "(install abox 0.7.1 or set AboxRunner(abox_bin=...))."
             ) from missing
         out = f"{res.stdout} {res.stderr}".strip()
         if res.exit_code != 0:
@@ -402,7 +402,7 @@ class AboxRunner:
     def build_command(
         self, bundle: TaskBundle, scratch_dir: Path, repo: Path | None = None
     ) -> list[str]:
-        """Construct the abox 0.7.0 ``run`` argv (spec section 6.2)."""
+        """Construct the abox 0.7.1 ``run`` argv (spec section 6.2)."""
         spec = bundle.agent_spec
         repo = repo or self.resolve_repo(bundle)
         network = NETWORK_MODE_MAP[spec.sandbox.network_mode.value]
@@ -493,7 +493,7 @@ class AboxRunner:
             except FileNotFoundError as missing:
                 raise AboxNotFoundError(
                     f"abox binary not found: {self._abox_bin!r} is not on PATH "
-                    "(install abox 0.7.0 or set AboxRunner(abox_bin=...))."
+                    "(install abox 0.7.1 or set AboxRunner(abox_bin=...))."
                 ) from missing
 
             timed_out = exec_result.timed_out or exec_result.exit_code == 124

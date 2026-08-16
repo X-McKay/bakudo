@@ -94,7 +94,7 @@ services:
   # environment or a `.env` file next to this compose file (the value below
   # interpolates `${BAKUDO_SANDBOX:-unavailable}`), no file edit needed.
   #
-  # To enable real sandboxing the host must have abox 0.7.0 and KVM; then:
+  # To enable real sandboxing the host must have abox 0.7.1 and KVM; then:
   #   1. mount the host abox binary:
   #        volumes:
   #          - /usr/local/bin/abox:/usr/local/bin/abox:ro

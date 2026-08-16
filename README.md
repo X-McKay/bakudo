@@ -142,7 +142,7 @@ as a first-class outcome — backed by a 25-case corpus whose no-change decoys
 make manufactured churn unpromotable.
 
 The 2026-08 hardening passes took the production plane **live end-to-end**
-(real abox microVMs — 0.6.0 then, 0.7.0 now — Temporal + Postgres, hosted vLLM models) and
+(real abox microVMs — 0.6.0 then, 0.7.1 now — Temporal + Postgres, hosted vLLM models) and
 restructured the two things live runs proved fragile:
 
 - **The run report is a phase, not a side effect** (issue #27): every loop

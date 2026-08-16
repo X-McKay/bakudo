@@ -1,6 +1,6 @@
-"""Pin the real abox 0.7.0 CLI protocol (review findings ABOX-1/2/3/5/8/11/12).
+"""Pin the real abox 0.7.1 CLI protocol (review findings ABOX-1/2/3/5/8/11/12).
 
-Verified against ``abox 0.7.0`` (`abox run --help`, MicroSandbox runtime):
+Verified against ``abox 0.7.1`` (`abox run --help`, MicroSandbox runtime):
 
 - staging goes through ``--input-file <host>[:<guestname>]`` which lands in
   ``/abox-meta/inputs/`` (read-only) inside the guest — no ``--mount``;
@@ -90,7 +90,7 @@ def _make_worktree(path: Path, base: str = "main") -> Path:
 
 @dataclass
 class FakeAbox:
-    """Fake executor speaking the abox 0.7.0 argv surface the runner uses."""
+    """Fake executor speaking the abox 0.7.1 argv surface the runner uses."""
 
     worktree: Path
     run_exit: int = 0
@@ -199,7 +199,7 @@ def test_build_command_never_passes_ephemeral(tmp_path, monkeypatch):
     [("none", "safe"), ("scoped", "scoped")],
 )
 def test_network_mode_maps_to_abox_vocabulary(tmp_path, monkeypatch, spec_mode, abox_mode):
-    # ABOX-6: spec says none|scoped|open; abox 0.7.0 says safe|scoped|open.
+    # ABOX-6: spec says none|scoped|open; abox 0.7.1 says safe|scoped|open.
     _clear_model_env(monkeypatch)
     from bakudo.agent_spec.models import NetworkMode
 
@@ -423,10 +423,10 @@ def test_base_ref_defaults_to_spec(tmp_path, monkeypatch):
 def test_verify_binary_accepts_real_abox_version(tmp_path):
     def fake(argv, timeout=None):
         assert argv[1] == "--version"
-        return ExecResult(0, "abox 0.7.0\n", "")
+        return ExecResult(0, "abox 0.7.1\n", "")
 
     version = AboxRunner(executor=fake, repo_root=tmp_path).verify_binary()
-    assert version == "0.7.0"
+    assert version == "0.7.1"
 
 
 def test_verify_binary_rejects_a_wrong_binary(tmp_path):
