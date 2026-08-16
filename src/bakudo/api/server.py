@@ -368,7 +368,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         try:
-            pipeline_fn = resolve_arm_pipeline_fn(
+            resolved_spec, pipeline_fn = resolve_arm_pipeline_fn(
                 spec, sandbox_fn=adapt_sandbox_fn(sandbox), agents_root=paths.agents_dir()
             )
         except FileNotFoundError as exc:
@@ -377,7 +377,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         result = run_experiment(
-            spec,
+            resolved_spec,
             registry=registry,
             ledger=tools.ledger,
             pipeline_fn=pipeline_fn,

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,12 +48,19 @@ _NETWORK_ORDER = {"none": 0, "scoped": 1, "open": 2}
 
 class PipelineResultLike(Protocol):
     """The shape ``pipeline_fn`` must return -- either a stub (tests) or the
-    CLI's adapter over the real :class:`bakudo.control.pipeline.PipelineResult`."""
+    CLI's adapter over the real :class:`bakudo.control.pipeline.PipelineResult`.
+
+    ``metrics`` is read defensively (``getattr(pr, "metrics", None) or {}``)
+    by :func:`run_trial`, not required structurally here, so pre-existing
+    stubs across the test suite that don't set it keep working unchanged --
+    absent keys default to ``0.0`` in the recorded :class:`TrialRecord`.
+    """
 
     diff: str
     result: Any
     denied_commands: list[str]
     scorecard: Any
+    metrics: dict[str, float]
 
 
 PipelineFn = Callable[[Objective, str, ScenarioBudgets, str], PipelineResultLike]
@@ -176,12 +183,25 @@ def build_pipeline_fn(
             objective, adjusted_spec, sandbox=lambda bundle: sandbox_fn(bundle, repo_path)
         )
         outcome = pipeline_result.outcome
+        # Cost signals (AboxOutcome, mirrored from result.json's metrics by
+        # abox/runner.py's _apply_result_signals / abox/local.py's
+        # ToolContext.observability()) -- run_trial merges these into
+        # TrialRecord.metrics so secondary metrics/costDelta are populated in
+        # real runs instead of structurally 0.0. Read via getattr: a real
+        # AboxOutcome always has these (0/0.0/{} defaults on the dataclass
+        # itself), but a bare test double standing in for one may not.
+        observability = getattr(outcome, "observability", None) or {}
         return SimpleNamespace(
             diff=outcome.diff,
             result=pipeline_result.result,
             denied_commands=[d.get("command", "") for d in outcome.denied_commands],
             scorecard=pipeline_result.scorecard,
             pins={"model_id": spec.model.model_id, "sandbox_profile": spec.sandbox.profile},
+            metrics={
+                "tokens": float(getattr(outcome, "tokens_used", 0) or 0),
+                "tool_calls": float(observability.get("tool_calls", 0) or 0),
+                "duration_s": float(getattr(outcome, "runtime_seconds", 0.0) or 0.0),
+            },
         )
 
     return pipeline_fn
@@ -296,9 +316,19 @@ def run_trial(
             "scorecard": _to_dict(pr.scorecard),
         }
 
+        # Cost signals (tokens/tool_calls/duration_s) come from pipeline_fn's
+        # own return, when it sets one -- build_pipeline_fn's real adapter
+        # always does (from the AboxOutcome); a bare test stub that doesn't
+        # set `metrics` defaults every key to 0.0 rather than omitting them,
+        # so a downstream experiment's secondary-metric/costDelta reads never
+        # have to special-case a missing key.
+        pipeline_metrics = getattr(pr, "metrics", None) or {}
         metrics = {
             "changed_files": float(len(changed_files)),
             "diff_bytes": float(len(diff.encode("utf-8"))),
+            "tokens": float(pipeline_metrics.get("tokens", 0.0)),
+            "tool_calls": float(pipeline_metrics.get("tool_calls", 0.0)),
+            "duration_s": float(pipeline_metrics.get("duration_s", 0.0)),
         }
 
         pins = {"bakudo": __version__, "scenario_digest_algo": "sha256"}
@@ -327,9 +357,11 @@ def run_trial(
 @dataclass
 class _StubPipelineResult:
     """Convenience constructor tests can use for the ``pipeline_fn`` return
-    shape (``diff``, ``result``, ``denied_commands``, ``scorecard``)."""
+    shape (``diff``, ``result``, ``denied_commands``, ``scorecard``,
+    ``metrics``)."""
 
     diff: str
     result: Any
     denied_commands: list[str]
     scorecard: Any = None
+    metrics: dict[str, float] = field(default_factory=dict)

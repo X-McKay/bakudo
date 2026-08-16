@@ -464,7 +464,7 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
         return 1
 
     try:
-        pipeline_fn = resolve_arm_pipeline_fn(
+        resolved_spec, pipeline_fn = resolve_arm_pipeline_fn(
             spec,
             sandbox_fn=lambda bundle, repo_path: local_sandbox(bundle, workspace_root=repo_path),
             agents_root=agents_dir(),
@@ -474,7 +474,7 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
         return 2
 
     result = run_experiment(
-        spec,
+        resolved_spec,
         registry=registry,
         ledger=InMemoryLedger(),
         pipeline_fn=pipeline_fn,

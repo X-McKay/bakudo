@@ -233,6 +233,34 @@ def test_hack_flag_blocks_promotion(registry):
     assert c["eligibleForPromotion"] is False
 
 
+def test_safety_regression_blocks_promotion(registry):
+    led = InMemoryLedger()
+    spec_compare = _spec()
+
+    def stub_with_safety_regression(objective, agent_ref, budgets, network):
+        if agent_ref == CANDIDATE:
+            return SimpleNamespace(
+                diff=REF_PATCH,
+                result=_stub_result("success", ["app.py"]),
+                denied_commands=[],
+                scorecard={"safety_regressions": 1},
+            )
+        return _baseline_fails()
+
+    result = run_experiment(
+        spec_compare,
+        registry=registry,
+        ledger=led,
+        pipeline_fn=stub_with_safety_regression,
+        test_runner=local_test_runner,
+    )
+
+    c = result["comparison"][CANDIDATE]
+    assert c["primary"]["verdict"] == "candidate"  # the fix itself is genuine
+    assert c["hardGates"]["safetyRegressions"] == 1
+    assert c["eligibleForPromotion"] is False
+
+
 def test_failed_trial_recorded_not_raised(registry):
     led = InMemoryLedger()
     spec_compare = _spec()
@@ -256,6 +284,117 @@ def test_failed_trial_recorded_not_raised(registry):
     (failed,) = [t for t in trials if t.agent_ref == CANDIDATE]
     assert failed.status == "failed"
     assert failed.evaluation["f2p_rate"] == 0.0
+
+
+# --------------------------------------------------------------------------
+# resolve_arm_pipeline_fn: unpinned refs resolve to the loaded spec version
+# --------------------------------------------------------------------------
+
+
+def _write_agent_spec(agents_root: Path, name: str, version: int) -> None:
+    real_qa = (Path(__file__).resolve().parents[1] / "agents" / "qa.yaml").read_text()
+    doc = yaml.safe_load(real_qa)
+    doc["metadata"]["name"] = name
+    doc["metadata"]["version"] = version
+    (agents_root / f"{name}.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+def test_unpinned_refs_resolve_to_loaded_spec_version(tmp_path, registry):
+    """An unpinned arm ref (bare name, no ``@version``) must not end up
+    verbatim in TrialRecord.agent_ref/result keys while a concrete on-disk
+    version actually ran -- resolve_arm_pipeline_fn's returned
+    ``resolved_spec`` carries each arm's REAL ``spec.ref``."""
+    from bakudo.experiments.runner import resolve_arm_pipeline_fn
+
+    agents_root = tmp_path / "agents"
+    agents_root.mkdir()
+    _write_agent_spec(agents_root, "agent-a", version=3)
+    _write_agent_spec(agents_root, "agent-b", version=5)
+
+    spec_unpinned = _spec(baseline="agent-a", candidates=["agent-b"])  # no @version
+
+    resolved_spec, _pipeline_fn = resolve_arm_pipeline_fn(
+        spec_unpinned,
+        sandbox_fn=lambda bundle, repo_path: SimpleNamespace(),  # never invoked below
+        agents_root=agents_root,
+    )
+    assert resolved_spec.baseline == "agent-a@3"
+    assert resolved_spec.candidates == ["agent-b@5"]
+
+    led = InMemoryLedger()
+
+    def stub(objective, agent_ref, budgets, network):
+        if agent_ref == "agent-b@5":
+            return SimpleNamespace(
+                diff=REF_PATCH,
+                result=_stub_result("success", ["app.py"]),
+                denied_commands=[],
+                scorecard=None,
+            )
+        return _baseline_fails()
+
+    result = run_experiment(
+        resolved_spec,
+        registry=registry,
+        ledger=led,
+        pipeline_fn=stub,
+        test_runner=local_test_runner,
+    )
+
+    assert result["baseline"] == "agent-a@3"
+    assert result["candidates"] == ["agent-b@5"]
+    assert "agent-b@5" in result["comparison"]
+
+    trials = led.list_trials(result["experimentId"])
+    assert {t.agent_ref for t in trials} == {"agent-a@3", "agent-b@5"}
+
+
+# --------------------------------------------------------------------------
+# Cost metrics: run_trial merges tokens/tool_calls/duration_s from the
+# pipeline_fn's own return into TrialRecord.metrics (not just
+# changed_files/diff_bytes), so costDelta is non-zero in real runs.
+# --------------------------------------------------------------------------
+
+
+def test_pipeline_cost_metrics_populate_trial_and_cost_delta(registry):
+    led = InMemoryLedger()
+    spec_compare = _spec()
+
+    def stub_with_tokens(objective, agent_ref, budgets, network):
+        tokens = 1000.0 if agent_ref == CANDIDATE else 100.0
+        if agent_ref == CANDIDATE:
+            return SimpleNamespace(
+                diff=REF_PATCH,
+                result=_stub_result("success", ["app.py"]),
+                denied_commands=[],
+                scorecard=None,
+                metrics={"tokens": tokens, "tool_calls": 7.0, "duration_s": 1.5},
+            )
+        return SimpleNamespace(
+            diff="",
+            result=_stub_result("failed", []),
+            denied_commands=[],
+            scorecard=None,
+            metrics={"tokens": tokens, "tool_calls": 2.0, "duration_s": 0.5},
+        )
+
+    result = run_experiment(
+        spec_compare,
+        registry=registry,
+        ledger=led,
+        pipeline_fn=stub_with_tokens,
+        test_runner=local_test_runner,
+    )
+
+    trials = led.list_trials(result["experimentId"])
+    (cand_trial,) = [t for t in trials if t.agent_ref == CANDIDATE]
+    assert cand_trial.metrics["tokens"] == 1000.0
+    assert cand_trial.metrics["tool_calls"] == 7.0
+    assert cand_trial.metrics["duration_s"] == 1.5
+
+    c = result["comparison"][CANDIDATE]
+    assert c["costDelta"] != 0.0
+    assert c["costDelta"] == pytest.approx((1000.0 - 100.0) / 100.0)
 
 
 # --------------------------------------------------------------------------

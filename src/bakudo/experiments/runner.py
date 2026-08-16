@@ -77,18 +77,31 @@ def resolve_arm_pipeline_fn(
     *,
     sandbox_fn: Callable[[Any, Path], AboxOutcome],
     agents_root: Path,
-) -> PipelineFn:
-    """Build a ``pipeline_fn`` for :func:`run_experiment` that dispatches to
-    each arm's OWN :class:`~bakudo.agent_spec.models.AgentSpec`.
+) -> tuple[ExperimentSpec, PipelineFn]:
+    """Resolve every arm's :class:`~bakudo.agent_spec.models.AgentSpec` and
+    build a ``pipeline_fn`` for :func:`run_experiment` that dispatches to it.
 
     Every arm (the baseline ref plus every candidate ref) resolves its spec
     the same way ``bakudo trial run`` does: ``agents_root/<name>.yaml``, with
-    an ``@version`` pin checked against what is actually on disk. Each arm's
-    spec is wrapped with :func:`bakudo.trials.runner.build_pipeline_fn` so
-    that arm's own budget/network intersection (against whatever scenario
-    ceiling ``run_trial`` passes down) is computed against THAT spec, not
-    just the baseline's -- a candidate agent with a tighter budget must not
-    silently inherit the baseline's looser one.
+    an ``@version`` pin (when given) checked against what is actually on
+    disk. Each arm's spec is wrapped with
+    :func:`bakudo.trials.runner.build_pipeline_fn` so that arm's own
+    budget/network intersection (against whatever scenario ceiling
+    ``run_trial`` passes down) is computed against THAT spec, not just the
+    baseline's -- a candidate agent with a tighter budget must not silently
+    inherit the baseline's looser one.
+
+    Returns ``(resolved_spec, pipeline_fn)``: ``resolved_spec`` is ``spec``
+    with ``baseline``/``candidates`` rewritten from whatever the caller gave
+    (bare name, or ``name@version``) to each arm's ACTUAL loaded
+    ``spec.ref`` (``name@version``). This matters even for an already-pinned
+    ref (kept as-is once it matches, by definition) but especially for an
+    unpinned one: an unpinned "debugger" must not end up recorded verbatim
+    in ``TrialRecord.agent_ref`` and result baseline/candidates/comparison
+    keys while a concrete on-disk version actually ran -- the caller MUST
+    use ``resolved_spec``, not ``spec``, for :func:`run_experiment` (and for
+    ``build_matrix``/``select_scenarios`` generally), since ``pipeline_fn``
+    below is keyed by the resolved refs, not the caller's originals.
 
     Raises ``ValueError`` when an ``@version``-pinned ref does not match the
     on-disk spec's version, or when the ref's spec file is malformed;
@@ -99,9 +112,10 @@ def resolve_arm_pipeline_fn(
     from ..agent_spec import load_spec_file
 
     arm_refs = [spec.baseline, *spec.candidates]
+    resolved_ref: dict[str, str] = {}
     per_arm: dict[str, PipelineFn] = {}
     for ref in arm_refs:
-        if ref in per_arm:
+        if ref in resolved_ref:
             continue
         name, sep, version_s = ref.partition("@")
         agent_spec: AgentSpec = load_spec_file(agents_root / f"{name}.yaml")
@@ -118,12 +132,19 @@ def resolve_arm_pipeline_fn(
                     f"{agent_spec.metadata.version}, but arm {ref!r} requested "
                     f"version {requested_version}"
                 )
-        per_arm[ref] = build_pipeline_fn(agent_spec, sandbox_fn=sandbox_fn)
+        resolved_ref[ref] = agent_spec.ref
+        per_arm[agent_spec.ref] = build_pipeline_fn(agent_spec, sandbox_fn=sandbox_fn)
 
     def pipeline_fn(objective: Any, agent_ref: str, budgets: Any, network: str) -> Any:
         return per_arm[agent_ref](objective, agent_ref, budgets, network)
 
-    return pipeline_fn
+    resolved_spec = spec.model_copy(
+        update={
+            "baseline": resolved_ref[spec.baseline],
+            "candidates": [resolved_ref[c] for c in spec.candidates],
+        }
+    )
+    return resolved_spec, pipeline_fn
 
 
 # --------------------------------------------------------------------------
