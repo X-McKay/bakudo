@@ -494,3 +494,83 @@ def test_record_eval_id_is_deterministic_from_subject_and_suite():
     ledger.record_eval(other)
     other_id = [p[0] for s, p in conn.executed if "insert into eval_results" in s][-1]
     assert other_id != ids[0], "different suites must not collide"
+
+
+# --- trials (experiment substrate design doc section 6) ---
+
+
+def _trial_record(**overrides):
+    from bakudo.trials.models import TrialRecord
+
+    fields = dict(
+        id="trial_T1",
+        experiment_id="exp_T1",
+        agent_ref="add-feature@1",
+        scenario_name="sample-bug",
+        scenario_version=1,
+        scenario_digest="sha256:deadbeef",
+        seed=42,
+        status="completed",
+    )
+    fields.update(overrides)
+    return TrialRecord(**fields)
+
+
+def test_record_trial_self_migrates_the_table_then_probes_then_inserts():
+    conn = FakeConn()
+    PostgresLedger(conn).record_trial(_trial_record())
+
+    seq = _sql_seq(conn)
+    ddl_idx = next(i for i, s in enumerate(seq) if "create table if not exists trials" in s)
+    index_idx = next(
+        i for i, s in enumerate(seq)
+        if "create index if not exists trials_experiment_idx" in s
+    )
+    probe_idx = next(i for i, s in enumerate(seq) if s == "select 1 from trials where id = %s")
+    insert_idx = next(i for i, s in enumerate(seq) if "insert into trials" in s)
+    assert ddl_idx < index_idx < probe_idx < insert_idx
+
+    insert_sql, insert_params = next(
+        (s, p) for s, p in conn.executed if "insert into trials" in s
+    )
+    assert insert_params[0] == "trial_T1"
+    assert insert_params[4] == "add-feature@1"
+
+
+def test_record_trial_duplicate_id_raises_value_error_without_inserting():
+    conn = FakeConn()
+    conn.rows = [(1,)]  # the id probe finds an existing row
+    with pytest.raises(ValueError):
+        PostgresLedger(conn).record_trial(_trial_record())
+    assert not any("insert into trials" in s for s, _ in conn.executed)
+
+
+def test_get_trial_selects_by_id():
+    conn = FakeConn()
+    PostgresLedger(conn).get_trial("trial_T1")
+    select_sql, params = next(
+        (s, p) for s, p in conn.executed if "from trials" in s
+    )
+    assert "where id = %s" in select_sql
+    assert params == ("trial_T1",)
+
+
+def test_list_trials_without_experiment_filter():
+    conn = FakeConn()
+    PostgresLedger(conn).list_trials()
+    select_sql, params = next(
+        (s, p) for s, p in conn.executed if "from trials" in s
+    )
+    assert "where experiment_id" not in select_sql
+    assert "order by created_at" in select_sql
+    assert params == ()
+
+
+def test_list_trials_with_experiment_filter():
+    conn = FakeConn()
+    PostgresLedger(conn).list_trials(experiment_id="exp_A")
+    select_sql, params = next(
+        (s, p) for s, p in conn.executed if "from trials" in s
+    )
+    assert "where experiment_id = %s" in select_sql
+    assert params == ("exp_A",)

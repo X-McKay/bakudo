@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
+from ..trials.models import TrialRecord
 from .records import VERSION_STATUSES, AgentVersionRecord, RunEvent, RunPhase, RunRecord
 
 
@@ -62,6 +63,14 @@ class Ledger(Protocol):
         comment: str | None = None,
     ) -> PromotionDecision: ...
 
+    # Trials (experiment substrate design doc section 6). Insert-only: a
+    # trial's outcome is immutable once recorded, so a duplicate id is a bug
+    # in the caller, not a state transition — it raises rather than
+    # silently overwriting or upserting.
+    def record_trial(self, t: TrialRecord) -> None: ...
+    def get_trial(self, trial_id: str) -> TrialRecord | None: ...
+    def list_trials(self, experiment_id: str | None = None) -> list[TrialRecord]: ...
+
 
 class InMemoryLedger:
     """A dependency-free ledger for tests and single-process dev."""
@@ -73,6 +82,7 @@ class InMemoryLedger:
         self._events: dict[str, list[RunEvent]] = {}
         self._evals: dict[str, list[EvalResult]] = {}
         self._promotions: list[PromotionDecision] = []
+        self._trials: dict[str, TrialRecord] = {}
 
     @staticmethod
     def _vkey(name: str, version: int) -> str:
@@ -290,3 +300,18 @@ class InMemoryLedger:
             )
         except KeyError:
             pass
+
+    # --- trials ---
+    def record_trial(self, t: TrialRecord) -> None:
+        if t.id in self._trials:
+            raise ValueError(f"trial {t.id} already recorded")
+        self._trials[t.id] = t
+
+    def get_trial(self, trial_id: str) -> TrialRecord | None:
+        return self._trials.get(trial_id)
+
+    def list_trials(self, experiment_id: str | None = None) -> list[TrialRecord]:
+        return [
+            t for t in self._trials.values()
+            if experiment_id is None or t.experiment_id == experiment_id
+        ]

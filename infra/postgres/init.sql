@@ -209,6 +209,35 @@ create table if not exists graph_mirror_outbox (
   created_at timestamptz not null default now()
 );
 
+-- Trials (experiment substrate design doc section 6): one agent-version run
+-- of one scenario version, with its metrics, evaluation, and hack-detection
+-- flags. Insert-only — a trial's outcome is immutable once recorded.
+--
+-- CANONICAL DDL — mirrored by _TRIALS_DDL in
+-- src/bakudo/registry/postgres_ledger.py, which self-migrates existing
+-- databases (this file only runs at first initialization). Keep the two in
+-- sync.
+create table if not exists trials (
+  id text primary key,
+  experiment_id text,
+  run_id text,
+  objective_id text,
+  agent_ref text not null,
+  scenario_name text not null,
+  scenario_version integer not null,
+  scenario_digest text not null,
+  seed bigint not null,
+  pins jsonb not null default '{}'::jsonb,
+  metrics jsonb not null default '{}'::jsonb,
+  evaluation jsonb not null default '{}'::jsonb,
+  flags jsonb not null default '{}'::jsonb,
+  status text not null,
+  started_at timestamptz,
+  completed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists trials_experiment_idx on trials (experiment_id);
+
 -- Integration-event outbox (section 17.1): durable handoff to projections.
 create table if not exists outbox (
   id bigserial primary key,
