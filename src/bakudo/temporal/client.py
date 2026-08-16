@@ -65,3 +65,42 @@ async def start_optimization(client: Any, inp: Any) -> Any:
         id=f"optimize-{inp.objective['id']}",
         task_queue=TASK_QUEUE_RUNS,
     )
+
+
+async def start_trial(client: Any, inp: Any) -> Any:
+    """Start a TrialWorkflow: run one scenario against one agent version.
+
+    ``inp`` is a :class:`~bakudo.temporal.shared.TrialInput`. Unlike
+    ``start_optimization``'s objective-id-derived id, a trial has no natural
+    dedupe key (the same scenario/agent/seed can legitimately run more than
+    once), so the workflow id carries a fresh UUID.
+    """
+    import uuid
+
+    from .shared import TASK_QUEUE_RUNS
+    from .workflows import TrialWorkflow
+
+    return await client.start_workflow(
+        TrialWorkflow.run,
+        inp,
+        id=f"trial-{uuid.uuid4().hex}",
+        task_queue=TASK_QUEUE_RUNS,
+    )
+
+
+async def start_experiment(client: Any, inp: Any) -> Any:
+    """Start an ExperimentWorkflow over one ExperimentSpec.
+
+    ``inp`` is a :class:`~bakudo.temporal.shared.ExperimentInput`.
+    """
+    import uuid
+
+    from .shared import TASK_QUEUE_RUNS
+    from .workflows import ExperimentWorkflow
+
+    return await client.start_workflow(
+        ExperimentWorkflow.run,
+        inp,
+        id=f"experiment-{uuid.uuid4().hex}",
+        task_queue=TASK_QUEUE_RUNS,
+    )

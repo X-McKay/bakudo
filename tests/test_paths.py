@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from bakudo.paths import agents_dir, schemas_dir, skills_dir
+from bakudo.paths import agents_dir, scenarios_dir, schemas_dir, skills_dir
 
 # The seed roles every install must be able to resolve by name.
 SEED_AGENTS = {
@@ -19,6 +19,15 @@ SEED_AGENTS = {
     "optimize-attempt",
     "optimize-scout",
     "qa",
+}
+
+# The exemplar scenarios (Task 4) every install must be able to resolve.
+EXEMPLAR_SCENARIOS = {
+    "csv-sum-offbyone",
+    "rate-limiter-nochange",
+    "rate-limiter-fix",
+    "retry-misdiagnosis",
+    "config-scope-trap",
 }
 
 
@@ -63,6 +72,15 @@ def test_agents_dir_resolves_and_contains_seed_specs():
 def test_schemas_and_skills_dirs_still_resolve():
     assert (schemas_dir() / "result.schema.json").is_file()
     assert skills_dir().is_dir()
+
+
+def test_scenarios_dir_resolves_and_contains_exemplars():
+    directory = scenarios_dir()
+    assert directory.is_dir()
+    names = {
+        path.name for path in directory.iterdir() if (path / "scenario.yaml").is_file()
+    }
+    assert names == EXEMPLAR_SCENARIOS
 
 
 # A hand-built agents path in any spelling: the quoted segment ('agents' or

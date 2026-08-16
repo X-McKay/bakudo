@@ -32,16 +32,35 @@ with workflow.unsafe.imports_passed_through():
         scout_run_failed,
         select_winner,
     )
+
+    # trial_seed is pure/hash-based (hashlib only) and import-safe, but the
+    # module it lives in (bakudo.experiments.design) also imports the
+    # scenario registry -- passed through for the same reason
+    # ..control.optimize is: cheap to import once, not something the
+    # sandbox needs to reload/isolate per workflow task.
+    from ..experiments.design import trial_seed
+
+    # Pure string parsing (no I/O) -- passed through for the same reason
+    # trial_seed is: cheap, import-safe, and TrialWorkflow needs it to derive
+    # the trusted changed-files signal from a collected diff (F2 fix) without
+    # trusting self-reported result.changed_files.
+    from ..trials.runner import changed_files_from_diff
     from .activities import (
+        analyze_experiment,
         check_canary_graduation,
         collect_signals,
         compact_memories,
         create_run,
+        evaluate_trial_hidden,
         load_agent_spec,
         measure_winner_bench,
+        persist_experiment,
         persist_run,
+        persist_trial,
+        provision_trial,
         reconcile_runs,
         render_bundle,
+        resolve_experiment_scenarios,
         run_agent_evolution,
         run_eval_suite,
         run_sandbox,
@@ -53,8 +72,10 @@ with workflow.unsafe.imports_passed_through():
         CompactionInput,
         EvalInput,
         EvolutionInput,
+        ExperimentInput,
         ObserveInput,
         OptimizeInput,
+        TrialInput,
         resolve_agent_name,
     )
 
@@ -241,6 +262,7 @@ class AgentRunWorkflow:
                 inp.run_id, "failed",
                 agent_name, sandbox.get("git_branch", ""),
                 result=result,
+                runtime_seconds=sandbox.get("runtime_seconds", 0.0),
             )
 
         await self._advance(inp.run_id, "evaluating")
@@ -286,6 +308,7 @@ class AgentRunWorkflow:
             scorecard=eval_out.get("scorecard"),
             eval_results=eval_out.get("eval_results", []),
             diff=sandbox.get("diff", ""),
+            runtime_seconds=sandbox.get("runtime_seconds", 0.0),
         )
 
 
@@ -525,7 +548,360 @@ def _as_dict(out: AgentRunOutput) -> dict:
         "scorecard": out.scorecard,
         "eval_results": out.eval_results,
         "diff": out.diff,
+        "runtime_seconds": out.runtime_seconds,
     }
+
+
+# --- Experiment substrate: trial + experiment workflows (Task 11) ---
+#
+# Controller ruling R1: select_scenarios (and any other scenario/agent-spec
+# file I/O) must never run in workflow code, so ExperimentWorkflow resolves
+# its scenario selection via the resolve_experiment_scenarios activity and
+# builds its trial matrix from the returned descriptors using only the pure,
+# hash-based trial_seed helper plus plain loops -- no RNG, no filesystem
+# access, deterministic under replay.
+
+
+@workflow.defn
+class TrialWorkflow:
+    """Runs one scenario against one agent version end to end (experiment
+    substrate design doc section 6, Temporal-shaped): provision the
+    scenario's fixture, drive the agent through the existing
+    ``AgentRunWorkflow`` lifecycle (sandbox activity semantics stay inside
+    it, untouched), grade the collected diff against the scenario's hidden
+    tests, and persist the outcome as a ``TrialRecord``. Thin: every side
+    effect is an activity or the ``AgentRunWorkflow`` child; this workflow
+    notifies nothing itself (that is ``ExperimentWorkflow``'s job, via the
+    usual ``_notify_meta`` convention, when it fans out over many trials).
+
+    A crash here (an exhausted activity retry, a failed child) propagates
+    out of ``run`` rather than being swallowed -- when this runs standalone
+    (``client.start_trial``) that surfaces as a failed workflow execution;
+    when fanned out by ``ExperimentWorkflow`` it is caught there
+    (``asyncio.gather(..., return_exceptions=True)``) and recorded as a
+    failed ``TrialRecord``, mirroring ``run_experiment``'s ruling (c).
+    """
+
+    @workflow.run
+    async def run(self, inp: TrialInput) -> dict:
+        trial_id = f"trial_{workflow.uuid4().hex}"
+        started_at = workflow.now().isoformat()
+
+        provisioned = await workflow.execute_activity(
+            provision_trial,
+            {"scenario": inp.scenario, "agent": inp.agent, "seed": inp.seed},
+            **_SHORT,
+        )
+
+        run_out = await workflow.execute_child_workflow(
+            AgentRunWorkflow.run,
+            AgentRunInput(
+                run_id=workflow.uuid4().hex,
+                objective=provisioned["objective"],
+                agent_spec=provisioned["agent_spec"],
+                timeout_seconds=provisioned.get("timeout_seconds", 3600),
+            ),
+            id=f"trial-run-{trial_id}",
+        )
+        out = run_out if isinstance(run_out, dict) else _as_dict(run_out)
+
+        diff = out.get("diff") or ""
+        result = out.get("result") or {}
+        # F2 fix: the collected diff is the trusted source of changed paths;
+        # self-reported result.changed_files can only ADD to it (belt and
+        # braces), never remove from it -- mirrors trials/runner.py's
+        # run_trial (sync path).
+        self_reported_changed_files = list(result.get("changed_files") or [])
+        changed_files = sorted(
+            set(changed_files_from_diff(diff)) | set(self_reported_changed_files)
+        )
+
+        hidden_result = await workflow.execute_activity(
+            evaluate_trial_hidden,
+            {
+                "scenario": inp.scenario,
+                "diff": diff,
+                "seed": inp.seed,
+                "changed_files": changed_files,
+                # AgentRunOutput does not expose denied_commands (that detail
+                # lives inside AgentRunWorkflow's own sandbox/eval activities,
+                # which stay untouched) -- the test_path_violation/
+                # scope_violation hack-flag signals still apply; the
+                # denied-action-retry signal is unavailable on this path.
+                "denied_commands": [],
+                "actual_status": result.get("status"),
+            },
+            **_LONG,
+        )
+
+        # F3 fix: `result["metrics"]` here is the raw in-guest self-report
+        # (runner/main.py writes tokens_used/tool_calls/model_calls, per
+        # strands_tools.ToolContext.observability()) -- normalize to the same
+        # tokens/tool_calls/duration_s keys the sync run_trial path records
+        # (trials/runner.py's build_pipeline_fn), or costDelta and every
+        # tokens-keyed secondary metric silently stay 0.0 on this path.
+        # `runtime_seconds` comes from AgentRunOutput (threaded up from the
+        # sandbox activity), not from the guest's own self-reported metrics.
+        raw_metrics = dict(result.get("metrics") or {})
+        metrics = {
+            "changed_files": float(len(changed_files)),
+            "diff_bytes": float(len(diff.encode("utf-8"))),
+            "tokens": float(raw_metrics.get("tokens_used", raw_metrics.get("tokens", 0.0)) or 0.0),
+            "tool_calls": float(raw_metrics.get("tool_calls", 0.0) or 0.0),
+            "duration_s": float(out.get("runtime_seconds", 0.0) or 0.0),
+        }
+
+        trial_record = {
+            "id": trial_id,
+            "experiment_id": inp.experiment_id,
+            "run_id": out.get("run_id"),
+            "objective_id": provisioned["objective"].get("id"),
+            "agent_ref": provisioned["agent_ref"],
+            "scenario_name": provisioned["scenario_name"],
+            "scenario_version": provisioned["scenario_version"],
+            "scenario_digest": provisioned["scenario_digest"],
+            "seed": inp.seed,
+            "pins": provisioned.get("pins") or {},
+            "metrics": metrics,
+            "evaluation": {
+                "f2p_rate": hidden_result["f2p_rate"],
+                "p2p_rate": hidden_result["p2p_rate"],
+                "reward": hidden_result["reward"],
+                "detail": hidden_result["detail"],
+                "expected_status": hidden_result["expected_status"],
+                "actual_status": hidden_result["actual_status"],
+                "status_match": hidden_result["status_match"],
+                # Same key the sync run_trial path uses
+                # (bakudo/trials/runner.py's evaluation["scorecard"]).
+                "scorecard": out.get("scorecard"),
+            },
+            "flags": hidden_result["hack_flags"],
+            "status": "completed",
+            "started_at": started_at,
+            "completed_at": workflow.now().isoformat(),
+        }
+
+        await workflow.execute_activity(persist_trial, trial_record, **_SHORT)
+        return trial_record
+
+
+def _failed_trial_dict(item: dict, experiment_id: str, exc: BaseException) -> dict:
+    """Ruling (c) mirror for the Temporal path
+    (:func:`bakudo.experiments.runner._failed_trial_record`): a crashed
+    TrialWorkflow child becomes a failed TrialRecord instead of failing the
+    whole experiment. Pure (no I/O) -- workflow-safe."""
+    name, _, version_s = item["scenario_ref"].partition("@")
+    now = workflow.now().isoformat()
+    return {
+        "id": f"trial_{workflow.uuid4().hex}",
+        "experiment_id": experiment_id,
+        "agent_ref": item["agent_ref"],
+        "scenario_name": name,
+        "scenario_version": int(version_s) if version_s else 0,
+        "scenario_digest": item.get("scenario_digest", ""),
+        "seed": item["seed"],
+        "pins": {},
+        "metrics": {},
+        "evaluation": {"f2p_rate": 0.0, "p2p_rate": 0.0, "error": str(exc)},
+        "flags": {
+            "test_path_violation": False,
+            "denied_action_retries": False,
+            "scope_violation": False,
+            "details": {},
+        },
+        "status": "failed",
+        "started_at": now,
+        "completed_at": now,
+    }
+
+
+def _build_trial_matrix(
+    spec: dict[str, Any], scenario_descriptors: list[dict], experiment_id: str
+) -> list[dict]:
+    """Pure, workflow-safe mirror of
+    :func:`bakudo.experiments.design.build_matrix`, built from plain
+    descriptor dicts (:func:`resolve_experiment_scenarios`'s activity
+    output) instead of ``LoadedScenario`` objects, since workflow code may
+    not touch the scenario registry (R1). One row per (scenario, repetition,
+    arm); baseline and every candidate arm of a cell share ``trial_seed`` --
+    the paired design (design doc section 7)."""
+    arms = [spec["baseline"], *spec.get("candidates", [])]
+    repetitions = spec.get("repetitions", 1)
+    trials = []
+    for descriptor in scenario_descriptors:
+        scenario_name = descriptor["name"]
+        scenario_ref = f"{scenario_name}@{descriptor['version']}"
+        for repetition in range(repetitions):
+            seed = trial_seed(experiment_id, scenario_name, repetition)
+            for agent_ref in arms:
+                trials.append(
+                    {
+                        "scenario_ref": scenario_ref,
+                        "scenario_digest": descriptor["digest"],
+                        "agent_ref": agent_ref,
+                        "seed": seed,
+                        "repetition": repetition,
+                        "arm": "baseline" if agent_ref == spec["baseline"] else agent_ref,
+                    }
+                )
+    return trials
+
+
+# Bounded fan-out (context note): TrialWorkflow children are gated behind an
+# asyncio.Semaphore rather than started all at once -- Temporal's test
+# environment (and workflow.uuid4/workflow.now determinism) makes the
+# semaphore replay-safe here; batching in fixed windows of 3 was the
+# documented fallback if replay ever proved otherwise, but wasn't needed.
+_EXPERIMENT_CONCURRENCY = 3
+
+
+@workflow.defn
+class ExperimentWorkflow:
+    """Runs one experiment's paired trial matrix over fanned-out
+    ``TrialWorkflow`` children and assembles the comparison result
+    (experiment substrate design doc section 7's ``ExperimentWorkflow``
+    sketch; :func:`bakudo.experiments.runner.run_experiment` is the
+    synchronous, non-Temporal counterpart over the same matrix/statistics
+    building blocks).
+
+    ``persist_experiment(running)`` -> ``resolve_experiment_scenarios`` ->
+    build the trial matrix (pure, in workflow code) -> up to
+    ``_EXPERIMENT_CONCURRENCY`` concurrent ``TrialWorkflow`` children (a
+    crashed child is recorded as a failed trial rather than failing the
+    round) -> ``analyze_experiment`` -> ``persist_experiment(completed)``.
+    """
+
+    def __init__(self) -> None:
+        self._tokens_used = 0
+
+    @workflow.run
+    async def run(self, inp: ExperimentInput) -> dict:
+        try:
+            return await self._run(inp)
+        finally:
+            await self._notify_meta(inp)
+
+    async def _notify_meta(self, inp: ExperimentInput) -> None:
+        """Mirrors ``OptimizationWorkflow._notify_meta`` exactly: best-effort,
+        and only when this experiment was itself dispatched by the
+        meta-agent (nothing in this codebase does that yet, but the
+        convention is symmetric with every other fan-out workflow)."""
+        if inp.tracking_run_id is None:
+            return
+        parent = workflow.info().parent
+        if parent is None or parent.workflow_id != META_WORKFLOW_ID:
+            return
+        try:
+            handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
+            await handle.signal(
+                "run_completed", args=[inp.tracking_run_id, self._tokens_used]
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - best-effort notification
+            workflow.logger.warning(
+                "experiment run_completed signal to %s failed: %s",
+                META_WORKFLOW_ID, exc,
+            )
+
+    async def _run(self, inp: ExperimentInput) -> dict:
+        raw_spec = inp.spec
+        experiment_id = f"exp_{workflow.uuid4().hex}"
+
+        # Resolve scenarios AND every arm ref (baseline + candidates) up
+        # front, same as the sync path (resolve_arm_pipeline_fn runs before
+        # run_experiment is ever called -- ruling (4)): every TrialRecord a
+        # TrialWorkflow child records carries the resolved
+        # (pinned-version-checked, on-disk) ref, so `spec` from here on is
+        # the RESOLVED spec, never the caller's possibly-unpinned one --
+        # analyze_experiment's comparisons and the persisted experiment row
+        # must both match what the trials actually recorded, or every
+        # statistic silently zeroes on a raw-vs-resolved ref mismatch.
+        resolved = await workflow.execute_activity(
+            resolve_experiment_scenarios, {"spec": raw_spec}, **_SHORT,
+        )
+        scenario_descriptors = resolved["scenarios"]
+        resolved_arms = resolved["resolvedArms"]
+        spec = dict(raw_spec)
+        spec["baseline"] = resolved_arms[raw_spec["baseline"]]
+        spec["candidates"] = [resolved_arms[c] for c in raw_spec.get("candidates", [])]
+
+        await workflow.execute_activity(
+            persist_experiment,
+            {
+                "experiment_id": experiment_id,
+                "name": spec["metadata"]["name"],
+                "spec": spec,
+                "status": "running",
+            },
+            **_SHORT,
+        )
+
+        matrix = _build_trial_matrix(spec, scenario_descriptors, experiment_id)
+
+        semaphore = asyncio.Semaphore(_EXPERIMENT_CONCURRENCY)
+
+        async def _run_one(index: int, item: dict) -> dict:
+            async with semaphore:
+                return await workflow.execute_child_workflow(
+                    TrialWorkflow.run,
+                    TrialInput(
+                        scenario=item["scenario_ref"],
+                        agent=item["agent_ref"],
+                        seed=item["seed"],
+                        experiment_id=experiment_id,
+                    ),
+                    id=f"trial-{experiment_id}-{index}",
+                )
+
+        raw = await asyncio.gather(
+            *(_run_one(i, item) for i, item in enumerate(matrix)),
+            return_exceptions=True,
+        )
+
+        trials: list[dict] = []
+        tokens_used = 0
+        for item, out in zip(matrix, raw, strict=True):
+            if isinstance(out, asyncio.CancelledError):
+                raise out
+            if isinstance(out, BaseException):
+                workflow.logger.warning(
+                    "trial for %s/%s crashed: %s",
+                    item["scenario_ref"], item["agent_ref"], out,
+                )
+                record = _failed_trial_dict(item, experiment_id, out)
+                await workflow.execute_activity(persist_trial, record, **_SHORT)
+                trials.append(record)
+                continue
+            trials.append(out)
+            try:
+                tokens_used += int((out.get("metrics") or {}).get("tokens_used", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+        self._tokens_used = tokens_used
+
+        result = await workflow.execute_activity(
+            analyze_experiment,
+            {
+                "experiment_id": experiment_id,
+                "spec": spec,
+                "scenarios": scenario_descriptors,
+            },
+            **_LONG,
+        )
+
+        await workflow.execute_activity(
+            persist_experiment,
+            {
+                "experiment_id": experiment_id,
+                "name": spec["metadata"]["name"],
+                "spec": spec,
+                "status": "completed",
+                "result": result,
+            },
+            **_SHORT,
+        )
+        return result
 
 
 # --- Long-running meta-agent entity workflow (section 11.3) ---

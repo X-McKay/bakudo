@@ -9,7 +9,7 @@
   "properties": {
     "subject_type": {
       "enum": [
-        "run", "agent_spec_version", "skill_version",
+        "run", "trial", "agent_spec_version", "skill_version",
         "prompt_candidate", "tool_policy_candidate",
         "model_config_candidate", "sandbox_policy_candidate"
       ]

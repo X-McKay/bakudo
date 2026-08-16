@@ -209,6 +209,55 @@ create table if not exists graph_mirror_outbox (
   created_at timestamptz not null default now()
 );
 
+-- Trials (experiment substrate design doc section 6): one agent-version run
+-- of one scenario version, with its metrics, evaluation, and hack-detection
+-- flags. Insert-only — a trial's outcome is immutable once recorded.
+--
+-- CANONICAL DDL — mirrored by _TRIALS_DDL in
+-- src/bakudo/registry/postgres_ledger.py, which self-migrates existing
+-- databases (this file only runs at first initialization). Keep the two in
+-- sync.
+create table if not exists trials (
+  id text primary key,
+  experiment_id text,
+  run_id text,
+  objective_id text,
+  agent_ref text not null,
+  scenario_name text not null,
+  scenario_version integer not null,
+  scenario_digest text not null,
+  seed bigint not null,
+  pins jsonb not null default '{}'::jsonb,
+  metrics jsonb not null default '{}'::jsonb,
+  evaluation jsonb not null default '{}'::jsonb,
+  flags jsonb not null default '{}'::jsonb,
+  status text not null,
+  started_at timestamptz,
+  completed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists trials_experiment_idx on trials (experiment_id);
+
+-- Experiments (experiment substrate design doc section 7): a
+-- baseline-vs-candidate (or, with an empty candidates list, baseline-only
+-- profile) comparison over a scenario selection. Recorded once at creation
+-- (status e.g. "running"), then mutated in place to its terminal
+-- status/result once the trial matrix's statistics pass completes.
+--
+-- CANONICAL DDL — mirrored by _EXPERIMENTS_DDL in
+-- src/bakudo/registry/postgres_ledger.py, which self-migrates existing
+-- databases (this file only runs at first initialization). Keep the two in
+-- sync.
+create table if not exists experiments (
+  id text primary key,
+  name text not null,
+  spec jsonb not null,
+  status text not null,
+  result jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 -- Integration-event outbox (section 17.1): durable handoff to projections.
 create table if not exists outbox (
   id bigserial primary key,

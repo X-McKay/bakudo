@@ -158,6 +158,39 @@ def reconcile_runs(run_ids: list[str]) -> list[str]:
     return _impl.reconcile_runs(run_ids)
 
 
+# --- Experiment substrate (Task 11) ---
+
+
+@_DEFN(name="resolve_experiment_scenarios")
+def resolve_experiment_scenarios(input: dict) -> dict:
+    return _impl.resolve_experiment_scenarios(input)
+
+
+@_DEFN(name="provision_trial")
+def provision_trial(input: dict) -> dict:
+    return _impl.provision_trial(input)
+
+
+@_DEFN(name="evaluate_trial_hidden")
+def evaluate_trial_hidden(input: dict) -> dict:
+    return _impl.evaluate_trial_hidden(input)
+
+
+@_DEFN(name="persist_trial")
+def persist_trial(record: dict) -> None:
+    _impl.persist_trial(record)
+
+
+@_DEFN(name="persist_experiment")
+def persist_experiment(input: dict) -> None:
+    _impl.persist_experiment(input)
+
+
+@_DEFN(name="analyze_experiment")
+def analyze_experiment(input: dict) -> dict:
+    return _impl.analyze_experiment(input)
+
+
 ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     create_run,
     load_agent_spec,
@@ -172,4 +205,10 @@ ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     compact_memories,
     collect_signals,
     reconcile_runs,
+    resolve_experiment_scenarios,
+    provision_trial,
+    evaluate_trial_hidden,
+    persist_trial,
+    persist_experiment,
+    analyze_experiment,
 ]

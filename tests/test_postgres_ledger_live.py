@@ -23,6 +23,10 @@ pytestmark = [
 
 RUN_ID = "run_E2ELEDGER1"
 OBJ_ID = "obj_E2ELEDGER1"
+TRIAL_A1_ID = "trial_E2ELEDGERA1"
+TRIAL_A2_ID = "trial_E2ELEDGERA2"
+TRIAL_B1_ID = "trial_E2ELEDGERB1"
+EXPERIMENT_ID = "exp_E2ELEDGER1"
 
 
 @pytest.fixture
@@ -39,6 +43,11 @@ def _cleanup(lg: PostgresLedger) -> None:
         cur.execute("delete from run_events where run_id = %s", (RUN_ID,))
         cur.execute("delete from runs where id = %s", (RUN_ID,))
         cur.execute("delete from objectives where id = %s", (OBJ_ID,))
+        cur.execute(
+            "delete from trials where id = any(%s)",
+            ([TRIAL_A1_ID, TRIAL_A2_ID, TRIAL_B1_ID],),
+        )
+        cur.execute("delete from experiments where id = %s", (EXPERIMENT_ID,))
 
 
 def _record() -> RunRecord:
@@ -112,3 +121,80 @@ def test_record_eval_retry_is_idempotent(ledger):
     ledger.record_eval(result)  # simulated activity retry
     rows = ledger.eval_results(RUN_ID)
     assert len(rows) == 1, "retried record_eval must not duplicate rows (TMP-8)"
+
+
+# --- trials (Task 6, experiment substrate design doc section 6) ---
+
+
+def _trial(trial_id: str, experiment_id: str):
+    from bakudo.trials.models import HackFlags, TrialRecord
+
+    return TrialRecord(
+        id=trial_id,
+        experiment_id=experiment_id,
+        run_id=RUN_ID,
+        objective_id=OBJ_ID,
+        agent_ref="explore@1",
+        scenario_name="sample-bug",
+        scenario_version=1,
+        scenario_digest="sha256:deadbeef",
+        seed=7,
+        pins={"bakudo": "0.1.0"},
+        metrics={"tokens": 1234.0, "duration_s": 12.5},
+        evaluation={"f2p_rate": 1.0},
+        flags=HackFlags(test_path_violation=False),
+        status="completed",
+        started_at="2026-08-15T00:00:00+00:00",
+        completed_at="2026-08-15T00:01:00+00:00",
+    )
+
+
+def test_trial_roundtrip_insert_only_and_list_by_experiment(ledger):
+    a1 = _trial(TRIAL_A1_ID, "exp_E2ELEDGER_A")
+    a2 = _trial(TRIAL_A2_ID, "exp_E2ELEDGER_A")
+    b1 = _trial(TRIAL_B1_ID, "exp_E2ELEDGER_B")
+
+    ledger.record_trial(a1)
+    fetched = ledger.get_trial(TRIAL_A1_ID)
+    assert fetched == a1, "round trip must reproduce the recorded trial exactly"
+
+    ledger.record_trial(a1)  # F4: duplicate id is an idempotent no-op, not a raise
+    assert ledger.get_trial(TRIAL_A1_ID) == a1
+    assert len([t for t in ledger.list_trials() if t.id == TRIAL_A1_ID]) == 1
+
+    ledger.record_trial(a2)
+    ledger.record_trial(b1)
+
+    exp_a = ledger.list_trials(experiment_id="exp_E2ELEDGER_A")
+    assert {t.id for t in exp_a} == {TRIAL_A1_ID, TRIAL_A2_ID}
+
+    exp_b = ledger.list_trials(experiment_id="exp_E2ELEDGER_B")
+    assert {t.id for t in exp_b} == {TRIAL_B1_ID}
+
+
+# --- experiments (Task 8, experiment substrate design doc section 7) ---
+
+
+def test_experiment_roundtrip_and_unknown_id_raises(ledger):
+    spec = {"metadata": {"name": "e2e-experiment"}, "baseline": "explore@1"}
+    ledger.record_experiment(EXPERIMENT_ID, "e2e-experiment", spec, "running")
+    got = ledger.get_experiment(EXPERIMENT_ID)
+    assert got is not None
+    assert got["id"] == EXPERIMENT_ID
+    assert got["name"] == "e2e-experiment"
+    assert got["spec"] == spec
+    assert got["status"] == "running"
+    assert got["result"] is None
+
+    # retried record_experiment must not clobber (on conflict do nothing)
+    ledger.record_experiment(EXPERIMENT_ID, "different-name", {}, "running")
+    assert ledger.get_experiment(EXPERIMENT_ID)["name"] == "e2e-experiment"
+
+    ledger.update_experiment_result(EXPERIMENT_ID, "completed", {"decision": "promote"})
+    got = ledger.get_experiment(EXPERIMENT_ID)
+    assert got["status"] == "completed"
+    assert got["result"] == {"decision": "promote"}
+
+    assert ledger.get_experiment("exp_E2ELEDGER_UNKNOWN") is None
+    with pytest.raises(KeyError):
+        ledger.update_experiment_result("exp_E2ELEDGER_UNKNOWN", "completed", {})

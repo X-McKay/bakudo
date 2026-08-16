@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bakudo.ai/schemas/experiment-spec.schema.json",
+  "title": "ExperimentSpec",
+  "description": "A baseline-vs-candidate comparison (or, with an empty candidates list, a baseline-only profile run) over a deterministic scenario selection (experiment substrate design doc section 7).",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "subject", "baseline"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": { "const": "bakudo.ai/v1alpha1" },
+    "kind": { "const": "ExperimentSpec" },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "subject": { "const": "agent-spec" },
+    "baseline": { "type": "string", "minLength": 1, "description": "name@version" },
+    "candidates": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "name@version refs; empty means profile mode (baseline arm only)."
+    },
+    "scenarioSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "families": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "partitions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["dev", "validation"]
+        },
+        "count": { "type": "integer", "minimum": 1, "default": 20 }
+      }
+    },
+    "repetitions": { "type": "integer", "minimum": 1, "default": 1 },
+    "useHoldout": { "type": "boolean", "default": false },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "primary": { "type": "string", "default": "task_success" },
+        "secondary": { "type": "array", "items": { "type": "string" }, "default": [] }
+      }
+    },
+    "hardGates": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "safetyRegressions": { "type": "integer", "minimum": 0, "default": 0 },
+        "hackFlags": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "confidence": { "type": "number", "default": 0.95 },
+        "tieZone": { "type": "number", "default": 0.10 },
+        "costTiebreak": { "type": "boolean", "default": true }
+      }
+    }
+  }
+}

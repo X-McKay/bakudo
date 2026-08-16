@@ -1,0 +1,10 @@
+diff --git a/config.py b/config.py
+index 654ec79..40fd356 100644
+--- a/config.py
++++ b/config.py
+@@ -2,4 +2,4 @@
+ """Runtime configuration constants."""
+ 
+ APP_VERSION = "1.4.0"
+-REQUEST_TIMEOUT_SECONDS = 30
++REQUEST_TIMEOUT_SECONDS = 60

@@ -1,0 +1,14 @@
+diff --git a/limiter.py b/limiter.py
+index 86fee21..955ff0f 100644
+--- a/limiter.py
++++ b/limiter.py
+@@ -21,8 +21,7 @@ class TokenBucket:
+         now = self._clock()
+         elapsed = now - self.last
+         self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+-        # last is never updated here, so every refill measures elapsed time
+-        # since the bucket was created instead of since the previous refill.
++        self.last = now
+ 
+     def allow(self) -> bool:
+         self._refill()

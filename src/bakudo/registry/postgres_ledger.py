@@ -18,7 +18,58 @@ from typing import Any
 
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
+from ..trials.models import HackFlags, TrialRecord
 from .records import AgentVersionRecord, RunEvent, RunPhase, RunRecord
+
+# Self-migration DDL for the trials table. infra/postgres/init.sql is the
+# canonical, documented copy (runs at first database initialization); this
+# constant MUST match it exactly and exists because init.sql never runs
+# against an already-initialized database (compose volume upgrade, the live
+# cluster) — without it the first trial write would hit UndefinedTable.
+# Mirrors _GRAPH_MIRROR_OUTBOX_DDL in src/bakudo/memory/store_pg.py.
+_TRIALS_DDL = """\
+create table if not exists trials (
+  id text primary key,
+  experiment_id text,
+  run_id text,
+  objective_id text,
+  agent_ref text not null,
+  scenario_name text not null,
+  scenario_version integer not null,
+  scenario_digest text not null,
+  seed bigint not null,
+  pins jsonb not null default '{}'::jsonb,
+  metrics jsonb not null default '{}'::jsonb,
+  evaluation jsonb not null default '{}'::jsonb,
+  flags jsonb not null default '{}'::jsonb,
+  status text not null,
+  started_at timestamptz,
+  completed_at timestamptz,
+  created_at timestamptz not null default now()
+)"""
+
+_TRIALS_EXPERIMENT_INDEX_DDL = (
+    "create index if not exists trials_experiment_idx on trials (experiment_id)"
+)
+
+# Self-migration DDL for the experiments table. Same rationale as
+# _TRIALS_DDL above; infra/postgres/init.sql is the canonical, documented
+# copy and this constant MUST match it exactly. Applied lazily in
+# record_experiment, so a read (get_experiment/update_experiment_result)
+# against a legacy database that predates this table — one that has never
+# had record_experiment called on it — raises psycopg.errors.UndefinedTable
+# rather than silently creating the table; this mirrors the accepted trials
+# pattern (Task 6) rather than being an oversight.
+_EXPERIMENTS_DDL = """\
+create table if not exists experiments (
+  id text primary key,
+  name text not null,
+  spec jsonb not null,
+  status text not null,
+  result jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+)"""
 
 
 class PostgresLedger:
@@ -600,3 +651,171 @@ class PostgresLedger:
                         reason=f"human {verb} by {approved_by}",
                     )
         return decision
+
+    # --- trials ---
+    _TRIAL_COLUMNS = (
+        "id, experiment_id, run_id, objective_id, agent_ref, scenario_name, "
+        "scenario_version, scenario_digest, seed, pins, metrics, evaluation, "
+        "flags, status, started_at, completed_at"
+    )
+
+    def _ensure_trials_table(self, conn: Any) -> None:
+        """Self-migrate the ``trials`` table (idempotent), mirroring
+        :meth:`PgSemanticMemoryStore._ensure_outbox_table`. Applied lazily on
+        the first trial write so an already-initialized database (whose
+        ``init.sql`` predates this table) still works without a manual
+        migration."""
+        self._do(conn, _TRIALS_DDL, ())
+        self._do(conn, _TRIALS_EXPERIMENT_INDEX_DDL, ())
+
+    def record_trial(self, t: TrialRecord) -> None:
+        """Idempotent insert (design section 6 + F4 fix): a trial's outcome
+        is immutable once recorded, so a duplicate id is a no-op (``on
+        conflict (id) do nothing``) rather than raising -- Temporal
+        at-least-once activity retries can replay the same ``persist_trial``
+        write after a lost activity completion, and that replay must succeed
+        silently (matching :meth:`record_experiment`'s convention) instead of
+        wedging the workflow. Single statement, no read-then-write TOCTOU."""
+        with self._connection() as conn:
+            self._ensure_trials_table(conn)
+            self._do(
+                conn,
+                """
+                insert into trials
+                    (id, experiment_id, run_id, objective_id, agent_ref,
+                     scenario_name, scenario_version, scenario_digest, seed,
+                     pins, metrics, evaluation, flags, status, started_at,
+                     completed_at)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (id) do nothing
+                """,
+                (
+                    t.id, t.experiment_id, t.run_id, t.objective_id, t.agent_ref,
+                    t.scenario_name, t.scenario_version, t.scenario_digest, t.seed,
+                    json.dumps(t.pins), json.dumps(t.metrics), json.dumps(t.evaluation),
+                    json.dumps(t.flags.model_dump(mode="json")), t.status,
+                    t.started_at, t.completed_at,
+                ),
+            )
+
+    def get_trial(self, trial_id: str) -> TrialRecord | None:
+        row = self._one(
+            f"select {self._TRIAL_COLUMNS} from trials where id = %s",
+            (trial_id,),
+        )
+        return self._trial_row(row)
+
+    def list_trials(self, experiment_id: str | None = None) -> list[TrialRecord]:
+        if experiment_id is None:
+            rows = self._all(
+                f"select {self._TRIAL_COLUMNS} from trials order by created_at"
+            )
+        else:
+            rows = self._all(
+                f"select {self._TRIAL_COLUMNS} from trials "
+                "where experiment_id = %s order by created_at",
+                (experiment_id,),
+            )
+        # rows come straight from `select ... from trials`, so _trial_row (typed
+        # to also handle the `select ... where id = %s` no-match-found case for
+        # get_trial) never actually returns None here; the walrus filter keeps
+        # mypy honest without an unchecked cast.
+        return [t for r in rows if (t := self._trial_row(r)) is not None]
+
+    @staticmethod
+    def _trial_ts(value: Any) -> str | None:
+        """Trial timestamps are plain ``str`` on the model (unlike
+        ``RunRecord``'s ``datetime``); normalise the ``timestamptz`` value
+        psycopg hands back into that shape."""
+        if value is None or isinstance(value, str):
+            return value
+        return value.isoformat()
+
+    @staticmethod
+    def _trial_json(value: Any, default: str = "{}") -> Any:
+        return value if isinstance(value, dict) else json.loads(value or default)
+
+    @classmethod
+    def _trial_row(cls, row: tuple | None) -> TrialRecord | None:
+        if row is None:
+            return None
+        return TrialRecord(
+            id=row[0], experiment_id=row[1], run_id=row[2], objective_id=row[3],
+            agent_ref=row[4], scenario_name=row[5], scenario_version=row[6],
+            scenario_digest=row[7], seed=row[8],
+            pins=cls._trial_json(row[9]),
+            metrics=cls._trial_json(row[10]),
+            evaluation=cls._trial_json(row[11]),
+            flags=HackFlags.model_validate(cls._trial_json(row[12])),
+            status=row[13],
+            started_at=cls._trial_ts(row[14]),
+            completed_at=cls._trial_ts(row[15]),
+        )
+
+    # --- experiments ---
+    _EXPERIMENT_COLUMNS = "id, name, spec, status, result, created_at, updated_at"
+
+    def _ensure_experiments_table(self, conn: Any) -> None:
+        """Self-migrate the ``experiments`` table (idempotent), mirroring
+        :meth:`_ensure_trials_table`. Applied lazily on the first experiment
+        write so an already-initialized database (whose ``init.sql``
+        predates this table) still works without a manual migration."""
+        self._do(conn, _EXPERIMENTS_DDL, ())
+
+    def record_experiment(
+        self, experiment_id: str, name: str, spec: dict, status: str
+    ) -> None:
+        """Insert the experiment row. Idempotent under retry (``on conflict
+        do nothing``, matching :meth:`create_run`): a duplicate id is a
+        retried write, not an error, and must not clobber an experiment that
+        has already progressed past its initial status via
+        :meth:`update_experiment_result`."""
+        with self._connection() as conn:
+            self._ensure_experiments_table(conn)
+            self._do(
+                conn,
+                """
+                insert into experiments (id, name, spec, status)
+                values (%s,%s,%s,%s)
+                on conflict (id) do nothing
+                """,
+                (experiment_id, name, json.dumps(spec), status),
+            )
+
+    def update_experiment_result(
+        self, experiment_id: str, status: str, result: dict
+    ) -> None:
+        # No _ensure_experiments_table call here (see _EXPERIMENTS_DDL
+        # comment): this is a read-before-first-write path on a legacy DB,
+        # and it's supposed to raise UndefinedTable rather than silently
+        # creating an empty table it then updates zero rows of.
+        #
+        # `update ... returning id` detects an unknown experiment_id (empty
+        # result), matching _set_version_status/resolve_promotion and
+        # InMemoryLedger's dict-lookup KeyError — a silent no-op here would
+        # let a caller believe a result was recorded when it wasn't.
+        row = self._one(
+            "update experiments set status = %s, result = %s, updated_at = now() "
+            "where id = %s returning id",
+            (status, json.dumps(result) if result is not None else None, experiment_id),
+        )
+        if row is None:
+            raise KeyError(f"unknown experiment: {experiment_id!r}")
+
+    def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"select {self._EXPERIMENT_COLUMNS} from experiments where id = %s",
+            (experiment_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "name": row[1],
+            "spec": row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
+            "status": row[3],
+            "result": row[4] if row[4] is None or isinstance(row[4], dict)
+            else json.loads(row[4] or "{}"),
+            "created_at": row[5],
+            "updated_at": row[6],
+        }
