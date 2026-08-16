@@ -211,7 +211,37 @@ The substrate is built so that coding agents can operate the loop:
   *structurally impossible* rather than merely discouraged, and this
   property is now a named, regression-tested invariant.
 
-## 6. What already exists vs. what's new
+## 6. Deployment model: a resident system, not a per-repo tool
+
+Bakudo is a **product-shaped standing service**, not a CLI you run
+inside a repository. The control plane stays up — the meta-agent entity
+workflow holding backlog/budgets across cycles, the repo observer, the
+Temporal worker, the API, Postgres/FalkorDB — and it operates on a
+*portfolio* of repositories that live on the host. Everything
+distinctive about it (durable curriculum, canary routing across runs,
+accumulated memory, the experiment ledger) is longitudinal state that a
+per-repo tool invocation would throw away. The tool-style entry points
+(`bakudo demo`, the sync mirrors) remain as dev/CI conveniences.
+
+Until now, repo onboarding was implicit: a repo "existed" if its
+directory sat under `$BAKUDO_REPO_ROOT`. This work makes onboarding
+deliberate:
+
+```
+bakudo repo add https://github.com/acme/payments-service   # clones into the managed root
+bakudo repo add ~/git/inference-gateway --name gateway     # registers an existing checkout
+bakudo repo list --json
+bakudo repo remove gateway                                 # deregisters; never deletes files
+```
+
+Registered repos are recorded in the ledger (name, source, path, base
+ref, provenance) and objective resolution consults the registry first,
+falling back to the old directory convention. Cloning fetches data
+only — repository code still executes exclusively inside sandbox
+guests. Scenario fixtures are unaffected either way: the provisioner
+materializes those itself.
+
+## 7. What already exists vs. what's new
 
 | Layer | Status |
 |---|---|
@@ -224,7 +254,9 @@ The substrate is built so that coding agents can operate the loop:
 | **Experiment layer + paired statistics + profile mode** | **new** |
 | **`bakudo scenario / trial / experiment` CLI + API routes** | **new** |
 | **~25-scenario corpus (4 families, twins, canaries)** | **new** |
+| **`bakudo repo add/list/remove` — deliberate repo onboarding** | **new** |
 | Old eval corpus (`run_corpus`) | absorbed — same API, now backed by trials |
+| Implicit `$BAKUDO_REPO_ROOT` repo convention | absorbed — registry first, directory fallback kept |
 
 Notable deliberate *non*-dependencies, each evaluated against the 2026
 landscape: Inspect and Harbor as execution engines (their loops collide
@@ -236,7 +268,7 @@ DSPy/TextGrad/OpenEvolve as optimization engines (the later mutation
 phase imitates GEPA's ideas instead). The paired-statistics core is the
 one component the survey found *nowhere* — it's the part worth owning.
 
-## 7. The road after this phase
+## 8. The road after this phase
 
 Each later phase now has a defined foundation to stand on:
 

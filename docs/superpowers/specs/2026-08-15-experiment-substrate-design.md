@@ -91,8 +91,12 @@ lineage anchors) are designed now.
    CI, tie-zone, cost tiebreak) and hard safety gates. Profile = the
    single-arm degenerate case.
 5. A minimal subject-polymorphic `Benchmark` seam; agent binding only.
-6. Operator surface: `bakudo scenario|trial|experiment …` CLI with
+6. Operator surface: `bakudo scenario|trial|experiment|repo …` CLI with
    `--json` everywhere, plus API routes.
+6a. **Repo onboarding** (`bakudo repo add`): deliberate registration of
+   target repositories, replacing the implicit "directory under
+   `$BAKUDO_REPO_ROOT`" convention and cementing the deployment model
+   (§11.5).
 7. Agent-authorability: scaffold, hardened `verify` loop, actionable
    errors, fail-closed provenance, authoring skill.
 8. Everything runs offline (`BAKUDO_OFFLINE=1`) end-to-end in CI.
@@ -443,10 +447,10 @@ smoke-corpus cascades are recorded future options, not built now.)
 
 ## 8. Persistence
 
-- New tables `trials`, `experiments` in `infra/postgres/init.sql` **and**
-  as idempotent self-migration DDL constants (the
-  `_GRAPH_MIRROR_OUTBOX_DDL` pattern) — `init.sql` only runs at first
-  cluster init.
+- New tables `trials`, `experiments`, `repos` in
+  `infra/postgres/init.sql` **and** as idempotent self-migration DDL
+  constants (the `_GRAPH_MIRROR_OUTBOX_DDL` pattern) — `init.sql` only
+  runs at first cluster init.
 - `Ledger` protocol grows `record_trial`, `get_trial`,
   `list_trials(experiment_id=…)`, `record_experiment`,
   `update_experiment_result`, `get_experiment`; both implementations,
@@ -488,7 +492,7 @@ smoke-corpus cascades are recorded future options, not built now.)
 
 ## 11. Operator Surface
 
-Three nouns matching the three primitives:
+Three nouns matching the three primitives, plus repo onboarding:
 
 ```
 bakudo scenario list [--family --partition --json]
@@ -499,10 +503,42 @@ bakudo experiment run <spec.yaml> [--json]
 bakudo experiment compare <baseline> <candidate> --family <f> --count N [--json]
 bakudo experiment profile <agent> [--family <f>] [--json]
 bakudo experiment result <exp_id> [--json]
+bakudo repo add <url|path> [--name <n>] [--base-ref <ref>] [--json]
+bakudo repo list [--json]
+bakudo repo remove <name>        # deregisters only; never deletes files
 ```
 
 API (bearer-auth as existing): `POST /experiments`,
-`GET /experiments/{id}`, `GET /trials/{id}`.
+`GET /experiments/{id}`, `GET /trials/{id}`, `POST /repos`,
+`GET /repos`.
+
+### 11.5 Deployment model and repo onboarding
+
+**Bakudo is a resident system (product), not a per-repo tool.** The
+control plane runs continuously (meta-agent entity workflow, observer,
+worker, API, Postgres/FalkorDB) and operates on a *portfolio* of
+host-resident repositories. The tool-style entry points (`bakudo
+demo`/`optimize`, sync mirrors) remain as dev/CI conveniences, not the
+identity. This phase makes repo onboarding deliberate instead of
+implicit:
+
+- `bakudo repo add <url|path>`: for a URL, `git clone` into
+  `$BAKUDO_REPO_ROOT/<name>` (clone only — git does not execute
+  repo-provided hooks on clone; repo code still only ever executes
+  in-guest); for a local path, register in place. Records name, source,
+  resolved path, default base ref, and provenance in a new `repos`
+  table.
+- `Ledger` protocol grows `register_repo`, `get_repo`, `list_repos`,
+  `deregister_repo` (both backends; `repos` DDL in `init.sql` + the
+  self-migration constant, like `trials`/`experiments`).
+- `resolve_repo()` in `abox/runner.py` consults the registry first
+  (name → registered path), falling back to the existing
+  `$BAKUDO_REPO_ROOT/<name>` convention for compatibility.
+- Deregistration never deletes files.
+- Out of scope: multi-repo observer fan-out (the observer stays
+  env-driven single-repo this phase; registry-driven observation is a
+  natural follow-up), credentialed clone flows beyond what the host's
+  git config already provides, and any auto-sync/fetch daemon.
 
 ## 12. Testing and Security
 
@@ -622,4 +658,6 @@ schema, Inspect `.eval` logs.
    profile/result) + API routes.
 8. `TrialWorkflow`/`ExperimentWorkflow` + registration + starters.
 9. Corpus buildout to ~25 + `run_corpus` adapter absorption.
-10. Inspect `.eval` emitter (optional artifact) + authoring skill + docs.
+10. Repo onboarding: `repos` table + ledger methods + `bakudo repo`
+    CLI + API routes + `resolve_repo()` registry integration.
+11. Inspect `.eval` emitter (optional artifact) + authoring skill + docs.
