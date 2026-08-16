@@ -644,3 +644,79 @@ def test_update_experiment_result_unknown_id_raises_key_error():
         PostgresLedger(conn).update_experiment_result(
             "exp_UNKNOWN", "completed", {"decision": "promote"}
         )
+
+
+# --- repos (repo onboarding, P2 Task 1) ---
+
+
+def _repo_record(**overrides):
+    from bakudo.registry.records import RepoRecord
+
+    fields = dict(name="add-feature-repo", source="/src/x", path="/checkouts/x")
+    fields.update(overrides)
+    return RepoRecord(**fields)
+
+
+def test_register_repo_self_migrates_then_inserts_when_name_unknown():
+    conn = FakeConn()  # `select path from repos` finds nothing -> fresh insert
+    PostgresLedger(conn).register_repo(_repo_record())
+
+    seq = _sql_seq(conn)
+    ddl_idx = next(i for i, s in enumerate(seq) if "create table if not exists repos" in s)
+    probe_idx = next(i for i, s in enumerate(seq) if "select path from repos" in s)
+    insert_idx = next(i for i, s in enumerate(seq) if "insert into repos" in s)
+    assert ddl_idx < probe_idx < insert_idx
+
+    insert_sql, insert_params = next(
+        (s, p) for s, p in conn.executed if "insert into repos" in s
+    )
+    assert "coalesce(%s, now())" in insert_sql, "added_at must fall back to now() when unset"
+    assert insert_params[:4] == ("add-feature-repo", "/src/x", "/checkouts/x", "main")
+
+
+def test_register_repo_same_path_is_idempotent_noop():
+    conn = FakeConn()
+    conn.rows = [("/checkouts/x",)]  # existing row reports the same path
+    PostgresLedger(conn).register_repo(_repo_record())
+    assert not any("insert into repos" in s for s, _ in conn.executed)
+
+
+def test_register_repo_conflicting_path_raises_value_error():
+    conn = FakeConn()
+    conn.rows = [("/checkouts/DIFFERENT",)]  # existing row reports another path
+    with pytest.raises(ValueError):
+        PostgresLedger(conn).register_repo(_repo_record())
+    assert not any("insert into repos" in s for s, _ in conn.executed)
+
+
+def test_get_repo_selects_by_name_without_migrating():
+    conn = FakeConn()
+    PostgresLedger(conn).get_repo("add-feature-repo")
+    select_sql, params = next((s, p) for s, p in conn.executed if "from repos" in s)
+    assert "where name = %s" in select_sql
+    assert params == ("add-feature-repo",)
+    assert not any("create table if not exists repos" in s for s in _sql_seq(conn))
+
+
+def test_list_repos_orders_by_added_at_without_migrating():
+    conn = FakeConn()
+    PostgresLedger(conn).list_repos()
+    select_sql, params = next((s, p) for s, p in conn.executed if "from repos" in s)
+    assert "order by added_at" in select_sql
+    assert params == ()
+    assert not any("create table if not exists repos" in s for s in _sql_seq(conn))
+
+
+def test_deregister_repo_deletes_by_name_returning():
+    conn = FakeConn()
+    conn.rows = [("add-feature-repo",)]  # `delete ... returning name` finds the row
+    PostgresLedger(conn).deregister_repo("add-feature-repo")
+    delete_sql, params = next((s, p) for s, p in conn.executed if "delete from repos" in s)
+    assert "returning name" in delete_sql
+    assert params == ("add-feature-repo",)
+
+
+def test_deregister_repo_unknown_name_raises_key_error():
+    conn = FakeConn()  # no rows preloaded -> `delete ... returning` finds none
+    with pytest.raises(KeyError):
+        PostgresLedger(conn).deregister_repo("does-not-exist")

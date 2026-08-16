@@ -24,7 +24,7 @@ from ..curriculum import build_default_collector, generate_objectives
 from ..curriculum.collectors import SignalCollector
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, Scorecard, assemble_suite, decide
-from ..evals.corpus import CaseRun, load_corpus
+from ..evals.corpus import CaseRun, load_corpus, load_corpus_from_scenarios
 from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
 from ..memory.compaction import compact
@@ -62,11 +62,11 @@ SANDBOX_REMEDIATION = (
 # fail-closed message, shared by Deps.resolve_hidden_eval_fn (runtime) and
 # any future worker startup posture log, so the two can never drift.
 HIDDEN_EVAL_REMEDIATION = (
-    "TODO(follow-up plan: corpus & integration): grading hidden tests "
-    "outside BAKUDO_ENV=dev requires a first-class abox-backed hidden-test "
-    "runner (bench-style sandbox exec), which does not exist yet. Set "
-    "BAKUDO_ENV=dev to use the local (host-executing, dev-only) test runner, "
-    "or inject Deps.hidden_eval_fn with a trusted runner."
+    "grading hidden tests outside BAKUDO_ENV=dev requires a resolvable "
+    "sandbox posture: set BAKUDO_ENV=dev to use the local (host-executing, "
+    "dev-only) test runner, or BAKUDO_SANDBOX=abox to grade inside a real "
+    "abox guest (bakudo.abox.hidden_bench.abox_test_runner), or inject "
+    "Deps.hidden_eval_fn with a trusted runner."
 )
 
 
@@ -102,14 +102,23 @@ def _default_hidden_eval_fn(workspace: Any, command: str) -> TestRunResult:
     resolution pattern, :func:`resolve_sandbox_mode`).
 
     ``BAKUDO_ENV=dev`` opts into the local, host-executing runner (the same
-    one ``bakudo trial run``/``bakudo experiment run`` use, and the only one
-    safe for scenario fixture/agent code today). Any other posture refuses
-    rather than silently executing untrusted diff-adjacent code on the host.
+    one ``bakudo trial run``/``bakudo experiment run`` use in dev mode).
+    Otherwise, ``resolve_sandbox_mode() == "abox"`` opts into the real
+    abox-backed guest runner (:func:`bakudo.abox.hidden_bench.abox_test_runner`,
+    Task 8) -- the same posture check ``Deps.sandbox_fn`` uses for the agent
+    sandbox itself, so hidden-test grading and agent execution can never
+    silently disagree about whether abox is the live boundary. Any other
+    posture refuses rather than silently executing untrusted diff-adjacent
+    code on the host.
     """
     if os.environ.get("BAKUDO_ENV") == "dev":
         from ..scenarios.testrun import local_test_runner
 
         return local_test_runner(workspace, command)
+    if resolve_sandbox_mode() == "abox":
+        from ..abox.hidden_bench import abox_test_runner
+
+        return abox_test_runner(workspace, command)
     raise RuntimeError(HIDDEN_EVAL_REMEDIATION)
 
 
@@ -134,6 +143,12 @@ class Deps:
     # them.
     scenario_registry_fn: ScenarioRegistryFn = _default_scenario_registry
     hidden_eval_fn: TestRunner = _default_hidden_eval_fn
+    # Task 7: threaded into build_pipeline_fn's run_objective_fn param by
+    # _scenario_case_run_fn (the scenario-backed evolve default). None (the
+    # production default) resolves to the real
+    # bakudo.control.pipeline.run_objective there; tests inject a stub so an
+    # evolution run over the scenario-backed default corpus stays offline.
+    run_objective_fn: Callable[..., Any] | None = None
 
     def sandbox_fn(self) -> SandboxFn:
         """Resolve the sandbox driver, failing *closed*.
@@ -582,7 +597,13 @@ def check_canary_graduation(name: str) -> dict:
 
 
 def _run_case(spec: AgentSpec, objective: Objective) -> CaseRun:
-    """Run one eval case in the configured sandbox and shape it for grading."""
+    """Run one eval case in the configured sandbox and shape it for grading.
+
+    Only valid for a legacy YAML corpus's cases, whose ``objective.repo`` is
+    a real, sandbox-resolvable checkout (a name ``resolve_repo`` maps to a
+    path, or an absolute path outright). A scenario-backed case's
+    ``objective.repo`` is a placeholder -- see :func:`_scenario_case_run_fn`.
+    """
     bundle = TaskBundle(
         run_id=ids.run_id(),
         objective_id=objective.id,
@@ -603,12 +624,56 @@ def _run_case(spec: AgentSpec, objective: Objective) -> CaseRun:
     )
 
 
+def _scenario_case_run_fn(spec: AgentSpec, objective: Objective) -> CaseRun:
+    """Run one *scenario-backed* eval case for ``spec`` via the trial
+    substrate (Task 7's ``bakudo.evals.corpus.scenario_run_fn``, bridging to
+    ``bakudo.trials.runner.run_trial``).
+
+    The scenario-aware counterpart to :func:`_run_case`: a scenario-backed
+    ``EvalCase``'s ``objective.repo`` is a placeholder (the scenario's own,
+    unprovisioned directory -- see ``load_corpus_from_scenarios``'s
+    docstring), so only ``run_trial``'s own fresh provisioning can run it
+    correctly (fixture only; ``hidden``/``reference`` never touch the
+    workspace). ``DEPS.run_objective_fn`` (``None`` in production) lets
+    tests keep the scenario-backed evolve default fully offline by injecting
+    a stub in place of the real ``bakudo.control.pipeline.run_objective``.
+    """
+    from ..evals.corpus import scenario_run_fn
+    from ..trials.runner import build_pipeline_fn
+
+    def sandbox_fn(bundle: TaskBundle, repo_path: Path) -> AboxOutcome:
+        return DEPS.sandbox_fn()(bundle)
+
+    run = scenario_run_fn(
+        test_runner=DEPS.hidden_eval_fn,
+        pipeline_factory=lambda: build_pipeline_fn(
+            spec, sandbox_fn=sandbox_fn, run_objective_fn=DEPS.run_objective_fn
+        ),
+    )
+    return run(objective)
+
+
 def run_agent_evolution(inp: EvolutionInput) -> dict:
-    """Score a candidate spec against a baseline over an eval corpus (§15)."""
+    """Score a candidate spec against a baseline over an eval corpus (§15).
+
+    ``inp.corpus_path`` set: the legacy YAML corpus, run via ``_run_case``
+    (unchanged). Unset (the default, Task 7): the scenario registry's
+    debugging + no-change families
+    (``bakudo.evals.corpus.load_corpus_from_scenarios``), run via
+    ``_scenario_case_run_fn`` since a scenario-backed case can only be run
+    correctly through the trial substrate's own provisioning.
+    """
     baseline = parse_spec(inp.baseline_spec)
     candidate = parse_spec(inp.candidate_spec)
-    _, cases = load_corpus(inp.corpus_path)
-    outcome = evolve_agent(baseline, candidate, cases, _run_case)
+    if inp.corpus_path:
+        _, cases = load_corpus(inp.corpus_path)
+        run_fn = _run_case
+    else:
+        cases = load_corpus_from_scenarios(
+            families=["debugging", "no-change"], registry=DEPS.scenario_registry_fn()
+        )
+        run_fn = _scenario_case_run_fn
+    outcome = evolve_agent(baseline, candidate, cases, run_fn)
 
     if callable(getattr(DEPS.ledger, "record_promotion", None)):
         # Record + transition the candidate version (design §1/§4).
@@ -846,8 +911,8 @@ def evaluate_trial_hidden(input: dict) -> dict:
     the expected/actual status comparison, all folded in here since they
     require the scenario (registry file I/O) that workflow code may not
     load itself (R1). Uses ``Deps.hidden_eval_fn`` -- fails closed outside
-    ``BAKUDO_ENV=dev`` until a first-class abox hidden-test runner lands
-    (see :data:`HIDDEN_EVAL_REMEDIATION`).
+    ``BAKUDO_ENV=dev``/``BAKUDO_SANDBOX=abox`` (see
+    :data:`HIDDEN_EVAL_REMEDIATION`).
     """
     from ..trials import hidden
     from ..trials.runner import compute_hack_flags

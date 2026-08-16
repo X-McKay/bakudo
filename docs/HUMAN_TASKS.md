@@ -172,13 +172,17 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 
 ## 7. Grow the eval corpora (judgement work)
 
-Promotion requires `promotionPolicy.minEvalCases` (25) real cases. The sample
-`evals/corpora/add-feature.yaml` has two. `evals/corpora/optimize.yaml` meets
-the 25-case bar with synthetic planted inefficiencies + no-change decoys;
-replace/extend those with real history as it accumulates.
+Promotion requires `promotionPolicy.minEvalCases` (25) real cases. The real
+corpus now lives in the scenario registry (`evals/scenarios/`, 25 exemplars
+across the debugging/no-change/adversarial-context/safety families), loaded
+via `bakudo.evals.corpus.load_corpus_from_scenarios`. `load_corpus(path)`
+still loads a legacy YAML corpus for roles the scenario registry doesn't
+cover yet (e.g. `optimize`, which has no scenario-registry equivalent);
+`evals/corpora/*.yaml` (the old fictional samples) were retired.
 
-- [ ] For each role, curate ≥25 cases from real objectives + historical
-      failures (use the `eval-author` role to convert failures into cases).
+- [ ] For each role the scenario registry doesn't cover, curate ≥25 cases
+      from real objectives + historical failures (use the `eval-author` role
+      to convert failures into cases).
 - [ ] Configure an LLM critic judge (`evals/critic.llm_judge`) and add the
       `critic` suite to the corpus run where you want review gating.
 - [ ] Decide the production `PromotionPolicy` (required suites incl. a

@@ -111,3 +111,20 @@ class RunRecord(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     result: dict[str, Any] | None = None
+
+
+class RepoRecord(BaseModel):
+    """A row of ``repos``: a deliberately onboarded repository checkout
+    (repo onboarding, P2 Task 1). ``name`` is the key
+    :meth:`bakudo.abox.runner.AboxRunner.resolve_repo` looks up first
+    (registry-first), falling back to ``$BAKUDO_REPO_ROOT/<name>`` when a
+    name has no registry entry -- so ``name`` must match the bare
+    ``objective.repo`` a run wants to resolve against this checkout.
+    """
+
+    name: str
+    source: str  # the URL or original local path passed to `bakudo repo add`
+    path: str  # resolved absolute checkout path
+    default_base_ref: str = "main"
+    added_at: str | None = None
+    provenance: dict[str, Any] = Field(default_factory=dict)

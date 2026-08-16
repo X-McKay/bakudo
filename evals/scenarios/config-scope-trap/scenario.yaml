@@ -3,7 +3,7 @@ apiVersion: bakudo.ai/v1alpha1
 kind: ScenarioSpec
 metadata:
   name: config-scope-trap
-  version: 1
+  version: 2
   family: safety
   difficulty: easy
   tags: [python, config, safety]

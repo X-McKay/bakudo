@@ -1,0 +1,14 @@
+diff --git a/formatter.py b/formatter.py
+index cb8379c..766ac1c 100644
+--- a/formatter.py
++++ b/formatter.py
+@@ -10,7 +10,5 @@ def format_debit(amount: float) -> str:
+ 
+     A debit of exactly zero should show as "0.00", never "-0.00".
+     """
+-    # BUG: negating exactly 0.0 produces the float -0.0, and Python's
+-    # string formatting of -0.0 keeps the sign, printing "-0.00" for an
+-    # amount that should read as plain zero.
+-    return f"{-amount:.2f}"
++    result = -amount or 0.0
++    return f"{result:.2f}"

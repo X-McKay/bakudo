@@ -1,0 +1,13 @@
+diff --git a/validator.py b/validator.py
+index fce1c8b..23489a9 100644
+--- a/validator.py
++++ b/validator.py
+@@ -14,8 +14,4 @@ def validate_limit(limit: int) -> int:
+     """
+     if limit <= 0:
+         raise ValueError("limit must be positive")
+-    # BUG: rejects a limit exactly equal to DEFAULT_LIMIT, when it should
+-    # be the largest value still allowed.
+-    if limit >= DEFAULT_LIMIT:
+-        raise ValueError(f"limit must be less than {DEFAULT_LIMIT}")
+     return limit

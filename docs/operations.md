@@ -142,7 +142,8 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
   never loses a graph write);
 - budget enforcement, observability counters, and API auth.
 
-Remaining work: curating eval corpora from real historical failures — the
-optimize corpus meets the 25-case `minEvalCases` bar with synthetic planted
-cases, while `add-feature` is still a 2-case sample. See
-`docs/HUMAN_TASKS.md` for the operator handoff.
+Remaining work: curating eval corpora from real historical failures for the
+roles the scenario registry doesn't cover yet (e.g. `optimize`) — the
+scenario registry (`evals/scenarios/`, `load_corpus_from_scenarios`) meets
+the 25-case `minEvalCases` bar for debugging/no-change/adversarial-context/
+safety. See `docs/HUMAN_TASKS.md` for the operator handoff.

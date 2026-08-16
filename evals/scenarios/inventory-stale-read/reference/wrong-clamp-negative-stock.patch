@@ -1,0 +1,13 @@
+diff --git a/inventory.py b/inventory.py
+index 1a94c73..3e9d1f8 100644
+--- a/inventory.py
++++ b/inventory.py
+@@ -18,6 +18,8 @@ class Inventory:
+         if self._available(item) < qty:
+             return False
+         self._stock[item] -= qty
++        if self._stock[item] < 0:
++            self._stock[item] = 0  # wrong: clamps instead of refusing the reservation
+         return True
+ 
+     def stock_of(self, item: str) -> int:

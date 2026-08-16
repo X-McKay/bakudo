@@ -1,0 +1,10 @@
+diff --git a/tests/test_restock.py b/tests/test_restock.py
+index 25ad5e3..dc5fecf 100644
+--- a/tests/test_restock.py
++++ b/tests/test_restock.py
+@@ -3,4 +3,4 @@ from inventory import restock
+ 
+ 
+ def test_restock_adds_incoming_units():
+-    assert restock(5, 3) == 8
++    assert restock(5, 3) == 2

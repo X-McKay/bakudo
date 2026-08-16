@@ -1,0 +1,22 @@
+diff --git a/date_range.py b/date_range.py
+index 66b6e39..649ada0 100644
+--- a/date_range.py
++++ b/date_range.py
+@@ -3,7 +3,7 @@
+ 
+ from __future__ import annotations
+ 
+-_MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]  # BUG: Feb listed as 29
++_MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+ 
+ 
+ def _is_leap(year: int) -> bool:
+@@ -13,7 +13,7 @@ def _is_leap(year: int) -> bool:
+ def _days_in_month(year: int, month: int) -> int:
+     days = _MONTH_DAYS[month - 1]
+     if month == 2 and _is_leap(year):
+-        days += 1  # double-adds a day on top of the already-wrong Feb=29
++        days += 1
+     return days
+ 
+ 

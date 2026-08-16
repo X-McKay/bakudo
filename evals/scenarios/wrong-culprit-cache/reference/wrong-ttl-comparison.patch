@@ -1,0 +1,13 @@
+diff --git a/cache.py b/cache.py
+index 7b177e9..70f00ab 100644
+--- a/cache.py
++++ b/cache.py
+@@ -27,7 +27,7 @@ class TTLCache:
+         if entry is None:
+             return None
+         value, expires_at = entry
+-        if self._clock() >= expires_at:
++        if self._clock() > expires_at:
+             del self._store[key]
+             return None
+         return value

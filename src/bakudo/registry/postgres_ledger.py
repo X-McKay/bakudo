@@ -19,7 +19,7 @@ from typing import Any
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
 from ..trials.models import HackFlags, TrialRecord
-from .records import AgentVersionRecord, RunEvent, RunPhase, RunRecord
+from .records import AgentVersionRecord, RepoRecord, RunEvent, RunPhase, RunRecord
 
 # Self-migration DDL for the trials table. infra/postgres/init.sql is the
 # canonical, documented copy (runs at first database initialization); this
@@ -69,6 +69,24 @@ create table if not exists experiments (
   result jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
+)"""
+
+# Self-migration DDL for the repos table (repo onboarding, P2 Task 1).
+# infra/postgres/init.sql is the canonical, documented copy; this constant
+# MUST match it exactly. Applied lazily in register_repo, mirroring
+# _TRIALS_DDL/_EXPERIMENTS_DDL above -- a read (get_repo/list_repos) or
+# deregister_repo against a legacy database that predates this table (one
+# that has never had register_repo called on it) raises
+# psycopg.errors.UndefinedTable rather than silently creating an empty
+# table, matching the accepted trials/experiments pattern.
+_REPOS_DDL = """\
+create table if not exists repos (
+  name text primary key,
+  source text not null,
+  path text not null,
+  default_base_ref text not null default 'main',
+  provenance jsonb not null default '{}'::jsonb,
+  added_at timestamptz not null default now()
 )"""
 
 
@@ -819,3 +837,83 @@ class PostgresLedger:
             "created_at": row[5],
             "updated_at": row[6],
         }
+
+    # --- repos ---
+    _REPO_COLUMNS = "name, source, path, default_base_ref, provenance, added_at"
+
+    def _ensure_repos_table(self, conn: Any) -> None:
+        """Self-migrate the ``repos`` table (idempotent), mirroring
+        :meth:`_ensure_trials_table`/:meth:`_ensure_experiments_table`.
+        Applied lazily on the first repo write so an already-initialized
+        database (whose ``init.sql`` predates this table) still works
+        without a manual migration."""
+        self._do(conn, _REPOS_DDL, ())
+
+    def register_repo(self, r: RepoRecord) -> None:
+        """Register (or, idempotently, re-register) a repo checkout.
+
+        Read-then-write (matching :meth:`upsert_agent_version`'s
+        first-of-name probe, not a transaction): an existing row with a
+        matching ``path`` is a no-op (a retried ``bakudo repo add``); a
+        matching name with a *different* path raises ``ValueError`` rather
+        than silently repointing where runs for that name execute.
+        """
+        with self._connection() as conn:
+            self._ensure_repos_table(conn)
+            existing = self._do_one(
+                conn, "select path from repos where name = %s", (r.name,)
+            )
+            if existing is not None:
+                if existing[0] != r.path:
+                    raise ValueError(
+                        f"repo {r.name!r} is already registered at "
+                        f"{existing[0]!r}; refusing to re-register it at "
+                        f"conflicting path {r.path!r}"
+                    )
+                return  # idempotent: same name+path, nothing to do
+            self._do(
+                conn,
+                """
+                insert into repos
+                    (name, source, path, default_base_ref, provenance, added_at)
+                values (%s,%s,%s,%s,%s, coalesce(%s, now()))
+                """,
+                (r.name, r.source, r.path, r.default_base_ref,
+                 json.dumps(r.provenance), r.added_at),
+            )
+
+    @staticmethod
+    def _repo_ts(value: Any) -> str | None:
+        """Mirrors :meth:`_trial_ts`: ``RepoRecord.added_at`` is a plain
+        ``str``, unlike ``RunRecord``'s ``datetime`` fields."""
+        if value is None or isinstance(value, str):
+            return value
+        return value.isoformat()
+
+    @classmethod
+    def _repo_row(cls, row: tuple | None) -> RepoRecord | None:
+        if row is None:
+            return None
+        return RepoRecord(
+            name=row[0], source=row[1], path=row[2], default_base_ref=row[3],
+            provenance=row[4] if isinstance(row[4], dict) else json.loads(row[4] or "{}"),
+            added_at=cls._repo_ts(row[5]),
+        )
+
+    def get_repo(self, name: str) -> RepoRecord | None:
+        row = self._one(
+            f"select {self._REPO_COLUMNS} from repos where name = %s", (name,)
+        )
+        return self._repo_row(row)
+
+    def list_repos(self) -> list[RepoRecord]:
+        rows = self._all(f"select {self._REPO_COLUMNS} from repos order by added_at")
+        return [r for row in rows if (r := self._repo_row(row)) is not None]
+
+    def deregister_repo(self, name: str) -> None:
+        """Remove the routing entry only -- never touches the filesystem."""
+        row = self._one(
+            "delete from repos where name = %s returning name", (name,)
+        )
+        if row is None:
+            raise KeyError(f"unknown repo: {name!r}")

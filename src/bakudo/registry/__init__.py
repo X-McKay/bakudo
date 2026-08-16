@@ -3,6 +3,7 @@
 from .ledger import InMemoryLedger, Ledger
 from .records import (
     AgentVersionRecord,
+    RepoRecord,
     RunEvent,
     RunPhase,
     RunRecord,
@@ -10,6 +11,7 @@ from .records import (
 
 __all__ = [
     "AgentVersionRecord",
+    "RepoRecord",
     "RunEvent",
     "RunPhase",
     "RunRecord",

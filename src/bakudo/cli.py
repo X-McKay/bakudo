@@ -14,8 +14,46 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .scenarios.testrun import TestRunner
+
+
+def _resolve_hidden_test_runner(command: str) -> tuple[TestRunner | None, str | None]:
+    """Resolve which ``TestRunner`` grades hidden tests for a ``bakudo
+    <command>`` invocation, mirroring ``_default_hidden_eval_fn``'s
+    resolution ladder (``temporal/_impl.py``): ``BAKUDO_ENV=dev`` -> the
+    local, host-executing runner (unchanged); else ``resolve_sandbox_mode()
+    == "abox"`` -> the real abox-guest runner (Task 8); else no runner, with
+    an actionable message the caller should print and exit 2 on.
+
+    Kept as the single place the CLI's trial/experiment commands resolve
+    this, so the ladder can't drift between them the way the pre-Task-8
+    per-command dev-only guards could have.
+    """
+    import os
+
+    if os.environ.get("BAKUDO_ENV") == "dev":
+        from .scenarios.testrun import local_test_runner
+
+        return local_test_runner, None
+
+    from .temporal._impl import resolve_sandbox_mode
+
+    if resolve_sandbox_mode() == "abox":
+        from .abox.hidden_bench import abox_test_runner
+
+        return abox_test_runner, None
+
+    return None, (
+        f"error: `bakudo {command}` grades hidden tests and needs a "
+        "trusted test runner: set BAKUDO_ENV=dev to use the local "
+        "(host-executing, dev-only) test runner, or BAKUDO_SANDBOX=abox to "
+        "grade inside a real abox sandbox."
+    )
 
 
 def _cmd_validate_spec(args: argparse.Namespace) -> int:
@@ -352,30 +390,25 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
     the in-process pipeline (:func:`bakudo.control.pipeline.run_objective`
     over :func:`bakudo.abox.local.local_sandbox`) drives the agent, reusing
     the scenario's own provisioned workspace as the sandbox root. Hidden-test
-    grading always uses the local test runner, which is guarded behind
-    ``BAKUDO_ENV=dev`` (ruling R2) since it executes scenario fixture/agent
-    code directly on this host -- so that variable must be set regardless of
-    online/offline mode.
+    grading resolves a runner via :func:`_resolve_hidden_test_runner`:
+    ``BAKUDO_ENV=dev`` (ruling R2) opts into the local, host-executing
+    runner; otherwise ``BAKUDO_SANDBOX=abox`` opts into the real abox-guest
+    runner (Task 8), so live trials are no longer local-only.
     """
     import os
 
     from .abox.local import local_sandbox
     from .agent_spec import load_spec_file
     from .paths import agents_dir, scenarios_dir
-    from .registry import InMemoryLedger
+    from .registry.factory import ledger_from_env
     from .scenarios.registry import ScenarioRegistry
-    from .scenarios.testrun import local_test_runner
     from .trials.runner import build_pipeline_fn, run_trial
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo trial run` grades hidden tests with the local test "
-            "runner, which executes scenario fixture/agent code directly on "
-            "this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
+    test_runner, err = _resolve_hidden_test_runner("trial run")
+    if test_runner is None:
+        print(err, file=sys.stderr)
         return 2
 
     try:
@@ -425,13 +458,19 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
         sandbox_fn=lambda bundle, repo_path: local_sandbox(bundle, workspace_root=repo_path),
     )
 
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     record = run_trial(
         scenario,
         spec.ref,  # the ref ACTUALLY loaded, not the raw --agent argument
         args.seed,
         pipeline_fn=pipeline_fn,
-        test_runner=local_test_runner,
-        ledger=InMemoryLedger(),
+        test_runner=test_runner,
+        ledger=ledger,
     )
 
     if args.json:
@@ -447,15 +486,88 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_experiment_and_report(spec, as_json: bool) -> int:
+def _repo_ledger():
+    from .registry.factory import ledger_from_env
+
+    # Durable when BAKUDO_POSTGRES_DSN is set (P2 Task 2); otherwise a fresh
+    # in-process InMemoryLedger, so `repo add` only persists for the
+    # lifetime of this process (same limitation as `bakudo trial run`/
+    # `experiment run` without a DSN configured).
+    return ledger_from_env()
+
+
+def _cmd_repo_add(args: argparse.Namespace) -> int:
+    """Clone (URL) or register in place (local path) a repo checkout."""
+    from .registry.repos import RepoAddError, add_repo
+
+    try:
+        record = add_repo(
+            args.source,
+            name=args.name,
+            base_ref=args.base_ref,
+            ledger=_repo_ledger(),
+        )
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (RepoAddError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(record.model_dump(mode="json"), indent=2))
+    else:
+        print(f"registered {record.name!r} -> {record.path}")
+    return 0
+
+
+def _cmd_repo_list(args: argparse.Namespace) -> int:
+    try:
+        repos = _repo_ledger().list_repos()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps([r.model_dump(mode="json") for r in repos], indent=2))
+    else:
+        for r in repos:
+            print(f"{r.name}  path={r.path}  base_ref={r.default_base_ref}")
+    return 0
+
+
+def _cmd_repo_remove(args: argparse.Namespace) -> int:
+    try:
+        ledger = _repo_ledger()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    record = ledger.get_repo(args.name)
+    try:
+        ledger.deregister_repo(args.name)
+    except KeyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    path = record.path if record is not None else "?"
+    print(f"deregistered {args.name!r}; files left in place at {path}")
+    return 0
+
+
+def _run_experiment_and_report(spec, as_json: bool, *, command_label: str) -> int:
     """Shared tail of every ``bakudo experiment ...`` subcommand: resolve the
-    scenario registry + per-arm pipeline_fn, run the experiment, print."""
+    hidden-test runner + scenario registry + per-arm pipeline_fn, run the
+    experiment, print. ``command_label`` (e.g. ``"experiment run"``) names
+    the invoking subcommand for :func:`_resolve_hidden_test_runner`'s error
+    message."""
     from .abox.local import local_sandbox
     from .experiments.runner import resolve_arm_pipeline_fn, run_experiment
     from .paths import agents_dir, scenarios_dir
-    from .registry import InMemoryLedger
+    from .registry.factory import ledger_from_env
     from .scenarios.registry import ScenarioRegistry
-    from .scenarios.testrun import local_test_runner
+
+    test_runner, err = _resolve_hidden_test_runner(command_label)
+    if test_runner is None:
+        print(err, file=sys.stderr)
+        return 2
 
     try:
         registry = ScenarioRegistry(scenarios_dir())
@@ -473,12 +585,18 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     result = run_experiment(
         resolved_spec,
         registry=registry,
-        ledger=InMemoryLedger(),
+        ledger=ledger,
         pipeline_fn=pipeline_fn,
-        test_runner=local_test_runner,
+        test_runner=test_runner,
     )
 
     if as_json:
@@ -501,8 +619,10 @@ def _run_experiment_and_report(spec, as_json: bool) -> int:
 def _cmd_experiment_run(args: argparse.Namespace) -> int:
     """Run an experiment from a spec YAML file end to end (offline unless
     ``BAKUDO_OFFLINE=0``); prints (or ``--json`` emits) the assembled
-    result. Grades hidden tests with the local test runner, same
-    ``BAKUDO_ENV=dev`` guard as ``bakudo trial run`` (ruling R2)."""
+    result. Hidden-test grading resolves a runner via
+    :func:`_resolve_hidden_test_runner` (``BAKUDO_ENV=dev`` local runner, or
+    ``BAKUDO_SANDBOX=abox`` real abox-guest runner -- ruling R2, extended by
+    Task 8)."""
     import os
 
     import yaml
@@ -512,15 +632,6 @@ def _cmd_experiment_run(args: argparse.Namespace) -> int:
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo experiment run` grades hidden tests with the local "
-            "test runner, which executes scenario fixture/agent code directly "
-            "on this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
-        return 2
-
     try:
         document = yaml.safe_load(Path(args.spec).read_text())
         validate_experiment_spec(document)
@@ -529,7 +640,7 @@ def _cmd_experiment_run(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    return _run_experiment_and_report(spec, args.json)
+    return _run_experiment_and_report(spec, args.json, command_label="experiment run")
 
 
 def _cmd_experiment_compare(args: argparse.Namespace) -> int:
@@ -540,15 +651,6 @@ def _cmd_experiment_compare(args: argparse.Namespace) -> int:
     from .experiments.models import ExperimentMetadata, ExperimentSpec, ScenarioSelector
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
-
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo experiment compare` grades hidden tests with the "
-            "local test runner, which executes scenario fixture/agent code "
-            "directly on this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
-        return 2
 
     selector_kwargs: dict = {}
     if args.family:
@@ -563,7 +665,7 @@ def _cmd_experiment_compare(args: argparse.Namespace) -> int:
         candidates=[args.candidate],
         scenario_selector=ScenarioSelector(**selector_kwargs),
     )
-    return _run_experiment_and_report(spec, args.json)
+    return _run_experiment_and_report(spec, args.json, command_label="experiment compare")
 
 
 def _cmd_experiment_profile(args: argparse.Namespace) -> int:
@@ -575,18 +677,11 @@ def _cmd_experiment_profile(args: argparse.Namespace) -> int:
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
-    if os.environ.get("BAKUDO_ENV") != "dev":
-        print(
-            "error: `bakudo experiment profile` grades hidden tests with the "
-            "local test runner, which executes scenario fixture/agent code "
-            "directly on this host; set BAKUDO_ENV=dev to allow it.",
-            file=sys.stderr,
-        )
-        return 2
-
     selector_kwargs: dict = {}
     if args.family:
         selector_kwargs["families"] = [args.family]
+    if args.count is not None:
+        selector_kwargs["count"] = args.count
 
     spec = ExperimentSpec(
         metadata=ExperimentMetadata(name=f"{args.agent}-profile"),
@@ -595,21 +690,38 @@ def _cmd_experiment_profile(args: argparse.Namespace) -> int:
         candidates=[],
         scenario_selector=ScenarioSelector(**selector_kwargs),
     )
-    return _run_experiment_and_report(spec, args.json)
+    return _run_experiment_and_report(spec, args.json, command_label="experiment profile")
 
 
 def _cmd_experiment_result(args: argparse.Namespace) -> int:
     """Look up a previously recorded experiment's result.
 
-    The CLI has no durable ledger of its own (every ``bakudo experiment
-    run``/``compare``/``profile`` invocation records to a throwaway
-    in-process ledger, same as ``bakudo trial run``), so this only finds
-    anything against a process that shares a ledger -- e.g. `bakudo serve`'s
-    API. This subcommand exists for that operator workflow's CLI parity.
+    Durable when ``BAKUDO_POSTGRES_DSN`` is configured (P2 Task 2): finds
+    experiments recorded by any process sharing that database, including
+    ``bakudo experiment run``/``compare``/``profile`` and `bakudo serve`'s
+    API. Without a DSN, every ``bakudo`` invocation gets its own throwaway
+    in-process ledger, so this can only ever find an experiment recorded
+    earlier in this same process -- which, for a fresh CLI invocation, is
+    never; a one-line warning makes that limitation explicit instead of
+    letting "unknown experiment" read as a real 404.
     """
-    from .registry import InMemoryLedger
+    from .registry.factory import ledger_from_env
+    from .registry.ledger import InMemoryLedger
 
-    experiment = InMemoryLedger().get_experiment(args.experiment_id)
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if isinstance(ledger, InMemoryLedger):
+        print(
+            "warning: no DSN configured; results from other processes are "
+            "not visible",
+            file=sys.stderr,
+        )
+
+    experiment = ledger.get_experiment(args.experiment_id)
     if experiment is None:
         print(f"error: unknown experiment: {args.experiment_id}", file=sys.stderr)
         return 1
@@ -686,6 +798,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_scn_scaffold.set_defaults(func=_cmd_scenario_scaffold)
 
+    p_repo = sub.add_parser("repo", help="Onboard and manage known repository checkouts.")
+    repo_sub = p_repo.add_subparsers(dest="repo_command", required=True)
+
+    p_repo_add = repo_sub.add_parser(
+        "add", help="Clone (URL) or register in place (local path) a repo checkout."
+    )
+    p_repo_add.add_argument("source", help="Git URL (https://, git@, file://) or local path.")
+    p_repo_add.add_argument("--name", default=None, help="Registry name (default: inferred).")
+    p_repo_add.add_argument(
+        "--base-ref", default=None, help="Default base ref for sandbox runs (default: main)."
+    )
+    p_repo_add.add_argument(
+        "--json", action="store_true", help="Emit the registered repo record as JSON."
+    )
+    p_repo_add.set_defaults(func=_cmd_repo_add)
+
+    p_repo_list = repo_sub.add_parser("list", help="List registered repos.")
+    p_repo_list.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    p_repo_list.set_defaults(func=_cmd_repo_list)
+
+    p_repo_remove = repo_sub.add_parser(
+        "remove", help="Deregister a repo (files are left in place)."
+    )
+    p_repo_remove.add_argument("name", help="Registry name to deregister.")
+    p_repo_remove.set_defaults(func=_cmd_repo_remove)
+
     p_trial = sub.add_parser("trial", help="Run and record scenario trials.")
     trial_sub = p_trial.add_subparsers(dest="trial_command", required=True)
 
@@ -723,6 +861,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_exp_profile.add_argument("agent", help="Agent ref, NAME[@VERSION].")
     p_exp_profile.add_argument("--family", default=None, help="Scenario family filter.")
+    p_exp_profile.add_argument("--count", type=int, default=None, help="Scenario count.")
     p_exp_profile.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     p_exp_profile.set_defaults(func=_cmd_experiment_profile)
 

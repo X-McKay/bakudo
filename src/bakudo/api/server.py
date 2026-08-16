@@ -65,6 +65,15 @@ class ExperimentSpecIn(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class RepoIn(BaseModel):
+    """Body of POST /repos: same semantics as ``bakudo repo add`` (repo
+    onboarding, P2 Task 1)."""
+
+    source: str
+    name: str | None = None
+    baseRef: str | None = None
+
+
 class PromotionResolutionIn(BaseModel):
     """Body of POST /promotions/{promotion_id}/approve|reject (spec §25.3).
 
@@ -400,6 +409,36 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         if trial is None:
             raise HTTPException(status_code=404, detail=f"Unknown trial: {trial_id}")
         return trial.model_dump(mode="json")
+
+    @app.post("/repos")
+    def add_repo(body: RepoIn) -> dict[str, Any]:
+        """Clone (URL) or register in place (local path) a repo checkout --
+        same semantics as ``bakudo repo add`` (repo onboarding, P2 Task 1).
+        Clone only, never execute: a plain ``git clone`` subprocess."""
+        from ..registry.repos import (
+            RepoCloneError,
+            RepoSourceInvalidError,
+            RepoTargetExistsError,
+        )
+        from ..registry.repos import add_repo as add_repo_record
+
+        try:
+            record = add_repo_record(
+                body.source, name=body.name, base_ref=body.baseRef, ledger=tools.ledger,
+            )
+        except RepoTargetExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RepoSourceInvalidError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RepoCloneError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return record.model_dump(mode="json")
+
+    @app.get("/repos")
+    def list_repos() -> list[dict[str, Any]]:
+        return [r.model_dump(mode="json") for r in tools.ledger.list_repos()]
 
     @app.get("/status")
     def status() -> dict[str, Any]:

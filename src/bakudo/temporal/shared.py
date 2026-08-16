@@ -100,11 +100,16 @@ class PromotionInput:
 
 @dataclass
 class EvolutionInput:
-    """Score a candidate spec against a baseline over an eval corpus."""
+    """Score a candidate spec against a baseline over an eval corpus.
+
+    ``corpus_path`` set: score against that legacy YAML corpus. Unset (the
+    default): score against the scenario registry's debugging + no-change
+    families (``bakudo.evals.corpus.load_corpus_from_scenarios``) -- Task 7.
+    """
 
     baseline_spec: dict[str, Any]
     candidate_spec: dict[str, Any]
-    corpus_path: str
+    corpus_path: str | None = None
 
 
 @dataclass
