@@ -89,6 +89,14 @@ def artifact_id() -> str:
     return new_id("artifact")
 
 
+def new_trial_id() -> str:
+    return new_id("trial")
+
+
+def new_experiment_id() -> str:
+    return new_id("exp")
+
+
 def git_branch_for(run: str) -> str:
     """The worktree branch name derived from a run id (section 6.3)."""
     return f"agent/{run}"

@@ -7,7 +7,7 @@
   "required": ["id", "type", "repo", "title"],
   "additionalProperties": false,
   "properties": {
-    "id": { "type": "string", "pattern": "^obj_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "id": { "type": "string", "pattern": "^obj(d)?_[0-9A-HJKMNP-TV-Z]{26}$" },
     "type": {
       "enum": ["explore", "add-feature", "qa", "critic", "eval-author", "skill-gen", "maintenance", "optimize"]
     },
