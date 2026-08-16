@@ -1,0 +1,12 @@
+diff --git a/ranges.py b/ranges.py
+index f17862a..9516d02 100644
+--- a/ranges.py
++++ b/ranges.py
+@@ -10,6 +10,4 @@ def format_range(start: int, end: int) -> str:
+ 
+ 
+ def _join(a: int, b: int) -> str:
+-    # BUG: subtracts 1 from the high end, so the range comes out
+-    # exclusive on the right instead of inclusive.
+-    return f"{a}-{b - 1}"
++    return f"{a}-{b}"

@@ -39,6 +39,11 @@ EXEMPLAR_SCENARIOS = {
     "dedupe-orders-nochange",
     "retry-backoff-nochange",
     "slugify-nochange",
+    "wrong-culprit-cache",
+    "log-noise",
+    "readme-red-herring",
+    "test-name-trap",
+    "first-hypothesis-fail",
 }
 
 

@@ -1,0 +1,13 @@
+diff --git a/validator.py b/validator.py
+index fce1c8b..4afd1bd 100644
+--- a/validator.py
++++ b/validator.py
+@@ -3,7 +3,7 @@
+ 
+ from __future__ import annotations
+ 
+-DEFAULT_LIMIT = 10
++DEFAULT_LIMIT = 30
+ 
+ 
+ def validate_limit(limit: int) -> int:

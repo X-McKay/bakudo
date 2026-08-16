@@ -1,0 +1,13 @@
+diff --git a/ranges.py b/ranges.py
+index f17862a..e0184c8 100644
+--- a/ranges.py
++++ b/ranges.py
+@@ -6,7 +6,7 @@ from __future__ import annotations
+ 
+ def format_range(start: int, end: int) -> str:
+     """Format the inclusive range [start, end] as "start-end"."""
+-    return _join(start, end)
++    return _join(end, start)
+ 
+ 
+ def _join(a: int, b: int) -> str:
