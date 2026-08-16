@@ -100,10 +100,12 @@ def worker_configs() -> list[dict[str, Any]]:
         AgentEvolutionWorkflow,
         AgentRunWorkflow,
         EvalWorkflow,
+        ExperimentWorkflow,
         MemoryCompactionWorkflow,
         MetaAgentWorkflow,
         OptimizationWorkflow,
         RepoObserverWorkflow,
+        TrialWorkflow,
     )
 
     # Every control-plane workflow type must be registered here, or client
@@ -116,8 +118,16 @@ def worker_configs() -> list[dict[str, Any]]:
         AgentEvolutionWorkflow,
         MemoryCompactionWorkflow,
         RepoObserverWorkflow,
+        TrialWorkflow,
+        ExperimentWorkflow,
     ]
-    run_workflows: list[type] = [AgentRunWorkflow, EvalWorkflow, OptimizationWorkflow]
+    run_workflows: list[type] = [
+        AgentRunWorkflow,
+        EvalWorkflow,
+        OptimizationWorkflow,
+        TrialWorkflow,
+        ExperimentWorkflow,
+    ]
 
     return [
         dict(

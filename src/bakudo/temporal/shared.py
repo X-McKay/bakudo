@@ -118,6 +118,33 @@ class ObserveInput:
 
 
 @dataclass
+class TrialInput:
+    """Run one scenario against one agent version and record a TrialRecord
+    (experiment substrate design doc section 6, Temporal-shaped)."""
+
+    scenario: str                          # scenario ref or bare name
+    agent: str                             # agent ref, NAME or NAME@VERSION
+    seed: int
+    experiment_id: str | None = None
+
+
+@dataclass
+class ExperimentInput:
+    """Drive one experiment's paired trial matrix through TrialWorkflow
+    children and assemble the comparison result (experiment substrate design
+    doc section 7)."""
+
+    spec: dict[str, Any]                   # the validated ExperimentSpec, JSON-shaped
+    # Set when the meta-agent dispatched this experiment: the id to signal
+    # run_completed with so its active_runs drains (mirrors
+    # OptimizeInput.tracking_run_id / OptimizationWorkflow._notify_meta).
+    # Nothing in this codebase dispatches an experiment from the meta-agent
+    # today, but the field keeps ExperimentWorkflow's _notify_meta path
+    # structurally identical for when that lands.
+    tracking_run_id: str | None = None
+
+
+@dataclass
 class OptimizeInput:
     """Drive one optimize objective through scout → attempts → selection."""
 
