@@ -17,9 +17,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Protocol
 
-from ..agent_spec.models import SpecBudget
+from .. import __version__
+from ..agent_spec.models import NetworkMode, SpecBudget
 from ..curriculum.objective import Constraints, Objective, ObjectiveType
 from ..ids import new_trial_id
 from ..scenarios.models import ScenarioBudgets, ScenarioExpect
@@ -28,6 +30,11 @@ from ..scenarios.registry import LoadedScenario
 from ..scenarios.testrun import TestRunner
 from . import hidden
 from .models import HackFlags, TrialRecord
+
+if TYPE_CHECKING:
+    from ..abox.runner import AboxOutcome
+    from ..agent_spec import AgentSpec
+    from ..bundle import TaskBundle
 
 # Any changed file whose path contains one of these markers is grounds for a
 # test_path_violation flag -- a candidate that edits the very tests grading
@@ -103,6 +110,81 @@ def intersect_network(agent_mode: str, scenario_mode: str) -> str:
     if _NETWORK_ORDER[agent_mode] <= _NETWORK_ORDER[scenario_mode]:
         return agent_mode
     return scenario_mode
+
+
+def build_pipeline_fn(
+    spec: AgentSpec,
+    *,
+    sandbox_fn: Callable[[TaskBundle, Path], AboxOutcome],
+    run_objective_fn: Callable[..., Any] | None = None,
+) -> PipelineFn:
+    """Build a ``pipeline_fn`` for :func:`run_trial` from a concrete agent spec.
+
+    Shared by every real (non-stub) caller -- the CLI today, Tasks 10/11's
+    experiment workflow tomorrow -- so the budget/network intersection and
+    the ``run_objective`` adapter shape live in exactly one place.
+
+    Before invoking ``run_objective_fn`` (defaults to the real
+    :func:`bakudo.control.pipeline.run_objective`), the scenario's own
+    budgets/network ceiling (what ``run_trial`` passes in) is intersected
+    against ``spec``'s own budget/network via :func:`intersect_budgets` /
+    :func:`intersect_network` -- tighten-only in both directions, including
+    the wall-clock timeout (an agent's own sandbox timeout can only ever be
+    shortened here, never loosened by a looser scenario ceiling).
+
+    ``sandbox_fn(bundle, repo_path)`` wires the sandbox to the trial's
+    already-provisioned workspace (``objective.repo``, set by
+    :func:`objective_from_scenario`) -- e.g.
+    ``lambda bundle, repo_path: local_sandbox(bundle, workspace_root=repo_path)``
+    for the offline path, or an abox-backed equivalent for a live one.
+    """
+    if run_objective_fn is None:
+        from ..control.pipeline import run_objective as run_objective_fn
+
+    def pipeline_fn(
+        objective: Objective, agent_ref: str, budgets: ScenarioBudgets, network: str
+    ) -> PipelineResultLike:
+        merged_budget = intersect_budgets(spec.budget, budgets)
+        merged_network = intersect_network(spec.sandbox.network_mode.value, network)
+
+        budget_updates: dict[str, Any] = dict(spec.budget.model_dump()) if spec.budget else {}
+        if "tokens" in merged_budget:
+            budget_updates["max_tokens"] = merged_budget["tokens"]
+        if "tool_calls" in merged_budget:
+            budget_updates["max_tool_calls"] = merged_budget["tool_calls"]
+
+        # Tighten-only: the agent's own sandbox timeout is a ceiling too, so
+        # a *looser* scenario wallSeconds must never widen it.
+        timeout_seconds = spec.sandbox.timeout_seconds
+        if "wall_seconds" in merged_budget:
+            timeout_seconds = min(timeout_seconds, merged_budget["wall_seconds"])
+
+        adjusted_spec = spec.model_copy(
+            update={
+                "sandbox": spec.sandbox.model_copy(
+                    update={
+                        "network_mode": NetworkMode(merged_network),
+                        "timeout_seconds": timeout_seconds,
+                    }
+                ),
+                "budget": SpecBudget(**budget_updates) if budget_updates else spec.budget,
+            }
+        )
+
+        repo_path = Path(objective.repo)
+        pipeline_result = run_objective_fn(
+            objective, adjusted_spec, sandbox=lambda bundle: sandbox_fn(bundle, repo_path)
+        )
+        outcome = pipeline_result.outcome
+        return SimpleNamespace(
+            diff=outcome.diff,
+            result=pipeline_result.result,
+            denied_commands=[d.get("command", "") for d in outcome.denied_commands],
+            scorecard=pipeline_result.scorecard,
+            pins={"model_id": spec.model.model_id, "sandbox_profile": spec.sandbox.profile},
+        )
+
+    return pipeline_fn
 
 
 def _within_scope(changed_file: str, allowed_paths: list[str]) -> bool:
@@ -219,6 +301,9 @@ def run_trial(
             "diff_bytes": float(len(diff.encode("utf-8"))),
         }
 
+        pins = {"bakudo": __version__, "scenario_digest_algo": "sha256"}
+        pins.update(getattr(pr, "pins", None) or {})
+
         record = TrialRecord(
             id=new_trial_id(),
             experiment_id=experiment_id,
@@ -227,6 +312,7 @@ def run_trial(
             scenario_version=scenario.spec.metadata.version,
             scenario_digest=scenario.digest,
             seed=seed,
+            pins=pins,
             metrics=metrics,
             evaluation=evaluation,
             flags=flags,

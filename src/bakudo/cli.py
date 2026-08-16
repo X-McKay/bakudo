@@ -358,17 +358,14 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
     online/offline mode.
     """
     import os
-    from types import SimpleNamespace
 
     from .abox.local import local_sandbox
     from .agent_spec import load_spec_file
-    from .agent_spec.models import SpecBudget
-    from .control.pipeline import run_objective
     from .paths import agents_dir, scenarios_dir
     from .registry import InMemoryLedger
     from .scenarios.registry import ScenarioRegistry
     from .scenarios.testrun import local_test_runner
-    from .trials.runner import intersect_budgets, intersect_network, run_trial
+    from .trials.runner import build_pipeline_fn, run_trial
 
     os.environ.setdefault("BAKUDO_OFFLINE", "1")
 
@@ -388,51 +385,49 @@ def _cmd_trial_run(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    agent_name = args.agent.split("@", 1)[0]
+    agent_name, sep, version_s = args.agent.partition("@")
+    requested_version: int | None = None
+    if sep:
+        try:
+            requested_version = int(version_s)
+        except ValueError:
+            print(
+                f"error: invalid agent version in {args.agent!r}: "
+                f"{version_s!r} is not an integer",
+                file=sys.stderr,
+            )
+            return 2
+
     try:
         spec = load_spec_file(agents_dir() / f"{agent_name}.yaml")
     except Exception as exc:  # noqa: BLE001 - reported, not raised
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    def pipeline_fn(objective, agent_ref, budgets, network):
-        merged_budget = intersect_budgets(spec.budget, budgets)
-        merged_network = intersect_network(spec.sandbox.network_mode.value, network)
-
-        budget_updates = dict(spec.budget.model_dump()) if spec.budget else {}
-        if "tokens" in merged_budget:
-            budget_updates["max_tokens"] = merged_budget["tokens"]
-        if "tool_calls" in merged_budget:
-            budget_updates["max_tool_calls"] = merged_budget["tool_calls"]
-        sandbox_updates: dict = {"network_mode": merged_network}
-        if "wall_seconds" in merged_budget:
-            sandbox_updates["timeout_seconds"] = merged_budget["wall_seconds"]
-
-        adjusted_spec = spec.model_copy(
-            update={
-                "sandbox": spec.sandbox.model_copy(update=sandbox_updates),
-                "budget": SpecBudget(**budget_updates) if budget_updates else spec.budget,
-            }
+    # `bakudo trial run` resolves an agent spec straight off disk (no ledger
+    # of registered versions like control/tools.py's `_resolve_spec`), so a
+    # pinned `@version` can only be honoured when it matches what's on disk
+    # -- silently loading a different version and recording the requested
+    # ref verbatim would let a trial claim a version it never actually ran.
+    if requested_version is not None and spec.metadata.version != requested_version:
+        print(
+            f"error: agent spec file for {agent_name!r} is at version "
+            f"{spec.metadata.version}, but --agent requested version "
+            f"{requested_version}; `bakudo trial run` resolves specs from "
+            f"{agents_dir()}, not a version-history-aware ledger, so only "
+            "the on-disk version can be selected.",
+            file=sys.stderr,
         )
+        return 2
 
-        pipeline_result = run_objective(
-            objective,
-            adjusted_spec,
-            sandbox=lambda bundle: local_sandbox(
-                bundle, workspace_root=Path(objective.repo)
-            ),
-        )
-        outcome = pipeline_result.outcome
-        return SimpleNamespace(
-            diff=outcome.diff,
-            result=pipeline_result.result,
-            denied_commands=[d.get("command", "") for d in outcome.denied_commands],
-            scorecard=pipeline_result.scorecard,
-        )
+    pipeline_fn = build_pipeline_fn(
+        spec,
+        sandbox_fn=lambda bundle, repo_path: local_sandbox(bundle, workspace_root=repo_path),
+    )
 
     record = run_trial(
         scenario,
-        args.agent,
+        spec.ref,  # the ref ACTUALLY loaded, not the raw --agent argument
         args.seed,
         pipeline_fn=pipeline_fn,
         test_runner=local_test_runner,

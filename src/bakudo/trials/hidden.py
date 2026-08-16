@@ -74,7 +74,14 @@ def _apply_diff(repo_path: Path, diff: str, scratch: Path) -> str | None:
 def _run_hidden_list(
     scenario: LoadedScenario, repo_path: Path, rel_paths: list[str], runner: TestRunner
 ) -> tuple[int, list[str]]:
-    """Run each hidden test file in ``rel_paths`` and return (passed, failing)."""
+    """Run each hidden test file in ``rel_paths`` and return (passed, failing).
+
+    Mirrors ``scenarios.verify``'s ``_run_one_hidden_test`` handling: a
+    runner that raises (a hung/killed subprocess, or any other OS-level
+    failure) scores that one file as failed rather than crashing the whole
+    evaluation -- a single flaky/hostile hidden test must never take down
+    ``run_trial``.
+    """
     hidden_dir = repo_path / "hidden"
     hidden_dir.mkdir(exist_ok=True)
     passed = 0
@@ -84,7 +91,18 @@ def _run_hidden_list(
         name = Path(rel).name
         shutil.copy2(src, hidden_dir / name)
         command = scenario.spec.hidden.test_command.format(files=f"hidden/{name}")
-        result = runner(repo_path, command)
+        try:
+            result = runner(repo_path, command)
+        except subprocess.CalledProcessError as exc:
+            detail = ((exc.stdout or "") + (exc.stderr or "")).strip() or str(exc)
+            failing.append(f"{rel} (error: {detail})")
+            continue
+        except subprocess.TimeoutExpired as exc:
+            failing.append(f"{rel} (timed out: {exc})")
+            continue
+        except OSError as exc:
+            failing.append(f"{rel} (runner error: {exc})")
+            continue
         if result.passed:
             passed += 1
         else:

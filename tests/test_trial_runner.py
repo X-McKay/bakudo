@@ -6,6 +6,7 @@ local test runner (mirrors the verify-loop tests' own pattern)."""
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -281,6 +282,104 @@ def test_hidden_evaluate_pristine_fixture_fails_f2p(registry):
     assert outcome.p2p_rate == 1.0
 
 
+def test_hidden_evaluate_runner_timeout_scores_zero_no_exception(registry):
+    scn = registry.get("csv-sum-offbyone@1")
+    ref_patch = _reference_patch(scn.path)
+
+    def hanging_runner(workspace, command):
+        raise subprocess.TimeoutExpired(cmd=command, timeout=120)
+
+    outcome = evaluate(scn, ref_patch, seed=0, runner=hanging_runner)
+    assert outcome.f2p_rate == 0.0
+    assert outcome.p2p_rate == 0.0
+
+
+# --------------------------------------------------------------------------
+# build_pipeline_fn
+# --------------------------------------------------------------------------
+
+
+def test_build_pipeline_fn_intersects_budgets_and_network_before_run_objective(tmp_path):
+    from bakudo.agent_spec import load_spec_file
+    from bakudo.curriculum.objective import Objective
+    from bakudo.trials.runner import build_pipeline_fn
+
+    agents_dir = Path(__file__).resolve().parents[1] / "agents"
+    spec = load_spec_file(agents_dir / "qa.yaml")  # networkMode: scoped, no budget set
+
+    seen: dict = {}
+
+    def fake_run_objective(objective, adjusted_spec, *, sandbox):
+        seen["network_mode"] = adjusted_spec.sandbox.network_mode
+        seen["timeout_seconds"] = adjusted_spec.sandbox.timeout_seconds
+        seen["max_tokens"] = adjusted_spec.budget.max_tokens if adjusted_spec.budget else None
+        # Exercise the sandbox wiring too, to prove repo_path threads through.
+        sandbox(SimpleNamespace())
+        return SimpleNamespace(
+            outcome=SimpleNamespace(diff="", denied_commands=[]),
+            result=_stub_result("blocked", []),
+            scorecard=None,
+        )
+
+    sandbox_calls: list[Path] = []
+
+    def sandbox_fn(bundle, repo_path):
+        sandbox_calls.append(repo_path)
+        return SimpleNamespace()
+
+    pipeline_fn = build_pipeline_fn(
+        spec, sandbox_fn=sandbox_fn, run_objective_fn=fake_run_objective
+    )
+    objective = Objective(type="qa", repo=str(tmp_path), title="t")
+    scenario_budgets = ScenarioBudgets(wallSeconds=1800, toolCalls=30, tokens=5000)
+
+    pr = pipeline_fn(objective, "qa@1", scenario_budgets, "none")
+
+    from bakudo.agent_spec.models import NetworkMode
+
+    # scoped (agent) vs none (scenario) -> none is more restrictive.
+    assert seen["network_mode"] == NetworkMode.none
+    assert seen["max_tokens"] == 5000  # no agent budget -> scenario value carried over
+    assert sandbox_calls == [Path(tmp_path)]
+    assert pr.diff == ""
+
+
+def test_build_pipeline_fn_timeout_tighten_only(tmp_path):
+    from bakudo.agent_spec import load_spec_file
+    from bakudo.curriculum.objective import Objective
+    from bakudo.trials.runner import build_pipeline_fn
+
+    agents_dir = Path(__file__).resolve().parents[1] / "agents"
+    base_spec = load_spec_file(agents_dir / "qa.yaml")
+    spec = base_spec.model_copy(
+        update={"sandbox": base_spec.sandbox.model_copy(update={"timeout_seconds": 300})}
+    )
+
+    seen: dict = {}
+
+    def fake_run_objective(objective, adjusted_spec, *, sandbox):
+        seen["timeout_seconds"] = adjusted_spec.sandbox.timeout_seconds
+        return SimpleNamespace(
+            outcome=SimpleNamespace(diff="", denied_commands=[]),
+            result=_stub_result("blocked", []),
+            scorecard=None,
+        )
+
+    pipeline_fn = build_pipeline_fn(
+        spec,
+        sandbox_fn=lambda bundle, repo_path: SimpleNamespace(),
+        run_objective_fn=fake_run_objective,
+    )
+    objective = Objective(type="qa", repo=str(tmp_path), title="t")
+    # Scenario wallSeconds (1800) is LOOSER than the agent's own 300s timeout
+    # -- the effective timeout must stay at the tighter 300, never widen.
+    scenario_budgets = ScenarioBudgets(wallSeconds=1800, toolCalls=30, tokens=5000)
+
+    pipeline_fn(objective, "qa@1", scenario_budgets, "scoped")
+
+    assert seen["timeout_seconds"] == 300
+
+
 # --------------------------------------------------------------------------
 # CLI: `bakudo trial run`
 # --------------------------------------------------------------------------
@@ -316,3 +415,24 @@ def test_cli_trial_run_unknown_scenario(monkeypatch, capsys):
     rc = main(["trial", "run", "does-not-exist", "--agent", "qa@1"])
     assert rc == 1
     assert "does-not-exist" in capsys.readouterr().err
+
+
+def test_cli_trial_run_nonexistent_pinned_version_exits_2(monkeypatch, capsys):
+    from bakudo.cli import main
+
+    monkeypatch.setenv("BAKUDO_ENV", "dev")
+    rc = main(["trial", "run", "csv-sum-offbyone", "--agent", "qa@99"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "qa@99" in err or "99" in err
+
+
+def test_cli_trial_run_bare_name_records_loaded_spec_ref(monkeypatch, capsys):
+    from bakudo.cli import main
+
+    monkeypatch.setenv("BAKUDO_ENV", "dev")
+    monkeypatch.setenv("BAKUDO_OFFLINE", "1")
+    rc = main(["trial", "run", "csv-sum-offbyone", "--agent", "qa", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["agent_ref"] == "qa@1"  # the loaded spec's real ref, not "qa"
