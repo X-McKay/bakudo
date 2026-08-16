@@ -238,6 +238,26 @@ create table if not exists trials (
 );
 create index if not exists trials_experiment_idx on trials (experiment_id);
 
+-- Experiments (experiment substrate design doc section 7): a
+-- baseline-vs-candidate (or, with an empty candidates list, baseline-only
+-- profile) comparison over a scenario selection. Recorded once at creation
+-- (status e.g. "running"), then mutated in place to its terminal
+-- status/result once the trial matrix's statistics pass completes.
+--
+-- CANONICAL DDL — mirrored by _EXPERIMENTS_DDL in
+-- src/bakudo/registry/postgres_ledger.py, which self-migrates existing
+-- databases (this file only runs at first initialization). Keep the two in
+-- sync.
+create table if not exists experiments (
+  id text primary key,
+  name text not null,
+  spec jsonb not null,
+  status text not null,
+  result jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 -- Integration-event outbox (section 17.1): durable handoff to projections.
 create table if not exists outbox (
   id bigserial primary key,

@@ -574,3 +574,56 @@ def test_list_trials_with_experiment_filter():
     )
     assert "where experiment_id = %s" in select_sql
     assert params == ("exp_A",)
+
+
+# --- experiments (Task 8, parity with the trials section above) ---
+
+
+def test_record_experiment_self_migrates_then_inserts_on_conflict_do_nothing():
+    conn = FakeConn()
+    PostgresLedger(conn).record_experiment(
+        "exp_T1", "exp-name", {"baseline": "add-feature@1"}, "running"
+    )
+
+    seq = _sql_seq(conn)
+    ddl_idx = next(
+        i for i, s in enumerate(seq) if "create table if not exists experiments" in s
+    )
+    insert_idx = next(i for i, s in enumerate(seq) if "insert into experiments" in s)
+    assert ddl_idx < insert_idx
+
+    insert_sql, insert_params = next(
+        (s, p) for s, p in conn.executed if "insert into experiments" in s
+    )
+    assert "on conflict (id) do nothing" in insert_sql
+    assert insert_params[0] == "exp_T1"
+    assert insert_params[1] == "exp-name"
+    assert insert_params[3] == "running"
+
+
+def test_get_experiment_selects_by_id_without_migrating():
+    conn = FakeConn()
+    PostgresLedger(conn).get_experiment("exp_T1")
+    select_sql, params = next(
+        (s, p) for s, p in conn.executed if "from experiments" in s
+    )
+    assert "where id = %s" in select_sql
+    assert params == ("exp_T1",)
+    # No self-migration on the read path (mirrors trials): a legacy DB
+    # without the table is expected to raise UndefinedTable, not silently
+    # get the table created out from under it.
+    assert not any("create table if not exists experiments" in s for s in _sql_seq(conn))
+
+
+def test_update_experiment_result_updates_status_and_result_without_migrating():
+    conn = FakeConn()
+    PostgresLedger(conn).update_experiment_result(
+        "exp_T1", "completed", {"decision": "promote"}
+    )
+    update_sql, params = next(
+        (s, p) for s, p in conn.executed if "update experiments" in s
+    )
+    assert "set status = %s, result = %s" in update_sql
+    assert "where id = %s" in update_sql
+    assert params == ("completed", '{"decision": "promote"}', "exp_T1")
+    assert not any("create table if not exists experiments" in s for s in _sql_seq(conn))

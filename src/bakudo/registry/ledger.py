@@ -71,6 +71,19 @@ class Ledger(Protocol):
     def get_trial(self, trial_id: str) -> TrialRecord | None: ...
     def list_trials(self, experiment_id: str | None = None) -> list[TrialRecord]: ...
 
+    # Experiments (experiment substrate design doc section 7). Unlike
+    # trials, an experiment's row is mutated in place as it runs: recorded
+    # once at creation, then moved to its terminal status/result by
+    # ``update_experiment_result`` when the run (or the statistics pass over
+    # its trials) finishes.
+    def record_experiment(
+        self, experiment_id: str, name: str, spec: dict, status: str
+    ) -> None: ...
+    def update_experiment_result(
+        self, experiment_id: str, status: str, result: dict
+    ) -> None: ...
+    def get_experiment(self, experiment_id: str) -> dict | None: ...
+
 
 class InMemoryLedger:
     """A dependency-free ledger for tests and single-process dev."""
@@ -83,6 +96,7 @@ class InMemoryLedger:
         self._evals: dict[str, list[EvalResult]] = {}
         self._promotions: list[PromotionDecision] = []
         self._trials: dict[str, TrialRecord] = {}
+        self._experiments: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _vkey(name: str, version: int) -> str:
@@ -315,3 +329,35 @@ class InMemoryLedger:
             t for t in self._trials.values()
             if experiment_id is None or t.experiment_id == experiment_id
         ]
+
+    # --- experiments ---
+    def record_experiment(
+        self, experiment_id: str, name: str, spec: dict, status: str
+    ) -> None:
+        # Idempotent, mirroring the Postgres backend's "on conflict do
+        # nothing": a retried caller must not clobber an experiment that has
+        # already progressed past its initial status.
+        if experiment_id in self._experiments:
+            return
+        now = datetime.now(UTC)
+        self._experiments[experiment_id] = {
+            "id": experiment_id,
+            "name": name,
+            "spec": spec,
+            "status": status,
+            "result": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def update_experiment_result(
+        self, experiment_id: str, status: str, result: dict
+    ) -> None:
+        record = self._experiments[experiment_id]  # KeyError on unknown id
+        record["status"] = status
+        record["result"] = result
+        record["updated_at"] = datetime.now(UTC)
+
+    def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        record = self._experiments.get(experiment_id)
+        return dict(record) if record is not None else None

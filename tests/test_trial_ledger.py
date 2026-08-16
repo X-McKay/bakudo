@@ -101,3 +101,46 @@ def test_trial_record_rejects_unknown_fields():
 def test_hack_flags_rejects_unknown_fields():
     with pytest.raises(ValidationError):
         HackFlags(bogus=True)
+
+
+# --- experiments (Task 8 parity with the trial methods above) ---
+
+
+def test_experiment_roundtrip(ledger):
+    eid = "exp_ROUNDTRIP"
+    spec = {"metadata": {"name": "exp-roundtrip"}, "baseline": "add-feature@1"}
+    ledger.record_experiment(eid, "exp-roundtrip", spec, "running")
+
+    got = ledger.get_experiment(eid)
+    assert got["id"] == eid
+    assert got["name"] == "exp-roundtrip"
+    assert got["spec"] == spec
+    assert got["status"] == "running"
+    assert got["result"] is None
+
+    ledger.update_experiment_result(eid, "completed", {"decision": "promote"})
+    got = ledger.get_experiment(eid)
+    assert got["status"] == "completed"
+    assert got["result"] == {"decision": "promote"}
+
+
+def test_get_experiment_unknown_returns_none(ledger):
+    assert ledger.get_experiment("exp_UNKNOWN") is None
+
+
+def test_record_experiment_is_idempotent(ledger):
+    eid = "exp_IDEMPOTENT"
+    ledger.record_experiment(eid, "first", {"a": 1}, "running")
+    ledger.update_experiment_result(eid, "completed", {"decision": "promote"})
+
+    # A retried record call must not clobber the progress already made.
+    ledger.record_experiment(eid, "second", {"a": 2}, "running")
+    got = ledger.get_experiment(eid)
+    assert got["name"] == "first"
+    assert got["status"] == "completed"
+    assert got["result"] == {"decision": "promote"}
+
+
+def test_update_experiment_result_unknown_raises(ledger):
+    with pytest.raises(KeyError):
+        ledger.update_experiment_result("exp_UNKNOWN", "completed", {})

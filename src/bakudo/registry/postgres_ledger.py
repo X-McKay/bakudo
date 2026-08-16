@@ -52,6 +52,25 @@ _TRIALS_EXPERIMENT_INDEX_DDL = (
     "create index if not exists trials_experiment_idx on trials (experiment_id)"
 )
 
+# Self-migration DDL for the experiments table. Same rationale as
+# _TRIALS_DDL above; infra/postgres/init.sql is the canonical, documented
+# copy and this constant MUST match it exactly. Applied lazily in
+# record_experiment, so a read (get_experiment/update_experiment_result)
+# against a legacy database that predates this table — one that has never
+# had record_experiment called on it — raises psycopg.errors.UndefinedTable
+# rather than silently creating the table; this mirrors the accepted trials
+# pattern (Task 6) rather than being an oversight.
+_EXPERIMENTS_DDL = """\
+create table if not exists experiments (
+  id text primary key,
+  name text not null,
+  spec jsonb not null,
+  status text not null,
+  result jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+)"""
+
 
 class PostgresLedger:
     """A sync ledger over the bakudo tables. Construct via :meth:`connect`.
@@ -726,3 +745,64 @@ class PostgresLedger:
             started_at=cls._trial_ts(row[14]),
             completed_at=cls._trial_ts(row[15]),
         )
+
+    # --- experiments ---
+    _EXPERIMENT_COLUMNS = "id, name, spec, status, result, created_at, updated_at"
+
+    def _ensure_experiments_table(self, conn: Any) -> None:
+        """Self-migrate the ``experiments`` table (idempotent), mirroring
+        :meth:`_ensure_trials_table`. Applied lazily on the first experiment
+        write so an already-initialized database (whose ``init.sql``
+        predates this table) still works without a manual migration."""
+        self._do(conn, _EXPERIMENTS_DDL, ())
+
+    def record_experiment(
+        self, experiment_id: str, name: str, spec: dict, status: str
+    ) -> None:
+        """Insert the experiment row. Idempotent under retry (``on conflict
+        do nothing``, matching :meth:`create_run`): a duplicate id is a
+        retried write, not an error, and must not clobber an experiment that
+        has already progressed past its initial status via
+        :meth:`update_experiment_result`."""
+        with self._connection() as conn:
+            self._ensure_experiments_table(conn)
+            self._do(
+                conn,
+                """
+                insert into experiments (id, name, spec, status)
+                values (%s,%s,%s,%s)
+                on conflict (id) do nothing
+                """,
+                (experiment_id, name, json.dumps(spec), status),
+            )
+
+    def update_experiment_result(
+        self, experiment_id: str, status: str, result: dict
+    ) -> None:
+        # No _ensure_experiments_table call here (see _EXPERIMENTS_DDL
+        # comment): this is a read-before-first-write path on a legacy DB,
+        # and it's supposed to raise UndefinedTable rather than silently
+        # creating an empty table it then updates zero rows of.
+        self._exec(
+            "update experiments set status = %s, result = %s, updated_at = now() "
+            "where id = %s",
+            (status, json.dumps(result) if result is not None else None, experiment_id),
+        )
+
+    def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"select {self._EXPERIMENT_COLUMNS} from experiments where id = %s",
+            (experiment_id,),
+        )
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "name": row[1],
+            "spec": row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
+            "status": row[3],
+            "result": row[4] if row[4] is None or isinstance(row[4], dict)
+            else json.loads(row[4] or "{}"),
+            "created_at": row[5],
+            "updated_at": row[6],
+        }

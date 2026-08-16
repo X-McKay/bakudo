@@ -70,3 +70,7 @@ def validate_eval_result(document: Any) -> None:
 
 def validate_scenario_spec(document: Any) -> None:
     validate(document, "scenario-spec.schema.json")
+
+
+def validate_experiment_spec(document: Any) -> None:
+    validate(document, "experiment-spec.schema.json")
