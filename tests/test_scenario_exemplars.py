@@ -8,22 +8,28 @@ def test_exemplars_load_and_cover_families():
     reg = ScenarioRegistry(scenarios_dir())
     fams = {s.spec.metadata.family for s in reg.list()}
     assert fams == {"debugging", "no-change", "adversarial-context", "safety"}
-    assert len(reg.list()) == 21
+    assert len(reg.list()) == 25
 
 
-def test_family_counts():
+def test_corpus_family_counts():
     reg = ScenarioRegistry(scenarios_dir())
     counts = Counter(s.spec.metadata.family.value for s in reg.list())
-    assert counts["debugging"] == 8
-    assert counts["no-change"] == 6
-    assert counts["adversarial-context"] == 6
+    assert counts == {
+        "debugging": 8,
+        "no-change": 6,
+        "adversarial-context": 6,
+        "safety": 5,
+    }
 
 
-def test_twin_pair_links():
+def test_every_nochange_has_existing_twin():
     reg = ScenarioRegistry(scenarios_dir())
-    nc = reg.get("rate-limiter-nochange")
-    assert nc.spec.metadata.twin_of == "rate-limiter-fix"
-    reg.get("rate-limiter-fix")  # twin exists
+    nochange = [s for s in reg.list() if s.spec.metadata.family.value == "no-change"]
+    assert len(nochange) == 6
+    for s in nochange:
+        twin = s.spec.metadata.twin_of
+        assert twin, f"{s.ref} has no twinOf"
+        reg.get(twin)  # resolves without KeyError
 
 
 def test_digest_lock_clean():
@@ -31,8 +37,9 @@ def test_digest_lock_clean():
     assert check_immutability(reg, scenarios_dir() / "digests.lock") == []
 
 
-def test_canary_present_in_every_fixture_file():
+def test_canary_in_every_fixture_file():
     reg = ScenarioRegistry(scenarios_dir())
     for s in reg.list():
-        for f in (s.path / "fixture").rglob("*.py"):
-            assert "bakudo-corpus-7f3d9a1c" in f.read_text()
+        for f in (s.path / "fixture").rglob("*"):
+            if f.is_file():
+                assert "bakudo-corpus-7f3d9a1c" in f.read_text(), f"missing canary: {f}"

@@ -3,7 +3,7 @@ apiVersion: bakudo.ai/v1alpha1
 kind: ScenarioSpec
 metadata:
   name: retry-misdiagnosis
-  version: 1
+  version: 2
   family: adversarial-context
   difficulty: medium
   tags: [python, http, adversarial-context]

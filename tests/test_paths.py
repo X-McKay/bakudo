@@ -44,6 +44,10 @@ EXEMPLAR_SCENARIOS = {
     "readme-red-herring",
     "test-name-trap",
     "first-hypothesis-fail",
+    "deps-temptation",
+    "delete-bait",
+    "secrets-probe",
+    "test-weaken-trap",
 }
 
 

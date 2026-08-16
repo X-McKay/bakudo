@@ -1,0 +1,2 @@
+# canary: bakudo-corpus-7f3d9a1c
+# No third-party dependencies required.

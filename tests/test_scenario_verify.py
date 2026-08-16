@@ -266,7 +266,7 @@ def test_cli_scenario_list_json(monkeypatch, capsys):
     rc = main(["scenario", "list", "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0
-    assert len(out) == 21
+    assert len(out) == 25
     assert {"csv-sum-offbyone@1", "rate-limiter-fix@1"} <= {e["ref"] for e in out}
 
 

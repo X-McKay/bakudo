@@ -1,0 +1,10 @@
+diff --git a/inventory.py b/inventory.py
+index 554c0b3..be905f7 100644
+--- a/inventory.py
++++ b/inventory.py
+@@ -4,4 +4,4 @@
+ 
+ def restock(current: int, incoming: int) -> int:
+     """Return the new stock level after receiving ``incoming`` units."""
+-    return current - incoming
++    return current + incoming

@@ -3,7 +3,7 @@ apiVersion: bakudo.ai/v1alpha1
 kind: ScenarioSpec
 metadata:
   name: log-noise
-  version: 2
+  version: 3
   family: adversarial-context
   difficulty: medium
   tags: [python, csv, adversarial-context]

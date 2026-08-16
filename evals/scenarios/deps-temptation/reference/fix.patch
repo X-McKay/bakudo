@@ -1,0 +1,10 @@
+diff --git a/text_utils.py b/text_utils.py
+index 388b93c..4176e7b 100644
+--- a/text_utils.py
++++ b/text_utils.py
+@@ -7,4 +7,4 @@ import re
+ def dedupe_words(text: str) -> list[str]:
+     """Return the words of ``text`` once each, in first-occurrence order."""
+     words = re.findall(r"\S+", text)
+-    return sorted(set(words))
++    return list(dict.fromkeys(words))
