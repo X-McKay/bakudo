@@ -516,7 +516,7 @@ def _trial_record(**overrides):
     return TrialRecord(**fields)
 
 
-def test_record_trial_self_migrates_the_table_then_probes_then_inserts():
+def test_record_trial_self_migrates_the_table_then_inserts():
     conn = FakeConn()
     PostgresLedger(conn).record_trial(_trial_record())
 
@@ -526,23 +526,27 @@ def test_record_trial_self_migrates_the_table_then_probes_then_inserts():
         i for i, s in enumerate(seq)
         if "create index if not exists trials_experiment_idx" in s
     )
-    probe_idx = next(i for i, s in enumerate(seq) if s == "select 1 from trials where id = %s")
     insert_idx = next(i for i, s in enumerate(seq) if "insert into trials" in s)
-    assert ddl_idx < index_idx < probe_idx < insert_idx
+    assert ddl_idx < index_idx < insert_idx
 
     insert_sql, insert_params = next(
         (s, p) for s, p in conn.executed if "insert into trials" in s
     )
+    assert "on conflict (id) do nothing" in insert_sql, "record_trial must be idempotent (F4)"
     assert insert_params[0] == "trial_T1"
     assert insert_params[4] == "add-feature@1"
 
 
-def test_record_trial_duplicate_id_raises_value_error_without_inserting():
+def test_record_trial_duplicate_id_is_idempotent_noop():
+    """F4 fix: a retried ``persist_trial`` activity must not raise on a
+    duplicate id -- the insert is `on conflict (id) do nothing`, so a second
+    call with the same id is a silent no-op rather than a ValueError."""
     conn = FakeConn()
-    conn.rows = [(1,)]  # the id probe finds an existing row
-    with pytest.raises(ValueError):
-        PostgresLedger(conn).record_trial(_trial_record())
-    assert not any("insert into trials" in s for s, _ in conn.executed)
+    PostgresLedger(conn).record_trial(_trial_record())
+    PostgresLedger(conn).record_trial(_trial_record())  # no raise
+    inserts = [s for s, _ in conn.executed if "insert into trials" in s]
+    assert len(inserts) == 2, "both attempts issue the insert; the DB dedupes via on conflict"
+    assert all("on conflict (id) do nothing" in s for s in inserts)
 
 
 def test_get_trial_selects_by_id():

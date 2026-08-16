@@ -145,8 +145,19 @@ def build_pipeline_fn(
     ``lambda bundle, repo_path: local_sandbox(bundle, workspace_root=repo_path)``
     for the offline path, or an abox-backed equivalent for a live one.
     """
-    if run_objective_fn is None:
-        from ..control.pipeline import run_objective as run_objective_fn
+    # Resolved into a new, non-Optional local (rather than rebinding the
+    # Optional parameter) because `pipeline_fn` below closes over it: mypy
+    # does not re-narrow a captured variable's type inside a nested function
+    # body from an `if x is None: x = ...` in the enclosing scope, so the
+    # closure read still saw the parameter's original `Callable[..., Any] |
+    # None` type and flagged the call as "None not callable".
+    resolved_run_objective_fn: Callable[..., Any]
+    if run_objective_fn is not None:
+        resolved_run_objective_fn = run_objective_fn
+    else:
+        from ..control.pipeline import run_objective
+
+        resolved_run_objective_fn = run_objective
 
     def pipeline_fn(
         objective: Objective, agent_ref: str, budgets: ScenarioBudgets, network: str
@@ -179,7 +190,7 @@ def build_pipeline_fn(
         )
 
         repo_path = Path(objective.repo)
-        pipeline_result = run_objective_fn(
+        pipeline_result = resolved_run_objective_fn(
             objective, adjusted_spec, sandbox=lambda bundle: sandbox_fn(bundle, repo_path)
         )
         outcome = pipeline_result.outcome
@@ -205,6 +216,52 @@ def build_pipeline_fn(
         )
 
     return pipeline_fn
+
+
+def changed_files_from_diff(diff: str) -> list[str]:
+    """Parse the file paths touched by a unified diff (F2 fix).
+
+    The trusted signal for hack-flag/metrics purposes: an agent's own
+    self-reported ``result.changed_files`` can be wrong or deliberately
+    incomplete (e.g. omitting a ``tests/`` edit it made), but the collected
+    diff cannot lie about what it actually contains. Handles:
+
+    * ``+++ b/<path>`` -- an added or modified file (the new-side path).
+    * ``--- a/<path>`` paired with a ``+++ /dev/null`` on the very next
+      line -- a deleted file (there is no new-side path to read).
+    * ``rename to <path>`` -- a pure rename with no content change, which
+      git emits with no ``---``/``+++`` pair at all.
+
+    Returns paths in first-seen order, de-duplicated. Unparseable/empty
+    input yields an empty list rather than raising -- the diff is trusted
+    but not assumed well-formed.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def _add(path: str) -> None:
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+
+    lines = diff.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            if target == "/dev/null":
+                continue
+            _add(target[2:] if target.startswith("b/") else target)
+        elif line.startswith("--- "):
+            source = line[4:].strip()
+            if source == "/dev/null":
+                continue
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            if nxt.startswith("+++ ") and nxt[4:].strip() == "/dev/null":
+                _add(source[2:] if source.startswith("a/") else source)
+        elif line.startswith("rename to "):
+            _add(line[len("rename to ") :].strip())
+
+    return paths
 
 
 def _within_scope(changed_file: str, allowed_paths: list[str]) -> bool:
@@ -296,7 +353,15 @@ def run_trial(
         )
 
         diff = pr.diff or ""
-        changed_files = list(getattr(pr.result, "changed_files", None) or [])
+        # F2 fix: the collected diff is the trusted source of changed
+        # paths; self-reported result.changed_files can only ADD to it
+        # (belt and braces for a diff the parser mis-reads), never remove
+        # from it -- an agent that self-reports an empty/partial list must
+        # not thereby dodge test_path_violation/scope_violation.
+        self_reported_changed_files = list(getattr(pr.result, "changed_files", None) or [])
+        changed_files = sorted(
+            set(changed_files_from_diff(diff)) | set(self_reported_changed_files)
+        )
         denied_commands = list(pr.denied_commands or [])
 
         hidden_outcome = hidden.evaluate(scenario, diff, seed, test_runner)

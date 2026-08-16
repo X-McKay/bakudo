@@ -248,6 +248,60 @@ async def test_trial_workflow_happy_path(env, deps, monkeypatch):
     assert recorded.evaluation.get("scorecard") is not None
 
 
+# --- Finding #3: Temporal-path metrics keys must match the sync run_trial
+# path (tokens/tool_calls/duration_s), not the guest's raw self-report ---
+
+
+def stub_sandbox_with_raw_metrics(bundle):
+    """A sandbox outcome whose result carries the guest's raw in-guest
+    metrics keys (tokens_used/tool_calls/model_calls, per
+    strands_tools.ToolContext.observability()/runner/main.py) plus a nonzero
+    ``runtime_seconds`` -- exactly what a real abox/local sandbox produces,
+    and what TrialWorkflow must normalize into tokens/tool_calls/duration_s."""
+    return AboxOutcome(
+        run_id=bundle.run_id,
+        abox_task_id=bundle.run_id,
+        exit_code=0,
+        git_branch=f"agent/{bundle.run_id}",
+        result={
+            "run_id": bundle.run_id,
+            "agent": "explore@1",
+            "objective_id": bundle.objective_id,
+            "status": "success",
+            "summary": "stubbed sandbox run",
+            "changed_files": ["fix.py"],
+            "metrics": {"tokens_used": 4321.0, "tool_calls": 6.0, "model_calls": 2.0},
+        },
+        diff="--- a/fix.py\n+++ b/fix.py\n",
+        runtime_seconds=12.5,
+    )
+
+
+async def test_trial_workflow_normalizes_temporal_metrics_keys(env, monkeypatch):
+    ledger = InMemoryLedger()
+    monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
+    monkeypatch.setattr(_impl.DEPS, "sandbox", stub_sandbox_with_raw_metrics)
+    monkeypatch.setattr(_impl, "provision_trial", _provision_stub())
+    monkeypatch.setattr(_impl, "evaluate_trial_hidden", _hidden_stub)
+
+    async with make_worker(env, [TrialWorkflow, AgentRunWorkflow, EvalWorkflow]):
+        out = await env.client.execute_workflow(
+            TrialWorkflow.run,
+            TrialInput(scenario="scenario-a@1", agent="explore@1", seed=11),
+            id="trial-run_METRICS1",
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert out["metrics"]["tokens"] == 4321.0, out["metrics"]
+    assert out["metrics"]["tool_calls"] == 6.0, out["metrics"]
+    assert out["metrics"]["duration_s"] == 12.5, out["metrics"]
+
+    recorded = ledger.get_trial(out["id"])
+    assert recorded is not None
+    assert recorded.metrics["tokens"] == 4321.0
+    assert recorded.metrics["duration_s"] == 12.5
+
+
 # --- ExperimentWorkflow ---
 
 

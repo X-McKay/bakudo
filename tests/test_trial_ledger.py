@@ -47,11 +47,16 @@ def test_get_trial_unknown_returns_none(ledger):
     assert ledger.get_trial("trial_UNKNOWN") is None
 
 
-def test_insert_only(ledger):
+def test_record_trial_duplicate_id_is_idempotent_noop(ledger):
+    """F4 fix: a retried ``persist_trial`` activity (Temporal
+    at-least-once) must not raise on a duplicate id -- the second write is a
+    silent no-op, matching ``record_experiment``'s "on conflict do nothing"
+    convention, and exactly one row is stored."""
     t = make_trial(id=new_trial_id())
     ledger.record_trial(t)
-    with pytest.raises(ValueError):
-        ledger.record_trial(t)
+    ledger.record_trial(t)  # no raise
+    assert ledger.get_trial(t.id) == t
+    assert len(ledger.list_trials()) == 1
 
 
 def test_list_by_experiment(ledger):

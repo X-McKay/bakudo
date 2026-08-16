@@ -530,6 +530,71 @@ def test_twin_pair_joint_scoring(twin_registry):
     assert pair["jointPass"][CANDIDATE] is True
 
 
+def test_twin_pair_joint_scoring_distrusts_self_reported_changed_files(twin_registry):
+    """F2: ``_joint_pass`` reads ``TrialRecord.metrics["changed_files"]``,
+    which ``run_trial`` now derives from the collected diff, not the raw
+    self-report -- a no-change trial whose diff actually touches a file must
+    fail jointPass even when the agent's own ``changed_files`` lies and
+    reports empty."""
+    led = InMemoryLedger()
+    spec = _spec()
+
+    # A real, cleanly-applicable edit to app.py that doesn't change compute()'s
+    # behaviour (so the no-change scenario's passToPass hidden test still
+    # passes) -- isolates the changed-files signal from f2p/p2p scoring.
+    noop_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        "+# noop\n"
+        " def compute(x):\n"
+        "     return x + 1\n"
+    )
+
+    def stub(objective, agent_ref, budgets, network):
+        is_fix = "Fix the twin bug" in objective.title
+        if agent_ref == CANDIDATE:
+            if is_fix:
+                return SimpleNamespace(
+                    diff=REF_PATCH,
+                    result=_stub_result("success", ["app.py"]),
+                    denied_commands=[],
+                    scorecard=None,
+                )
+            # No-change trial: the diff really does touch app.py, but the
+            # self-report lies and claims nothing changed.
+            return SimpleNamespace(
+                diff=noop_patch,
+                result=_stub_result("success", []),
+                denied_commands=[],
+                scorecard=None,
+            )
+        return SimpleNamespace(
+            diff="",
+            result=_stub_result("failed" if is_fix else "success", []),
+            denied_commands=[],
+            scorecard=None,
+        )
+
+    result = run_experiment(
+        spec, registry=twin_registry, ledger=led, pipeline_fn=stub, test_runner=local_test_runner
+    )
+
+    trials = led.list_trials(result["experimentId"])
+    (cand_nochange,) = [
+        t for t in trials if t.agent_ref == CANDIDATE and t.scenario_name == "twin-nochange"
+    ]
+    assert cand_nochange.metrics["changed_files"] == 1.0, (
+        "changed_files must be derived from the diff even when self-report is empty"
+    )
+
+    (pair,) = result["twinPairs"]
+    assert pair["jointPass"][CANDIDATE] is False, (
+        "a non-empty diff on the no-change trial must fail jointPass even "
+        "when self-reported changed_files is empty"
+    )
+
+
 # --------------------------------------------------------------------------
 # CLI: `bakudo experiment compare`
 # --------------------------------------------------------------------------

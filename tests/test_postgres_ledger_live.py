@@ -158,8 +158,9 @@ def test_trial_roundtrip_insert_only_and_list_by_experiment(ledger):
     fetched = ledger.get_trial(TRIAL_A1_ID)
     assert fetched == a1, "round trip must reproduce the recorded trial exactly"
 
-    with pytest.raises(ValueError):
-        ledger.record_trial(a1)  # insert-only: duplicate id must raise
+    ledger.record_trial(a1)  # F4: duplicate id is an idempotent no-op, not a raise
+    assert ledger.get_trial(TRIAL_A1_ID) == a1
+    assert len([t for t in ledger.list_trials() if t.id == TRIAL_A1_ID]) == 1
 
     ledger.record_trial(a2)
     ledger.record_trial(b1)

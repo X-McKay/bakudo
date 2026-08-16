@@ -64,9 +64,11 @@ class Ledger(Protocol):
     ) -> PromotionDecision: ...
 
     # Trials (experiment substrate design doc section 6). Insert-only: a
-    # trial's outcome is immutable once recorded, so a duplicate id is a bug
-    # in the caller, not a state transition — it raises rather than
-    # silently overwriting or upserting.
+    # trial's outcome is immutable once recorded. record_trial is idempotent
+    # (F4 fix) -- a duplicate id is a no-op, not an overwrite/upsert and not
+    # an error, so a Temporal at-least-once activity retry can safely replay
+    # the same write (mirrors record_experiment's "on conflict do nothing"
+    # convention).
     def record_trial(self, t: TrialRecord) -> None: ...
     def get_trial(self, trial_id: str) -> TrialRecord | None: ...
     def list_trials(self, experiment_id: str | None = None) -> list[TrialRecord]: ...
@@ -317,8 +319,12 @@ class InMemoryLedger:
 
     # --- trials ---
     def record_trial(self, t: TrialRecord) -> None:
+        # Idempotent (F4 fix): a retried persist_trial activity (Temporal
+        # at-least-once) must not raise on a duplicate id -- same-id insert
+        # is a no-op, mirroring record_experiment's "on conflict do nothing"
+        # convention.
         if t.id in self._trials:
-            raise ValueError(f"trial {t.id} already recorded")
+            return
         self._trials[t.id] = t
 
     def get_trial(self, trial_id: str) -> TrialRecord | None:

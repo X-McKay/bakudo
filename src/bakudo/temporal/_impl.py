@@ -876,8 +876,12 @@ def evaluate_trial_hidden(input: dict) -> dict:
 
 def persist_trial(record: dict) -> None:
     """Record an (immutable) TrialRecord (experiment substrate design doc
-    section 6). Insert-only: ``ledger.record_trial`` raises on a duplicate
-    id, matching the sync ``run_trial`` path."""
+    section 6). Idempotent (F4 fix): ``ledger.record_trial`` treats a
+    duplicate id as a no-op rather than raising, so a Temporal at-least-once
+    retry of this activity (e.g. after a lost activity completion wedges
+    ``TrialWorkflow``, and ``ExperimentWorkflow`` separately synthesizes a
+    failed record for the same trial) can never double-count a trial's
+    stats."""
     trial = TrialRecord.model_validate(record)
     DEPS.ledger.record_trial(trial)
 

@@ -68,6 +68,11 @@ class AgentRunOutput:
     # The collected worktree diff. The agent branch does not survive sandbox
     # cleanup, so this is the only re-benchable artifact (issue #28).
     diff: str = ""
+    # Wall-clock sandbox runtime (F3 fix): threaded through so TrialWorkflow
+    # (which only sees this output, not the sandbox activity dict itself) can
+    # populate TrialRecord.metrics["duration_s"], matching the sync run_trial
+    # path's keys.
+    runtime_seconds: float = 0.0
 
 
 @dataclass

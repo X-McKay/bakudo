@@ -31,7 +31,8 @@ MINIMAL = {
     "environment": {"profile": "python-glibc", "network": "none"},
     "budgets": {"wallSeconds": 600, "toolCalls": 30, "tokens": 20000},
     "hidden": {"failToPass": ["hidden/test_bug.py"], "passToPass": ["hidden/test_ok.py"],
-               "testCommand": "pytest {files} -q", "wrongFixProbes": [], "expectedFiles": ["app.py"]},
+               "testCommand": "pytest {files} -q", "wrongFixProbes": [],
+               "expectedFiles": ["app.py"]},
     "expect": {"status": "success", "changesPaths": ["app.py"], "maxChangedFiles": 2,
                "forbidsDeniedCommands": True, "testPathsImmutable": True},
 }

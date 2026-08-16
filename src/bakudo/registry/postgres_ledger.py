@@ -669,14 +669,15 @@ class PostgresLedger:
         self._do(conn, _TRIALS_EXPERIMENT_INDEX_DDL, ())
 
     def record_trial(self, t: TrialRecord) -> None:
-        """Insert-only (design section 6): a trial's outcome is immutable
-        once recorded, so a duplicate id raises rather than overwrites."""
+        """Idempotent insert (design section 6 + F4 fix): a trial's outcome
+        is immutable once recorded, so a duplicate id is a no-op (``on
+        conflict (id) do nothing``) rather than raising -- Temporal
+        at-least-once activity retries can replay the same ``persist_trial``
+        write after a lost activity completion, and that replay must succeed
+        silently (matching :meth:`record_experiment`'s convention) instead of
+        wedging the workflow. Single statement, no read-then-write TOCTOU."""
         with self._connection() as conn:
             self._ensure_trials_table(conn)
-            with conn.cursor() as cur:
-                cur.execute("select 1 from trials where id = %s", (t.id,))
-                if cur.fetchone() is not None:
-                    raise ValueError(f"trial {t.id} already recorded")
             self._do(
                 conn,
                 """
@@ -686,6 +687,7 @@ class PostgresLedger:
                      pins, metrics, evaluation, flags, status, started_at,
                      completed_at)
                 values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (id) do nothing
                 """,
                 (
                     t.id, t.experiment_id, t.run_id, t.objective_id, t.agent_ref,
@@ -714,7 +716,11 @@ class PostgresLedger:
                 "where experiment_id = %s order by created_at",
                 (experiment_id,),
             )
-        return [self._trial_row(r) for r in rows]
+        # rows come straight from `select ... from trials`, so _trial_row (typed
+        # to also handle the `select ... where id = %s` no-match-found case for
+        # get_trial) never actually returns None here; the walrus filter keeps
+        # mypy honest without an unchecked cast.
+        return [t for r in rows if (t := self._trial_row(r)) is not None]
 
     @staticmethod
     def _trial_ts(value: Any) -> str | None:

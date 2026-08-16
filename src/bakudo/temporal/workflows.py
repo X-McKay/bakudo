@@ -39,6 +39,12 @@ with workflow.unsafe.imports_passed_through():
     # ..control.optimize is: cheap to import once, not something the
     # sandbox needs to reload/isolate per workflow task.
     from ..experiments.design import trial_seed
+
+    # Pure string parsing (no I/O) -- passed through for the same reason
+    # trial_seed is: cheap, import-safe, and TrialWorkflow needs it to derive
+    # the trusted changed-files signal from a collected diff (F2 fix) without
+    # trusting self-reported result.changed_files.
+    from ..trials.runner import changed_files_from_diff
     from .activities import (
         analyze_experiment,
         check_canary_graduation,
@@ -256,6 +262,7 @@ class AgentRunWorkflow:
                 inp.run_id, "failed",
                 agent_name, sandbox.get("git_branch", ""),
                 result=result,
+                runtime_seconds=sandbox.get("runtime_seconds", 0.0),
             )
 
         await self._advance(inp.run_id, "evaluating")
@@ -301,6 +308,7 @@ class AgentRunWorkflow:
             scorecard=eval_out.get("scorecard"),
             eval_results=eval_out.get("eval_results", []),
             diff=sandbox.get("diff", ""),
+            runtime_seconds=sandbox.get("runtime_seconds", 0.0),
         )
 
 
@@ -540,6 +548,7 @@ def _as_dict(out: AgentRunOutput) -> dict:
         "scorecard": out.scorecard,
         "eval_results": out.eval_results,
         "diff": out.diff,
+        "runtime_seconds": out.runtime_seconds,
     }
 
 
@@ -598,7 +607,14 @@ class TrialWorkflow:
 
         diff = out.get("diff") or ""
         result = out.get("result") or {}
-        changed_files = list(result.get("changed_files") or [])
+        # F2 fix: the collected diff is the trusted source of changed paths;
+        # self-reported result.changed_files can only ADD to it (belt and
+        # braces), never remove from it -- mirrors trials/runner.py's
+        # run_trial (sync path).
+        self_reported_changed_files = list(result.get("changed_files") or [])
+        changed_files = sorted(
+            set(changed_files_from_diff(diff)) | set(self_reported_changed_files)
+        )
 
         hidden_result = await workflow.execute_activity(
             evaluate_trial_hidden,
@@ -618,9 +634,22 @@ class TrialWorkflow:
             **_LONG,
         )
 
-        metrics = dict(result.get("metrics") or {})
-        metrics.setdefault("changed_files", float(len(changed_files)))
-        metrics.setdefault("diff_bytes", float(len(diff.encode("utf-8"))))
+        # F3 fix: `result["metrics"]` here is the raw in-guest self-report
+        # (runner/main.py writes tokens_used/tool_calls/model_calls, per
+        # strands_tools.ToolContext.observability()) -- normalize to the same
+        # tokens/tool_calls/duration_s keys the sync run_trial path records
+        # (trials/runner.py's build_pipeline_fn), or costDelta and every
+        # tokens-keyed secondary metric silently stay 0.0 on this path.
+        # `runtime_seconds` comes from AgentRunOutput (threaded up from the
+        # sandbox activity), not from the guest's own self-reported metrics.
+        raw_metrics = dict(result.get("metrics") or {})
+        metrics = {
+            "changed_files": float(len(changed_files)),
+            "diff_bytes": float(len(diff.encode("utf-8"))),
+            "tokens": float(raw_metrics.get("tokens_used", raw_metrics.get("tokens", 0.0)) or 0.0),
+            "tool_calls": float(raw_metrics.get("tool_calls", 0.0) or 0.0),
+            "duration_s": float(out.get("runtime_seconds", 0.0) or 0.0),
+        }
 
         trial_record = {
             "id": trial_id,
