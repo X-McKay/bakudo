@@ -149,6 +149,42 @@ def test_get_returns_loaded_scenario(tmp_path):
     assert loaded.ref == "sample-bug@1"
 
 
+def test_get_bare_name_resolves_when_unambiguous(tmp_path):
+    root = tmp_path / "scenarios"
+    root.mkdir()
+    make_scenario_dir(root, name="sample-bug")
+
+    registry = ScenarioRegistry(root)
+    loaded = registry.get("sample-bug")  # bare name, no version
+    assert loaded.ref == "sample-bug@1"
+
+
+def test_get_bare_name_ambiguous_raises(tmp_path):
+    """Two directories whose scenarios share a metadata.name at different
+    versions: a bare-name lookup can't pick one, so get() must raise rather
+    than silently returning an arbitrary match."""
+    root = tmp_path / "scenarios"
+    root.mkdir()
+    make_scenario_dir(
+        root,
+        name="sample-bug-v1",
+        overrides={"metadata.name": "sample-bug", "metadata.version": 1},
+    )
+    make_scenario_dir(
+        root,
+        name="sample-bug-v2",
+        overrides={"metadata.name": "sample-bug", "metadata.version": 2},
+    )
+
+    registry = ScenarioRegistry(root)
+    with pytest.raises(KeyError) as exc_info:
+        registry.get("sample-bug")
+    message = str(exc_info.value).lower()
+    assert "ambiguous" in message
+    assert "sample-bug@1" in message
+    assert "sample-bug@2" in message
+
+
 def test_immutability_flags_unbumped_change(tmp_path):
     root = tmp_path / "scenarios"
     root.mkdir()
