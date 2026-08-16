@@ -37,7 +37,7 @@ class ScenarioSelector(_Strict):
     families: list[str] = []
     tags: list[str] = []
     partitions: list[str] = ["dev", "validation"]
-    count: int = 20
+    count: int = Field(default=20, ge=1)
 
 
 class MetricsBlock(_Strict):

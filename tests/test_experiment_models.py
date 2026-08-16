@@ -4,7 +4,7 @@ tests/test_scenario_models.py)."""
 import pytest
 from pydantic import ValidationError
 
-from bakudo.experiments.models import ExperimentSpec
+from bakudo.experiments.models import ExperimentSpec, ScenarioSelector
 
 MINIMAL = {
     "apiVersion": "bakudo.ai/v1alpha1",
@@ -28,6 +28,12 @@ def test_minimal_experiment_parses_with_defaults():
     assert spec.decision.confidence == 0.95
     assert spec.decision.tie_zone == 0.10
     assert spec.decision.cost_tiebreak is True
+
+
+@pytest.mark.parametrize("bad_count", [0, -1])
+def test_scenario_selector_count_must_be_positive(bad_count):
+    with pytest.raises(ValidationError):
+        ScenarioSelector(count=bad_count)
 
 
 def test_extra_fields_forbidden():

@@ -617,6 +617,7 @@ def test_get_experiment_selects_by_id_without_migrating():
 
 def test_update_experiment_result_updates_status_and_result_without_migrating():
     conn = FakeConn()
+    conn.rows = [("exp_T1",)]  # `update ... returning id` finds the row
     PostgresLedger(conn).update_experiment_result(
         "exp_T1", "completed", {"decision": "promote"}
     )
@@ -625,5 +626,17 @@ def test_update_experiment_result_updates_status_and_result_without_migrating():
     )
     assert "set status = %s, result = %s" in update_sql
     assert "where id = %s" in update_sql
+    assert "returning id" in update_sql
     assert params == ("completed", '{"decision": "promote"}', "exp_T1")
     assert not any("create table if not exists experiments" in s for s in _sql_seq(conn))
+
+
+def test_update_experiment_result_unknown_id_raises_key_error():
+    """Parity with InMemoryLedger (dict-lookup KeyError) and this file's own
+    convention (_set_version_status/resolve_promotion): an unknown id must
+    raise rather than silently no-op."""
+    conn = FakeConn()  # no rows preloaded -> `update ... returning` finds none
+    with pytest.raises(KeyError):
+        PostgresLedger(conn).update_experiment_result(
+            "exp_UNKNOWN", "completed", {"decision": "promote"}
+        )

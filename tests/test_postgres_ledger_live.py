@@ -26,6 +26,7 @@ OBJ_ID = "obj_E2ELEDGER1"
 TRIAL_A1_ID = "trial_E2ELEDGERA1"
 TRIAL_A2_ID = "trial_E2ELEDGERA2"
 TRIAL_B1_ID = "trial_E2ELEDGERB1"
+EXPERIMENT_ID = "exp_E2ELEDGER1"
 
 
 @pytest.fixture
@@ -46,6 +47,7 @@ def _cleanup(lg: PostgresLedger) -> None:
             "delete from trials where id = any(%s)",
             ([TRIAL_A1_ID, TRIAL_A2_ID, TRIAL_B1_ID],),
         )
+        cur.execute("delete from experiments where id = %s", (EXPERIMENT_ID,))
 
 
 def _record() -> RunRecord:
@@ -167,3 +169,31 @@ def test_trial_roundtrip_insert_only_and_list_by_experiment(ledger):
 
     exp_b = ledger.list_trials(experiment_id="exp_E2ELEDGER_B")
     assert {t.id for t in exp_b} == {TRIAL_B1_ID}
+
+
+# --- experiments (Task 8, experiment substrate design doc section 7) ---
+
+
+def test_experiment_roundtrip_and_unknown_id_raises(ledger):
+    spec = {"metadata": {"name": "e2e-experiment"}, "baseline": "explore@1"}
+    ledger.record_experiment(EXPERIMENT_ID, "e2e-experiment", spec, "running")
+    got = ledger.get_experiment(EXPERIMENT_ID)
+    assert got is not None
+    assert got["id"] == EXPERIMENT_ID
+    assert got["name"] == "e2e-experiment"
+    assert got["spec"] == spec
+    assert got["status"] == "running"
+    assert got["result"] is None
+
+    # retried record_experiment must not clobber (on conflict do nothing)
+    ledger.record_experiment(EXPERIMENT_ID, "different-name", {}, "running")
+    assert ledger.get_experiment(EXPERIMENT_ID)["name"] == "e2e-experiment"
+
+    ledger.update_experiment_result(EXPERIMENT_ID, "completed", {"decision": "promote"})
+    got = ledger.get_experiment(EXPERIMENT_ID)
+    assert got["status"] == "completed"
+    assert got["result"] == {"decision": "promote"}
+
+    assert ledger.get_experiment("exp_E2ELEDGER_UNKNOWN") is None
+    with pytest.raises(KeyError):
+        ledger.update_experiment_result("exp_E2ELEDGER_UNKNOWN", "completed", {})

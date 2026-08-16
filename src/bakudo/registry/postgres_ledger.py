@@ -783,11 +783,18 @@ class PostgresLedger:
         # comment): this is a read-before-first-write path on a legacy DB,
         # and it's supposed to raise UndefinedTable rather than silently
         # creating an empty table it then updates zero rows of.
-        self._exec(
+        #
+        # `update ... returning id` detects an unknown experiment_id (empty
+        # result), matching _set_version_status/resolve_promotion and
+        # InMemoryLedger's dict-lookup KeyError — a silent no-op here would
+        # let a caller believe a result was recorded when it wasn't.
+        row = self._one(
             "update experiments set status = %s, result = %s, updated_at = now() "
-            "where id = %s",
+            "where id = %s returning id",
             (status, json.dumps(result) if result is not None else None, experiment_id),
         )
+        if row is None:
+            raise KeyError(f"unknown experiment: {experiment_id!r}")
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
         row = self._one(
