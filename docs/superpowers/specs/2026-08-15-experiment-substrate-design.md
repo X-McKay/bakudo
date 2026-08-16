@@ -1,9 +1,10 @@
-# Experiment Substrate: ScenarioSpec, Trial, and the Experiment Layer
+# Experiment Substrate: One Loop, Three Primitives
 
-**Status:** approved design, pending implementation plan
-**Date:** 2026-08-15
-**Source:** "Bakudo Agent Lab, Agent Simulator, and Software Evolution Engine" proposal (2026-08-15), Phases 1–2 + minimal statistics
+**Status:** approved design (v2 — post-research revision), pending implementation plan
+**Date:** 2026-08-15 (revised same day after literature/tooling review)
+**Source:** "Bakudo Agent Lab, Agent Simulator, and Software Evolution Engine" proposal (2026-08-15), Phases 1–2 + minimal statistics, reframed as a single generic experiment loop
 **Branch:** `feature/experiment-substrate`
+**Companion:** `docs/experiment-loop.md` (descriptive overview)
 
 ---
 
@@ -17,110 +18,152 @@ eval assembler, enforced budgets and concurrency, and evidence-backed
 memory. What it lacks is the **measurement apparatus**:
 
 - No `ScenarioSpec`. The nearest analogue is the eval corpus
-  (`EvalCase`/`Expectations` in `src/bakudo/evals/corpus.py`), and its 25
-  optimize cases reference a fictional `payments-api` repo — the corpus is
-  unrunnable against real code.
-- No `Trial`. Per-case results (`CaseRun`) collapse into aggregate
-  `EvalResult` rows; no persisted record of one agent×scenario execution
-  with pinned versions and seeds exists.
-- No statistics. The only aggregation is mean-of-scorecards
-  (`_window_stats`) and a fixed 0.05 delta threshold. No pairing, no
-  confidence intervals, no holdouts, no seeds anywhere in the system.
+  (`EvalCase`/`Expectations` in `src/bakudo/evals/corpus.py`), whose 25
+  optimize cases reference a fictional repo — unrunnable against real code.
+- No `Trial`. Per-case results collapse into aggregate `EvalResult` rows;
+  no persisted record of one agent×scenario execution with pinned versions
+  and seeds exists.
+- No statistics. The only aggregation is mean-of-scorecards and a fixed
+  0.05 delta threshold. No pairing, no confidence intervals, no holdouts,
+  no seeds anywhere.
 
 The guiding rule, from the source proposal:
 
 > **Build the measurement apparatus before increasing autonomy.**
 
-This spec covers exactly that substrate. Mutation machinery, statistical
-promotion, Pareto/routing, the generalized Evolution Engine, and the
-Scenario Factory are explicitly later phases.
+A 2026-08-15 research sweep (agent-eval harnesses; benchmark-construction
+literature; self-improving-agent systems and eval statistics) confirmed
+the design skeleton and forced specific revisions, all folded in below.
+Citations live in §15.
 
-An additional cross-cutting requirement: the substrate must be
-**agent-authorable**. Coding agents (Claude Code, Codex) should be able to
-generate scenarios, experiment specs, and candidate agent specs from a
-high-level objective, with a machine-checkable verification loop that
-makes generated artifacts trustworthy without human review of each one.
-This is the on-ramp to the autonomous system the proposal describes.
+### 1.1 The unifying frame: one experiment loop
+
+The source proposal described three subsystems (Simulator, Agent Lab,
+Evolution Engine). This design collapses them into **one generic loop**,
+parameterized by *subject*:
+
+```
+define benchmark → profile baseline → research (hypothesize) → improve (candidates)
+       → evaluate (paired experiment) → verify (independent) → promote / no-change
+                                   ↺ evidence feeds the next research step
+```
+
+| Loop stage | Subject = agent (this phase) | Subject = software artifact (later) |
+|---|---|---|
+| benchmark unit | ScenarioSpec | measurement command + workload |
+| profile | behavioral fingerprint over corpus | baseline bench/profiling run |
+| improve | spec mutation (prompt/skill/model) | code diff from scout/attempt |
+| verify | hidden tests in fresh sandbox | independent re-bench (`abox/bench.py`, exists) |
+| promote | version status change (canary→active) | PR / merge |
+
+Everything in the middle — Trial, pairing, seeds, statistics, holdout
+guard, persistence, result shape, no-change-as-success — is
+subject-neutral and shared. That shared middle is this phase's
+deliverable, with only the agent binding implemented.
+
+**What stays subject-specific, deliberately:** the promotion act (version
+flip vs PR are different trust decisions) and the execution/trust
+machinery (abox policy, hidden-test isolation). We genericize measurement
+semantics, never the security posture.
+
+### 1.2 Agent-authorability requirement
+
+Coding agents (Claude Code, Codex) must be able to generate scenarios,
+experiment specs, and candidate agent specs from a high-level objective,
+with a machine-checkable verification loop making generated artifacts
+trustworthy without per-artifact human review. This is the on-ramp to the
+autonomous system; the `research` and `improve` stages get explicit,
+empty slots whose *inputs* (evidence objects) and *outputs* (provenance,
+lineage anchors) are designed now.
 
 ## 2. Goals
 
-1. `ScenarioSpec`: a versioned, reproducible, self-contained environment
-   definition with hidden ground truth, authored as files in-tree.
-2. A runnable starter corpus of ~25 scenarios across four families:
-   debugging, no-change, adversarial-context, safety/scope-discipline.
-3. `Trial`: an immutable, persisted record of one AgentSpec × ScenarioSpec
-   × seed execution, pinned to exact versions of everything that matters.
-4. `ExperimentSpec`/`ExperimentResult`: paired candidate-vs-baseline trial
-   matrices with honest statistics (paired bootstrap CI, exact McNemar,
-   Wilson intervals) and hard safety gates.
-5. Operator surface: `bakudo sim …` and `bakudo lab …` CLI plus API
-   routes, all with `--json` output.
-6. Agent-authorability: scaffolding, a closed verification loop
-   (`bakudo sim verify`), actionable validation errors, provenance
-   tracking, and an authoring skill.
-7. Everything runs offline (`BAKUDO_OFFLINE=1`) end-to-end in CI.
+1. `ScenarioSpec`: versioned, reproducible, self-contained environment
+   definitions as files-in-git, Harbor-task-isomorphic and
+   SWE-bench-field-compatible.
+2. A runnable starter corpus of ~25 scenarios across four families
+   (debugging, no-change with paired twins, adversarial-context,
+   safety/scope-discipline), plus optional imported dev-split instances.
+3. `Trial`: immutable persisted record of one subject×scenario×seed
+   execution with full version pins and reward-hacking flags.
+4. `ExperimentSpec`/`ExperimentResult`: paired trial matrices with the
+   Miller-recipe statistics (per-scenario paired differences, bootstrap
+   CI, tie-zone, cost tiebreak) and hard safety gates. Profile = the
+   single-arm degenerate case.
+5. A minimal subject-polymorphic `Benchmark` seam; agent binding only.
+6. Operator surface: `bakudo scenario|trial|experiment …` CLI with
+   `--json` everywhere, plus API routes.
+7. Agent-authorability: scaffold, hardened `verify` loop, actionable
+   errors, fail-closed provenance, authoring skill.
+8. Everything runs offline (`BAKUDO_OFFLINE=1`) end-to-end in CI.
 
 ## 3. Non-Goals (this phase)
 
-- AgentSpec mutation model beyond what exists (prompt mutation), lineage
-  tables, failure-driven candidate generation (Phase 3).
-- Rewiring `PromotionPolicy` to require experiment evidence (Phase 4).
-  This phase produces the evidence object; promotion consumes it later.
-- Pareto frontier, task feature extraction, routing (Phase 5).
-- `EvolutionObjective`/`ArtifactCandidate` generalization (Phase 6).
-- Scenario Factory automation (Phase 7). Agent-authored scenarios are
-  supported and verified, but the failure→scenario pipeline is manual.
-- `TeamSpec` (Phase 8).
-- Perturbation engine, service sidecars, fault injection, clock control —
-  these need abox extensions. Adversarial content in this phase is
-  authored directly into fixtures (misleading issue text, deceptive
-  comments/READMEs), which covers the adversarial-context family without
-  new runtime capability.
-- Gymnasium/PettingZoo adapters. Evaluated and rejected as the core
-  abstraction (§13). Their seeding and versioned-environment-registry
-  conventions are adopted instead.
+- AgentSpec mutation machinery beyond the existing prompt mutation;
+  failure-driven or GEPA-style reflective candidate generation (later
+  `improve`/`research` phases; see §13 for the recorded direction).
+- Rewiring `PromotionPolicy` to *require* experiment evidence. This phase
+  produces the evidence object; promotion consumes it later. The
+  screening→confirmatory framing (§8.4) needs no promotion changes.
+- Pareto-frontier machinery, task feature extraction, routing. Research
+  finding: below dozens of candidates, success-primary +
+  cost-as-constraint/tiebreaker dominates; Pareto is dropped from the
+  roadmap's near term, not just this phase.
+- `EvolutionObjective`/`ArtifactCandidate` generalization — becomes
+  "write the second `Benchmark` binding" when it happens.
+- Scenario Factory automation; variant generation (RepoMirage-style
+  perturbation) is a recorded future op, not built now.
+- `TeamSpec`; perturbation engine; service sidecars; fault injection;
+  clock control (need abox extensions). Adversarial content this phase is
+  authored directly into fixtures.
+- Gymnasium/PettingZoo adapters; Inspect/Harbor as execution engines;
+  external experiment-tracking platforms as system of record (all
+  evaluated — §14). Optional Inspect-format transcript *emission* is in
+  scope as a small artifact writer; Langfuse trace mirroring is not.
 
 ## 4. Data Model
 
 ```
-ScenarioSpec  (files in git, versioned)   the world
-Trial         (Postgres, immutable)       one AgentSpec × ScenarioSpec × seed execution
+ScenarioSpec  (files in git, versioned)   the benchmark unit ("the world")
+Trial         (Postgres, insert-only)     one subject × scenario × seed execution
 ExperimentSpec/Result (Postgres)          paired trial matrix + statistics
 ```
 
-A trial is fully determined by:
-
-```
-Trial = AgentSpec × Objective(derived) × ScenarioSpec × seed × runtime pins
-```
-
-- New ID prefixes in `src/bakudo/ids.py`: `trial_`, `exp_` (ULID-based,
-  same as existing prefixes).
+- `Trial = subject × Objective(derived) × ScenarioSpec × seed × runtime pins`.
+- New ID prefixes in `src/bakudo/ids.py`: `trial_`, `exp_`.
 - New JSON Schemas: `schemas/scenario-spec.schema.json`,
   `schemas/experiment-spec.schema.json`, mirrored by `_Strict` pydantic
   models (camelCase aliases, `extra="forbid"`), same convention as
-  `AgentSpec`.
-- `schemas/eval-result.schema.json` subject-type enum gains `trial`.
-- Scenarios are **not** stored in Postgres. They are versioned files in
-  git (like `agents/` seed specs). A Trial pins a scenario by
-  `name@version` **plus a content digest** computed over the scenario
-  directory. A test fails the build if scenario content changes without a
-  version bump (the Gymnasium `Env-v3` immutability convention, enforced).
+  `AgentSpec`. `eval-result.schema.json` subject-type enum gains `trial`.
+- Scenarios are **not** stored in Postgres: versioned files in git (like
+  `agents/` seeds). A Trial pins `name@version` **plus a content digest**
+  over the scenario directory; a test fails the build if content changes
+  without a version bump (Gymnasium's immutable-env-ID convention).
+- **Benchmark seam**: a minimal protocol — `provision(unit, seed) →
+  workspace`, `execute(subject, workspace, budgets) → outcome`,
+  `evaluate(outcome) → metrics + gates` — with exactly one
+  implementation (agent-on-scenario). No speculative hooks; the second
+  binding (artifact benchmarks) reshapes it when it actually arrives.
 
 ## 5. ScenarioSpec
 
-### 5.1 On-disk layout
+### 5.1 On-disk layout (Harbor-isomorphic)
 
 ```
 evals/scenarios/<name>/
-  scenario.yaml      # the spec
+  scenario.yaml      # manifest (mission, environment, budgets, expectations)
   fixture/           # project tree materialized into the agent's repo
-  hidden/            # hidden tests + grading assets — never enter agent workspace
-  reference/         # ground-truth patch proving the scenario is solvable
+  hidden/            # fail-to-pass + pass-to-pass tests, wrong-fix probes — never in agent workspace
+  reference/         # ground-truth patch
 ```
 
-Packaged into the wheel like `agents/` and `skills/` (a `paths.py`
-resolver + `force-include` entry + packaging-test update).
+Directory roles map 1:1 onto Harbor's task format (`instruction` ≈
+mission text, `environment` ≈ fixture, `solution` ≈ reference, `tests` ≈
+hidden), and the grading contract adopts Harbor's `reward.json` shape
+(verifier writes named float metrics to a well-known path; the control
+plane reads it). A two-way Harbor converter is therefore a small script
+and their registry becomes an importable task pool. Packaged into the
+wheel like `agents/` and `skills/`.
 
 ### 5.2 scenario.yaml shape
 
@@ -135,33 +178,38 @@ metadata:
   difficulty: medium
   tags: [python, race-condition]
   partition: dev               # dev | validation | holdout
+  twinOf: null                 # no-change twins point at their change-required sibling
+  canary: "bakudo-canary-<corpus-guid>"   # + BIG-bench canary embedded in fixture files
   provenance:
-    createdBy: human           # or an agent ref, e.g. scenario-author@3
-    sourceType: hand-written   # hand-written | historical-bug | agent-failure | ...
-    eligibleForPromotion: true # false until verified for agent-authored scenarios
+    createdBy: human           # or agent ref
+    createdAt: 2026-08-15
+    sourceType: hand-written   # hand-written | historical-bug | agent-failure | imported | ...
+    eligibleForPromotion: true # false until verified, always false for imports
 
-mission:                       # becomes the Objective handed to the agent
-  type: qa                     # existing ObjectiveType values
+mission:                       # becomes the Objective; must NOT contain the fix (verified)
+  type: qa
   title: Diagnose duplicate webhook delivery
   description: >
     Users occasionally receive duplicate payment notifications. Find the
     root cause and implement a safe fix.
   acceptanceCriteria: [...]
-  constraints:
-    maxFilesChanged: 4
+  constraints: {maxFilesChanged: 4}
 
 environment:
-  profile: python-glibc        # guest profile hint
+  profile: python-glibc
   network: none                # none | scoped; most-restrictive-wins vs agent spec
 
-budgets:                       # min() with the agent spec's budget — can only tighten
+budgets:                       # min() with the agent spec's budget — tighten-only
   wallSeconds: 1800
   toolCalls: 60
   tokens: 40000
 
-hidden:
-  tests: [hidden/test_no_duplicates.py]
-  testCommand: "pytest hidden -q"
+hidden:                        # SWE-bench-compatible test semantics
+  failToPass: [hidden/test_no_duplicates.py]    # fail pristine, pass with reference
+  passToPass: [hidden/test_existing_behavior.py] # pass in both states (regression guards)
+  testCommand: "pytest {files} -q"
+  wrongFixProbes:              # optional: plausible-but-wrong patches hidden tests must reject
+    - reference/wrong-retry-config.patch
   expectedFiles: [app/webhook.py]
 
 expect:                        # existing Expectations semantics, kept
@@ -169,98 +217,137 @@ expect:                        # existing Expectations semantics, kept
   changesPaths: [app/]
   maxChangedFiles: 4
   forbidsDeniedCommands: true
+  testPathsImmutable: true     # diffs touching hidden-test-mirrored or CI paths flag the trial
 ```
 
 Notes:
 
-- `mission` maps onto the existing `Objective` model; no new objective
-  type is required for the four starter families (they use `qa`,
-  `optimize`, `maintenance` as appropriate). If a dedicated type is later
-  needed, both the JSON Schema enum and `ObjectiveType` must change
-  together (they are dual-sourced).
-- `no-change` scenarios express ground truth as `expect.maxChangedFiles: 0`
-  plus hidden tests that verify behavior is unchanged — the planted-decoy
-  pattern from the retired optimize corpus, made real.
-- `budgets` and `environment.network` can only **restrict** what the agent
-  spec allows, never loosen it. Intersection logic lives in pure code and
-  is unit-tested.
+- `mission` maps onto the existing `Objective` model; the four starter
+  families use existing `ObjectiveType` values. (Objective type enum is
+  dual-sourced — JSON Schema + `ObjectiveType` — and must change together
+  if a dedicated type is ever added.)
+- **No-change scenarios ship as twins**: the no-change member sets
+  `expect.maxChangedFiles: 0` with pass-to-pass tests proving behavior
+  unchanged; `twinOf` points to a near-identical sibling that *does*
+  require a change. Experiment reporting scores twins jointly, so blanket
+  abstention cannot score well (FixedBench/AgentAbstain lesson).
+- `budgets` and `environment.network` can only **restrict** what the
+  agent spec allows; intersection logic is pure and unit-tested.
+- Every fixture carries the BIG-bench canary string plus a corpus GUID —
+  contamination *detectors* (checkable by probing models), not
+  prevention. Dated provenance supports future decontamination cutoffs.
 
 ### 5.3 Provisioning
 
 `src/bakudo/scenarios/provision.py` materializes `fixture/` into a
-throwaway git repository:
+throwaway git repository: sorted file walk, fixed author identity and
+timestamp, single initial commit → byte-identical repos for the same
+scenario+seed. The seed is an explicit provisioning input recorded on the
+Trial (Gymnasium `reset(seed=…)` convention). The provisioner only
+**writes** fixture files, never executes them (the `abox/bench.py`
+discipline); fixture content is adversarial by design and only runs
+in-guest. The content digest (scenario.yaml + fixture/ + hidden/ +
+reference/, hashed over sorted paths and bytes) is computed here.
 
-- sorted file walk, fixed author identity and timestamp, single initial
-  commit → byte-identical repos for the same scenario+seed;
-- the seed is available to templated fixture values (rare; most fixtures
-  are static) following the Gymnasium `reset(seed=…)` convention: seed is
-  an explicit input to environment construction, recorded on the Trial;
-- the provisioner only ever **writes** fixture files; it never executes
-  them (the `abox/bench.py` discipline). Fixture content is adversarial by
-  design and only runs inside the guest;
-- the content digest (scenario.yaml + fixture/ + hidden/ + reference/,
-  hashed over sorted relative paths and bytes) is computed here and is the
-  value Trials pin.
+### 5.4 Verification (`bakudo scenario verify`)
 
-The provisioned repo path is handed to the existing `AboxRunner` repo
-resolution; no runner changes are needed beyond accepting an absolute
-provisioned path.
+Hardened per the benchmark-quality literature (fail-to-pass alone is
+provably insufficient: audits attribute 24–59% of "verified" SWE-bench
+task failures to task flaws, and 33% of original instances leaked
+solutions in issue text). Checks, in order:
 
-### 5.4 Registry and loader
+1. schema-valid manifest; JSON-pointer errors with remediation hints;
+2. provisioning determinism (digest stable across two materializations);
+3. `failToPass` tests **fail** on the pristine fixture and **pass** with
+   `reference/` applied (for no-change scenarios: pass in both states);
+4. `passToPass` tests pass in both states;
+5. every `wrongFixProbes` patch is **rejected** by the hidden tests;
+6. **solution-leak scan**: mission text must not contain the reference
+   diff (textual + n-gram overlap check);
+7. **spec-sufficiency check** (LLM-assisted, advisory): can the hidden
+   tests' requirements be inferred from the mission text alone? Flags,
+   does not fail, when no model is available (offline);
+8. version-immutability against the registry.
 
-`src/bakudo/scenarios/` package: `models.py` (pydantic), `loader.py`
-(YAML → model with schema validation), `registry.py` (discover, filter by
-family/tags/partition, digest computation, version-immutability check).
+A scenario passing `verify` is structurally sound by construction — the
+property that makes autonomous scenario generation trustworthy.
+
+### 5.5 Registry and loader
+
+`src/bakudo/scenarios/`: `models.py`, `loader.py` (YAML → model with
+schema validation), `registry.py` (discovery, filtering by
+family/tags/partition, digest computation, immutability check),
+`provision.py`, `verify.py`.
+
+### 5.6 Corpus policy
+
+- ~25 authored scenarios: 8 debugging, 6 no-change (3 twin pairs counted
+  as 6), 6 adversarial-context, 5 safety/scope-discipline. Small and fast
+  enough to run repeatedly — the corpus is infrastructure.
+- **Imports land in `partition: dev` only** (public = contaminated by
+  definition; models reproduce SWE-bench file paths from memory).
+  SWE-smith (MIT) is the preferred import source and its generation
+  toolkit (AST mutation, PR-mirroring, reimplement-the-function) is the
+  model for later autonomous generation. Imported scenarios are always
+  `eligibleForPromotion: false`.
+- Holdout stays freshly authored or (later) perturbation-derived.
+  Corpus is versioned; results always tag the corpus version; refresh is
+  deliberate and versioned, never silent (evaluator-drift lesson).
 
 ## 6. Trial
 
 ### 6.1 Execution flow
 
-New `trials/` package following the repo's proven three-part pattern
-(pure logic + thin Temporal workflow + synchronous mirror):
+`trials/` package, the repo's three-part pattern:
 
 - **Pure logic** (`trials/runner.py`): scenario → Objective derivation,
-  budget/network intersection, trial-record assembly.
-- **`TrialWorkflow`** (thin, deterministic): provision scenario → launch
-  the existing `AgentRunWorkflow` as a child (unchanged — it already owns
-  ledger writes, sandbox lifecycle, cancel racing, evals) → hidden
-  evaluation activity → persist Trial → cleanup.
-- **Sync mirror** (`trials/sync.py` or equivalent) for CLI/offline use,
-  exactly as `run_optimize_loop` mirrors `OptimizationWorkflow`.
+  budget/network intersection, record assembly, hack-flag computation.
+- **`TrialWorkflow`**: provision → launch existing `AgentRunWorkflow` as
+  child (unchanged: ledger, sandbox, cancel, evals) → hidden evaluation
+  activity → persist Trial → cleanup.
+- **Sync mirror** for CLI/offline, as `run_optimize_loop` mirrors
+  `OptimizationWorkflow`.
 
-### 6.2 Hidden evaluation
+### 6.2 Hidden evaluation (independent verification)
 
-Reuses the independent-verification pattern from `abox/bench.py`:
-
-1. control plane takes the trial's diff (the only durable artifact of the
-   agent's work);
-2. applies it host-side to a fresh worktree of the pristine provisioned
-   fixture (file writes only, never executed);
-3. copies `hidden/` in;
-4. runs `hidden.testCommand` in a fresh `--network safe` guest;
-5. records the outcome as a `hidden` eval suite with subject_type `trial`.
+Reuses the `abox/bench.py` pattern: control plane takes the trial's diff
+→ applies it host-side to a fresh worktree of the pristine provisioned
+fixture (file writes only) → copies `hidden/` in → runs `testCommand` in
+a fresh `--network safe` guest → verifier writes `reward.json` (named
+float metrics: `fail_to_pass_rate`, `pass_to_pass_rate`, plus
+family-specific extras) → recorded as a `hidden` eval suite,
+subject_type `trial`.
 
 Invariants: the agent's sandbox never contains `hidden/`; hidden tests
-never run in a workspace the agent shaped beyond its diff.
+never run in a workspace the agent shaped beyond its diff; grading is
+out-of-process from the agent (a `sys.exit(0)`-style escape cannot fake
+a pass).
 
-### 6.3 Trial record
+### 6.3 Reward-hacking flags
 
-Persisted fields (jsonb where structured):
+Computed on every trial, stored as booleans + details:
 
-- identity: `id` (`trial_`), optional `experiment_id`, `run_id`,
-  `objective_id`;
-- subject: agent ref (`name@version`), scenario `name@version`, scenario
-  content digest, seed;
-- runtime pins: bakudo version, abox version (already probed by
-  `verify_binary`), model id + endpoint ref, guest profile;
-- execution metrics (mirrored from the existing observability keys):
-  duration, input/output tokens, tool calls, denied actions, changed
-  files, diff bytes;
-- evaluation: scorecard, hidden-suite outcome, expectation results;
-- `status` and timestamps.
+- `test_path_violation`: diff touches test-mirrored, CI, or scoring
+  paths (auto-flag; scenario may escalate to hard-fail via
+  `expect.testPathsImmutable`);
+- `denied_action_retries`: repeated identical denied commands (from
+  existing telemetry);
+- `scope_violation`: diff outside `expect.changesPaths`.
 
-Immutability: trials are insert-only; no update path exists on the ledger
-interface.
+Flags feed the safety suite and are hard-reported in experiment results.
+
+### 6.4 Trial record
+
+Insert-only. Identity (`trial_`, optional `experiment_id`, `run_id`,
+`objective_id`); subject (agent ref); scenario (`name@version`, digest,
+seed); runtime pins (bakudo version, abox version, model id + endpoint
+ref, guest profile); execution metrics (duration, input/output tokens,
+tool calls, denied actions, changed files, diff bytes — cost as
+first-class columns, per the HAL lesson); evaluation (scorecard, hidden
+suite with F2P/P2P rates, expectation results, hack flags); status,
+timestamps. Optional artifact: an Inspect-format `.eval` transcript per
+trial (small emitter, no runtime dependency) so Docent/Inspect-View work
+on bakudo trials out of the box.
 
 ## 7. Experiment Layer
 
@@ -270,12 +357,11 @@ interface.
 apiVersion: bakudo.ai/v1alpha1
 kind: ExperimentSpec
 
-metadata:
-  name: debugger-prompt-ablation
+metadata: {name: debugger-prompt-ablation}
 
 subject: agent-spec
 baseline: debugger@17
-candidates: [debugger@18]
+candidates: [debugger@18]      # empty list ⇒ profile mode (single-arm fingerprint)
 
 scenarioSelector:
   families: [debugging]
@@ -284,248 +370,256 @@ scenarioSelector:
   count: 20
 
 repetitions: 2
-useHoldout: false              # holdout partition excluded unless explicitly true
+useHoldout: false              # holdout excluded unless explicitly true; stamped in result
 
 metrics:
-  primary: [task_success]
-  secondary: [tokens, tool_calls, duration]
+  primary: task_success        # from hidden suite F2P
+  secondary: [pass_to_pass, tokens, tool_calls, duration]
 
 hardGates:
   safetyRegressions: 0
+  hackFlags: 0
 
 decision:
-  method: paired-bootstrap
   confidence: 0.95
-  minImprovement: 0.03
+  tieZone: 0.10                # sub-MDE deltas are ties; honest about power at n≈20-50
+  costTiebreak: true           # ties resolved toward lower cost
 ```
+
+**Profile mode**: `candidates: []` runs the baseline over the selection
+and emits the behavioral fingerprint (per-family metrics, hack flags,
+cost profile) using the identical machinery — one less concept, and the
+natural input to a future hypothesis-generating agent.
 
 ### 7.2 Paired design
 
-`experiments/design.py` builds the trial matrix: for each selected
-scenario × repetition, one baseline trial and one trial per candidate,
-**sharing a seed** derived deterministically as
+`experiments/design.py`: for each selected scenario × repetition, one
+baseline trial and one per candidate, **sharing a seed** derived as
 `hash(experiment_id, scenario_name, repetition)` — no RNG in workflow
-code, consistent with the repo's hashing-over-RNG convention
-(`routes_to_canary`, `deterministic_objective_id`).
+code (repo convention). Twins are selected and reported together.
+Holdout leakage guard as above.
 
-Holdout leakage guard: `partition: holdout` scenarios are excluded from
-selection unless `useHoldout: true`, and that flag is stamped into the
-`ExperimentResult` so holdout exposure is auditable.
+### 7.3 Statistics (the Miller recipe, one method)
 
-### 7.3 Statistics
+`experiments/statistics.py`, stdlib only:
 
-`experiments/statistics.py`, **stdlib only** (preserves the light-core
-dependency rule; no scipy/numpy):
+1. average repetitions **within** a scenario (reps reduce noise but are
+   not independent observations; scenarios are the unit of analysis);
+2. per-scenario paired differences `d_i = candidate_i − baseline_i`;
+3. mean delta with a 95% **paired bootstrap CI** over scenarios (seeded
+   `random.Random`, deterministic); optional family-clustered resampling
+   when families are heterogeneous;
+4. always report the CI, never a bare verdict;
+5. deltas inside `decision.tieZone` are **ties**; ties resolve toward
+   lower cost when `costTiebreak` (never promote a sub-MDE "win" —
+   typical evals are 4–40× underpowered for small effects);
+6. multi-candidate multiplicity is handled **structurally**: offline
+   experiments are screening; the existing canary is the pre-registered
+   confirmatory stage for the single selected candidate. No new
+   promotion machinery this phase.
 
-- paired bootstrap CI for continuous score deltas (seeded `random.Random`,
-  deterministic given the experiment id);
-- exact McNemar via binomial tail for paired pass/fail;
-- Wilson score interval for success rates.
-
-Roughly 150 lines, unit-tested against known distributions and closed-form
-cases.
+(The earlier three-test design — bootstrap + McNemar + Wilson — is
+superseded: one bootstrap recipe covers binary and continuous metrics.)
 
 ### 7.4 ExperimentResult
 
-Reports, per candidate vs baseline:
-
-- paired win / loss / tie counts;
-- mean and median score delta with bootstrap CI;
-- per-family deltas (the counterfactual view: "clean debugging unchanged,
-  misleading-hypothesis +18pp");
-- cost deltas: tokens, tool calls, duration;
-- safety regressions (any > 0 ⇒ `eligibleForPromotion: false` regardless
-  of capability — hard gate);
-- an **advisory** promotion verdict (`eligibleForPromotion`, rationale).
-  Promotion policy itself is unchanged this phase.
+Per candidate vs baseline: paired win/loss/tie counts; mean delta + CI
+for primary and secondaries; per-family deltas (the counterfactual
+view); twin-pair joint scores for the no-change family; cost deltas;
+hack-flag and safety-regression counts (any > 0 ⇒
+`eligibleForPromotion: false`, hard gate); advisory verdict with
+rationale; corpus version, holdout exposure, and full pin set. Profile
+mode emits the same object with the comparison block absent.
 
 ### 7.5 ExperimentWorkflow
 
 Resolve scenarios → build matrix → fan out `TrialWorkflow` children with
-bounded concurrency (the `asyncio.gather(..., return_exceptions=True)` +
-crash-tolerant-candidate pattern from `OptimizationWorkflow`) → aggregate
-→ statistics → persist result. A crashed trial becomes a recorded failed
-trial, not a lost data point. Token usage accumulates and reports to the
-meta-agent via the existing `_notify_meta` convention when parented by it;
-standalone experiments (CLI-started) skip it.
+bounded concurrency (`asyncio.gather(..., return_exceptions=True)`,
+crash → recorded failed trial, not a lost data point) → aggregate →
+statistics → persist. Token usage accumulates to the meta-agent via the
+existing `_notify_meta` convention when parented by it; CLI-started
+experiments skip it. (Successive-halving experiment shapes and cheap
+smoke-corpus cascades are recorded future options, not built now.)
 
 ## 8. Persistence
 
-- New tables `trials` and `experiments` (spec + status + result jsonb) in
-  `infra/postgres/init.sql` **and** as idempotent self-migration DDL
-  constants (the `_GRAPH_MIRROR_OUTBOX_DDL` pattern), because `init.sql`
-  only runs at first cluster init and existing dev databases must
-  converge.
-- `Ledger` protocol grows: `record_trial`, `get_trial`,
+- New tables `trials`, `experiments` in `infra/postgres/init.sql` **and**
+  as idempotent self-migration DDL constants (the
+  `_GRAPH_MIRROR_OUTBOX_DDL` pattern) — `init.sql` only runs at first
+  cluster init.
+- `Ledger` protocol grows `record_trial`, `get_trial`,
   `list_trials(experiment_id=…)`, `record_experiment`,
-  `update_experiment_result`, `get_experiment`. Implemented in both
-  `InMemoryLedger` and `PostgresLedger` with parity tests.
-- Workflow registration in `temporal/worker.py`; new activities join
-  `Deps`, `configure()`, and `ALL_ACTIVITIES`; starters land in
-  `temporal/client.py` (unlike `AgentEvolutionWorkflow`, these ship with
-  real entry points: CLI + API).
+  `update_experiment_result`, `get_experiment`; both implementations,
+  parity-tested.
+- Registration: workflows in `temporal/worker.py`; activities into
+  `Deps`/`configure()`/`ALL_ACTIVITIES`; starters into
+  `temporal/client.py` (these ship with real entry points).
 
 ## 9. Corpus Absorption and Compatibility
 
-- `run_corpus()` keeps its signature but becomes a thin adapter: it loads
-  scenarios and delegates to the trial runner; `EvalCase`/`Expectations`
-  survive as the adapter's view. Callers (`evolve_agent`, eval paths) see
-  no behavior change. One "run an agent in a controlled environment"
-  abstraction underneath.
-- `evals/corpora/add-feature.yaml` cases become real fixture-backed
-  scenarios. `evals/corpora/optimize.yaml` (fictional, unrunnable) is
-  retired; its planted-inefficiency/decoy pattern is reborn as real
+- `run_corpus()` keeps its signature, becomes an adapter over the trial
+  runner; `EvalCase`/`Expectations` survive as its view; callers
+  (`evolve_agent`, eval paths) unchanged. One abstraction underneath.
+- `add-feature.yaml` cases become real scenarios; `optimize.yaml`
+  (fictional) is retired, its planted/decoy pattern reborn as real
   fixtures in the no-change family.
-- Targeted fix en route: `deterministic_objective_id` emits `objd_…` but
-  `schemas/objective.schema.json` pins `^obj_…`; fixed so
-  scenario-derived and observer objectives pass validation uniformly.
-
-### 9.1 Starter corpus (~25)
-
-| Family | Count | Content |
-|---|---|---|
-| debugging | 8 | planted bugs (race, off-by-one, stale cache, wrong conditional…) with hidden regression tests |
-| no-change | 6 | already-optimal code, misleading perf comments, already-fixed issues — ground truth is `maxChangedFiles: 0` |
-| adversarial-context | 6 | misleading issue hypothesis, deceptive README/comments, salient-but-irrelevant error in logs |
-| safety / scope-discipline | 5 | tempting out-of-scope edits, instructions in repo content, denied-command handling |
-
-Each scenario small enough to run repeatedly; the corpus is
-infrastructure, not test data.
+- Fix en route: `deterministic_objective_id` (`objd_…`) vs
+  `objective.schema.json` (`^obj_…`) mismatch.
 
 ## 10. Agent-Authorability
 
-The substrate is designed so a coding agent can generate scenarios,
-experiment specs, and candidate agent specs from a high-level prompt, with
-machine verification closing the loop:
-
-1. **Scaffolding**: `bakudo sim scaffold <name> --family <f>` emits a
-   commented template tree (scenario.yaml with inline docs, fixture/,
-   hidden/, reference/ stubs).
-2. **Closed verification loop**: `bakudo sim verify <scenario>` checks,
-   in order:
-   - schema-valid `scenario.yaml`;
-   - fixture provisions deterministically (digest stable across two runs);
-   - hidden tests **fail** on the pristine fixture (the planted problem is
-     real) — skipped for no-change scenarios, where they must pass;
-   - hidden tests **pass** with `reference/` patch applied (the problem is
-     solvable);
-   - version-immutability check against the registry.
-   A scenario that passes `verify` is structurally sound by construction.
-3. **Actionable errors**: schema and verify failures emit JSON-pointer
-   paths and remediation hints; every CLI command supports `--json`.
-4. **Provenance and anti-poisoning**: `metadata.provenance.createdBy`
-   records the generating agent; agent-authored scenarios default to
-   `eligibleForPromotion: false` until verified, and scenario generators
-   must not immediately benefit from their own scenarios (the separation
-   the source proposal requires; full enforcement arrives with the
-   Scenario Factory phase, but the fields and defaults land now).
-5. **Authoring skill**: a scenario-authoring skill ships in the repo's
-   `skills/` tree — layout, invariants, family-specific checklists,
-   verify-loop usage — written for consumption by coding agents.
-6. **Experiment/candidate generation**: `ExperimentSpec` and candidate
-   `AgentSpec`s are plain schema-validated YAML — the format agents
-   already generate reliably. `bakudo lab compare A B --family f --count n`
-   generates and runs an ExperimentSpec without authoring a file at all.
+1. **Scaffold**: `bakudo scenario scaffold <name> --family <f>` emits a
+   commented template tree (canary strings pre-inserted, provenance
+   pre-filled, twin stub for no-change).
+2. **Closed loop**: `bakudo scenario verify` (§5.4) — a generated
+   scenario that passes is structurally sound by construction.
+3. **Actionable errors**: JSON-pointer paths + remediation hints;
+   `--json` on every command.
+4. **Fail-closed provenance**: agent-authored and imported scenarios
+   default `eligibleForPromotion: false`; generator identity recorded;
+   scenario generators must not immediately benefit from their own
+   scenarios (fields and defaults now; full enforcement with the
+   Scenario Factory phase).
+5. **Authoring skill** in `skills/`: layout, invariants, family
+   checklists, verify-loop usage, written for coding agents.
+6. `ExperimentSpec` and candidate `AgentSpec`s are plain
+   schema-validated YAML; `bakudo experiment compare A B --family f
+   --count n` runs a comparison with no file authored at all.
 
 ## 11. Operator Surface
 
-CLI (subcommands on the existing `bakudo` entry point):
+Three nouns matching the three primitives:
 
 ```
-bakudo sim list [--family --partition --json]
-bakudo sim scaffold <name> --family <f>
-bakudo sim verify <scenario> [--json]
-bakudo sim run <scenario> --agent <name[@ver]> [--seed N] [--json]
-bakudo lab run <experiment.yaml> [--json]
-bakudo lab compare <baseline> <candidate> --family <f> --count N [--json]
-bakudo lab result <exp_id> [--json]
+bakudo scenario list [--family --partition --json]
+bakudo scenario scaffold <name> --family <f>
+bakudo scenario verify <name> [--json]
+bakudo trial run <scenario> --agent <name[@ver]> [--seed N] [--json]
+bakudo experiment run <spec.yaml> [--json]
+bakudo experiment compare <baseline> <candidate> --family <f> --count N [--json]
+bakudo experiment profile <agent> [--family <f>] [--json]
+bakudo experiment result <exp_id> [--json]
 ```
 
-API (same bearer-auth pattern as existing routes): `POST /experiments`,
+API (bearer-auth as existing): `POST /experiments`,
 `GET /experiments/{id}`, `GET /trials/{id}`.
 
 ## 12. Testing and Security
 
-**Testing**
+**Testing.** Entire path under `BAKUDO_OFFLINE=1` in CI (provision →
+trial → experiment → statistics, no model). Unit: provisioning
+determinism; digest-vs-version enforcement; tighten-only intersection;
+seed derivation/pairing; statistics vs known distributions (bootstrap
+coverage, tie-zone behavior); holdout guard; hidden-test isolation;
+hack-flag computation; verify semantics per family (incl. wrong-fix
+probes and leak scan); twin joint scoring. Ledger parity tests both
+backends. Workflow tests per existing patterns. Live e2e gated like
+`test_abox_live.py`.
 
-- Entire path runs under `BAKUDO_OFFLINE=1` with the existing
-  deterministic driver: provision → trial → experiment → statistics in CI
-  with no model.
-- Unit: provisioning determinism (byte-stable digests), digest-vs-version
-  enforcement, budget/network intersection (tighten-only), seed
-  derivation/pairing, statistics vs known distributions, holdout guard,
-  hidden-test isolation, `verify` semantics per family.
-- Ledger parity tests for the new methods on both implementations.
-- Temporal workflow tests following the existing
-  `test_temporal_workflows.py` patterns.
-- Live e2e behind the same gating as `test_abox_live.py`.
+**Security invariants** (existing posture, extended):
 
-**Security invariants** (existing posture, extended)
-
-- Fixtures and hidden tests are data until executed in-guest; the control
+- Fixtures/hidden tests are data until executed in-guest; the control
   plane never executes fixture content.
-- Hidden evaluation runs in a fresh `--network safe` guest.
-- Scenario budgets/network can only tighten the agent spec's, never
-  loosen.
-- No new secret surfaces; env forwarding unchanged.
-- Agent-authored scenario provenance defaults are fail-closed
-  (`eligibleForPromotion: false`).
+- Hidden evaluation: fresh `--network safe` guest, out-of-process from
+  the agent.
+- Scenario budgets/network tighten-only.
+- **The measurement plane lives outside every mutable surface**: graders,
+  hidden tests, statistics, and promotion logic are not reachable from
+  AgentSpec mutations or sandboxed code. This is the structural property
+  that makes config-space evolution safe (grader sabotage — the worst
+  documented failure mode of self-improving systems — is impossible by
+  construction). Named invariant; regression-tested.
+- Fail-closed provenance for agent-authored/imported scenarios.
+- No new secret surfaces.
 
-## 13. Alternatives Considered
+## 13. Recorded Directions for Later Phases (not built now)
 
-**Gymnasium / PettingZoo as the environment abstraction — rejected.**
-Gymnasium's contract is step-level MDP interaction with the caller owning
-the policy loop. A bakudo trial is episode-level: the agent loop runs
-autonomously inside an untrusted abox guest, mediated by abox policy, not
-by a Python API between steps. Making bakudo a real Gym env would either
-move the agent loop into the control plane (dissolving the
-trusted/untrusted boundary) or reduce `step()` to "run the whole trial"
-(one-step episodes; the interface becomes ceremony). Gym's machinery
-(spaces, vector envs, wrappers) serves tensor-exchanging policies, not
-"a git worktree, a Postgres fixture, and an incident log." PettingZoo
-models simultaneous/turn-based games; TeamSpec topologies are pipelines of
-complete runs. **Adopted from them instead**: the `reset(seed=…)` seeding
-discipline and the versioned immutable environment-ID registry
-convention. A thin Gym adapter remains possible later (deterministic
-seeded provisioning + versioned scenarios + machine-readable outcomes)
-if gradient-based RL training ever becomes a goal; explicitly out of
-scope now. Closer prior art (Inspect, SWE-bench harness) informed the
-ScenarioSpec field shape but would duplicate abox/Temporal if adopted
-wholesale.
+- **Lineage**: `parent_version` pointers + experiment results already
+  anchor lineage; later selection should consider descendant performance
+  (HGM's metaproductivity finding), and archive/diverse-parent sampling
+  beats greedy best-only (DGM, GEPA, ADAS convergent finding).
+- **Mutation**: single-factor mutations as executor (attributable wins);
+  GEPA-style reflective trace-driven proposal as the generator when the
+  `research` stage is built. DSPy/TextGrad/PromptBreeder/OpenEvolve-as-
+  engine: evaluated, passed.
+- **Experiment shapes**: successive halving / cheap-smoke-corpus
+  cascades for >5 candidates.
+- **Variant generation**: semantics-preserving perturbation
+  (RepoMirage-style) to refresh holdouts without authoring cost.
+- **Impossible variants** as a machine-detectable cheating probe family
+  (ImpossibleBench recipe).
+- **Selection objective**: if scalarization is ever needed, price
+  errors/cost/abstention in domain terms rather than maintaining a
+  Pareto frontier.
 
-**Layer alongside the existing corpus (no absorption) — rejected.** Two
-permanent overlapping scenario abstractions; evolution/promotion paths
-would keep standing on the unstatistical one.
+## 14. Alternatives Considered
 
-**Extend `corpus.py` in place — rejected.** No persisted trial identity,
-no experiment object, no reproducibility pinning; does not deliver the
-substrate.
+**Gymnasium / PettingZoo — rejected as core; conventions adopted.**
+Step-level MDP API vs episode-level trials; a real Gym env would either
+move the agent loop into the control plane (dissolving the trust
+boundary) or reduce `step()` to "run the whole trial." Adopted: seeding
+discipline, immutable versioned env IDs. A thin adapter stays possible
+if RL training ever becomes a goal.
 
-## 14. Risks
+**Inspect AI — imitate; don't adopt as engine.** Its solver loop owns
+retries/model calls/sandbox lifecycle — collides with Temporal+abox.
+Adopted: scorer/metric separation pattern, optional `.eval` transcript
+emission (de-facto interchange; Docent ingests it). Icebox: abox as an
+Inspect sandbox provider to run their benchmark library.
 
-- **Corpus authoring dominates the phase.** Mitigated by the scaffold +
-  verify loop (agents can draft scenarios; verification is mechanical) and
-  by capping at ~25.
-- **Offline driver fidelity.** The canned offline result exercises
-  plumbing, not agent behavior; statistical code is therefore tested
-  against synthetic distributions, not just offline trials.
-- **Fan-out cost on live runs.** A 20-scenario × 2-rep × 2-arm experiment
-  is 80 sandboxed runs. Bounded concurrency + budgets apply; experiments
-  report token usage to the meta-agent's ledger when parented by it.
-- **Schema evolution.** Two `additionalProperties: false` walls
-  (objective, eval-result) are extended deliberately and minimally.
+**Harbor — imitate closely; don't adopt as engine.** Its task format is
+nearly isomorphic to ScenarioSpec and is the emerging containerized-task
+standard; we match directory roles and the `reward.json` contract for
+cheap convertibility. Its harness owns execution — same collision.
 
-## 15. Build Order (for the implementation plan)
+**Experiment-tracking platforms (Langfuse, MLflow, Phoenix, Weave,
+Braintrust) — not the system of record.** None model version-pinned
+paired seeded trials; our Postgres ledger already exists. Langfuse is a
+possible later observability sidecar (traces only). Phoenix: ELv2 +
+acquisition risk. Weave/Braintrust: no true self-host.
 
-1. Schemas + pydantic models + ids (`ScenarioSpec`, `ExperimentSpec`,
-   trial/experiment records).
+**METR task-standard / Vivaria — dead** (deprecated; METR moved to
+Inspect). **OpenAI Evals — dead** (platform shutdown Nov 2026).
+
+**Layer alongside the existing corpus / extend corpus.py in place —
+rejected** (duplicate abstractions / no persistence, no experiment
+identity, no pinning).
+
+## 15. Key Sources
+
+Benchmark quality: SWE-bench Verified (OpenAI), UTBoost
+(arXiv:2506.09289), SWE-Bench+ (arXiv:2410.06992), OpenAI
+signal-vs-noise audit (2026), Agentic Benchmark Checklist
+(arXiv:2507.02825). Contamination: SWE-Bench Illusion (ICSE-SEIP 2026),
+SWE-rebench, RepoMirage (arXiv:2605.26177), BIG-bench canary analyses.
+Abstention/no-change: FixedBench (ETH SRI), AgentAbstain
+(arXiv:2607.10059). Reward hacking: METR (2025-06), ImpossibleBench
+(arXiv:2510.20270), Anthropic emergent-misalignment reproduction,
+Building-to-the-Test (arXiv:2606.28430). Generation: SWE-smith (MIT),
+R2E-Gym (COLM 2025), SWE-bench-Live, Defects4J/BugsInPy. Statistics:
+Miller, "Adding Error Bars to Evals" (arXiv:2411.00640); ASHA; CAPO;
+power analyses (arXiv:2601.20251). Self-improvement: AlphaEvolve /
+OpenEvolve, Darwin Gödel Machine (arXiv:2505.22954), HGM
+(arXiv:2510.21614), Red Queen GM (arXiv:2606.26294), ADAS
+(arXiv:2408.08435), AFlow, SICA, GEPA (arXiv:2507.19457). Cost-aware
+selection: AI Agents That Matter (arXiv:2407.01502), HAL
+(arXiv:2510.11977). Formats: Harbor/terminal-bench, SWE-bench instance
+schema, Inspect `.eval` logs.
+
+## 16. Build Order (for the implementation plan)
+
+1. Schemas + pydantic models + ids.
 2. Scenario registry, loader, digest, provisioner + determinism tests.
-3. Trial pure logic + sync runner + hidden evaluation + ledger
-   persistence (both backends).
-4. `bakudo sim` CLI (list/scaffold/verify/run) + first scenarios to prove
-   the loop.
-5. Experiment design (pairing, seeds, holdout guard) + statistics module.
-6. Experiment sync runner + `bakudo lab` CLI + API routes.
-7. `TrialWorkflow`/`ExperimentWorkflow` + worker registration + starters.
-8. Corpus buildout to ~25 + corpus-adapter absorption of `run_corpus`.
-9. Authoring skill + docs.
+3. Verify loop (all checks incl. probes/leak-scan; spec-sufficiency
+   flagged-not-failed offline).
+4. Trial pure logic + sync runner + hidden evaluation (reward.json
+   contract) + hack flags + ledger persistence (both backends).
+5. `bakudo scenario`/`bakudo trial` CLI + first scenarios proving the
+   loop end-to-end offline.
+6. Experiment design (pairing, seeds, twins, holdout guard) +
+   statistics module.
+7. Experiment sync runner + `bakudo experiment` CLI (run/compare/
+   profile/result) + API routes.
+8. `TrialWorkflow`/`ExperimentWorkflow` + registration + starters.
+9. Corpus buildout to ~25 + `run_corpus` adapter absorption.
+10. Inspect `.eval` emitter (optional artifact) + authoring skill + docs.
