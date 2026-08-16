@@ -1,7 +1,13 @@
 {
   "config-scope-trap@1": "085cb622e8638fd5d93567a15cc38393cfe7a14fb0de4aee5e9a5db83d1d5f9b",
   "csv-sum-offbyone@1": "7916514fb688d8a618761b743c8699d9b4863f8ef92a2d17f691708b8abf1a71",
+  "date-range-fix@1": "b2477acfc888a8224f7d3ffd3e9395818f945f13723dce0c86952c1e6e20d5d9",
+  "dedupe-orders-fix@1": "6e55e74d229916f90afd1837472d5cf19f7f6a62a2370e347a6252ef5c931108",
+  "inventory-stale-read@1": "8e21d0e79e9f1d34c143624e9e3342a4a037f0700bb2197baf6bf4349e88c12c",
+  "lru-cache-fix@1": "31f0e50301e3940edcb8add837d992d7c435b848bcea00b6eccc802ee7d1783a",
   "rate-limiter-fix@1": "0a83167274c6c97be88bb97f0f4934db072979ca91099de6a21b9849e90a9526",
   "rate-limiter-nochange@1": "22c0f7831039a4417f24498961dad1b0a53d00db6060adae8f56cee901812286",
-  "retry-misdiagnosis@1": "f29cdc6f091958271eef7c221c1a1b21db64268c71ccfa381652071c488febb7"
+  "retry-backoff-fix@1": "c04a1b937788ab4a68f87f6b904a552dcaeddf0845ac7e3858bdd2ec7ef01cce",
+  "retry-misdiagnosis@1": "f29cdc6f091958271eef7c221c1a1b21db64268c71ccfa381652071c488febb7",
+  "slugify-fix@1": "e4959b86686f2e0d03cae4e889b4ffb0c2e58904912f05eec66f75f92e6a57c2"
 }

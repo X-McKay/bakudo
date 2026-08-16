@@ -1,0 +1,11 @@
+diff --git a/dedupe_orders.py b/dedupe_orders.py
+index 5445afc..5466371 100644
+--- a/dedupe_orders.py
++++ b/dedupe_orders.py
+@@ -14,5 +14,5 @@ def dedupe_orders(orders: list[dict]) -> list[dict]:
+         oid = order["id"]
+         if oid not in seen:
+             order_ids.append(oid)
+-        seen.setdefault(oid, order)  # BUG: setdefault keeps the FIRST occurrence
++        seen[oid] = order
+     return [seen[oid] for oid in order_ids]

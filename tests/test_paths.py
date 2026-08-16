@@ -28,6 +28,12 @@ EXEMPLAR_SCENARIOS = {
     "rate-limiter-fix",
     "retry-misdiagnosis",
     "config-scope-trap",
+    "lru-cache-fix",
+    "date-range-fix",
+    "dedupe-orders-fix",
+    "retry-backoff-fix",
+    "slugify-fix",
+    "inventory-stale-read",
 }
 
 

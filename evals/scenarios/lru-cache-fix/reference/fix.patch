@@ -1,0 +1,13 @@
+diff --git a/lru_cache.py b/lru_cache.py
+index 4f33d98..e467740 100644
+--- a/lru_cache.py
++++ b/lru_cache.py
+@@ -23,7 +23,7 @@ class LRUCache:
+         if key in self._store:
+             self._order.remove(key)
+         elif len(self._store) >= self.capacity:
+-            evicted = self._order.pop()  # BUG: pops the newest key, not the oldest
++            evicted = self._order.pop(0)
+             del self._store[evicted]
+         self._order.append(key)
+         self._store[key] = value
