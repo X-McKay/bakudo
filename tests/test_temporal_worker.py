@@ -260,7 +260,7 @@ def test_log_sandbox_posture(
 ):
     from bakudo.temporal import worker
 
-    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+    for var in ("BAKUDO_SANDBOX", "BAKUDO_ENV"):
         monkeypatch.delenv(var, raising=False)
     for var, value in env.items():
         monkeypatch.setenv(var, value)
@@ -281,7 +281,7 @@ def test_posture_log_and_runtime_error_share_the_remediation(monkeypatch, caplog
     SAME remediation text, sourced from one constant, so they cannot drift."""
     from bakudo.temporal import _impl, worker
 
-    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+    for var in ("BAKUDO_SANDBOX", "BAKUDO_ENV"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("BAKUDO_SANDBOX", "unavailable")
 

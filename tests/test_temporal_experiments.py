@@ -2,14 +2,14 @@
 ``tests/test_temporal_workflows.py``'s time-skipping-env / ``Deps``-stubbing
 patterns.
 
-Controller ruling R1: ``select_scenarios``/the scenario registry are
+Controller ruling R1: ``select_tasks``/the task source are
 filesystem I/O, so they never run in workflow code -- ``resolve_experiment_
-scenarios``, ``provision_trial``, ``evaluate_trial_hidden``, and
+tasks``, ``provision_trial``, ``evaluate_trial_verifier``, and
 ``analyze_experiment`` are stubbed at the ``_impl`` module-function boundary
 here (the same boundary the activity wrappers call through), the same way
 ``test_temporal_workflows.py`` stubs ``_impl.DEPS.sandbox`` -- these tests
 exercise workflow orchestration (fan-out, concurrency, crash handling,
-persistence), not the trial/hidden-eval internals Tasks 6/7 already cover.
+persistence), not the trial/verifier-eval internals Tasks 6/7 already cover.
 """
 
 from __future__ import annotations
@@ -86,12 +86,12 @@ def make_worker(env, workflows):
     )
 
 
-def _objective_doc(scenario_ref: str) -> dict:
+def _objective_doc(task_ref: str) -> dict:
     return {
-        "id": f"objd_{scenario_ref.replace('@', '_')}",
+        "id": f"objd_{task_ref.replace('@', '_')}",
         "type": "explore",
         "repo": "bakudo",
-        "title": f"trial: {scenario_ref}",
+        "title": f"trial: {task_ref}",
         "description": "",
         "acceptanceCriteria": [],
         "constraints": {},
@@ -104,29 +104,34 @@ def _objective_doc(scenario_ref: str) -> dict:
 def _provision_stub(fail_for: tuple[str, str] | None = None):
     """A stand-in for ``_impl.provision_trial`` good enough to drive a real
     ``AgentRunWorkflow`` (a schema-valid objective + a real, on-disk agent
-    spec) without touching the scenario registry/fixture filesystem."""
+    spec) without touching the task-source/fixture filesystem."""
 
     agent_spec_doc = _impl.load_agent_spec("explore")
     assert agent_spec_doc is not None
 
     def _stub(input: dict) -> dict:
-        if fail_for is not None and (input["scenario"], input["agent"]) == fail_for:
+        if fail_for is not None and (input["task"], input["agent"]) == fail_for:
             raise ApplicationError("provisioning exploded", non_retryable=True)
-        name, _, version_s = input["scenario"].partition("@")
+        name, _, version_s = input["task"].partition("@")
+        version = int(version_s) if version_s else 1
         return {
             "repo_path": "/tmp/bakudo-trial-stub",
-            "objective": _objective_doc(input["scenario"]),
+            "objective": _objective_doc(input["task"]),
             "agent_spec": agent_spec_doc,
             "agent_ref": input["agent"],
-            "scenario_name": name,
-            "scenario_version": int(version_s) if version_s else 1,
-            "scenario_digest": f"digest-{name}",
-            "budgets": {},
+            "task_pin": {
+                "source_uri": "file:///benchmark-corpus",
+                "corpus_revision": "test-revision",
+                "name": name,
+                "version": version,
+                "bundle_digest": f"sha256:bundle-{name}",
+                "verifier_digest": f"sha256:verifier-{name}",
+            },
+            "limits": {},
             "network": "none",
             "timeout_seconds": 60,
-            "pins": {
+            "runtime_pins": {
                 "bakudo": "0.0.0-stub",
-                "scenario_digest_algo": "sha256",
                 "model_id": agent_spec_doc["model"]["modelId"],
                 "sandbox_profile": agent_spec_doc["sandbox"]["profile"],
             },
@@ -135,37 +140,53 @@ def _provision_stub(fail_for: tuple[str, str] | None = None):
     return _stub
 
 
-def _hidden_stub(input: dict) -> dict:
+def _verifier_stub(input: dict) -> dict:
     return {
         "f2p_rate": 1.0,
         "p2p_rate": 1.0,
         "reward": {"fail_to_pass_rate": 1.0, "pass_to_pass_rate": 1.0},
-        "detail": "stubbed hidden eval",
+        "detail": "stubbed verifier eval",
         "expected_status": "success",
         "actual_status": input.get("actual_status"),
         "status_match": True,
-        "hack_flags": {
-            "test_path_violation": False,
-            "denied_action_retries": False,
+        "integrity": {
+            "verifier_input_violation": False,
+            "denied_action_violation": False,
             "scope_violation": False,
+            "change_limit_violation": False,
             "details": {},
         },
     }
 
 
-def _scenarios_stub(input: dict) -> dict:
+def _tasks_stub(input: dict) -> dict:
     """Identity arm resolution (every test spec here already uses pinned
     refs) -- ``resolvedArms`` is still built from ``input["spec"]`` so a
     test can also exercise Finding #4's resolution contract by asserting on
     it directly, without special-casing this stub further."""
     spec = input["spec"]
     arm_refs = [spec["baseline"], *spec.get("candidates", [])]
+
+    def descriptor(name: str, digest: str) -> dict:
+        return {
+            "name": name,
+            "version": 1,
+            "family": "debugging",
+            "paired_task": None,
+            "task_pin": {
+                "source_uri": "file:///benchmark-corpus",
+                "corpus_revision": "test-revision",
+                "name": name,
+                "version": 1,
+                "bundle_digest": f"sha256:{digest}",
+                "verifier_digest": f"sha256:verifier-{digest}",
+            },
+        }
+
     return {
-        "scenarios": [
-            {"name": "scenario-a", "version": 1, "digest": "da", "family": "debugging",
-             "twin_of": None},
-            {"name": "scenario-b", "version": 1, "digest": "db", "family": "debugging",
-             "twin_of": None},
+        "tasks": [
+            descriptor("task-a", "da"),
+            descriptor("task-b", "db"),
         ],
         "resolvedArms": {ref: ref for ref in arm_refs},
     }
@@ -173,11 +194,11 @@ def _scenarios_stub(input: dict) -> dict:
 
 @pytest.fixture
 def stub_trial_activities(monkeypatch):
-    """Stub the filesystem-bound trial activities (provision/hidden-eval),
+    """Stub the filesystem-bound trial activities (provision/verifier-eval),
     leaving persist_trial/persist_experiment real so assertions can read the
     ledger directly."""
     monkeypatch.setattr(_impl, "provision_trial", _provision_stub())
-    monkeypatch.setattr(_impl, "evaluate_trial_hidden", _hidden_stub)
+    monkeypatch.setattr(_impl, "evaluate_trial_verifier", _verifier_stub)
     return None
 
 
@@ -189,7 +210,7 @@ def _experiment_spec(name: str = "exp-test", candidates: list[str] | None = None
         "subject": "agent-spec",
         "baseline": "explore@1",
         "candidates": candidates if candidates is not None else ["explore@1"],
-        "scenarioSelector": {"count": 20},
+        "taskSelector": {"count": 20},
         "repetitions": 1,
     }
 
@@ -198,7 +219,7 @@ def _experiment_spec(name: str = "exp-test", candidates: list[str] | None = None
 
 
 async def test_trial_workflow_happy_path(env, deps, monkeypatch):
-    calls = {"provision": 0, "hidden": 0}
+    calls = {"provision": 0, "verifier": 0}
 
     provision_impl = _provision_stub()
 
@@ -206,35 +227,33 @@ async def test_trial_workflow_happy_path(env, deps, monkeypatch):
         calls["provision"] += 1
         return provision_impl(input)
 
-    def counted_hidden(input: dict) -> dict:
-        calls["hidden"] += 1
-        return _hidden_stub(input)
+    def counted_verifier(input: dict) -> dict:
+        calls["verifier"] += 1
+        return _verifier_stub(input)
 
     monkeypatch.setattr(_impl, "provision_trial", counted_provision)
-    monkeypatch.setattr(_impl, "evaluate_trial_hidden", counted_hidden)
+    monkeypatch.setattr(_impl, "evaluate_trial_verifier", counted_verifier)
 
     async with make_worker(env, [TrialWorkflow, AgentRunWorkflow, EvalWorkflow]):
         out = await env.client.execute_workflow(
             TrialWorkflow.run,
-            TrialInput(scenario="scenario-a@1", agent="explore@1", seed=7),
+            TrialInput(task="task-a@1", agent="explore@1", seed=7),
             id="trial-run_HAPPY1",
             task_queue=TASK_QUEUE_CONTROL,
         )
 
-    assert calls == {"provision": 1, "hidden": 1}
+    assert calls == {"provision": 1, "verifier": 1}
     assert out["status"] == "completed"
     assert out["agent_ref"] == "explore@1"
-    assert out["scenario_name"] == "scenario-a"
+    assert out["task"]["name"] == "task-a"
     assert out["evaluation"]["f2p_rate"] == 1.0
     assert out["seed"] == 7
 
-    # Finding #2: pins must carry the same provenance fields the sync
-    # run_trial path records, not be dropped to {}.
-    assert out["pins"], "pins must not be empty on the Temporal trial path"
-    assert out["pins"]["bakudo"] == "0.0.0-stub"
-    assert out["pins"]["scenario_digest_algo"] == "sha256"
-    assert out["pins"]["model_id"]
-    assert out["pins"]["sandbox_profile"]
+    # Runtime pins remain distinct from immutable task provenance.
+    assert out["task"]["corpus_revision"] == "test-revision"
+    assert out["runtime_pins"]["bakudo"] == "0.0.0-stub"
+    assert out["runtime_pins"]["model_id"]
+    assert out["runtime_pins"]["sandbox_profile"]
 
     # Finding #3: the AgentRunWorkflow child's scorecard must not be
     # silently dropped from evaluation.
@@ -244,7 +263,8 @@ async def test_trial_workflow_happy_path(env, deps, monkeypatch):
     assert recorded is not None
     assert recorded.status == "completed"
     assert recorded.agent_ref == "explore@1"
-    assert recorded.pins == out["pins"]
+    assert recorded.task.model_dump(mode="json") == out["task"]
+    assert recorded.runtime_pins == out["runtime_pins"]
     assert recorded.evaluation.get("scorecard") is not None
 
 
@@ -273,21 +293,28 @@ def stub_sandbox_with_raw_metrics(bundle):
             "metrics": {"tokens_used": 4321.0, "tool_calls": 6.0, "model_calls": 2.0},
         },
         diff="--- a/fix.py\n+++ b/fix.py\n",
+        denied_commands=[{"command": "blocked-command", "reason": "policy"}],
         runtime_seconds=12.5,
     )
 
 
 async def test_trial_workflow_normalizes_temporal_metrics_keys(env, monkeypatch):
     ledger = InMemoryLedger()
+    verifier_input: dict = {}
+
+    def capture_verifier(input: dict) -> dict:
+        verifier_input.update(input)
+        return _verifier_stub(input)
+
     monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
     monkeypatch.setattr(_impl.DEPS, "sandbox", stub_sandbox_with_raw_metrics)
     monkeypatch.setattr(_impl, "provision_trial", _provision_stub())
-    monkeypatch.setattr(_impl, "evaluate_trial_hidden", _hidden_stub)
+    monkeypatch.setattr(_impl, "evaluate_trial_verifier", capture_verifier)
 
     async with make_worker(env, [TrialWorkflow, AgentRunWorkflow, EvalWorkflow]):
         out = await env.client.execute_workflow(
             TrialWorkflow.run,
-            TrialInput(scenario="scenario-a@1", agent="explore@1", seed=11),
+            TrialInput(task="task-a@1", agent="explore@1", seed=11),
             id="trial-run_METRICS1",
             task_queue=TASK_QUEUE_CONTROL,
         )
@@ -295,6 +322,7 @@ async def test_trial_workflow_normalizes_temporal_metrics_keys(env, monkeypatch)
     assert out["metrics"]["tokens"] == 4321.0, out["metrics"]
     assert out["metrics"]["tool_calls"] == 6.0, out["metrics"]
     assert out["metrics"]["duration_s"] == 12.5, out["metrics"]
+    assert verifier_input["denied_commands"] == ["blocked-command"]
 
     recorded = ledger.get_trial(out["id"])
     assert recorded is not None
@@ -314,7 +342,7 @@ async def test_experiment_workflow_fans_out(env, deps, stub_trial_activities, mo
         analyzed["experiment_id"] = input["experiment_id"]
         return {"experimentId": input["experiment_id"], "trialsSeen": len(trials)}
 
-    monkeypatch.setattr(_impl, "resolve_experiment_scenarios", _scenarios_stub)
+    monkeypatch.setattr(_impl, "resolve_experiment_tasks", _tasks_stub)
     monkeypatch.setattr(_impl, "analyze_experiment", fake_analyze)
 
     async with make_worker(
@@ -327,7 +355,7 @@ async def test_experiment_workflow_fans_out(env, deps, stub_trial_activities, mo
             task_queue=TASK_QUEUE_CONTROL,
         )
 
-    # 2 scenarios x 1 repetition x 2 arms (baseline + 1 candidate) -> 4 trials.
+    # 2 tasks x 1 repetition x 2 arms (baseline + 1 candidate) -> 4 trials.
     assert analyzed["trial_count"] == 4
     assert result["trialsSeen"] == 4
 
@@ -338,7 +366,7 @@ async def test_experiment_workflow_fans_out(env, deps, stub_trial_activities, mo
 
 
 async def test_experiment_child_crash_recorded(env, deps, monkeypatch):
-    # One (scenario, agent) cell -- the candidate arm on scenario-b -- fails
+    # One (task, agent) cell -- the candidate arm on task-b -- fails
     # to provision; every other cell succeeds. Distinct baseline/candidate
     # refs (the stub doesn't care that "explore-candidate@1" isn't a real
     # on-disk spec -- it never loads one) isolate exactly one of the 4
@@ -346,10 +374,10 @@ async def test_experiment_child_crash_recorded(env, deps, monkeypatch):
     monkeypatch.setattr(
         _impl,
         "provision_trial",
-        _provision_stub(fail_for=("scenario-b@1", "explore-candidate@1")),
+        _provision_stub(fail_for=("task-b@1", "explore-candidate@1")),
     )
-    monkeypatch.setattr(_impl, "evaluate_trial_hidden", _hidden_stub)
-    monkeypatch.setattr(_impl, "resolve_experiment_scenarios", _scenarios_stub)
+    monkeypatch.setattr(_impl, "evaluate_trial_verifier", _verifier_stub)
+    monkeypatch.setattr(_impl, "resolve_experiment_tasks", _tasks_stub)
 
     seen: dict = {}
 
@@ -377,14 +405,14 @@ async def test_experiment_child_crash_recorded(env, deps, monkeypatch):
         )
 
     # The workflow completed despite the crashed child, with the crash
-    # isolated to exactly the one (scenario-b, explore-candidate) cell.
+    # isolated to exactly the one (task-b, explore-candidate) cell.
     assert result["trialsSeen"] == 4
     assert result["failed"] == 1
 
     trials = deps.list_trials(seen["experiment_id"])
     failed = [t for t in trials if t.status == "failed"]
     assert len(failed) == 1, "crashed child must be recorded as exactly one failed TrialRecord"
-    assert failed[0].scenario_name == "scenario-b"
+    assert failed[0].task.name == "task-b"
     assert failed[0].agent_ref == "explore-candidate@1"
     assert "error" in failed[0].evaluation
 
@@ -396,33 +424,33 @@ async def test_experiment_child_crash_recorded(env, deps, monkeypatch):
 
 def test_provision_trial_local_sandbox_uses_provisioned_fixture(monkeypatch):
     """Non-stubbed integration test: real ``provision_trial`` + real
-    ``local_sandbox`` for csv-sum-offbyone, called with the EXACT shape
+    ``local_sandbox`` for the bundled rate-limiter smoke task, called with the EXACT shape
     ``_impl.run_sandbox`` uses (``bundle`` only, no ``workspace_root``).
 
     Before the fix, ``local_sandbox`` ignored ``bundle.objective.repo``
     whenever ``workspace_root`` was omitted and always fabricated a fresh,
     empty git repo -- so a Temporal-driven dev-mode trial's tool calls never
-    saw the scenario fixture at all. A custom ``offline_driver`` reads
-    ``summer.py`` through the agent's own ``read-file`` tool and the test
+    saw the task fixture at all. A custom ``offline_driver`` reads
+    ``limiter.py`` through the agent's own ``read-file`` tool and the test
     asserts its content is the REAL fixture content, not a
     file-not-found/empty read against an unrelated throwaway repo.
     """
     monkeypatch.setenv("BAKUDO_ENV", "dev")
 
     from bakudo.abox.local import local_sandbox
+    from bakudo.agent_run_bundle import AgentRunBundle, Budget
     from bakudo.agent_spec import parse_spec
-    from bakudo.bundle import Budget, TaskBundle
     from bakudo.curriculum.objective import Objective
 
     provisioned = _impl.provision_trial(
-        {"scenario": "csv-sum-offbyone@1", "agent": "explore", "seed": 1}
+        {"task": "smoke-rate-limiter-fix@1", "agent": "explore", "seed": 1}
     )
-    expected_content = (Path(provisioned["repo_path"]) / "summer.py").read_text()
-    assert expected_content, "the provisioned fixture must actually contain summer.py"
+    expected_content = (Path(provisioned["repo_path"]) / "limiter.py").read_text()
+    assert expected_content, "the provisioned fixture must actually contain limiter.py"
 
     objective = Objective.model_validate(provisioned["objective"])
     agent_spec = parse_spec(provisioned["agent_spec"])
-    bundle = TaskBundle(
+    bundle = AgentRunBundle(
         run_id="run_localfixture1",
         objective_id=objective.id,
         objective=objective,
@@ -433,11 +461,11 @@ def test_provision_trial_local_sandbox_uses_provisioned_fixture(monkeypatch):
     seen: dict = {}
 
     def offline_driver(system_prompt, user_prompt, tool_callables):
-        seen["content"] = tool_callables["read-file"](path="summer.py")["content"]
+        seen["content"] = tool_callables["read-file"](path="limiter.py")["content"]
         return json.dumps(
             {
                 "status": "success",
-                "summary": "read summer.py",
+                "summary": "read limiter.py",
                 "changedFiles": [],
                 "proposedFollowups": [],
                 "memoriesToWrite": [],
@@ -466,11 +494,11 @@ async def test_experiment_workflow_resolves_unpinned_arm_refs(env, deps):
     ``spec.baseline`` ``assemble_result`` compares against, and every
     per-family/comparison statistic silently zeroes.
 
-    Real (non-stubbed) ``resolve_experiment_scenarios`` / ``provision_trial``
-    / ``evaluate_trial_hidden`` / ``analyze_experiment`` against the real
-    on-disk registry + agents dir; only the ``AgentRunWorkflow`` sandbox is
+    Real (non-stubbed) ``resolve_experiment_tasks`` / ``provision_trial``
+    / ``evaluate_trial_verifier`` / ``analyze_experiment`` against the real
+    on-disk task source + agents dir; only the ``AgentRunWorkflow`` sandbox is
     stubbed (the ``deps`` fixture) to avoid a live model. Selects the real
-    ``rate-limiter-nochange`` scenario, whose empty ``failToPass`` makes its
+    ``rate-limiter-nochange`` task, whose empty ``failToPass`` makes its
     f2p_rate -- and so ``perFamily["no-change"]["baselineMean"]`` -- vacuously
     ``1.0`` regardless of what the stubbed agent's diff actually did, so a
     non-zero result here can only mean the resolved-ref match worked, not
@@ -483,7 +511,7 @@ async def test_experiment_workflow_resolves_unpinned_arm_refs(env, deps):
         "subject": "agent-spec",
         "baseline": "explore",  # deliberately unpinned
         "candidates": [],
-        "scenarioSelector": {"families": ["no-change"], "count": 1},
+        "taskSelector": {"families": ["no-change"], "count": 1},
         "repetitions": 1,
     }
 
@@ -535,17 +563,17 @@ def test_starters_exist():
 def test_new_activities_registered():
     from bakudo.temporal.activities import (
         analyze_experiment,
-        evaluate_trial_hidden,
+        evaluate_trial_verifier,
         persist_experiment,
         persist_trial,
         provision_trial,
-        resolve_experiment_scenarios,
+        resolve_experiment_tasks,
     )
 
     for fn in (
-        resolve_experiment_scenarios,
+        resolve_experiment_tasks,
         provision_trial,
-        evaluate_trial_hidden,
+        evaluate_trial_verifier,
         persist_trial,
         persist_experiment,
         analyze_experiment,

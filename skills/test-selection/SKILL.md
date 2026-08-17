@@ -4,10 +4,6 @@ description: >-
   Selects the smallest relevant test set for a code change. Use when an agent
   modifies files and needs to decide which tests to run before reporting
   completion.
-compatibility: Requires Python, git, and repository access.
-metadata:
-  version: "1.0.0"
-  owner: "meta-agent"
 ---
 
 # Test Selection

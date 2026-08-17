@@ -49,8 +49,8 @@ class AgentRunInput:
     """Start one agent spec against one objective in one sandbox."""
 
     run_id: str
-    objective: dict[str, Any]      # Objective.to_dict()
-    agent_spec: dict[str, Any]     # AgentSpec schema document
+    objective: dict[str, Any]  # Objective.to_dict()
+    agent_spec: dict[str, Any]  # AgentSpec schema document
     memory_excerpts: list[dict[str, Any]] = field(default_factory=list)
     eval_rubric: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: int = 3600
@@ -68,6 +68,7 @@ class AgentRunOutput:
     # The collected worktree diff. The agent branch does not survive sandbox
     # cleanup, so this is the only re-benchable artifact (issue #28).
     diff: str = ""
+    denied_commands: list[dict[str, str]] = field(default_factory=list)
     # Wall-clock sandbox runtime (F3 fix): threaded through so TrialWorkflow
     # (which only sees this output, not the sandbox activity dict itself) can
     # populate TrialRecord.metrics["duration_s"], matching the sync run_trial
@@ -93,23 +94,17 @@ class EvalInput:
 class PromotionInput:
     """Compare a candidate scorecard against a baseline and decide."""
 
-    candidate: dict[str, Any]              # Scorecard dump
+    candidate: dict[str, Any]  # Scorecard dump
     baseline: dict[str, Any] | None = None
     mutation_kinds: list[str] = field(default_factory=list)
 
 
 @dataclass
 class EvolutionInput:
-    """Score a candidate spec against a baseline over an eval corpus.
-
-    ``corpus_path`` set: score against that legacy YAML corpus. Unset (the
-    default): score against the scenario registry's debugging + no-change
-    families (``bakudo.evals.corpus.load_corpus_from_scenarios``) -- Task 7.
-    """
+    """Score a candidate spec against the configured benchmark tasks."""
 
     baseline_spec: dict[str, Any]
     candidate_spec: dict[str, Any]
-    corpus_path: str | None = None
 
 
 @dataclass
@@ -129,11 +124,11 @@ class ObserveInput:
 
 @dataclass
 class TrialInput:
-    """Run one scenario against one agent version and record a TrialRecord
+    """Run one task against one agent version and record a TrialRecord
     (experiment substrate design doc section 6, Temporal-shaped)."""
 
-    scenario: str                          # scenario ref or bare name
-    agent: str                             # agent ref, NAME or NAME@VERSION
+    task: str  # task ref or bare name
+    agent: str  # agent ref, NAME or NAME@VERSION
     seed: int
     experiment_id: str | None = None
 
@@ -144,7 +139,7 @@ class ExperimentInput:
     children and assemble the comparison result (experiment substrate design
     doc section 7)."""
 
-    spec: dict[str, Any]                   # the validated ExperimentSpec, JSON-shaped
+    spec: dict[str, Any]  # the validated ExperimentSpec, JSON-shaped
     # Set when the meta-agent dispatched this experiment: the id to signal
     # run_completed with so its active_runs drains (mirrors
     # OptimizeInput.tracking_run_id / OptimizationWorkflow._notify_meta).
@@ -158,9 +153,9 @@ class ExperimentInput:
 class OptimizeInput:
     """Drive one optimize objective through scout → attempts → selection."""
 
-    objective: dict[str, Any]              # Objective.to_dict(), type "optimize"
-    scout_spec: dict[str, Any]             # optimize-scout AgentSpec document
-    attempt_spec: dict[str, Any]           # optimize-attempt AgentSpec document
+    objective: dict[str, Any]  # Objective.to_dict(), type "optimize"
+    scout_spec: dict[str, Any]  # optimize-scout AgentSpec document
+    attempt_spec: dict[str, Any]  # optimize-attempt AgentSpec document
     max_rounds: int = 2
     max_approaches: int = 3
     timeout_seconds: int = 3600

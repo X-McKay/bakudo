@@ -5,14 +5,17 @@
 The control-plane domain logic depends only on the light core deps (`pydantic`,
 `pyyaml`, `jsonschema`). With no Temporal/Postgres/FalkorDB/abox/vLLM you can:
 
-- validate AgentSpecs (`bakudo validate-spec`),
-- list skills (`bakudo skills`),
+- diagnose the local configuration without contacting services (`bakudo doctor`),
+- inspect and validate AgentSpecs (`bakudo agent list`, `bakudo agent validate`),
+- list runtime skills (`bakudo skill list`),
 - run an objective end-to-end via the **local sandbox** + **offline driver**
   (`bakudo demo`), which exercises the full lifecycle (bundle → sandbox →
   result → eval → scorecard),
 - run the optimization loop end-to-end (`bakudo optimize --repo ... --title
   ...`) — scout → attempts → gated selection, offline by default,
 - run the control API in-process (`bakudo serve`),
+- load, inspect, publish, and author-verify local task bundles (`bakudo task`;
+  verifier execution requires `BAKUDO_ENV=dev`),
 - run the test suite (`pytest`).
 
 The local sandbox (`abox/local.py`) is **not** a security boundary — it runs the
@@ -36,6 +39,13 @@ offline CLI/demo path calls the local sandbox directly and is unaffected.
 | HTTP control surface | FastAPI/uvicorn | `api` |
 
 Install everything with `pip install -e ".[all,dev]"`.
+
+Run `bakudo doctor` after installation or configuration changes. It validates
+packaged AgentSpecs, runtime skill discovery, the configured task source,
+optional imports, execution posture, and persistence configuration without
+connecting to Postgres or another external service. Use `--json` for tooling
+and `--strict` when warnings should fail a CI/bootstrap check. See
+[cli.md](cli.md) for the complete command and exit-status contract.
 
 ## Operational modes (spec §26)
 
@@ -103,12 +113,31 @@ run with a `budget:*` blocked reason rather than running away.
 
 ## CI and types
 
-`make check` runs the full local gate (`ruff` + `mypy` + `pytest`). The Python
+`make doctor` runs the offline readiness checks; `make check` runs the full
+local gate (`ruff` + `mypy` + `pytest`). The Python
 CI workflow lives at `.github/workflows/ci.yml` and installs the full
 `[all,dev]` extras so the API/Temporal/memory test surface runs in CI.
 Live-integration tests are opt-in: `pytest -m live` (needs live-service env
 vars) and `ABOX_LIVE=1 pytest tests/test_abox_live.py` (needs a trusted,
 warmed abox project).
+
+## Task sources and benchmark artifacts
+
+Bakudo defaults to exactly two packaged smoke tasks. Real experiments should
+set `BAKUDO_TASK_SOURCE` to a checkout of the private `bakudo-benchmarks`
+corpus, or to a locally cached published task bundle:
+
+```bash
+export BAKUDO_TASK_SOURCE="$HOME/git/bakudo-benchmarks"
+bakudo task list --json
+BAKUDO_ENV=dev bakudo task verify rate-limiter-fix
+```
+
+The core repository does not own the benchmark corpus or privileged verifier
+material. Corpus CI validates all 25 tasks through Bakudo's public source,
+verifier, and bundle interfaces. Runtime trial rows persist the source URI,
+corpus revision, task version, bundle digest, and verifier digest in a
+`TaskPin`. See [task-corpus-and-bundles.md](task-corpus-and-bundles.md).
 
 ## Build order (spec §29)
 
@@ -142,8 +171,9 @@ This repo implements the recommended order: (1) schemas, (2) agent-runner,
   never loses a graph write);
 - budget enforcement, observability counters, and API auth.
 
-Remaining work: curating eval corpora from real historical failures for the
-roles the scenario registry doesn't cover yet (e.g. `optimize`) — the
-scenario registry (`evals/scenarios/`, `load_corpus_from_scenarios`) meets
-the 25-case `minEvalCases` bar for debugging/no-change/adversarial-context/
-safety. See `docs/HUMAN_TASKS.md` for the operator handoff.
+Remaining work: defining task-backed environments from real historical
+failures for roles the benchmark task source does not cover yet (for example
+`optimize`). The private `bakudo-benchmarks` corpus meets the 25-case
+`minEvalCases` bar for
+debugging/no-change/adversarial-context/safety; core's two smoke tasks do not.
+See `docs/HUMAN_TASKS.md` for the operator handoff.

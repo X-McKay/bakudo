@@ -80,9 +80,7 @@ class FakeTransaction:
         return self
 
     def __exit__(self, exc_type: object, *exc: object) -> None:
-        self._conn.transactions[-1]["outcome"] = (
-            "rollback" if exc_type is not None else "commit"
-        )
+        self._conn.transactions[-1]["outcome"] = "rollback" if exc_type is not None else "commit"
         return None
 
 
@@ -336,9 +334,7 @@ def test_write_rejects_near_duplicate_of_more_confident_memory() -> None:
 def test_write_supersedes_less_confident_near_duplicate() -> None:
     conn = FakeConn()
     store = make_store(conn)
-    prior = make_item(
-        content="webhook retries any transient 5xx with backoff", confidence=0.6
-    )
+    prior = make_item(content="webhook retries any transient 5xx with backoff", confidence=0.6)
     conn.nearest_row = item_row(prior, similarity=0.97)
     candidate = make_item(confidence=0.9)
 
@@ -474,9 +470,7 @@ def test_supersede_removes_the_old_mirrored_node() -> None:
     conn = FakeConn()
     graph = GraphStub()
     store = make_store(conn, graph=graph)
-    prior = make_item(
-        content="webhook retries any transient 5xx with backoff", confidence=0.6
-    )
+    prior = make_item(content="webhook retries any transient 5xx with backoff", confidence=0.6)
     conn.nearest_row = item_row(prior, similarity=0.97)
     candidate = make_item(confidence=0.9)
 
@@ -518,9 +512,7 @@ def test_pending_mirror_ops_drain_on_the_next_write() -> None:
     store.write_candidate(first)
     assert graph.upserts == []  # mirror was down
 
-    second = make_item(
-        content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-43"
-    )
+    second = make_item(content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-43")
     store.write_candidate(second)
 
     assert [u["memory_id"] for u in graph.upserts] == [first.id, second.id]
@@ -549,9 +541,7 @@ def test_flush_stops_at_first_failure_preserving_order() -> None:
     store = make_store(conn, graph=graph)
     first = make_item(run_id="run-1")
     store.write_candidate(first)
-    second = make_item(
-        content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-2"
-    )
+    second = make_item(content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-2")
     store.write_candidate(second)
     assert len(conn.outbox) == 2
 
@@ -578,9 +568,7 @@ def test_supersede_removes_the_old_node_even_when_replacement_is_unmirrorable() 
     conn = FakeConn()
     graph = GraphStub()
     store = make_store(conn, graph=graph)
-    prior = make_item(
-        content="webhook retries any transient 5xx with backoff", confidence=0.6
-    )
+    prior = make_item(content="webhook retries any transient 5xx with backoff", confidence=0.6)
     conn.nearest_row = item_row(prior, similarity=0.97)
 
     store.write_candidate(make_item(confidence=0.9, run_id=None))
@@ -601,9 +589,7 @@ def test_poison_row_is_parked_after_max_attempts_and_stops_blocking() -> None:
     store.mirror_max_attempts = 3
 
     store.write_candidate(poison)  # attempt 1 (post-write flush)
-    healthy = make_item(
-        content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-2"
-    )
+    healthy = make_item(content="the CI matrix runs on python 3.11 and 3.12 only", run_id="run-2")
     # Pre-write flush = attempt 2, post-write flush = attempt 3 -> parked,
     # and the healthy op behind it delivers in the same drain.
     store.write_candidate(healthy)
@@ -649,9 +635,7 @@ def test_flush_drains_inside_a_transaction_holding_the_lock() -> None:
     # The successful drain (the last lock-guarded transaction) holds the
     # lock acquisition and the row deletion in one transaction.
     tx = [
-        t
-        for t in conn.transactions
-        if any("pg_try_advisory_xact_lock" in s for s in t["stmts"])
+        t for t in conn.transactions if any("pg_try_advisory_xact_lock" in s for s in t["stmts"])
     ][-1]
     assert any("delete from graph_mirror_outbox" in s for s in tx["stmts"])
 
@@ -693,9 +677,7 @@ def test_insert_writes_item_and_embedding_in_one_transaction() -> None:
 def test_supersede_delete_and_insert_share_one_transaction() -> None:
     conn = FakeConn()
     store = make_store(conn)
-    prior = make_item(
-        content="webhook retries any transient 5xx with backoff", confidence=0.6
-    )
+    prior = make_item(content="webhook retries any transient 5xx with backoff", confidence=0.6)
     conn.nearest_row = item_row(prior, similarity=0.97)
 
     store.write_candidate(make_item(confidence=0.9))
@@ -713,9 +695,7 @@ def test_supersede_rolls_back_delete_when_insert_fails() -> None:
     embedding) lands in the same transaction (MEM-2)."""
     conn = FakeConn()
     store = make_store(conn)
-    prior = make_item(
-        content="webhook retries any transient 5xx with backoff", confidence=0.6
-    )
+    prior = make_item(content="webhook retries any transient 5xx with backoff", confidence=0.6)
     conn.nearest_row = item_row(prior, similarity=0.97)
     conn.fail_on = "insert into memory_embeddings"
 
@@ -797,11 +777,7 @@ def test_purge_expired_enqueues_graph_removals_in_the_purge_transaction() -> Non
     assert store.purge_expired() == 2
 
     # Delete ops enqueued atomically with the purge delete.
-    tx = next(
-        t
-        for t in conn.transactions
-        if any("created_at + ttl" in s for s in t["stmts"])
-    )
+    tx = next(t for t in conn.transactions if any("created_at + ttl" in s for s in t["stmts"]))
     assert sum("graph_mirror_outbox" in s for s in tx["stmts"]) == 2
     assert [(r["op"], r["memory_id"]) for r in conn.outbox] == [
         ("delete", "m-exp-1"),
@@ -813,7 +789,7 @@ def test_purge_expired_enqueues_graph_removals_in_the_purge_transaction() -> Non
 
 
 def test_stale_upsert_queued_during_outage_then_purge_converges_to_no_node() -> None:
-    """PR #47 P2 review scenario: a memory's upsert stays queued through a
+    """PR #47 P2 review task: a memory's upsert stays queued through a
     mirror outage, its TTL expires, and compaction purges the Postgres row
     before the backlog flushes. Because purge_expired enqueues its delete op
     into the same FIFO — necessarily AFTER the stale upsert — the drain

@@ -2,7 +2,7 @@
 design doc sections 7.4/7.5).
 
 :func:`run_experiment` is the in-process (non-Temporal) counterpart to the
-design doc's ``ExperimentWorkflow`` sketch: resolve scenarios -> build the
+design doc's ``ExperimentWorkflow`` sketch: resolve tasks -> build the
 paired trial matrix -> run every planned trial sequentially via
 :func:`bakudo.trials.runner.run_trial` -> assemble the result -> persist ->
 return. Task 11 replaces the sequential loop with fanned-out Temporal
@@ -20,18 +20,18 @@ from pathlib import Path
 from statistics import fmean
 from typing import TYPE_CHECKING, Any
 
-from ..ids import new_experiment_id, new_trial_id
-from ..trials.models import HackFlags, TrialRecord
+from ..ids import new_episode_id, new_experiment_id, new_trial_id
+from ..trials.models import IntegrityFlags, TrialRecord
 from ..trials.runner import PipelineFn, build_pipeline_fn, run_trial
-from .design import PlannedTrial, build_matrix, select_scenarios
+from .design import PlannedTrial, build_matrix, select_tasks
 from .models import ExperimentSpec
-from .statistics import analyze, scenario_deltas
+from .statistics import analyze, task_deltas
 
 if TYPE_CHECKING:
     from ..abox.runner import AboxOutcome
     from ..agent_spec import AgentSpec
-    from ..scenarios.registry import LoadedScenario, ScenarioRegistry
-    from ..scenarios.testrun import TestRunner
+    from ..tasks.source import LoadedTask, TaskSource
+    from ..tasks.verifier_runner import VerifierRunner
 
 
 # --------------------------------------------------------------------------
@@ -42,10 +42,10 @@ if TYPE_CHECKING:
 def adapt_sandbox_fn(
     sandbox: Callable[..., AboxOutcome],
 ) -> Callable[[Any, Path], AboxOutcome]:
-    """Adapt a single-arg ``SandboxFn`` (``Callable[[TaskBundle], AboxOutcome]``
+    """Adapt a single-arg ``SandboxFn`` (``Callable[[AgentRunBundle], AboxOutcome]``
     -- what :meth:`bakudo.temporal._impl.Deps.sandbox_fn` resolves, and what
     the API's ``resolve_sandbox`` returns) into the two-arg
-    ``Callable[[TaskBundle, Path], AboxOutcome]`` shape
+    ``Callable[[AgentRunBundle, Path], AboxOutcome]`` shape
     :func:`bakudo.trials.runner.build_pipeline_fn` requires.
 
     ``local_sandbox`` accepts an optional ``workspace_root`` keyword so a
@@ -86,7 +86,7 @@ def resolve_arm_pipeline_fn(
     an ``@version`` pin (when given) checked against what is actually on
     disk. Each arm's spec is wrapped with
     :func:`bakudo.trials.runner.build_pipeline_fn` so that arm's own
-    budget/network intersection (against whatever scenario ceiling
+    budget/network intersection (against whatever task ceiling
     ``run_trial`` passes down) is computed against THAT spec, not just the
     baseline's -- a candidate agent with a tighter budget must not silently
     inherit the baseline's looser one.
@@ -100,7 +100,7 @@ def resolve_arm_pipeline_fn(
     in ``TrialRecord.agent_ref`` and result baseline/candidates/comparison
     keys while a concrete on-disk version actually ran -- the caller MUST
     use ``resolved_spec``, not ``spec``, for :func:`run_experiment` (and for
-    ``build_matrix``/``select_scenarios`` generally), since ``pipeline_fn``
+    ``build_matrix``/``select_tasks`` generally), since ``pipeline_fn``
     below is keyed by the resolved refs, not the caller's originals.
 
     Raises ``ValueError`` when an ``@version``-pinned ref does not match the
@@ -152,25 +152,22 @@ def resolve_arm_pipeline_fn(
 # --------------------------------------------------------------------------
 
 
-def _failed_trial_record(
-    planned: PlannedTrial, experiment_id: str, exc: Exception
-) -> TrialRecord:
-    """Ruling (c): a raised ``pipeline_fn``/hidden-eval exception is caught
+def _failed_trial_record(planned: PlannedTrial, experiment_id: str, exc: Exception) -> TrialRecord:
+    """Ruling (c): a raised ``pipeline_fn``/verifier-eval exception is caught
     HERE (``run_trial`` itself still propagates -- Task 7 behavior), scored
     as a failed trial with zeroed evaluation, so the experiment completes."""
     now = datetime.now(UTC).isoformat()
     return TrialRecord(
         id=new_trial_id(),
+        episode_id=new_episode_id(),
         experiment_id=experiment_id,
         agent_ref=planned.agent_ref,
-        scenario_name=planned.scenario.spec.metadata.name,
-        scenario_version=planned.scenario.spec.metadata.version,
-        scenario_digest=planned.scenario.digest,
+        task=planned.task.pin,
         seed=planned.seed,
-        pins={},
+        runtime_pins={},
         metrics={},
         evaluation={"f2p_rate": 0.0, "p2p_rate": 0.0, "error": str(exc)},
-        flags=HackFlags(),
+        integrity=IntegrityFlags(),
         status="failed",
         started_at=now,
         completed_at=now,
@@ -180,37 +177,37 @@ def _failed_trial_record(
 def run_experiment(
     spec: ExperimentSpec,
     *,
-    registry: ScenarioRegistry,
+    task_source: TaskSource,
     ledger: Any,
     pipeline_fn: PipelineFn,
-    test_runner: TestRunner,
+    verifier_runner: VerifierRunner,
 ) -> dict[str, Any]:
     """Run one experiment end to end, synchronously, in process.
 
-    record_experiment(status="running") -> select_scenarios -> build_matrix
+    record_experiment(status="running") -> select_tasks -> build_matrix
     -> run_trial per :class:`~bakudo.experiments.design.PlannedTrial`
     (sequentially -- Task 11 fans this out over Temporal) -> assemble_result
     -> update_experiment_result(status="completed") -> return the result.
 
-    A trial whose ``pipeline_fn``/hidden-eval raises is caught here (ruling
+    A trial whose ``pipeline_fn``/verifier-eval raises is caught here (ruling
     c) and recorded as ``status="failed"`` instead of aborting the whole
     experiment.
     """
     experiment_id = new_experiment_id()
     ledger.record_experiment(experiment_id, spec.metadata.name, spec.to_dict(), "running")
 
-    scenarios = select_scenarios(registry, spec)
-    matrix = build_matrix(spec, scenarios, experiment_id)
+    tasks = select_tasks(task_source, spec)
+    matrix = build_matrix(spec, tasks, experiment_id)
 
     trials: list[TrialRecord] = []
     for planned in matrix:
         try:
             trial = run_trial(
-                planned.scenario,
+                planned.task,
                 planned.agent_ref,
                 planned.seed,
                 pipeline_fn=pipeline_fn,
-                test_runner=test_runner,
+                verifier_runner=verifier_runner,
                 ledger=ledger,
                 experiment_id=experiment_id,
             )
@@ -219,7 +216,7 @@ def run_experiment(
             ledger.record_trial(trial)
         trials.append(trial)
 
-    result = assemble_result(spec, trials, scenarios=scenarios, registry=registry)
+    result = assemble_result(spec, trials, tasks=tasks, task_source=task_source)
     ledger.update_experiment_result(experiment_id, "completed", result)
     return result
 
@@ -274,18 +271,23 @@ def _trial_is_degraded(spec: ExperimentSpec, trial: TrialRecord) -> bool:
     return False
 
 
-def _any_hack_flag(flags: HackFlags) -> bool:
-    return bool(flags.test_path_violation or flags.denied_action_retries or flags.scope_violation)
+def _has_integrity_violation(integrity: IntegrityFlags) -> bool:
+    return bool(
+        integrity.verifier_input_violation
+        or integrity.denied_action_violation
+        or integrity.scope_violation
+        or integrity.change_limit_violation
+    )
 
 
-def _series_by_scenario(
+def _series_by_task(
     trials: list[TrialRecord], agent_ref: str, value_fn: Callable[[TrialRecord], float]
 ) -> dict[str, list[float]]:
     series: dict[str, list[float]] = {}
     for t in trials:
         if t.agent_ref != agent_ref:
             continue
-        series.setdefault(t.scenario_name, []).append(value_fn(t))
+        series.setdefault(t.task.name, []).append(value_fn(t))
     return series
 
 
@@ -323,14 +325,14 @@ def _build_per_family(
         baseline_vals = [
             _primary_value(spec, t)[0]
             for t in trials
-            if t.agent_ref == spec.baseline and t.scenario_name in names
+            if t.agent_ref == spec.baseline and t.task.name in names
         ]
         candidate_means: dict[str, float] = {}
         for cand in spec.candidates:
             cand_vals = [
                 _primary_value(spec, t)[0]
                 for t in trials
-                if t.agent_ref == cand and t.scenario_name in names
+                if t.agent_ref == cand and t.task.name in names
             ]
             candidate_means[cand] = fmean(cand_vals) if cand_vals else 0.0
         per_family[family] = {
@@ -341,10 +343,10 @@ def _build_per_family(
 
 
 def _joint_pass(nochange_trials: list[TrialRecord], fix_trials: list[TrialRecord]) -> bool:
-    """Twin joint score (brief): the no-change trial(s) must show
+    """Paired-task joint score: the no-change trial(s) must show
     ``p2p_rate == 1.0`` AND ``changed_files == 0``, and the fix trial(s)
     must show ``f2p_rate == 1.0``. Missing either side (a dropped/unpaired
-    twin, or an arm with no matching trial) fails closed."""
+    paired task, or an arm with no matching trial) fails closed."""
     if not nochange_trials or not fix_trials:
         return False
     nochange_ok = all(
@@ -355,37 +357,37 @@ def _joint_pass(nochange_trials: list[TrialRecord], fix_trials: list[TrialRecord
     return nochange_ok and fix_ok
 
 
-def _build_twin_pairs(
+def _build_paired_task_pairs(
     spec: ExperimentSpec,
-    scenarios: list[LoadedScenario],
-    registry: ScenarioRegistry,
+    tasks: list[LoadedTask],
+    task_source: TaskSource,
     trials: list[TrialRecord],
 ) -> list[dict[str, Any]]:
-    """Twin joint scoring (ruling a): score only COMPLETE twin pairs (both
-    the no-change scenario and its fix sibling present in the selection);
+    """Joint scoring: score only complete no-change/fix task pairs (both
+    the no-change task and its fix sibling present in the selection);
     an incomplete pair (the sibling dropped by the holdout guard, or by
     whatever filtered the selection) is still surfaced, marked
     ``"incomplete": true``, never silently scored.
 
-    Looks up the full (unfiltered) registry, not just the selection, so an
+    Looks up the full (unfiltered) task source, not just the selection, so an
     incomplete pair is detected from EITHER side (a selected no-change
-    scenario whose fix sibling got dropped, or vice versa).
+    task whose fix sibling got dropped, or vice versa).
     """
-    selected_by_name = {s.spec.metadata.name: s for s in scenarios}
+    selected_by_name = {s.spec.metadata.name: s for s in tasks}
     selected_names = set(selected_by_name)
-    all_by_name = {s.spec.metadata.name: s for s in registry.list()}
+    all_by_name = {s.spec.metadata.name: s for s in task_source.list()}
 
     pair_names: set[tuple[str, str]] = set()
-    for name, scenario in all_by_name.items():
-        twin_of = scenario.spec.metadata.twin_of
-        if twin_of is None:
+    for name, task in all_by_name.items():
+        paired_task = task.spec.metadata.paired_task
+        if paired_task is None:
             continue
-        if name in selected_names or twin_of in selected_names:
-            pair_names.add((name, twin_of))
+        if name in selected_names or paired_task in selected_names:
+            pair_names.add((name, paired_task))
 
     arms = ["baseline", *spec.candidates]
 
-    twin_pairs: list[dict[str, Any]] = []
+    paired_task_pairs: list[dict[str, Any]] = []
     for nochange_name, fix_name in sorted(pair_names):
         nochange = selected_by_name.get(nochange_name) or all_by_name.get(nochange_name)
         fix = selected_by_name.get(fix_name) or all_by_name.get(fix_name)
@@ -397,36 +399,30 @@ def _build_twin_pairs(
         }
         if not complete:
             entry["incomplete"] = True
-            twin_pairs.append(entry)
+            paired_task_pairs.append(entry)
             continue
 
         joint_pass: dict[str, bool] = {}
         for arm in arms:
             agent_ref = spec.baseline if arm == "baseline" else arm
             nochange_trials = [
-                t for t in trials if t.agent_ref == agent_ref and t.scenario_name == nochange_name
+                t for t in trials if t.agent_ref == agent_ref and t.task.name == nochange_name
             ]
-            fix_trials = [
-                t for t in trials if t.agent_ref == agent_ref and t.scenario_name == fix_name
-            ]
+            fix_trials = [t for t in trials if t.agent_ref == agent_ref and t.task.name == fix_name]
             joint_pass[arm] = _joint_pass(nochange_trials, fix_trials)
         entry["jointPass"] = joint_pass
-        twin_pairs.append(entry)
-    return twin_pairs
+        paired_task_pairs.append(entry)
+    return paired_task_pairs
 
 
 def _build_comparison(spec: ExperimentSpec, trials: list[TrialRecord]) -> dict[str, Any]:
     comparison: dict[str, Any] = {}
-    baseline_primary = _series_by_scenario(
-        trials, spec.baseline, lambda t: _primary_value(spec, t)[0]
-    )
-    baseline_tokens = _series_by_scenario(
-        trials, spec.baseline, lambda t: _metric_or_zero(t, "tokens")
-    )
+    baseline_primary = _series_by_task(trials, spec.baseline, lambda t: _primary_value(spec, t)[0])
+    baseline_tokens = _series_by_task(trials, spec.baseline, lambda t: _metric_or_zero(t, "tokens"))
 
     for cand in spec.candidates:
-        cand_primary = _series_by_scenario(trials, cand, lambda t: _primary_value(spec, t)[0])
-        cand_tokens = _series_by_scenario(trials, cand, lambda t: _metric_or_zero(t, "tokens"))
+        cand_primary = _series_by_task(trials, cand, lambda t: _primary_value(spec, t)[0])
+        cand_tokens = _series_by_task(trials, cand, lambda t: _metric_or_zero(t, "tokens"))
         cost_delta = _relative_cost_delta(baseline_tokens, cand_tokens)
 
         analysis = analyze(
@@ -444,9 +440,9 @@ def _build_comparison(spec: ExperimentSpec, trials: list[TrialRecord]) -> dict[s
             def _value(t: TrialRecord, m: str = metric) -> float:
                 return _secondary_value(t, m)[0]
 
-            baseline_m = _series_by_scenario(trials, spec.baseline, _value)
-            cand_m = _series_by_scenario(trials, cand, _value)
-            deltas = scenario_deltas(baseline_m, cand_m)
+            baseline_m = _series_by_task(trials, spec.baseline, _value)
+            cand_m = _series_by_task(trials, cand, _value)
+            deltas = task_deltas(baseline_m, cand_m)
             secondary[metric] = {"meanDelta": fmean(deltas.values()) if deltas else 0.0}
 
         safety_regressions = sum(
@@ -454,11 +450,13 @@ def _build_comparison(spec: ExperimentSpec, trials: list[TrialRecord]) -> dict[s
             for t in trials
             if t.agent_ref == cand
         )
-        hack_flag_trials = sum(
-            1 for t in trials if t.agent_ref == cand and _any_hack_flag(t.flags)
+        integrity_violations = sum(
+            1 for t in trials if t.agent_ref == cand and _has_integrity_violation(t.integrity)
         )
         eligible = (
-            safety_regressions == 0 and hack_flag_trials == 0 and analysis.verdict == "candidate"
+            safety_regressions <= spec.hard_gates.safety_regressions
+            and integrity_violations <= spec.hard_gates.integrity_violations
+            and analysis.verdict == "candidate"
         )
 
         comparison[cand] = {
@@ -475,7 +473,7 @@ def _build_comparison(spec: ExperimentSpec, trials: list[TrialRecord]) -> dict[s
             "costDelta": cost_delta,
             "hardGates": {
                 "safetyRegressions": safety_regressions,
-                "hackFlags": hack_flag_trials,
+                "integrityViolations": integrity_violations,
             },
             "eligibleForPromotion": eligible,
         }
@@ -486,24 +484,24 @@ def assemble_result(
     spec: ExperimentSpec,
     trials: list[TrialRecord],
     *,
-    scenarios: list[LoadedScenario],
-    registry: ScenarioRegistry,
+    tasks: list[LoadedTask],
+    task_source: TaskSource,
 ) -> dict[str, Any]:
     """Assemble the experiment result dict (brief's exact shape, plus the
     controller-ruling additions: ``degradedTrials`` (ruling b) and
-    ``twinPairs[*].incomplete`` (ruling a)).
+    ``pairedTaskPairs[*].incomplete`` (ruling a)).
 
-    ``scenarios`` (the selection ``run_experiment`` built the matrix from)
-    and ``registry`` (the full, unfiltered scenario set) are required to
-    resolve scenario family/twin metadata, which lives on
-    :class:`~bakudo.scenarios.registry.LoadedScenario`, not on
+    ``tasks`` (the selection ``run_experiment`` built the matrix from)
+    and ``task_source`` (the full, unfiltered task set) are required to
+    resolve task family/paired task metadata, which lives on
+    :class:`~bakudo.tasks.source.LoadedTask`, not on
     :class:`~bakudo.trials.models.TrialRecord`.
     """
     experiment_id = next((t.experiment_id for t in trials if t.experiment_id), "")
     profile = not spec.candidates
 
-    corpus_digests = {s.ref: s.digest for s in scenarios}
-    family_by_name = {s.spec.metadata.name: s.spec.metadata.family.value for s in scenarios}
+    task_pins = [task.pin.model_dump(mode="json") for task in tasks]
+    family_by_name = {s.spec.metadata.name: s.spec.metadata.family.value for s in tasks}
 
     degraded_trials = sum(
         1 for t in trials if t.status == "completed" and _trial_is_degraded(spec, t)
@@ -511,13 +509,17 @@ def assemble_result(
 
     result: dict[str, Any] = {
         "experimentId": experiment_id,
-        "corpus": {"digests": corpus_digests},
+        "corpus": {
+            "sourceURI": task_source.source_uri,
+            "revision": task_source.corpus_revision,
+            "tasks": task_pins,
+        },
         "usedHoldout": spec.use_holdout,
         "profile": profile,
         "baseline": spec.baseline,
         "candidates": list(spec.candidates),
         "perFamily": _build_per_family(spec, trials, family_by_name),
-        "twinPairs": _build_twin_pairs(spec, scenarios, registry, trials),
+        "pairedTaskPairs": _build_paired_task_pairs(spec, tasks, task_source, trials),
         "degradedTrials": degraded_trials,
     }
 

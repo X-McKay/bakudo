@@ -18,15 +18,15 @@ from dataclasses import dataclass
 from .. import ids
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome
+from ..agent_run_bundle import AgentRunBundle, budget_from_spec
 from ..agent_spec import AgentSpec
-from ..bundle import TaskBundle, budget_from_spec
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, EvalResult, Scorecard, assemble_suite
 from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
 from ..registry.ledger import Ledger
 from ..runner.result import RunResult
 
-SandboxFn = Callable[[TaskBundle], AboxOutcome]
+SandboxFn = Callable[[AgentRunBundle], AboxOutcome]
 
 
 @dataclass
@@ -57,7 +57,7 @@ def run_objective(
     sandbox = sandbox or local_sandbox
     run_id = run_id or ids.run_id()
 
-    bundle = TaskBundle(
+    bundle = AgentRunBundle(
         run_id=run_id,
         objective_id=objective.id,
         objective=objective,
@@ -120,6 +120,4 @@ def run_objective(
     scorecard = Scorecard.from_results(eval_results)
 
     ledger.finish_run(run_id, RunPhase.completed, outcome.result)
-    return PipelineResult(
-        run_id, RunPhase.completed, result, eval_results, scorecard, outcome
-    )
+    return PipelineResult(run_id, RunPhase.completed, result, eval_results, scorecard, outcome)

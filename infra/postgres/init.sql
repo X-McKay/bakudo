@@ -210,8 +210,8 @@ create table if not exists graph_mirror_outbox (
 );
 
 -- Trials (experiment substrate design doc section 6): one agent-version run
--- of one scenario version, with its metrics, evaluation, and hack-detection
--- flags. Insert-only — a trial's outcome is immutable once recorded.
+-- of one environment episode, with immutable task provenance, metrics,
+-- evaluation, and integrity violations. Insert-only.
 --
 -- CANONICAL DDL — mirrored by _TRIALS_DDL in
 -- src/bakudo/registry/postgres_ledger.py, which self-migrates existing
@@ -219,18 +219,17 @@ create table if not exists graph_mirror_outbox (
 -- sync.
 create table if not exists trials (
   id text primary key,
+  episode_id text not null,
   experiment_id text,
   run_id text,
   objective_id text,
   agent_ref text not null,
-  scenario_name text not null,
-  scenario_version integer not null,
-  scenario_digest text not null,
+  task_pin jsonb not null,
   seed bigint not null,
-  pins jsonb not null default '{}'::jsonb,
+  runtime_pins jsonb not null default '{}'::jsonb,
   metrics jsonb not null default '{}'::jsonb,
   evaluation jsonb not null default '{}'::jsonb,
-  flags jsonb not null default '{}'::jsonb,
+  integrity jsonb not null default '{}'::jsonb,
   status text not null,
   started_at timestamptz,
   completed_at timestamptz,
@@ -240,7 +239,7 @@ create index if not exists trials_experiment_idx on trials (experiment_id);
 
 -- Experiments (experiment substrate design doc section 7): a
 -- baseline-vs-candidate (or, with an empty candidates list, baseline-only
--- profile) comparison over a scenario selection. Recorded once at creation
+-- profile) comparison over a task selection. Recorded once at creation
 -- (status e.g. "running"), then mutated in place to its terminal
 -- status/result once the trial matrix's statistics pass completes.
 --

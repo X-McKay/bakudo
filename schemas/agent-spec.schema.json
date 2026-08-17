@@ -90,7 +90,11 @@
     },
     "skills": {
       "type": "array",
-      "items": { "type": "string", "description": "name@semver-range, e.g. test-selection@^1.0" }
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+        "description": "Exact skill package name, e.g. test-selection"
+      }
     },
     "mcpServers": {
       "type": "array",

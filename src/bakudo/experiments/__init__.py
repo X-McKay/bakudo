@@ -1,14 +1,14 @@
 """The ExperimentSpec object model and paired trial-matrix design (experiment
 substrate design doc section 7)."""
 
-from .design import PlannedTrial, build_matrix, select_scenarios, trial_seed
+from .design import PlannedTrial, build_matrix, select_tasks, trial_seed
 from .models import (
     DecisionPolicy,
     ExperimentMetadata,
     ExperimentSpec,
     HardGates,
     MetricsBlock,
-    ScenarioSelector,
+    TaskSelector,
 )
 
 __all__ = [
@@ -18,8 +18,8 @@ __all__ = [
     "HardGates",
     "MetricsBlock",
     "PlannedTrial",
-    "ScenarioSelector",
+    "TaskSelector",
     "build_matrix",
-    "select_scenarios",
+    "select_tasks",
     "trial_seed",
 ]

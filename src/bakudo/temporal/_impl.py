@@ -18,22 +18,22 @@ from .. import __version__ as bakudo_version
 from .. import ids, paths
 from ..abox.local import local_sandbox
 from ..abox.runner import AboxOutcome, AboxRunner
+from ..agent_run_bundle import AgentRunBundle, Budget, MemoryExcerpt
 from ..agent_spec import AgentSpec, parse_spec
-from ..bundle import Budget, MemoryExcerpt, TaskBundle
 from ..curriculum import build_default_collector, generate_objectives
 from ..curriculum.collectors import SignalCollector
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, Scorecard, assemble_suite, decide
-from ..evals.corpus import CaseRun, load_corpus, load_corpus_from_scenarios
+from ..evals.corpus import CaseRun, load_corpus_from_tasks
 from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
 from ..memory.compaction import compact
 from ..memory.semantic import SemanticMemoryStore
 from ..registry import InMemoryLedger, RunPhase, RunRecord
 from ..registry.ledger import Ledger
-from ..runner.result import RunResult, RunStatus
-from ..scenarios.provision import provision
-from ..scenarios.testrun import TestRunner, TestRunResult
+from ..runner.result import RunResult
+from ..tasks.provision import provision
+from ..tasks.verifier_runner import VerificationResult, VerifierRunner
 from ..trials.models import TrialRecord
 from .shared import (
     AgentRunInput,
@@ -45,10 +45,10 @@ from .shared import (
 )
 
 if TYPE_CHECKING:
-    from ..scenarios.registry import ScenarioRegistry
+    from ..tasks.source import TaskSource
 
-SandboxFn = Callable[[TaskBundle], AboxOutcome]
-ScenarioRegistryFn = Callable[[], "ScenarioRegistry"]
+SandboxFn = Callable[[AgentRunBundle], AboxOutcome]
+TaskSourceFn = Callable[[], "TaskSource"]
 
 # How to turn a sandbox-less deployment into a sandboxed one (TMP-13). Shared
 # by the fail-fast RuntimeError below and the worker's startup posture log
@@ -58,68 +58,63 @@ SANDBOX_REMEDIATION = (
     "the worker and set BAKUDO_SANDBOX=abox (see infra/docker-compose.yml)."
 )
 
-# Mirrors SANDBOX_REMEDIATION: single source of truth for the hidden-eval
-# fail-closed message, shared by Deps.resolve_hidden_eval_fn (runtime) and
+# Mirrors SANDBOX_REMEDIATION: single source of truth for the verifier-eval
+# fail-closed message, shared by Deps.resolve_verifier_eval_fn (runtime) and
 # any future worker startup posture log, so the two can never drift.
-HIDDEN_EVAL_REMEDIATION = (
-    "grading hidden tests outside BAKUDO_ENV=dev requires a resolvable "
+VERIFIER_EVAL_REMEDIATION = (
+    "grading verifier tests outside BAKUDO_ENV=dev requires a resolvable "
     "sandbox posture: set BAKUDO_ENV=dev to use the local (host-executing, "
     "dev-only) test runner, or BAKUDO_SANDBOX=abox to grade inside a real "
-    "abox guest (bakudo.abox.hidden_bench.abox_test_runner), or inject "
-    "Deps.hidden_eval_fn with a trusted runner."
+    "abox guest (bakudo.abox.verifier_bench.abox_verifier_runner), or inject "
+    "Deps.verifier_eval_fn with a trusted runner."
 )
 
 
 def resolve_sandbox_mode() -> str | None:
-    """The configured sandbox mode: ``BAKUDO_SANDBOX``, honouring the
-    backwards-compatible ``BAKUDO_USE_ABOX=1`` alias; ``None`` when unset.
+    """Return the configured ``BAKUDO_SANDBOX`` mode, or ``None`` when unset.
 
     The single source of truth for mode resolution — :meth:`Deps.sandbox_fn`
     (runtime behavior) and the worker's startup posture log both use it.
     """
-    mode = os.environ.get("BAKUDO_SANDBOX")
-    if mode is None and os.environ.get("BAKUDO_USE_ABOX") == "1":
-        return "abox"
-    return mode
+    return os.environ.get("BAKUDO_SANDBOX")
 
 
-def _default_scenario_registry() -> ScenarioRegistry:
-    """The real, on-disk scenario registry (``paths.scenarios_dir()``).
+def _default_task_source() -> TaskSource:
+    """Resolve the configured runtime task source.
 
-    Assigned as ``Deps.scenario_registry_fn``'s default *value* (a function
+    Assigned as ``Deps.task_source_fn``'s default *value* (a function
     reference, not a call) so no directory I/O happens at ``Deps()``
     construction/import time -- only when an activity actually resolves the
-    registry.
+    source.
     """
-    from .. import paths
-    from ..scenarios.registry import ScenarioRegistry
+    from ..tasks.source import default_task_source
 
-    return ScenarioRegistry(paths.scenarios_dir())
+    return default_task_source()
 
 
-def _default_hidden_eval_fn(workspace: Any, command: str) -> TestRunResult:
-    """Fail-closed default hidden-test runner (mirrors ``Deps.sandbox_fn``'s
+def _default_verifier_eval_fn(workspace: Any, command: str) -> VerificationResult:
+    """Fail-closed default verifier-test runner (mirrors ``Deps.sandbox_fn``'s
     resolution pattern, :func:`resolve_sandbox_mode`).
 
     ``BAKUDO_ENV=dev`` opts into the local, host-executing runner (the same
     one ``bakudo trial run``/``bakudo experiment run`` use in dev mode).
     Otherwise, ``resolve_sandbox_mode() == "abox"`` opts into the real
-    abox-backed guest runner (:func:`bakudo.abox.hidden_bench.abox_test_runner`,
+    abox-backed guest runner (:func:`bakudo.abox.verifier_bench.abox_verifier_runner`,
     Task 8) -- the same posture check ``Deps.sandbox_fn`` uses for the agent
-    sandbox itself, so hidden-test grading and agent execution can never
+    sandbox itself, so verifier-test grading and agent execution can never
     silently disagree about whether abox is the live boundary. Any other
     posture refuses rather than silently executing untrusted diff-adjacent
     code on the host.
     """
     if os.environ.get("BAKUDO_ENV") == "dev":
-        from ..scenarios.testrun import local_test_runner
+        from ..tasks.verifier_runner import local_verifier_runner
 
-        return local_test_runner(workspace, command)
+        return local_verifier_runner(workspace, command)
     if resolve_sandbox_mode() == "abox":
-        from ..abox.hidden_bench import abox_test_runner
+        from ..abox.verifier_bench import abox_verifier_runner
 
-        return abox_test_runner(workspace, command)
-    raise RuntimeError(HIDDEN_EVAL_REMEDIATION)
+        return abox_verifier_runner(workspace, command)
+    raise RuntimeError(VERIFIER_EVAL_REMEDIATION)
 
 
 @dataclass
@@ -134,20 +129,20 @@ class Deps:
     # ((diff, bench_command) -> (before_s, after_s)); None resolves the
     # fresh-sandbox abox measurer when the abox sandbox is active.
     bench_measure: Callable[[str, str], tuple[float, float]] | None = None
-    # Experiment substrate (Task 11): a factory returning a ScenarioRegistry
-    # (never the registry itself -- constructing one does directory I/O, so
+    # A factory returning a TaskSource (never a source instance -- resolving
+    # one may perform directory or archive I/O, so
     # activities call this fresh rather than sharing a stale instance across
-    # a long-lived worker process) and the hidden-test TestRunner. Both
+    # a long-lived worker process) and the verifier-test VerifierRunner. Both
     # default to real, env/paths-driven behavior (see the module-level
     # functions above) so tests are the only callers that need to override
     # them.
-    scenario_registry_fn: ScenarioRegistryFn = _default_scenario_registry
-    hidden_eval_fn: TestRunner = _default_hidden_eval_fn
+    task_source_fn: TaskSourceFn = _default_task_source
+    verifier_eval_fn: VerifierRunner = _default_verifier_eval_fn
     # Task 7: threaded into build_pipeline_fn's run_objective_fn param by
-    # _scenario_case_run_fn (the scenario-backed evolve default). None (the
+    # _task_case_run_fn (the task-backed evolve default). None (the
     # production default) resolves to the real
     # bakudo.control.pipeline.run_objective there; tests inject a stub so an
-    # evolution run over the scenario-backed default corpus stays offline.
+    # evolution run over the task-backed default corpus stays offline.
     run_objective_fn: Callable[..., Any] | None = None
 
     def sandbox_fn(self) -> SandboxFn:
@@ -202,8 +197,8 @@ def configure(
     sandbox: SandboxFn | None = None,
     memory: object | None = None,
     collector: SignalCollector | None = None,
-    scenario_registry_fn: ScenarioRegistryFn | None = None,
-    hidden_eval_fn: TestRunner | None = None,
+    task_source_fn: TaskSourceFn | None = None,
+    verifier_eval_fn: VerifierRunner | None = None,
 ) -> None:
     """Inject real dependencies (called by the worker entrypoint)."""
     if ledger is not None:
@@ -214,33 +209,29 @@ def configure(
         DEPS.memory = memory
     if collector is not None:
         DEPS.collector = collector
-    if scenario_registry_fn is not None:
-        DEPS.scenario_registry_fn = scenario_registry_fn
-    if hidden_eval_fn is not None:
-        DEPS.hidden_eval_fn = hidden_eval_fn
+    if task_source_fn is not None:
+        DEPS.task_source_fn = task_source_fn
+    if verifier_eval_fn is not None:
+        DEPS.verifier_eval_fn = verifier_eval_fn
 
 
-def _budget_for(spec: AgentSpec, timeout_seconds: int) -> Budget:
-    """Budget for a bundle: ``bakudo.bundle.budget_from_spec`` when it exists
-    (landing separately), else the current input-timeout behavior."""
-    from .. import bundle as bundle_mod
+def _budget_for(spec: AgentSpec) -> Budget:
+    """Build the worker budget through the single canonical constructor."""
+    from .. import agent_run_bundle
 
-    budget_from_spec = getattr(bundle_mod, "budget_from_spec", None)
-    if callable(budget_from_spec):
-        return budget_from_spec(spec)
-    return Budget(timeoutSeconds=timeout_seconds)
+    return agent_run_bundle.budget_from_spec(spec)
 
 
-def _bundle_from_input(inp: AgentRunInput) -> TaskBundle:
+def _bundle_from_input(inp: AgentRunInput) -> AgentRunBundle:
     spec = parse_spec(inp.agent_spec)
-    return TaskBundle(
+    return AgentRunBundle(
         run_id=inp.run_id,
         objective_id=inp.objective["id"],
         objective=Objective.model_validate(inp.objective),
         agent_spec=spec,
         memory_excerpts=[MemoryExcerpt.model_validate(m) for m in inp.memory_excerpts],
         eval_rubric=inp.eval_rubric,
-        budget=_budget_for(spec, inp.timeout_seconds),
+        budget=_budget_for(spec),
     )
 
 
@@ -286,9 +277,7 @@ def load_agent_spec(name: str, run_id: str | None = None) -> dict | None:
     canary_version = getattr(ledger, "canary_version", None)
     if run_id is not None and callable(canary_version):
         canary = canary_version(name)
-        if canary is not None and routes_to_canary(
-            run_id, PromotionPolicy().canary_percent
-        ):
+        if canary is not None and routes_to_canary(run_id, PromotionPolicy().canary_percent):
             doc = _doc(canary)
             if doc is not None:
                 return doc
@@ -340,7 +329,7 @@ def _sandbox_accepts_cancel_event(fn: object) -> bool:
 
 
 def run_sandbox(bundle_dict: dict, cancel_event: object | None = None) -> dict:
-    bundle = TaskBundle.model_validate(bundle_dict)
+    bundle = AgentRunBundle.model_validate(bundle_dict)
     fn: Any = DEPS.sandbox_fn()
     if cancel_event is not None and _sandbox_accepts_cancel_event(fn):
         outcome = fn(bundle, cancel_event=cancel_event)
@@ -439,8 +428,10 @@ def decide_promotion(inp: PromotionInput) -> dict:
     candidate = Scorecard.model_validate(inp.candidate)
     baseline = Scorecard.model_validate(inp.baseline) if inp.baseline else None
     decision = decide(
-        candidate, baseline,
-        policy=PromotionPolicy(), mutation_kinds=inp.mutation_kinds,
+        candidate,
+        baseline,
+        policy=PromotionPolicy(),
+        mutation_kinds=inp.mutation_kinds,
     )
     # Record + transition the candidate version through the §1 state machine.
     apply_decision(DEPS.ledger, decision)
@@ -505,13 +496,16 @@ def check_canary_graduation(name: str) -> dict:
     canary_runs = ledger.completed_runs(canary_ref, limit=window)
     if len(canary_runs) < window:
         return {
-            "status": "insufficient-runs", "agent": canary_ref,
-            "runs": len(canary_runs), "required": window,
+            "status": "insufficient-runs",
+            "agent": canary_ref,
+            "runs": len(canary_runs),
+            "required": window,
         }
     canary_stats = _window_stats(ledger, canary_runs)
     if canary_stats is None or canary_stats["runs"] < window:
         return {
-            "status": "insufficient-runs", "agent": canary_ref,
+            "status": "insufficient-runs",
+            "agent": canary_ref,
             "runs": 0 if canary_stats is None else canary_stats["runs"],
             "required": window,
         }
@@ -533,10 +527,7 @@ def check_canary_graduation(name: str) -> dict:
         cases_total=canary_stats["runs"],
     )
 
-    hard_failure = (
-        canary_stats["safety_regressions"] > 0
-        or canary_stats["critical_failures"] > 0
-    )
+    hard_failure = canary_stats["safety_regressions"] > 0 or canary_stats["critical_failures"] > 0
     worse = baseline_mean is not None and canary_stats["mean_score"] < baseline_mean
 
     if hard_failure or worse:
@@ -559,8 +550,11 @@ def check_canary_graduation(name: str) -> dict:
             return {"status": "already-resolved", "agent": canary_ref}
         ledger.record_promotion(
             PromotionDecision(
-                Decision.reject, reason, card,
-                status="rejected", approved_by="canary-graduation",
+                Decision.reject,
+                reason,
+                card,
+                status="rejected",
+                approved_by="canary-graduation",
                 resolved_at=datetime.now(UTC),
             )
         )
@@ -569,8 +563,11 @@ def check_canary_graduation(name: str) -> dict:
     reason = (
         f"canary graduated: mean score {canary_stats['mean_score']:.3f} over "
         f"{canary_stats['runs']} runs"
-        + (f" >= active baseline {baseline_mean:.3f}" if baseline_mean is not None
-           else " with no active baseline runs")
+        + (
+            f" >= active baseline {baseline_mean:.3f}"
+            if baseline_mean is not None
+            else " with no active baseline runs"
+        )
     )
     # Compare-and-set on the canary status (TMP-23): two runs finishing near-
     # simultaneously both reach here, but only the first flips canary->active;
@@ -583,69 +580,35 @@ def check_canary_graduation(name: str) -> dict:
         return {"status": "already-resolved", "agent": canary_ref}
     if active is not None:
         ledger.set_version_status(
-            name, active.version, "archived",
+            name,
+            active.version,
+            "archived",
             reason=f"superseded by {canary_ref}",
         )
     ledger.record_promotion(
         PromotionDecision(
-            Decision.promote, reason, card,
-            status="approved", approved_by="canary-graduation",
+            Decision.promote,
+            reason,
+            card,
+            status="approved",
+            approved_by="canary-graduation",
             resolved_at=datetime.now(UTC),
         )
     )
     return {"status": "graduated", "agent": canary_ref, "reason": reason}
 
 
-def _run_case(spec: AgentSpec, objective: Objective) -> CaseRun:
-    """Run one eval case in the configured sandbox and shape it for grading.
-
-    Only valid for a legacy YAML corpus's cases, whose ``objective.repo`` is
-    a real, sandbox-resolvable checkout (a name ``resolve_repo`` maps to a
-    path, or an absolute path outright). A scenario-backed case's
-    ``objective.repo`` is a placeholder -- see :func:`_scenario_case_run_fn`.
-    """
-    bundle = TaskBundle(
-        run_id=ids.run_id(),
-        objective_id=objective.id,
-        objective=objective,
-        agent_spec=spec,
-        budget=Budget(timeoutSeconds=spec.sandbox.timeout_seconds),
-    )
-    outcome = DEPS.sandbox_fn()(bundle)
-    if outcome.result:
-        result = RunResult.model_validate(outcome.result)
-    else:
-        result = RunResult(
-            run_id=bundle.run_id, agent=spec.ref, objective_id=objective.id,
-            status=RunStatus.failed, summary="no result produced",
-        )
-    return CaseRun(
-        result=result, diff=outcome.diff, denied_commands=outcome.denied_commands
-    )
-
-
-def _scenario_case_run_fn(spec: AgentSpec, objective: Objective) -> CaseRun:
-    """Run one *scenario-backed* eval case for ``spec`` via the trial
-    substrate (Task 7's ``bakudo.evals.corpus.scenario_run_fn``, bridging to
-    ``bakudo.trials.runner.run_trial``).
-
-    The scenario-aware counterpart to :func:`_run_case`: a scenario-backed
-    ``EvalCase``'s ``objective.repo`` is a placeholder (the scenario's own,
-    unprovisioned directory -- see ``load_corpus_from_scenarios``'s
-    docstring), so only ``run_trial``'s own fresh provisioning can run it
-    correctly (fixture only; ``hidden``/``reference`` never touch the
-    workspace). ``DEPS.run_objective_fn`` (``None`` in production) lets
-    tests keep the scenario-backed evolve default fully offline by injecting
-    a stub in place of the real ``bakudo.control.pipeline.run_objective``.
-    """
-    from ..evals.corpus import scenario_run_fn
+def _task_case_run_fn(spec: AgentSpec, objective: Objective, source: TaskSource) -> CaseRun:
+    """Run one task-backed eval case through the trial substrate."""
+    from ..evals.corpus import task_run_fn
     from ..trials.runner import build_pipeline_fn
 
-    def sandbox_fn(bundle: TaskBundle, repo_path: Path) -> AboxOutcome:
+    def sandbox_fn(bundle: AgentRunBundle, repo_path: Path) -> AboxOutcome:
         return DEPS.sandbox_fn()(bundle)
 
-    run = scenario_run_fn(
-        test_runner=DEPS.hidden_eval_fn,
+    run = task_run_fn(
+        source=source,
+        verifier_runner=DEPS.verifier_eval_fn,
         pipeline_factory=lambda: build_pipeline_fn(
             spec, sandbox_fn=sandbox_fn, run_objective_fn=DEPS.run_objective_fn
         ),
@@ -654,25 +617,15 @@ def _scenario_case_run_fn(spec: AgentSpec, objective: Objective) -> CaseRun:
 
 
 def run_agent_evolution(inp: EvolutionInput) -> dict:
-    """Score a candidate spec against a baseline over an eval corpus (§15).
-
-    ``inp.corpus_path`` set: the legacy YAML corpus, run via ``_run_case``
-    (unchanged). Unset (the default, Task 7): the scenario registry's
-    debugging + no-change families
-    (``bakudo.evals.corpus.load_corpus_from_scenarios``), run via
-    ``_scenario_case_run_fn`` since a scenario-backed case can only be run
-    correctly through the trial substrate's own provisioning.
-    """
+    """Score a candidate spec against a baseline over benchmark tasks (§15)."""
     baseline = parse_spec(inp.baseline_spec)
     candidate = parse_spec(inp.candidate_spec)
-    if inp.corpus_path:
-        _, cases = load_corpus(inp.corpus_path)
-        run_fn = _run_case
-    else:
-        cases = load_corpus_from_scenarios(
-            families=["debugging", "no-change"], registry=DEPS.scenario_registry_fn()
-        )
-        run_fn = _scenario_case_run_fn
+    source = DEPS.task_source_fn()
+    cases = load_corpus_from_tasks(families=["debugging", "no-change"], source=source)
+
+    def run_fn(spec: AgentSpec, objective: Objective) -> CaseRun:
+        return _task_case_run_fn(spec, objective, source)
+
     outcome = evolve_agent(baseline, candidate, cases, run_fn)
 
     if callable(getattr(DEPS.ledger, "record_promotion", None)):
@@ -731,23 +684,23 @@ def collect_signals(inp: ObserveInput) -> list[dict]:
 
 # --- Experiment substrate (Task 11): trial/experiment activities ---
 #
-# select_scenarios/the scenario registry read the filesystem, so per
-# controller ruling R1 they may never run in workflow code -- every scenario/
+# select_tasks/the task source read the filesystem, so per
+# controller ruling R1 they may never run in workflow code -- every task/
 # agent-spec file I/O below is an activity. ExperimentWorkflow/TrialWorkflow
 # build the deterministic trial matrix themselves from the plain descriptor
 # dicts these activities return, using only the pure
 # bakudo.experiments.design.trial_seed helper.
 
 
-def resolve_experiment_scenarios(input: dict) -> dict:
-    """Resolve an ExperimentSpec's scenario selection AND its arm refs.
+def resolve_experiment_tasks(input: dict) -> dict:
+    """Resolve an ExperimentSpec's task selection AND its arm refs.
 
-    Runs :func:`bakudo.experiments.design.select_scenarios` (registry file
+    Runs :func:`bakudo.experiments.design.select_tasks` (task-source file
     I/O) so ``ExperimentWorkflow`` never has to (R1), and resolves every arm
     ref (``spec.baseline`` + ``spec.candidates``) the same on-disk,
     pinned-version-checked way :func:`provision_trial`
     (``_resolve_trial_agent_spec``) does. Returns
-    ``{"scenarios": [descriptor, ...], "resolvedArms": {raw_ref: resolved_ref}}``.
+    ``{"tasks": [descriptor, ...], "resolvedArms": {raw_ref: resolved_ref}}``.
 
     The arm resolution matters beyond labelling: every ``TrialRecord`` a
     ``TrialWorkflow`` child records carries the RESOLVED ref (whatever
@@ -760,21 +713,21 @@ def resolve_experiment_scenarios(input: dict) -> dict:
     here, keeps the trial matrix's arms and the spec ``analyze_experiment``/
     the persisted experiment row carry in lockstep with what actually ran.
     """
-    from ..experiments.design import select_scenarios
+    from ..experiments.design import select_tasks
     from ..experiments.models import ExperimentSpec
 
     spec = ExperimentSpec.model_validate(input["spec"])
-    registry = DEPS.scenario_registry_fn()
-    scenarios = select_scenarios(registry, spec)
+    source = DEPS.task_source_fn()
+    tasks = select_tasks(source, spec)
     descriptors = [
         {
             "name": s.spec.metadata.name,
             "version": s.spec.metadata.version,
-            "digest": s.digest,
+            "task_pin": s.pin.model_dump(mode="json"),
             "family": s.spec.metadata.family.value,
-            "twin_of": s.spec.metadata.twin_of,
+            "paired_task": s.spec.metadata.paired_task,
         }
-        for s in scenarios
+        for s in tasks
     ]
 
     resolved_arms: dict[str, str] = {}
@@ -783,7 +736,7 @@ def resolve_experiment_scenarios(input: dict) -> dict:
             continue
         resolved_arms[raw_ref] = _resolve_trial_agent_spec(raw_ref).ref
 
-    return {"scenarios": descriptors, "resolvedArms": resolved_arms}
+    return {"tasks": descriptors, "resolvedArms": resolved_arms}
 
 
 def _resolve_trial_agent_spec(agent_ref: str) -> AgentSpec:
@@ -816,38 +769,38 @@ def _resolve_trial_agent_spec(agent_ref: str) -> AgentSpec:
 
 
 def provision_trial(input: dict) -> dict:
-    """Provision a scenario's fixture workspace and derive its Objective.
+    """Provision a task's fixture workspace and derive its Objective.
 
     Mirrors ``run_trial``'s setup half (:mod:`bakudo.trials.runner`) plus
     ``resolve_arm_pipeline_fn``'s spec loading, folded into one activity
-    since both are filesystem-bound: resolves the scenario (by ref/bare
-    name) and the agent spec (pinned, off-disk) via the registry/agents_dir,
-    provisions the scenario into a fresh scratch workspace, derives the
-    Objective, and intersects the scenario's budget/network ceiling against
+    since both are filesystem-bound: resolves the task (by ref/bare
+    name) and the agent spec (pinned, off-disk) via the task source/agents_dir,
+    provisions the task into a fresh scratch workspace, derives the
+    Objective, and intersects the task's budget/network ceiling against
     the agent spec's own (tighten-only, same as ``build_pipeline_fn``) into
     an adjusted agent-spec document ready for ``AgentRunWorkflow``.
 
     NOTE: the scratch workspace is intentionally NOT cleaned up here (unlike
     ``run_trial``'s ``TemporaryDirectory`` context manager) -- it must
-    outlive this activity call across the sandbox run and hidden-eval
+    outlive this activity call across the sandbox run and verifier-eval
     activities that follow in the same TrialWorkflow, which may execute on a
     different worker thread. Left for the OS temp reaper, matching how
     sandbox-side worktrees are not explicitly swept either.
     """
     from ..agent_spec.models import NetworkMode, SpecBudget
-    from ..trials.runner import intersect_budgets, intersect_network, objective_from_scenario
+    from ..trials.runner import intersect_budgets, intersect_network, objective_from_task
 
-    registry = DEPS.scenario_registry_fn()
-    scenario = registry.get(input["scenario"])
+    source = DEPS.task_source_fn()
+    task = source.get(input["task"])
     agent_spec = _resolve_trial_agent_spec(input["agent"])
 
     tmp_root = Path(tempfile.mkdtemp(prefix="bakudo-trial-"))
-    ws = provision(scenario, tmp_root, seed=input["seed"])
-    objective = objective_from_scenario(scenario, ws.repo_path)
+    ws = provision(task, tmp_root, seed=input["seed"])
+    objective = objective_from_task(task, ws.repo_path)
 
-    merged_budget = intersect_budgets(agent_spec.budget, scenario.spec.budgets)
+    merged_budget = intersect_budgets(agent_spec.budget, task.spec.limits)
     merged_network = intersect_network(
-        agent_spec.sandbox.network_mode.value, scenario.spec.environment.network
+        agent_spec.sandbox.network_mode.value, task.spec.environment.network
     )
 
     budget_updates: dict[str, Any] = (
@@ -883,19 +836,13 @@ def provision_trial(input: dict) -> dict:
         # parse_spec inside render_bundle).
         "agent_spec": adjusted_spec.to_dict(),
         "agent_ref": agent_spec.ref,
-        "scenario_name": scenario.spec.metadata.name,
-        "scenario_version": scenario.spec.metadata.version,
-        "scenario_digest": scenario.digest,
-        "budgets": scenario.spec.budgets.model_dump(mode="json"),
-        "network": scenario.spec.environment.network,
-        # Same pins the sync run_trial records (bakudo/trials/runner.py):
-        # {"bakudo": __version__, "scenario_digest_algo": "sha256"} merged
-        # with build_pipeline_fn's PipelineResultLike.pins
-        # ({"model_id": ..., "sandbox_profile": ...}). Built here (not in
+        "task_pin": task.pin.model_dump(mode="json"),
+        "limits": task.spec.limits.model_dump(mode="json"),
+        "network": task.spec.environment.network,
+        # Runtime pins are separate from the immutable TaskPin. Built here (not in
         # workflow code) since it needs the resolved AgentSpec object.
-        "pins": {
+        "runtime_pins": {
             "bakudo": bakudo_version,
-            "scenario_digest_algo": "sha256",
             "model_id": adjusted_spec.model.model_id,
             "sandbox_profile": adjusted_spec.sandbox.profile,
         },
@@ -903,30 +850,32 @@ def provision_trial(input: dict) -> dict:
     }
 
 
-def evaluate_trial_hidden(input: dict) -> dict:
-    """Grade a trial's collected diff against its scenario's hidden tests.
+def evaluate_trial_verifier(input: dict) -> dict:
+    """Grade a trial's collected diff against its task's verifier tests.
 
     Mirrors ``run_trial``'s grading tail (:mod:`bakudo.trials.runner`):
-    :func:`bakudo.trials.hidden.evaluate` plus :func:`compute_hack_flags` and
+    :func:`bakudo.trials.verifier.evaluate` plus :func:`compute_integrity_flags` and
     the expected/actual status comparison, all folded in here since they
-    require the scenario (registry file I/O) that workflow code may not
-    load itself (R1). Uses ``Deps.hidden_eval_fn`` -- fails closed outside
+    require the task (task-source I/O) that workflow code may not
+    load itself (R1). Uses ``Deps.verifier_eval_fn`` -- fails closed outside
     ``BAKUDO_ENV=dev``/``BAKUDO_SANDBOX=abox`` (see
-    :data:`HIDDEN_EVAL_REMEDIATION`).
+    :data:`VERIFIER_EVAL_REMEDIATION`).
     """
-    from ..trials import hidden
-    from ..trials.runner import compute_hack_flags
+    from ..trials import verifier
+    from ..trials.runner import compute_integrity_flags
 
-    registry = DEPS.scenario_registry_fn()
-    scenario = registry.get(input["scenario"])
-    runner: TestRunner = DEPS.hidden_eval_fn
+    source = DEPS.task_source_fn()
+    task = source.get(input["task"])
+    runner: VerifierRunner = DEPS.verifier_eval_fn
 
-    outcome = hidden.evaluate(scenario, input.get("diff") or "", input["seed"], runner)
-    flags = compute_hack_flags(
-        input.get("changed_files") or [], input.get("denied_commands") or [], scenario.spec.expect
+    outcome = verifier.evaluate(task, input.get("diff") or "", input["seed"], runner)
+    integrity = compute_integrity_flags(
+        input.get("changed_files") or [],
+        input.get("denied_commands") or [],
+        task.spec.constraints,
     )
     actual_status = input.get("actual_status")
-    expected_status = scenario.spec.expect.status
+    expected_status = task.spec.constraints.expected_status
     return {
         "f2p_rate": outcome.f2p_rate,
         "p2p_rate": outcome.p2p_rate,
@@ -935,7 +884,7 @@ def evaluate_trial_hidden(input: dict) -> dict:
         "expected_status": expected_status,
         "actual_status": actual_status,
         "status_match": actual_status == expected_status,
-        "hack_flags": flags.model_dump(),
+        "integrity": integrity.model_dump(),
     }
 
 
@@ -960,13 +909,9 @@ def persist_experiment(input: dict) -> None:
     ledger = DEPS.ledger
     status = input["status"]
     if status == "running":
-        ledger.record_experiment(
-            input["experiment_id"], input["name"], input["spec"], status
-        )
+        ledger.record_experiment(input["experiment_id"], input["name"], input["spec"], status)
     else:
-        ledger.update_experiment_result(
-            input["experiment_id"], status, input.get("result") or {}
-        )
+        ledger.update_experiment_result(input["experiment_id"], status, input.get("result") or {})
 
 
 def analyze_experiment(input: dict) -> dict:
@@ -981,9 +926,7 @@ def analyze_experiment(input: dict) -> dict:
     from ..experiments.runner import assemble_result
 
     spec = ExperimentSpec.model_validate(input["spec"])
-    registry = DEPS.scenario_registry_fn()
+    task_source = DEPS.task_source_fn()
     trials = DEPS.ledger.list_trials(input["experiment_id"])
-    scenarios = [
-        registry.get(f"{d['name']}@{d['version']}") for d in input["scenarios"]
-    ]
-    return assemble_result(spec, trials, scenarios=scenarios, registry=registry)
+    tasks = [task_source.get(f"{d['name']}@{d['version']}") for d in input["tasks"]]
+    return assemble_result(spec, trials, tasks=tasks, task_source=task_source)

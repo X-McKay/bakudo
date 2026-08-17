@@ -21,8 +21,8 @@ import time
 from pathlib import Path
 
 from .. import ids
+from ..agent_run_bundle import AgentRunBundle, budget_from_spec
 from ..agent_spec import load_spec_file
-from ..bundle import TaskBundle, budget_from_spec
 from ..curriculum.objective import Objective
 from ..skills import SkillRegistry
 from ..strands_tools import ToolContext, Workspace
@@ -45,14 +45,14 @@ def _exception_chain(exc: BaseException, limit: int = 4) -> str:
     return " (caused by ".join(parts) + ")" * (len(parts) - 1)
 
 
-def _load_bundle(args: argparse.Namespace) -> TaskBundle:
+def _load_bundle(args: argparse.Namespace) -> AgentRunBundle:
     if args.bundle:
         data = json.loads(Path(args.bundle).read_text())
-        return TaskBundle.model_validate(data)
+        return AgentRunBundle.model_validate(data)
 
     spec = load_spec_file(args.spec)
     objective = Objective.model_validate(json.loads(Path(args.objective).read_text()))
-    return TaskBundle(
+    return AgentRunBundle(
         run_id=args.run_id or ids.run_id(),
         objective_id=objective.id,
         objective=objective,
@@ -97,7 +97,9 @@ def run(args: argparse.Namespace) -> int:
     workspace = Workspace(Path(args.workspace))
     skills = SkillRegistry(allowed=spec.skills)
     ctx = ToolContext(
-        workspace=workspace, skills=skills, run_id=bundle.run_id,
+        workspace=workspace,
+        skills=skills,
+        run_id=bundle.run_id,
         memory_query=bundle.memory_query,
     )
 
@@ -138,16 +140,17 @@ def run(args: argparse.Namespace) -> int:
     if not result.changed_files:
         result.changed_files = workspace.changed_files()
     if ctx.denied_commands:
-        result.blocked_reasons.extend(
-            f"denied:{d['reason']}" for d in ctx.denied_commands
-        )
+        result.blocked_reasons.extend(f"denied:{d['reason']}" for d in ctx.denied_commands)
 
     # Self-report observability so the host/evals never grade empty signals
     # (ABOX-10). result.schema.json only allows numeric metrics, so the
     # counters land there; the agent's own metrics keep precedence.
     observability = ctx.observability()
     for key in (
-        "tool_calls", "model_calls", "tokens_used", "memories_retrieved",
+        "tool_calls",
+        "model_calls",
+        "tokens_used",
+        "memories_retrieved",
     ):
         result.metrics.setdefault(key, float(observability[key]))
     result.metrics.setdefault("denied_commands", float(len(ctx.denied_commands)))
@@ -164,7 +167,7 @@ def run(args: argparse.Namespace) -> int:
 
 def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-runner", description=__doc__)
-    parser.add_argument("--bundle", help="Path to a pre-rendered TaskBundle JSON.")
+    parser.add_argument("--bundle", help="Path to a pre-rendered AgentRunBundle JSON.")
     parser.add_argument("--spec", help="Path to the AgentSpec YAML.")
     parser.add_argument("--objective", help="Path to the objective JSON.")
     parser.add_argument(
@@ -172,9 +175,7 @@ def cli(argv: list[str] | None = None) -> int:
         default="/workspace/.agent/result.json",
         help="Where to write result.json.",
     )
-    parser.add_argument(
-        "--workspace", default="/workspace", help="Path to the git worktree."
-    )
+    parser.add_argument("--workspace", default="/workspace", help="Path to the git worktree.")
     parser.add_argument("--run-id", help="Canonical run id (defaults to a fresh ULID).")
     args = parser.parse_args(argv)
 

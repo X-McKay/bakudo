@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from .. import ids
-from ..bundle import TaskBundle
+from ..agent_run_bundle import AgentRunBundle
 from ..runner.agent import OfflineDriver, build_and_run
 from ..runner.result import normalize_result
 from ..skills import SkillRegistry
@@ -55,7 +55,7 @@ def _under_temp_root(path: Path) -> bool:
 
 
 def local_sandbox(
-    bundle: TaskBundle,
+    bundle: AgentRunBundle,
     *,
     offline_driver: OfflineDriver | None = None,
     workspace_root: Path | None = None,
@@ -69,8 +69,8 @@ def local_sandbox(
 
     When no explicit ``workspace_root`` is given, ``bundle.objective.repo``
     is checked for an absolute path to an already-provisioned git workspace
-    (e.g. :func:`bakudo.scenarios.provision.provision`'s output, wired in by
-    :func:`bakudo.trials.runner.objective_from_scenario` /
+    (e.g. :func:`bakudo.tasks.provision.provision`'s output, wired in by
+    :func:`bakudo.trials.runner.objective_from_task` /
     ``bakudo.temporal._impl.provision_trial``) and used in place rather than
     discarded in favor of a fresh, empty throwaway repo -- mirroring
     :meth:`bakudo.abox.runner.AboxRunner.resolve_repo`'s own absolute-path
@@ -89,7 +89,7 @@ def local_sandbox(
 
     F5 fix: in-place reuse is further gated to paths that resolve under the
     system temp root (``tempfile.gettempdir()``) -- exactly where every
-    trial/experiment provisioner (``scenarios.provision.provision``,
+    trial/experiment provisioner (``tasks.provision.provision``,
     ``trials.runner.run_trial``'s ``TemporaryDirectory``,
     ``temporal._impl.provision_trial``'s ``mkdtemp``) actually writes its
     scratch workspaces. Without this, ANY absolute, ``.git``-bearing
@@ -111,7 +111,9 @@ def local_sandbox(
     workspace = Workspace(workspace_root)
     skills = SkillRegistry(allowed=spec.skills)
     ctx = ToolContext(
-        workspace=workspace, skills=skills, run_id=bundle.run_id,
+        workspace=workspace,
+        skills=skills,
+        run_id=bundle.run_id,
         memory_query=bundle.memory_query,
     )
 

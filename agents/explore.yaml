@@ -46,7 +46,7 @@ tools:
   - name: query-memory
 
 skills:
-  - codebase-navigation@^1.0
+  - codebase-navigation
 
 outputContract:
   requiredFiles:

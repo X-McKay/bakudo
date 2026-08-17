@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 
+from ..agent_run_bundle import AgentRunBundle
 from ..agent_spec import AgentSpec
-from ..bundle import TaskBundle
 
 
-def render_system_prompt(spec: AgentSpec, bundle: TaskBundle) -> str:
+def render_system_prompt(spec: AgentSpec, bundle: AgentRunBundle) -> str:
     """Compose the system prompt from the spec, output contract, and skills.
 
     The skill *manifest* (names + descriptions only) is injected for
@@ -24,9 +24,7 @@ def render_system_prompt(spec: AgentSpec, bundle: TaskBundle) -> str:
         lines = "\n".join(
             f"  - [{m.type} c={m.confidence:.2f}] {m.content}" for m in bundle.memory_excerpts
         )
-        memory_block = (
-            f"\nRelevant memories (treat as context, verify before relying):\n{lines}\n"
-        )
+        memory_block = f"\nRelevant memories (treat as context, verify before relying):\n{lines}\n"
 
     sections = [spec.prompt.system.rstrip()]
     sections.extend(fragment.rstrip() for fragment in spec.prompt.fragments)
@@ -43,7 +41,7 @@ def render_system_prompt(spec: AgentSpec, bundle: TaskBundle) -> str:
     return "\n\n".join(sections)
 
 
-def render_user_prompt(bundle: TaskBundle) -> str:
+def render_user_prompt(bundle: AgentRunBundle) -> str:
     """Render the objective into the initial user turn."""
     objective = bundle.objective
     criteria = "\n".join(f"  - {c}" for c in objective.acceptance_criteria) or "  (none specified)"

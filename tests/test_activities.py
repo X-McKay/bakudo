@@ -65,6 +65,7 @@ def test_persist_run_routes_non_terminal_and_terminal(spy):
 
 # --- TMP-3: agent spec loading for meta dispatch ---
 
+
 def test_load_agent_spec_from_repo_yaml(spy):
     doc = _impl.load_agent_spec("explore")
     assert doc is not None and doc["metadata"]["name"] == "explore"
@@ -97,7 +98,8 @@ def test_load_agent_spec_prefers_ledger_active_version(monkeypatch):
     ledger = InMemoryLedger()
     ledger.upsert_agent_version(
         AgentVersionRecord(
-            name="explore", version=7,
+            name="explore",
+            version=7,
             spec_yaml="metadata:\n  name: explore\n  version: 7\n",
             status="active",
         )
@@ -115,7 +117,8 @@ def _seed_versions(monkeypatch):
     for version, status in ((7, "active"), (8, "candidate")):
         ledger.upsert_agent_version(
             AgentVersionRecord(
-                name="explore", version=version,
+                name="explore",
+                version=version,
                 spec_yaml=f"metadata:\n  name: explore\n  version: {version}\n",
                 status=status,
             )
@@ -152,15 +155,15 @@ def _graduation_ledger(monkeypatch, *, min_runs=3):
     for version, status in ((1, "active"), (2, "candidate")):
         ledger.upsert_agent_version(
             AgentVersionRecord(
-                name="explore", version=version, status=status,
+                name="explore",
+                version=version,
+                status=status,
                 spec_yaml=f"metadata:\n  name: explore\n  version: {version}\n",
             )
         )
     ledger.set_version_status("explore", 2, "canary", reason="auto-pass")
     monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
-    monkeypatch.setattr(
-        _impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=min_runs)
-    )
+    monkeypatch.setattr(_impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=min_runs))
     return ledger
 
 
@@ -170,15 +173,21 @@ def _completed_run(ledger, ref, run_id, score, *, safety_regressions=0):
 
     ledger.create_run(
         RunRecord(
-            id=run_id, temporal_workflow_id=f"wf-{run_id}", abox_task_id=run_id,
-            objective_id="obj_GRAD", agent_ref=ref,
+            id=run_id,
+            temporal_workflow_id=f"wf-{run_id}",
+            abox_task_id=run_id,
+            objective_id="obj_GRAD",
+            agent_ref=ref,
         )
     )
     ledger.finish_run(run_id, RunPhase.completed, {})
     ledger.record_eval(
         EvalResult(
-            subject_type="run", subject_id=run_id, suite_name="task",
-            score=score, passed=True,
+            subject_type="run",
+            subject_id=run_id,
+            suite_name="task",
+            score=score,
+            passed=True,
             details={"safety_regressions": safety_regressions},
         )
     )
@@ -213,10 +222,7 @@ def test_graduation_promotes_better_canary_and_archives_old_active(monkeypatch):
     # The transition was recorded as a promote decision with events.
     decisions = ledger.promotions()
     assert any(d.decision.value == "promote" for d in decisions)
-    assert any(
-        e.event_type == "version_status"
-        for e in ledger.events("agent:explore@2")
-    )
+    assert any(e.event_type == "version_status" for e in ledger.events("agent:explore@2"))
 
 
 def test_graduation_equal_scores_still_graduate(monkeypatch):
@@ -245,9 +251,7 @@ def test_graduation_rolls_back_on_safety_regression_despite_score(monkeypatch):
     ledger = _graduation_ledger(monkeypatch, min_runs=2)
     for i in range(2):
         _completed_run(ledger, "explore@1", f"run_A{i}", 0.5)
-        _completed_run(
-            ledger, "explore@2", f"run_C{i}", 0.95, safety_regressions=1
-        )
+        _completed_run(ledger, "explore@2", f"run_C{i}", 0.95, safety_regressions=1)
 
     out = _impl.check_canary_graduation("explore")
     assert out["status"] == "rolled-back"
@@ -263,9 +267,10 @@ def test_graduation_without_active_baseline_runs_graduates_clean_canary(monkeypa
 
 # --- integration hook: budget_from_spec (abox agent's contract) ---
 
-def test_render_bundle_uses_budget_from_spec_when_available(monkeypatch, spy):
-    import bakudo.bundle as bundle_mod
-    from bakudo.bundle import Budget
+
+def test_render_bundle_uses_canonical_budget_constructor(monkeypatch, spy):
+    import bakudo.agent_run_bundle as bundle_mod
+    from bakudo.agent_run_bundle import Budget
 
     calls = []
 
@@ -273,9 +278,7 @@ def test_render_bundle_uses_budget_from_spec_when_available(monkeypatch, spy):
         calls.append(spec)
         return Budget(timeoutSeconds=1234)
 
-    monkeypatch.setattr(
-        bundle_mod, "budget_from_spec", fake_budget_from_spec, raising=False
-    )
+    monkeypatch.setattr(bundle_mod, "budget_from_spec", fake_budget_from_spec, raising=False)
     spec = _impl.load_agent_spec("explore")
     out = _impl.render_bundle(
         AgentRunInput(
@@ -290,10 +293,10 @@ def test_render_bundle_uses_budget_from_spec_when_available(monkeypatch, spy):
 
 
 def test_render_bundle_uses_real_budget_from_spec(spy):
-    """Integration seam: with the real ``bakudo.bundle.budget_from_spec``
+    """Integration seam: with the real ``bakudo.agent_run_bundle.budget_from_spec``
     landed, the bundle budget comes from the spec's sandbox timeout, not the
     workflow input's ``timeout_seconds`` fallback."""
-    import bakudo.bundle as bundle_mod
+    import bakudo.agent_run_bundle as bundle_mod
 
     assert hasattr(bundle_mod, "budget_from_spec")
     spec = _impl.load_agent_spec("explore")
@@ -311,6 +314,7 @@ def test_render_bundle_uses_real_budget_from_spec(spy):
 
 # --- TMP-12: run_sandbox heartbeats from its worker thread ---
 
+
 def test_run_sandbox_heartbeats_while_the_sandbox_runs(monkeypatch):
     """A silent worker crash during a 2h sandbox run must be detectable via
     heartbeat_timeout, so the sync activity heartbeats on a side thread."""
@@ -324,11 +328,17 @@ def test_run_sandbox_heartbeats_while_the_sandbox_runs(monkeypatch):
     def slow_sandbox(bundle):
         time.sleep(0.15)
         return AboxOutcome(
-            run_id=bundle.run_id, abox_task_id=bundle.run_id,
-            exit_code=0, git_branch="agent/run_HB",
-            result={"run_id": bundle.run_id, "agent": "explore@1",
-                    "objective_id": bundle.objective_id,
-                    "status": "success", "summary": "ok"},
+            run_id=bundle.run_id,
+            abox_task_id=bundle.run_id,
+            exit_code=0,
+            git_branch="agent/run_HB",
+            result={
+                "run_id": bundle.run_id,
+                "agent": "explore@1",
+                "objective_id": bundle.objective_id,
+                "status": "success",
+                "summary": "ok",
+            },
         )
 
     monkeypatch.setattr(activities, "_HEARTBEAT_INTERVAL_SECONDS", 0.01)
@@ -358,11 +368,17 @@ def test_run_sandbox_works_outside_an_activity_context(monkeypatch):
 
     def sandbox(bundle):
         return AboxOutcome(
-            run_id=bundle.run_id, abox_task_id=bundle.run_id,
-            exit_code=0, git_branch="agent/run_HB2",
-            result={"run_id": bundle.run_id, "agent": "explore@1",
-                    "objective_id": bundle.objective_id,
-                    "status": "success", "summary": "ok"},
+            run_id=bundle.run_id,
+            abox_task_id=bundle.run_id,
+            exit_code=0,
+            git_branch="agent/run_HB2",
+            result={
+                "run_id": bundle.run_id,
+                "agent": "explore@1",
+                "objective_id": bundle.objective_id,
+                "status": "success",
+                "summary": "ok",
+            },
         )
 
     monkeypatch.setattr(_impl.DEPS, "sandbox", sandbox)
@@ -379,8 +395,9 @@ def test_run_sandbox_works_outside_an_activity_context(monkeypatch):
 
 # --- A4: fail-closed sandbox selection ---
 
+
 def _clear_sandbox_env(monkeypatch):
-    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+    for var in ("BAKUDO_SANDBOX", "BAKUDO_ENV"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -428,8 +445,12 @@ def test_run_sandbox_dict_carries_error_and_stderr_tail(monkeypatch):
 
     def broken(bundle):
         return AboxOutcome(
-            run_id=bundle.run_id, abox_task_id=bundle.run_id, exit_code=1,
-            git_branch="b", result=None, stderr="x" * 3000 + "the real cause",
+            run_id=bundle.run_id,
+            abox_task_id=bundle.run_id,
+            exit_code=1,
+            git_branch="b",
+            result=None,
+            stderr="x" * 3000 + "the real cause",
             error="no result.json at /w/.agent/result.json",
         )
 
@@ -454,8 +475,13 @@ def test_reconcile_runs_reports_only_terminal_runs(monkeypatch):
     ledger = InMemoryLedger()
 
     def _run(rid):
-        return RunRecord(id=rid, temporal_workflow_id="wf", abox_task_id=rid,
-                         objective_id="obj", agent_ref="explore@1")
+        return RunRecord(
+            id=rid,
+            temporal_workflow_id="wf",
+            abox_task_id=rid,
+            objective_id="obj",
+            agent_ref="explore@1",
+        )
 
     ledger.create_run(_run("done"))
     ledger.finish_run("done", RunPhase.completed, {"status": "success"})

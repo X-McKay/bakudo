@@ -30,8 +30,8 @@ from bakudo.abox.runner import (
     ExecResult,
     _subprocess_executor,
 )
+from bakudo.agent_run_bundle import AgentRunBundle, budget_from_spec
 from bakudo.agent_spec import load_spec_file
-from bakudo.bundle import TaskBundle, budget_from_spec
 from bakudo.curriculum import Objective
 
 AGENTS = Path(__file__).resolve().parents[1] / "agents"
@@ -51,7 +51,7 @@ def _bundle(spec_name: str = "explore.yaml", **spec_overrides):
     for key, value in spec_overrides.items():
         object.__setattr__(spec.sandbox, key, value)
     objective = Objective(type="explore", repo="bakudo", title="map it")
-    return TaskBundle(
+    return AgentRunBundle(
         run_id="run_TEST01",
         objective_id=objective.id,
         objective=objective,
@@ -112,7 +112,9 @@ class FakeAbox:
                 doc = self.result_doc if self.result_doc is not None else VALID_RESULT
                 (result_dir / "result.json").write_text(json.dumps(doc))
             return ExecResult(
-                self.run_exit, "boot ok\nagent done\n", "some stderr\n",
+                self.run_exit,
+                "boot ok\nagent done\n",
+                "some stderr\n",
                 timed_out=self.run_timed_out,
             )
         if sub == "path":
@@ -142,24 +144,36 @@ def test_build_command_matches_abox_0_7_contract(tmp_path, monkeypatch):
     cmd = runner.build_command(bundle, tmp_path / "scratch")
 
     assert cmd == [
-        "abox", "run",
-        "--repo", str(tmp_path),
-        "--task", "run_TEST01",
-        "--base", "main",
+        "abox",
+        "run",
+        "--repo",
+        str(tmp_path),
+        "--task",
+        "run_TEST01",
+        "--base",
+        "main",
         # spec timeoutSeconds 1800 + IN_GUEST_SETUP_HEADROOM_SECONDS (the
         # in-guest prepare now spends guest deadline before agent work starts).
-        "--timeout", "2100",
-        "--network", "scoped",
-        "--input-file", f"{tmp_path / 'scratch' / 'bundle.json'}:bundle.json",
-        "-e", "BAKUDO_OFFLINE=1",
-        "-e", "VLLM_BASE_URL=https://llm.example/v1",
-        "-e", "VLLM_API_KEY=sk-test",
-        "-e", "BAKUDO_VLLM_QWEN_CODER=https://llm-fast.example/v1",
+        "--timeout",
+        "2100",
+        "--network",
+        "scoped",
+        "--input-file",
+        f"{tmp_path / 'scratch' / 'bundle.json'}:bundle.json",
+        "-e",
+        "BAKUDO_OFFLINE=1",
+        "-e",
+        "VLLM_BASE_URL=https://llm.example/v1",
+        "-e",
+        "VLLM_API_KEY=sk-test",
+        "-e",
+        "BAKUDO_VLLM_QWEN_CODER=https://llm-fast.example/v1",
         "--",
         # 0.7.0 guests boot fresh from OCI images, so the repo prepare flow
         # (fast against the warm pip cache) must run in-guest before the
         # runner; `python3 -m` stays PATH-proof for the runner itself.
-        "sh", "-c",
+        "sh",
+        "-c",
         "set -e; "
         "[ ! -f /workspace/.abox/prepare.sh ] || sh /workspace/.abox/prepare.sh; "
         "exec python3 -m bakudo.runner.main "
@@ -208,9 +222,7 @@ def test_network_mode_maps_to_abox_vocabulary(tmp_path, monkeypatch, spec_mode, 
     assert cmd[cmd.index("--network") + 1] == abox_mode
 
 
-def test_network_mode_open_fails_closed_without_operator_opt_in(
-    tmp_path, monkeypatch
-):
+def test_network_mode_open_fails_closed_without_operator_opt_in(tmp_path, monkeypatch):
     # The run-level --network replaces the repo's trusted scoped allowlist, so
     # a (possibly model-authored) spec asking for `open` must not silently get
     # public-internet egress.
@@ -319,9 +331,7 @@ def test_resolve_repo_absolute_objective_bypasses_registry_lookup(tmp_path):
 def test_run_stages_bundle_and_collects_result_from_worktree(tmp_path, monkeypatch):
     _clear_model_env(monkeypatch)
     fake = FakeAbox(worktree=_make_worktree(tmp_path / "wt"))
-    runner = AboxRunner(
-        executor=fake, repo_root=tmp_path, scratch_root=tmp_path / "scratch"
-    )
+    runner = AboxRunner(executor=fake, repo_root=tmp_path, scratch_root=tmp_path / "scratch")
     outcome = runner.run(_bundle())
 
     # The bundle was staged for --input-file from the host scratch dir
@@ -454,9 +464,7 @@ def test_run_passes_through_observability_metrics(tmp_path, monkeypatch):
     assert outcome.tokens_used == 1234
     assert outcome.observability["tool_calls"] == 7
     assert outcome.observability["model_calls"] == 2
-    assert outcome.denied_commands == [
-        {"command": "", "reason": "command 'curl' not in allowlist"}
-    ]
+    assert outcome.denied_commands == [{"command": "", "reason": "command 'curl' not in allowlist"}]
 
 
 def test_base_ref_env_override(tmp_path, monkeypatch):
@@ -542,6 +550,7 @@ def test_subprocess_executor_kills_process_when_cancel_event_set():
     from bakudo.abox.runner import _CANCELLED_EXIT_CODE, _subprocess_executor
 
     cancel = threading.Event()
+
     # A process that would run for 30s; we cancel it almost immediately.
     def cancel_soon():
         time.sleep(0.3)

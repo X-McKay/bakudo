@@ -55,9 +55,9 @@ tools:
   - name: query-memory
 
 skills:
-  - codebase-navigation@^1.0
-  - test-selection@^1.0
-  - safe-refactor@^1.0
+  - codebase-navigation
+  - test-selection
+  - safe-refactor
 
 mcpServers:
   - name: github-readonly

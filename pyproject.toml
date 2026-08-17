@@ -69,14 +69,14 @@ bakudo = "bakudo.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bakudo"]
 
-# Ship schemas, skill packages and the seed agent specs inside the wheel so
+# Ship schemas, skill packages, seed agent specs, and two smoke tasks so
 # the runtime can resolve them without the source tree being present (API-12;
 # resolved via bakudo.paths).
 [tool.hatch.build.targets.wheel.force-include]
 "schemas" = "bakudo/_data/schemas"
 "skills" = "bakudo/_data/skills"
 "agents" = "bakudo/_data/agents"
-"evals/scenarios" = "bakudo/_data/scenarios"
+"smoke/tasks" = "bakudo/_data/smoke-tasks"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

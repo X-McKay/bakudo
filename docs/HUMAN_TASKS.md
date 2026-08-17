@@ -120,9 +120,6 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
       fails). Build vendor wheels with `make wheel` (SHA-stamped `3.0.0.dev0+<sha>`
       versions) and use a force-reinstall prepare so refreshes always take
       effect. A future improvement: automated version handshake at bundle load.
-- [ ] Define the abox sandbox profiles named in `abox/runner.py::PROFILES`
-      (`explore-readonly`, `add-feature-python`, `optimize-python`, …) with the network bundles
-      (`github-api`, `pypi-public`, `vllm-gateway`) and resource/diff limits.
 - [x] Validate the real `abox run` flags against `AboxRunner.build_command`.
       *(Done on the 2026-08-09 validation branch: the runner speaks the real
       0.6.0 protocol — `--repo/--task/--base/--timeout/--network/--input-file`,
@@ -172,15 +169,15 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
 
 ## 7. Grow the eval corpora (judgement work)
 
-Promotion requires `promotionPolicy.minEvalCases` (25) real cases. The real
-corpus now lives in the scenario registry (`evals/scenarios/`, 25 exemplars
-across the debugging/no-change/adversarial-context/safety families), loaded
-via `bakudo.evals.corpus.load_corpus_from_scenarios`. `load_corpus(path)`
-still loads a legacy YAML corpus for roles the scenario registry doesn't
-cover yet (e.g. `optimize`, which has no scenario-registry equivalent);
-`evals/corpora/*.yaml` (the old fictional samples) were retired.
+Promotion requires `promotionPolicy.minEvalCases` (25) real cases. The private
+`bakudo-benchmarks` repository owns 25 versioned tasks across the
+debugging/no-change/adversarial-context/safety families. Configure it through
+`BAKUDO_TASK_SOURCE`; core contains only two smoke tasks and must not be used as
+a promotion corpus. Roles such as `optimize` need their own task-backed
+environments before they can use the same reproducible trial and provenance
+pipeline.
 
-- [ ] For each role the scenario registry doesn't cover, curate ≥25 cases
+- [ ] For each role the benchmark task source does not cover, curate ≥25 cases
       from real objectives + historical failures (use the `eval-author` role
       to convert failures into cases).
 - [ ] Configure an LLM critic judge (`evals/critic.llm_judge`) and add the

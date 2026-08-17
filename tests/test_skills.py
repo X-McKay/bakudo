@@ -19,11 +19,18 @@ def test_progressive_disclosure_body_loaded_on_demand():
 
 
 def test_allowlist_restricts_available_skills():
-    reg = SkillRegistry(allowed=["test-selection@^1.0"])
+    reg = SkillRegistry(allowed=["test-selection"])
     names = {s["name"] for s in reg.discovery_manifest()}
     assert names == {"test-selection"}
     with pytest.raises(PermissionError):
         reg.load_skill("safe-refactor")
+
+
+def test_empty_allowlist_exposes_no_skills():
+    reg = SkillRegistry(allowed=[])
+    assert reg.discovery_manifest() == []
+    with pytest.raises(PermissionError):
+        reg.load_skill("test-selection")
 
 
 def test_frontmatter_parsing():

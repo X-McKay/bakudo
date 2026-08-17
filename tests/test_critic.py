@@ -192,7 +192,7 @@ def test_run_eval_suite_omits_critic_without_sandbox(monkeypatch, _eval_input):
     from bakudo.temporal import _impl
 
     monkeypatch.setattr(_impl.DEPS, "sandbox", None)
-    for var in ("BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+    for var in ("BAKUDO_SANDBOX", "BAKUDO_ENV"):
         monkeypatch.delenv(var, raising=False)
     out = _impl.run_eval_suite(_eval_input)
     assert "critic" not in {r["suite_name"] for r in out["eval_results"]}

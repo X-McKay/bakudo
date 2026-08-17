@@ -1,9 +1,8 @@
-"""Resolution of bundled data directories (schemas, skills, seed agents,
-exemplar scenarios).
+"""Resolution of bundled data directories (schemas, skills, agents, smoke tasks).
 
 When bakudo runs from a source checkout, ``schemas/``, ``skills/`` and
-``agents/`` live at the repository root, and the exemplar scenarios live at
-``evals/scenarios/``. When installed as a wheel, they are all force-included
+``agents/`` live at the repository root, and smoke tasks live at
+``smoke/tasks/``. When installed as a wheel, they are force-included
 under ``bakudo/_data/`` (see ``pyproject.toml``). This module hides that
 difference: the packaged location is resolved via ``importlib.resources``
 first, with the source-tree layout as the dev fallback (API-12).
@@ -29,7 +28,7 @@ def _resolve(name: str, source_subpath: str | None = None) -> Path:
     # Source-tree layout (dev checkout). Usually the same name as the
     # packaged dir (e.g. "agents" -> "agents"), but some bundled data lives
     # deeper in the source tree than its packaged flat name suggests (e.g.
-    # "scenarios" -> "evals/scenarios") — source_subpath overrides that.
+    # "smoke-tasks" -> "smoke/tasks") — source_subpath overrides that.
     repo_root = _PKG_ROOT.parents[1]  # src/bakudo -> src -> repo root
     source = repo_root / (source_subpath or name)
     if source.is_dir():
@@ -46,8 +45,7 @@ def _resolve(name: str, source_subpath: str | None = None) -> Path:
     except (TypeError, ValueError, OSError, ModuleNotFoundError):
         pass
     raise FileNotFoundError(
-        f"Could not locate bundled data directory '{name}'. "
-        f"Looked in {packaged} and {source}."
+        f"Could not locate bundled data directory '{name}'. Looked in {packaged} and {source}."
     )
 
 
@@ -66,10 +64,7 @@ def agents_dir() -> Path:
     return _resolve("agents")
 
 
-def scenarios_dir() -> Path:
-    """Directory containing the exemplar ScenarioSpec fixtures.
+def smoke_tasks_dir() -> Path:
+    """Directory containing Bakudo's two self-test TaskSpecs."""
 
-    Installed wheels ship these flattened under ``bakudo/_data/scenarios``;
-    a source checkout keeps them at ``evals/scenarios``.
-    """
-    return _resolve("scenarios", source_subpath="evals/scenarios")
+    return _resolve("smoke-tasks", source_subpath="smoke/tasks")

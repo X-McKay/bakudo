@@ -12,29 +12,26 @@ import fnmatch
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
-from ..curriculum.objective import Objective
+from ..curriculum.objective import Constraints, Objective, ObjectiveType
 from ..runner.result import RunResult, RunStatus
 from .checks import DEFAULT_SUITE, EvalContext, Grader
 from .result import EvalResult
 
 if TYPE_CHECKING:
-    from ..scenarios.registry import LoadedScenario, ScenarioRegistry
-    from ..scenarios.testrun import TestRunner
+    from ..tasks.source import LoadedTask, TaskSource
+    from ..tasks.verifier_runner import VerifierRunner
     from ..trials.runner import PipelineFn
 
 
 @dataclass
-class Expectations:
+class OutcomeConstraints:
     """What a case asserts about a run's outcome."""
 
     status: str = "success"
-    changes_paths: list[str] = field(default_factory=list)  # globs that must be touched
-    forbids_denied_commands: bool = True
+    allowed_change_paths: list[str] = field(default_factory=list)  # permitted path globs
+    forbids_denied_actions: bool = True
     max_changed_files: int | None = None
 
 
@@ -42,7 +39,7 @@ class Expectations:
 class EvalCase:
     name: str
     objective: Objective
-    expect: Expectations = field(default_factory=Expectations)
+    constraints: OutcomeConstraints = field(default_factory=OutcomeConstraints)
 
 
 @dataclass
@@ -57,20 +54,25 @@ class CaseRun:
 
 
 def grade_expectations(case: EvalCase, run: CaseRun) -> tuple[bool, list[str]]:
-    """Return (passed, reasons-for-failure) for a case's expectations."""
+    """Return whether an observed outcome satisfies the case constraints."""
     reasons: list[str] = []
-    exp = case.expect
+    exp = case.constraints
     if run.result.status.value != exp.status:
         reasons.append(f"status {run.result.status.value} != expected {exp.status}")
-    if exp.forbids_denied_commands and run.denied_commands:
+    if exp.forbids_denied_actions and run.denied_commands:
         reasons.append(f"{len(run.denied_commands)} denied command(s)")
     if exp.max_changed_files is not None and len(run.result.changed_files) > exp.max_changed_files:
+        reasons.append(f"{len(run.result.changed_files)} changed files > {exp.max_changed_files}")
+    unexpected = [
+        path
+        for path in run.result.changed_files
+        if not any(fnmatch.fnmatch(path, pattern) for pattern in exp.allowed_change_paths)
+    ]
+    if unexpected:
+        allowed = ", ".join(exp.allowed_change_paths) or "<none>"
         reasons.append(
-            f"{len(run.result.changed_files)} changed files > {exp.max_changed_files}"
+            f"changed files outside allowed paths: {', '.join(unexpected)}; allowed: {allowed}"
         )
-    for pattern in exp.changes_paths:
-        if not any(fnmatch.fnmatch(p, pattern) for p in run.result.changed_files):
-            reasons.append(f"no changed file matched '{pattern}'")
     return (not reasons), reasons
 
 
@@ -172,112 +174,52 @@ def run_corpus(
     return aggregated
 
 
-def load_corpus(path: str | Path) -> tuple[str, list[EvalCase]]:
-    """Load a corpus YAML into (suite_name, cases).
-
-    A missing file raises a clear, actionable error rather than a bare
-    ``FileNotFoundError`` -- the two fictional/unrunnable example corpora
-    that used to live under ``evals/corpora/`` are retired (real corpora now
-    come from the scenario registry), so a caller hitting this is almost
-    always looking for :func:`load_corpus_from_scenarios` instead of a
-    genuinely out-of-tree legacy YAML corpus.
-    """
-    corpus_path = Path(path)
-    if not corpus_path.is_file():
-        raise FileNotFoundError(
-            f"No corpus file at {corpus_path}. The bundled example corpora "
-            "(evals/corpora/*.yaml) were retired in favor of the scenario "
-            "registry -- use load_corpus_from_scenarios(...) "
-            "(bakudo.evals.corpus) to build a corpus from evals/scenarios/ "
-            "instead, or pass the path to a real, out-of-tree legacy corpus "
-            "YAML."
-        )
-    doc = yaml.safe_load(corpus_path.read_text())
-    suite_name = doc["name"]
-    cases: list[EvalCase] = []
-    for raw in doc.get("cases", []):
-        exp = raw.get("expect", {})
-        cases.append(
-            EvalCase(
-                name=raw["name"],
-                objective=Objective.model_validate(raw["objective"]),
-                expect=Expectations(
-                    status=exp.get("status", "success"),
-                    changes_paths=exp.get("changesPaths", []),
-                    forbids_denied_commands=exp.get("forbidsDeniedCommands", True),
-                    max_changed_files=exp.get("maxChangedFiles"),
-                ),
-            )
-        )
-    return suite_name, cases
+_TASK_REF_PREFIX = "task://"
 
 
-# --------------------------------------------------------------------------
-# Scenario-backed adapter (Task 7): the scenario registry (evals/scenarios/)
-# is now the source of real corpora. load_corpus_from_scenarios() maps it
-# onto the EvalCase shape above; scenario_run_fn() bridges the resulting
-# EvalCase.objective back to a real run via bakudo.trials.runner.run_trial,
-# so the exact same run_corpus() aggregation runs unchanged over either
-# source.
-# --------------------------------------------------------------------------
-
-# EvalCase.objective built by load_corpus_from_scenarios() is a placeholder:
-# objective_from_scenario() needs a repo path, but no workspace has been
-# provisioned yet at corpus-build time (that only happens per-run, inside
-# run_trial, with a fresh seed each time). The scenario's own (unprovisioned)
-# directory stands in -- it must NEVER be treated as a runnable checkout (it
-# holds scenario.yaml/hidden/reference alongside the fixture) -- purely as a
-# stable, unique key. scenario_run_fn()'s returned run_fn only ever receives
-# that placeholder Objective back (run_corpus's calling convention is
-# run_fn(case.objective)), so it recovers the real LoadedScenario from this
-# module-level lookup keyed by that same placeholder objective.repo, and lets
-# run_trial do the real (correctly-scoped) provisioning.
-_SCENARIO_BY_OBJECTIVE_REPO: dict[str, LoadedScenario] = {}
-
-
-def load_corpus_from_scenarios(
+def load_corpus_from_tasks(
     *,
     families: Sequence[str] | None = None,
     partitions: Sequence[str] = ("dev",),
-    registry: ScenarioRegistry | None = None,
+    source: TaskSource | None = None,
 ) -> list[EvalCase]:
-    """Adapt the scenario registry into the ``EvalCase``/``run_corpus`` shape.
+    """Adapt a task source into the ``EvalCase``/``run_corpus`` shape.
 
-    Every scenario matching ``families`` (all families when ``None``) and
-    ``partitions`` becomes one ``EvalCase``: ``name`` is the scenario's ref
-    (``name@version``), ``objective`` comes from
-    ``bakudo.trials.runner.objective_from_scenario`` (see the module note
-    above for why its ``repo`` is a placeholder), and ``expect`` mirrors the
-    scenario's own ``spec.expect``. ``registry`` defaults to a fresh
-    ``ScenarioRegistry(scenarios_dir())`` (the exemplar corpus).
+    Every matching task becomes one ``EvalCase``. Its objective carries a
+    stable ``task://name@version`` identity instead of a filesystem path;
+    :func:`task_run_fn` resolves that identity through its explicit source.
     """
-    from ..paths import scenarios_dir
-    from ..scenarios.registry import ScenarioRegistry
-    from ..trials.runner import objective_from_scenario
+    from ..tasks.source import default_task_source
 
-    reg = registry if registry is not None else ScenarioRegistry(scenarios_dir())
+    resolved_source = source if source is not None else default_task_source()
     family_filters: list[str | None] = list(families) if families is not None else [None]
 
-    by_ref: dict[str, Any] = {}
+    by_ref: dict[str, LoadedTask] = {}
     for family in family_filters:
-        for scenario in reg.list(family=family, partitions=partitions):
-            by_ref.setdefault(scenario.ref, scenario)
+        for task in resolved_source.list(family=family, partitions=partitions):
+            by_ref.setdefault(task.ref, task)
 
     cases: list[EvalCase] = []
     for ref in sorted(by_ref):
-        scenario = by_ref[ref]
-        objective = objective_from_scenario(scenario, scenario.path)
-        _SCENARIO_BY_OBJECTIVE_REPO[objective.repo] = scenario
-        expect = scenario.spec.expect
+        task = by_ref[ref]
+        instruction = task.spec.instruction
+        constraints = task.spec.constraints
         cases.append(
             EvalCase(
-                name=scenario.ref,
-                objective=objective,
-                expect=Expectations(
-                    status=expect.status,
-                    changes_paths=list(expect.changes_paths),
-                    forbids_denied_commands=expect.forbids_denied_commands,
-                    max_changed_files=expect.max_changed_files,
+                name=task.ref,
+                objective=Objective(
+                    type=ObjectiveType(instruction.type),
+                    repo=f"{_TASK_REF_PREFIX}{task.ref}",
+                    title=instruction.title,
+                    description=instruction.description,
+                    acceptanceCriteria=list(instruction.success_criteria),
+                    constraints=Constraints(maxFilesChanged=constraints.max_changed_files),
+                ),
+                constraints=OutcomeConstraints(
+                    status=constraints.expected_status,
+                    allowed_change_paths=list(constraints.allowed_change_paths),
+                    forbids_denied_actions=constraints.forbids_denied_actions,
+                    max_changed_files=constraints.max_changed_files,
                 ),
             )
         )
@@ -326,23 +268,19 @@ def _coerce_run_result(pipeline_result_value: Any, trial_record: Any) -> RunResu
     )
 
 
-def scenario_run_fn(
+def task_run_fn(
     *,
-    test_runner: TestRunner,
+    source: TaskSource,
+    verifier_runner: VerifierRunner,
     pipeline_factory: Callable[[], PipelineFn],
 ) -> Callable[[Objective], CaseRun]:
     """Bridge a ``run_corpus``-style ``run_fn(objective) -> CaseRun`` to
     :func:`bakudo.trials.runner.run_trial`.
 
-    ``pipeline_factory() -> PipelineFn`` builds the pipeline for one case
-    (e.g. ``lambda: build_pipeline_fn(spec, sandbox_fn=...)``); ``test_runner``
-    is ``run_trial``'s hidden-test runner. The returned callable recovers the
-    ``LoadedScenario`` a placeholder ``objective`` came from (see the
-    module-level lookup above -- raises ``KeyError`` for an objective
-    ``load_corpus_from_scenarios`` never built), runs one trial (a fresh,
-    ephemeral ``InMemoryLedger`` records it -- callers that need the
-    immutable trial history persisted should use the trial/experiment
-    substrate directly instead of this eval-corpus bridge), and maps the
+    ``pipeline_factory() -> PipelineFn`` builds the pipeline for one case and
+    ``verifier_runner`` is ``run_trial``'s verifier boundary. The returned
+    callable resolves the objective's task identity through ``source``, runs
+    one trial using a fresh ephemeral ledger, and maps the
     ``TrialRecord`` -> ``CaseRun``: ``result``/``diff``/``denied_commands``
     come from the pipeline result itself (the trusted, unabridged source --
     a ``TrialRecord`` only durably keeps counts/summaries of these, not the
@@ -352,17 +290,14 @@ def scenario_run_fn(
     from ..registry import InMemoryLedger
     from ..trials.runner import run_trial
 
-    ledger = InMemoryLedger()
-
     def run(objective: Objective) -> CaseRun:
-        scenario = _SCENARIO_BY_OBJECTIVE_REPO.get(objective.repo)
-        if scenario is None:
+        if not objective.repo.startswith(_TASK_REF_PREFIX):
             raise KeyError(
-                f"No scenario registered for objective.repo={objective.repo!r}. "
-                "scenario_run_fn() only runs objectives built by "
-                "load_corpus_from_scenarios(); build the corpus with that "
-                "function first."
+                f"Expected objective.repo to start with {_TASK_REF_PREFIX!r}; "
+                f"got {objective.repo!r}."
             )
+        task = source.get(objective.repo.removeprefix(_TASK_REF_PREFIX))
+        ledger = InMemoryLedger()
 
         pipeline_fn = pipeline_factory()
         captured: dict[str, Any] = {}
@@ -373,11 +308,11 @@ def scenario_run_fn(
             return pr
 
         record = run_trial(
-            scenario,
+            task,
             "corpus-eval@0",
             0,
             pipeline_fn=capturing_pipeline_fn,
-            test_runner=test_runner,
+            verifier_runner=verifier_runner,
             ledger=ledger,
         )
 

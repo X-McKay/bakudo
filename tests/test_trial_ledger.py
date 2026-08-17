@@ -12,19 +12,28 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from bakudo.ids import new_trial_id
+from bakudo.ids import new_episode_id, new_trial_id
 from bakudo.registry import InMemoryLedger
-from bakudo.trials.models import HackFlags, TrialRecord
+from bakudo.tasks.models import TaskPin
+from bakudo.trials.models import IntegrityFlags, TrialRecord
+
+TASK_PIN = TaskPin(
+    source_uri="file:///benchmark-corpus",
+    corpus_revision="test-revision",
+    name="sample-bug",
+    version=1,
+    bundle_digest="sha256:deadbeef",
+    verifier_digest="sha256:feedface",
+)
 
 
 def make_trial(*, id: str, experiment_id: str | None = None, **overrides) -> TrialRecord:
     fields: dict = dict(
         id=id,
+        episode_id=new_episode_id(),
         experiment_id=experiment_id,
         agent_ref="add-feature@1",
-        scenario_name="sample-bug",
-        scenario_version=1,
-        scenario_digest="sha256:deadbeef",
+        task=TASK_PIN,
         seed=42,
         status="completed",
     )
@@ -80,8 +89,8 @@ def test_list_trials_empty_when_no_match(ledger):
 
 def test_trial_record_defaults():
     t = make_trial(id=new_trial_id())
-    assert t.flags == HackFlags()
-    assert t.pins == {}
+    assert t.integrity == IntegrityFlags()
+    assert t.runtime_pins == {}
     assert t.metrics == {}
     assert t.evaluation == {}
     assert t.run_id is None
@@ -93,19 +102,18 @@ def test_trial_record_rejects_unknown_fields():
     with pytest.raises(ValidationError):
         TrialRecord(
             id=new_trial_id(),
+            episode_id=new_episode_id(),
             agent_ref="add-feature@1",
-            scenario_name="sample-bug",
-            scenario_version=1,
-            scenario_digest="sha256:deadbeef",
+            task=TASK_PIN,
             seed=42,
             status="completed",
             bogus_field="nope",
         )
 
 
-def test_hack_flags_rejects_unknown_fields():
+def test_integrity_flags_rejects_unknown_fields():
     with pytest.raises(ValidationError):
-        HackFlags(bogus=True)
+        IntegrityFlags(bogus=True)
 
 
 # --- experiments (Task 8 parity with the trial methods above) ---

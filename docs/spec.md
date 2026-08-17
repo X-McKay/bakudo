@@ -1,8 +1,8 @@
 # Long-Running Meta-Agent System Spec
 
-**Version:** v0.1 draft  
-**Date:** 2026-06-13  
-**Primary technologies:** abox, Temporal, Strands Agents, vLLM, Postgres, Neo4j, Open Agent Skills, MCP
+**Version:** v0.2 draft
+**Date:** 2026-08-16
+**Primary technologies:** abox, Temporal, Strands Agents, vLLM, Postgres, FalkorDB, Open Agent Skills, MCP
 
 ---
 
@@ -10,7 +10,7 @@
 
 This spec proposes a durable, always-running meta-agent system that can create, run, evaluate, and evolve specialized agents over time.
 
-The system should be treated as a **durable agent operating system**, not as a single autonomous agent. The meta-agent is the control-plane intelligence. Temporal provides durable orchestration. abox provides sandboxed execution. Strands provides the runtime for individual agents. Postgres stores the authoritative ledger. Neo4j stores relationship-oriented knowledge and memory. vLLM provides local or self-hosted LLM inference.
+The system should be treated as a **durable agent operating system**, not as a single autonomous agent. The meta-agent is the control-plane intelligence. Temporal provides durable orchestration. abox provides sandboxed execution. Strands provides the runtime for individual agents. Postgres stores the authoritative ledger. FalkorDB stores relationship-oriented knowledge and memory. vLLM provides local or self-hosted LLM inference.
 
 The central design principle is:
 
@@ -38,7 +38,7 @@ The system should be able to:
 4. Use Strands to define and execute the agents themselves.
 5. Use vLLM-hosted models through OpenAI-compatible APIs or Strands-compatible providers.
 6. Store authoritative state, runs, evals, logs, and agent specs in Postgres.
-7. Store graph-like knowledge, relationships, and memory in Neo4j.
+7. Store graph-like knowledge, relationships, and memory in FalkorDB.
 8. Create specialized agents for roles such as `explore`, `add-feature`, `qa`, `critic`, and `eval-author`.
 9. Run multiple agents in parallel.
 10. Inspect progress and logs through Temporal and persisted run records.
@@ -75,7 +75,7 @@ flowchart TD
 
     R --> PG[(Postgres)]
     MEM --> PG
-    MEM --> NEO[(Neo4j)]
+    MEM --> GRAPH[(FalkorDB)]
 
     M -->|spawn child workflows| AR[AgentRun Workflows]
     AR --> AB[abox Sandbox Runner]
@@ -127,7 +127,7 @@ Curriculum generator
 Promotion engine
 Dashboard/API
 Postgres
-Neo4j
+FalkorDB
 vLLM gateway
 ```
 
@@ -209,7 +209,7 @@ A worker agent should:
 
 ### 5.3 Worker Input Bundle
 
-Each worker run should receive a task bundle containing:
+Each worker run should receive an agent-run bundle containing:
 
 ```text
 run_id
@@ -282,7 +282,9 @@ This avoids brittle cross-system lookup logic.
 
 ### 6.4 abox Sandbox Policy
 
-Each agent role should map to an abox sandbox profile.
+Each agent role carries a `sandbox.profile` label. The label identifies the
+expected repo-owned abox configuration and is persisted with trials; it is not
+an independent policy registry inside Bakudo.
 
 Example profiles:
 
@@ -294,7 +296,8 @@ skill-author
 restricted-network
 ```
 
-Policy dimensions:
+Enforcement is split across the repo's `.abox/project.toml`, explicit
+AgentSpec fields, and trusted post-run constraints. Relevant dimensions are:
 
 ```text
 filesystem access
@@ -447,9 +450,9 @@ tools:
   - name: query-memory
 
 skills:
-  - codebase-navigation@^1.0
-  - test-selection@^1.0
-  - safe-refactor@^1.0
+  - codebase-navigation
+  - test-selection
+  - safe-refactor
 
 mcpServers:
   - name: repo-docs
@@ -624,7 +627,7 @@ abox invocations
 DB reads/writes
 GitHub calls
 MCP calls
-Neo4j writes
+FalkorDB writes
 Postgres writes
 file/object storage writes
 embedding generation
@@ -696,7 +699,7 @@ sequenceDiagram
 
     M->>A: start objective + agentSpecVersion
     A->>P: create run record
-    A->>A: render task bundle
+    A->>A: render agent-run bundle
     A->>B: abox run --task <run_id> --prompt-file ...
     B->>S: launch agent-runner in microVM
     S->>S: use tools / MCP / skills / vLLM
@@ -770,7 +773,10 @@ Skills should be the system's procedural memory layer.
 
 ### 13.1 Skill Design
 
-A skill should be a tested, versioned package, not just arbitrary text.
+A skill should be a tested package with one stable name, not arbitrary text.
+Candidate revisions can be tracked in the ledger, but the installed
+`SKILL.md` frontmatter contains only `name` and `description`; AgentSpecs
+allowlist exact package names.
 
 Example layout:
 
@@ -792,10 +798,6 @@ skills/
 ---
 name: test-selection
 description: Selects the smallest relevant test set for a code change. Use when an agent modifies files and needs to decide which tests to run before reporting completion.
-compatibility: Requires Python, git, and repository access.
-metadata:
-  version: "1.0.0"
-  owner: "meta-agent"
 ---
 
 # Test Selection
@@ -879,9 +881,9 @@ dimension-agnostic `vector` column queried server-side with the cosine
 operator (`PgSemanticMemoryStore`); retype to `vector(<dim>)` and add an HNSW
 index once a production embedder fixes the dimension.
 
-### 14.2 Neo4j
+### 14.2 FalkorDB
 
-Neo4j should represent relationships that are painful to model in relational tables.
+FalkorDB represents relationships that are painful to model in relational tables.
 
 Suggested graph structure:
 
@@ -916,7 +918,7 @@ evaluative_memory
   What made outputs good or bad, which agent versions improved, what failed.
 
 relational_memory
-  File, module, task, failure, and skill relationships in Neo4j.
+  File, module, task, failure, and skill relationships in FalkorDB.
 ```
 
 ### 14.4 Memory Record Shape
@@ -1449,7 +1451,7 @@ create table eval_cases (
 
 ---
 
-## 21. Neo4j Graph Model
+## 21. FalkorDB Graph Model
 
 ### 21.1 Core Nodes
 
@@ -1659,7 +1661,7 @@ Open Agent Skills registry
 Skill discovery/load tool
 Memory writer
 Postgres memory table
-Neo4j graph ingestion
+FalkorDB graph ingestion
 retrieval tool
 ```
 
@@ -1700,7 +1702,7 @@ meta-agent-system/
     docker-compose.yml
     temporal/
     postgres/
-    neo4j/
+    falkordb/
     vllm-gateway/
   schemas/
     agent-spec.schema.json
@@ -1915,7 +1917,7 @@ modifying the meta-agent's own control tools
    - Writes `result.json`
 
 3. Build abox activity:
-   - Creates task bundle
+   - Creates agent-run bundle
    - Starts abox
    - Streams or collects logs
    - Captures diff and artifacts
@@ -1952,7 +1954,7 @@ modifying the meta-agent's own control tools
 9. Add memory pipeline:
    - evidence-backed memory candidates
    - Postgres storage
-   - Neo4j graph edges
+   - FalkorDB graph edges
    - retrieval tool
 
 10. Add candidate evolution:
@@ -1964,7 +1966,7 @@ modifying the meta-agent's own control tools
 
 ## 30. Clean v0.1 Spec Sentence
 
-A Temporal-supervised meta-agent maintains a curriculum of objectives, launches versioned Strands agents inside abox microVM sandboxes, stores every run, eval, and memory in Postgres and Neo4j, and evolves agents through candidate specs and Open Agent Skills that must pass evals before promotion.
+A Temporal-supervised meta-agent maintains a curriculum of objectives, launches versioned Strands agents inside abox microVM sandboxes, stores every run, eval, and memory in Postgres and FalkorDB, and evolves agents through candidate specs and Open Agent Skills that must pass evals before promotion.
 
 ---
 
@@ -1985,4 +1987,4 @@ A Temporal-supervised meta-agent maintains a curriculum of objectives, launches 
 - Open Agent Skills: https://agentskills.io/specification
 - Open Agent Skills GitHub: https://github.com/agentskills/agentskills
 - pgvector: https://github.com/pgvector/pgvector
-- Neo4j vector indexes: https://neo4j.com/docs/cypher-manual/current/indexes/semantic-indexes/vector-indexes/
+- FalkorDB documentation: https://docs.falkordb.com/

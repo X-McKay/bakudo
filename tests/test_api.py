@@ -71,7 +71,7 @@ ROUTE_IDS = [f"{m} {t}" for m, t, _, _ in ROUTES]
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Every test states its auth/sandbox posture explicitly."""
-    for var in ("BAKUDO_API_TOKEN", "BAKUDO_SANDBOX", "BAKUDO_USE_ABOX", "BAKUDO_ENV"):
+    for var in ("BAKUDO_API_TOKEN", "BAKUDO_SANDBOX", "BAKUDO_ENV"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -137,11 +137,12 @@ def test_route_fail_open_when_token_unset(method, template, path, body):
 def test_openapi_declares_bearer_security_scheme():
     schema = TestClient(build_app()).get("/openapi.json").json()
     schemes = schema.get("components", {}).get("securitySchemes", {})
-    assert any(
-        s.get("type") == "http" and s.get("scheme") == "bearer" for s in schemes.values()
-    ), f"no HTTP bearer security scheme declared: {schemes}"
+    assert any(s.get("type") == "http" and s.get("scheme") == "bearer" for s in schemes.values()), (
+        f"no HTTP bearer security scheme declared: {schemes}"
+    )
     (scheme_name,) = [
-        name for name, s in schemes.items()
+        name
+        for name, s in schemes.items()
         if s.get("type") == "http" and s.get("scheme") == "bearer"
     ]
     for path, operations in schema["paths"].items():
@@ -253,10 +254,10 @@ def test_experiments_409_when_sandbox_unset():
 
 
 def test_experiments_409_when_dev_env_unset(monkeypatch):
-    """R2: hidden-test grading always executes on this host via the local
+    """R2: verifier-test grading always executes on this host via the local
     test runner, independent of the sandbox mode driving the agent -- so
     this 409 fires even once the sandbox itself resolves fine."""
-    monkeypatch.setattr("bakudo.api.server._resolve_sandbox", lambda: (lambda bundle: None))
+    monkeypatch.setattr("bakudo.api.server._resolve_sandbox", lambda: lambda bundle: None)
     client = TestClient(build_app())
     resp = client.post("/experiments", json=_EXPERIMENT_BODY)
     assert resp.status_code == 409
@@ -277,7 +278,9 @@ def test_experiments_post_get_round_trip(monkeypatch):
     _dev_local_sandbox(monkeypatch)
     tools = MetaAgentTools()
     client = TestClient(build_app(tools))
-    body = {**_EXPERIMENT_BODY, "scenarioSelector": {"count": 1}}  # keep it fast: 1 trial
+    # count=1 selects one primary task; paired-task closure deliberately adds
+    # its counterpart so joint no-change/fix behavior remains measurable.
+    body = {**_EXPERIMENT_BODY, "taskSelector": {"count": 1}}
     resp = client.post("/experiments", json=body)
     assert resp.status_code == 200, resp.text
     experiment_id = resp.json()["id"]
@@ -290,7 +293,9 @@ def test_experiments_post_get_round_trip(monkeypatch):
     assert got_body["result"]["experimentId"] == experiment_id
     assert got_body["result"]["profile"] is True
 
-    (trial,) = tools.ledger.list_trials(experiment_id)
+    trials = tools.ledger.list_trials(experiment_id)
+    assert len(trials) == 2
+    trial = trials[0]
     trial_resp = client.get(f"/trials/{trial.id}")
     assert trial_resp.status_code == 200
     assert trial_resp.json()["experiment_id"] == experiment_id
@@ -395,9 +400,7 @@ def test_openapi_shows_request_bodies_not_query_params():
     ):
         post = schema["paths"][path]["post"]
         assert "requestBody" in post, f"{path} lost its request body"
-        query_params = {
-            p["name"] for p in post.get("parameters", []) if p.get("in") == "query"
-        }
+        query_params = {p["name"] for p in post.get("parameters", []) if p.get("in") == "query"}
         assert not query_params.intersection(fields), (
             f"{path} binds {query_params & set(fields)} as query params"
         )
@@ -454,22 +457,32 @@ def _tools_with_pending_promotion():
     for version, status in ((1, "active"), (2, "candidate")):
         tools.ledger.upsert_agent_version(
             AgentVersionRecord(
-                name="add-feature", version=version, status=status,
+                name="add-feature",
+                version=version,
+                status=status,
                 spec_yaml=f"metadata:\n  name: add-feature\n  version: {version}\n",
             )
         )
 
     def card(score, subject_id):
         return Scorecard(
-            subject_type="agent_spec_version", subject_id=subject_id,
-            overall_score=score, cases_total=30,
-            suites={"schema": score, "safety": score, "regression": score,
-                    "role-specific": score, "code": score},
+            subject_type="agent_spec_version",
+            subject_id=subject_id,
+            overall_score=score,
+            cases_total=30,
+            suites={
+                "schema": score,
+                "safety": score,
+                "regression": score,
+                "role-specific": score,
+                "code": score,
+            },
             passed_suites=["schema", "safety", "regression", "role-specific", "code"],
         )
 
     decision = decide(
-        card(0.9, "add-feature@2"), card(0.5, "add-feature@1"),
+        card(0.9, "add-feature@2"),
+        card(0.5, "add-feature@1"),
         mutation_kinds=["new-secret-access"],
     )
     apply_decision(tools.ledger, decision)
@@ -522,7 +535,8 @@ def test_approve_promotion_ignores_caller_scorecards_and_mutations():
     resp = client.post(
         f"/promotions/{decision.id}/approve",
         json={
-            "approved_by": "al", "comment": "ok",
+            "approved_by": "al",
+            "comment": "ok",
             "scorecard": {"overall_score": 1.0, "subject_id": "forged@9"},
             "mutation_kinds": [],
         },
@@ -534,22 +548,16 @@ def test_approve_promotion_ignores_caller_scorecards_and_mutations():
 
 def test_approve_unknown_promotion_is_404():
     client = TestClient(build_app())
-    resp = client.post(
-        "/promotions/prom_missing/approve", json={"approved_by": "al"}
-    )
+    resp = client.post("/promotions/prom_missing/approve", json={"approved_by": "al"})
     assert resp.status_code == 404
 
 
 def test_approve_twice_is_409():
     tools, decision = _tools_with_pending_promotion()
     client = TestClient(build_app(tools))
-    first = client.post(
-        f"/promotions/{decision.id}/approve", json={"approved_by": "al"}
-    )
+    first = client.post(f"/promotions/{decision.id}/approve", json={"approved_by": "al"})
     assert first.status_code == 200
-    second = client.post(
-        f"/promotions/{decision.id}/reject", json={"approved_by": "al"}
-    )
+    second = client.post(f"/promotions/{decision.id}/reject", json={"approved_by": "al"})
     assert second.status_code == 409
 
 
@@ -559,8 +567,7 @@ def test_old_bulk_approve_route_is_gone():
     client = TestClient(build_app())
     resp = client.post(
         "/promotions/approve",
-        json={"candidate": {"subject_type": "run", "subject_id": "r1",
-                            "overall_score": 0.9}},
+        json={"candidate": {"subject_type": "run", "subject_id": "r1", "overall_score": 0.9}},
     )
     # /promotions/approve now only matches /promotions/{promotion_id}/... shapes.
     assert resp.status_code in (404, 405)
@@ -611,9 +618,7 @@ def test_post_repos_conflicting_path_for_same_name_is_409(tmp_path):
     repo_b = _init_git_repo(tmp_path / "b")
     client = TestClient(build_app())
 
-    assert client.post(
-        "/repos", json={"source": str(repo_a), "name": "dup"}
-    ).status_code == 200
+    assert client.post("/repos", json={"source": str(repo_a), "name": "dup"}).status_code == 200
     resp = client.post("/repos", json={"source": str(repo_b), "name": "dup"})
     assert resp.status_code == 409
 

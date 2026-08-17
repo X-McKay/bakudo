@@ -4,10 +4,6 @@ description: >-
   Efficiently maps an unfamiliar repository before making changes. Use when an
   agent must understand where functionality lives, how modules relate, and
   which files a change will touch.
-compatibility: Requires git and repository access.
-metadata:
-  version: "1.0.0"
-  owner: "meta-agent"
 ---
 
 # Codebase Navigation

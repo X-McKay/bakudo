@@ -20,8 +20,8 @@ from pathlib import Path
 import pytest
 
 from bakudo.abox.runner import AboxRunner, _subprocess_executor
+from bakudo.agent_run_bundle import AgentRunBundle, budget_from_spec
 from bakudo.agent_spec import load_spec_file
-from bakudo.bundle import TaskBundle, budget_from_spec
 from bakudo.curriculum import Objective
 
 REPO = Path(__file__).resolve().parents[1]
@@ -40,21 +40,21 @@ pytestmark = [
 def _current_branch() -> str:
     proc = subprocess.run(
         ["git", "-C", str(REPO), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return proc.stdout.strip()
 
 
-def _bundle(run_id: str = RUN_ID) -> TaskBundle:
+def _bundle(run_id: str = RUN_ID) -> AgentRunBundle:
     spec = load_spec_file(REPO / "agents" / "explore.yaml")
     # Fork from the branch under test, not the spec's default `main`: the
     # guest's editable install resolves to /workspace, so the sandboxed run
     # must contain the code being validated.
     spec.sandbox.base_ref = _current_branch()
-    objective = Objective(
-        type="explore", repo="bakudo", title="offline in-sandbox e2e"
-    )
-    return TaskBundle(
+    objective = Objective(type="explore", repo="bakudo", title="offline in-sandbox e2e")
+    return AgentRunBundle(
         run_id=run_id,
         objective_id=objective.id,
         objective=objective,
@@ -66,7 +66,9 @@ def _bundle(run_id: str = RUN_ID) -> TaskBundle:
 def _branch_exists() -> bool:
     proc = subprocess.run(
         ["git", "-C", str(REPO), "branch", "--list", BRANCH],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return BRANCH in proc.stdout
 
@@ -121,15 +123,27 @@ def test_real_abox_timeout_is_distinguishable(monkeypatch):
     # generic failure. Uses the raw executor to avoid a 30-minute spec run.
     result = _subprocess_executor(
         [
-            "abox", "run", "--repo", str(REPO),
-            "--task", "run_E2ETMO1", "--base", "main",
-            "--timeout", "5", "--network", "safe",
-            "--", "sleep", "999",
+            "abox",
+            "run",
+            "--repo",
+            str(REPO),
+            "--task",
+            "run_E2ETMO1",
+            "--base",
+            "main",
+            "--timeout",
+            "5",
+            "--network",
+            "safe",
+            "--",
+            "sleep",
+            "999",
         ],
         timeout=120,
     )
     subprocess.run(
         ["abox", "stop", "--clean", "run_E2ETMO1", "--repo", str(REPO)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert result.exit_code == 124
