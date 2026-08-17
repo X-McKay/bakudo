@@ -142,6 +142,7 @@ def test_injected_connection_still_supported(record):
 
 # --- TMP-2: create_run upserts the objective row first, same transaction ---
 
+
 def _sql_seq(conn):
     return [sql for sql, _ in conn.executed]
 
@@ -150,7 +151,10 @@ def test_create_run_upserts_objective_before_run_in_one_transaction(record):
     conn = FakeConn()
     ledger = PostgresLedger(conn)
     objective = {
-        "id": "obj_T1", "repo": "bakudo", "type": "explore", "title": "t",
+        "id": "obj_T1",
+        "repo": "bakudo",
+        "type": "explore",
+        "title": "t",
         "priority": {"score": 0.5},
     }
     ledger.create_run(record, objective=objective)
@@ -163,9 +167,7 @@ def test_create_run_upserts_objective_before_run_in_one_transaction(record):
     assert begin_idx < obj_idx < run_idx < commit_idx, (
         "objective upsert must precede the run insert inside one transaction"
     )
-    obj_sql, obj_params = next(
-        (s, p) for s, p in conn.executed if "insert into objectives" in s
-    )
+    obj_sql, obj_params = next((s, p) for s, p in conn.executed if "insert into objectives" in s)
     assert "on conflict (id) do nothing" in obj_sql, "objective upsert must be idempotent"
     assert obj_params[0] == "obj_T1"
 
@@ -180,6 +182,7 @@ def test_create_run_without_objective_upserts_stub_row(record):
 
 
 # --- TMP-9: backend parity with InMemoryLedger ---
+
 
 def test_set_phase_agent_running_stamps_started_at_once(record):
     """InMemoryLedger stamps started_at on the first agent_running phase;
@@ -202,9 +205,7 @@ def test_finish_run_stores_result_on_the_run_row(record):
 
     conn = FakeConn()
     PostgresLedger(conn).finish_run("run_T1", RunPhase.completed, {"ok": True})
-    update_sql, update_params = next(
-        (s, p) for s, p in conn.executed if "update runs" in s
-    )
+    update_sql, update_params = next((s, p) for s, p in conn.executed if "update runs" in s)
     assert "result = " in update_sql
     assert '{"ok": true}' in update_params
 
@@ -236,6 +237,7 @@ def test_in_memory_parity_started_at_and_result(record):
 
 # --- TMP-8: idempotent writes under activity retry ---
 
+
 def _event_inserts(conn):
     return [(s, p) for s, p in conn.executed if "insert into run_events" in s]
 
@@ -266,7 +268,9 @@ def _version_record(status="candidate"):
     from bakudo.registry.records import AgentVersionRecord
 
     return AgentVersionRecord(
-        name="add-feature", version=2, status=status,
+        name="add-feature",
+        version=2,
+        status=status,
         spec_yaml="metadata:\n  name: add-feature\n  version: 2\n",
     )
 
@@ -274,9 +278,7 @@ def _version_record(status="candidate"):
 def test_upsert_agent_version_writes_status_reason_and_decided_at():
     conn = FakeConn()
     PostgresLedger(conn).upsert_agent_version(_version_record())
-    insert_sql, _ = next(
-        (s, p) for s, p in conn.executed if "insert into agent_spec_versions" in s
-    )
+    insert_sql, _ = next((s, p) for s, p in conn.executed if "insert into agent_spec_versions" in s)
     assert "status_reason" in insert_sql
     assert "decided_at" in insert_sql
     assert "status_reason = excluded.status_reason" in insert_sql
@@ -288,9 +290,9 @@ def test_upsert_agent_version_checks_for_first_version_of_name():
     active."""
     conn = FakeConn()
     stored = PostgresLedger(conn).upsert_agent_version(_version_record())
-    assert any(
-        "select 1 from agent_spec_versions" in s for s, _ in conn.executed
-    ), "must probe for existing versions of the name"
+    assert any("select 1 from agent_spec_versions" in s for s, _ in conn.executed), (
+        "must probe for existing versions of the name"
+    )
     assert stored.status == "active"
 
 
@@ -310,16 +312,16 @@ def test_set_version_status_updates_row_and_writes_outbox_event():
     assert "returning version" in update_sql
     assert update_params[:2] == ("rejected", "safety regression")
 
-    outbox_sql, outbox_params = next(
-        (s, p) for s, p in conn.executed if "insert into outbox" in s
-    )
+    outbox_sql, outbox_params = next((s, p) for s, p in conn.executed if "insert into outbox" in s)
     assert outbox_params[0] == "agent_version_status"
     import json as _json
 
     payload = _json.loads(outbox_params[1])
     assert payload == {
-        "name": "add-feature", "version": 2,
-        "status": "rejected", "reason": "safety regression",
+        "name": "add-feature",
+        "version": 2,
+        "status": "rejected",
+        "reason": "safety regression",
     }
 
 
@@ -351,19 +353,27 @@ def test_record_promotion_writes_lifecycle_columns():
     from bakudo.evals.scorecard import Scorecard
 
     decision = PromotionDecision(
-        Decision.needs_human, "needs a human", Scorecard(
-            subject_type="agent_spec_version", subject_id="add-feature@2",
+        Decision.needs_human,
+        "needs a human",
+        Scorecard(
+            subject_type="agent_spec_version",
+            subject_id="add-feature@2",
             overall_score=0.9,
         ),
-        requires_human=True, gated_mutations=["new-secret-access"],
+        requires_human=True,
+        gated_mutations=["new-secret-access"],
     )
     conn = FakeConn()
     PostgresLedger(conn).record_promotion(decision)
-    sql, params = next(
-        (s, p) for s, p in conn.executed if "insert into promotion_decisions" in s
-    )
-    for column in ("status", "approved_by", "comment", "resolved_at",
-                   "gated_mutations", "requires_human"):
+    sql, params = next((s, p) for s, p in conn.executed if "insert into promotion_decisions" in s)
+    for column in (
+        "status",
+        "approved_by",
+        "comment",
+        "resolved_at",
+        "gated_mutations",
+        "requires_human",
+    ):
         assert column in sql, f"promotion insert missing {column}"
     assert "on conflict (id) do nothing" in sql
     assert params[0] == decision.id, "the decision id must be the caller's, not a uuid"
@@ -374,9 +384,7 @@ def test_promotions_reads_with_optional_status_filter():
     ledger = PostgresLedger(conn)
     assert ledger.promotions() == []
     assert ledger.promotions(status="pending") == []
-    selects = [
-        (s, p) for s, p in conn.executed if "from promotion_decisions" in s
-    ]
+    selects = [(s, p) for s, p in conn.executed if "from promotion_decisions" in s]
     assert len(selects) == 2
     assert "where status = %s" not in selects[0][0]
     assert "where status = %s" in selects[1][0]
@@ -397,12 +405,21 @@ def test_completed_runs_selects_by_ref_recent_first():
 
 def _promotion_row(status="pending"):
     scorecard = {
-        "subject_type": "agent_spec_version", "subject_id": "add-feature@2",
+        "subject_type": "agent_spec_version",
+        "subject_id": "add-feature@2",
         "overall_score": 0.9,
     }
     return (
-        "prom_T1", "needs_human", "needs a human", scorecard, status,
-        None, None, None, ["new-secret-access"], True,
+        "prom_T1",
+        "needs_human",
+        "needs a human",
+        scorecard,
+        status,
+        None,
+        None,
+        None,
+        ["new-secret-access"],
+        True,
     )
 
 
@@ -413,9 +430,7 @@ def test_resolve_promotion_updates_row_and_transitions_version():
     # version` (TMP-15/TMP-14).
     conn.rows = [_promotion_row(), (2,)]
     ledger = PostgresLedger(conn)
-    resolved = ledger.resolve_promotion(
-        "prom_T1", approved=True, approved_by="al", comment="ok"
-    )
+    resolved = ledger.resolve_promotion("prom_T1", approved=True, approved_by="al", comment="ok")
     assert resolved.status == "approved"
     assert resolved.approved_by == "al"
 
@@ -446,26 +461,20 @@ def test_resolve_promotion_reject_transitions_version_to_rejected():
     PostgresLedger(conn).resolve_promotion(
         "prom_T1", approved=False, approved_by="al", comment="no"
     )
-    version_params = next(
-        p for s, p in conn.executed if "update agent_spec_versions" in s
-    )
+    version_params = next(p for s, p in conn.executed if "update agent_spec_versions" in s)
     assert version_params[0] == "rejected"
 
 
 def test_resolve_promotion_unknown_id_raises():
     with pytest.raises(KeyError):
-        PostgresLedger(FakeConn()).resolve_promotion(
-            "prom_NOPE", approved=True, approved_by="al"
-        )
+        PostgresLedger(FakeConn()).resolve_promotion("prom_NOPE", approved=True, approved_by="al")
 
 
 def test_resolve_promotion_already_resolved_raises():
     conn = FakeConn()
     conn.rows = [_promotion_row(status="approved")]
     with pytest.raises(ValueError):
-        PostgresLedger(conn).resolve_promotion(
-            "prom_T1", approved=True, approved_by="al"
-        )
+        PostgresLedger(conn).resolve_promotion("prom_T1", approved=True, approved_by="al")
 
 
 def test_record_eval_id_is_deterministic_from_subject_and_suite():
@@ -474,8 +483,12 @@ def test_record_eval_id_is_deterministic_from_subject_and_suite():
     conn = FakeConn()
     ledger = PostgresLedger(conn)
     result = EvalResult(
-        subject_type="run", subject_id="run_T1", suite_name="safety",
-        score=1.0, passed=True, details={},
+        subject_type="run",
+        subject_id="run_T1",
+        suite_name="safety",
+        score=1.0,
+        passed=True,
+        details={},
     )
     ledger.record_eval(result)
     ledger.record_eval(result)
@@ -488,8 +501,12 @@ def test_record_eval_id_is_deterministic_from_subject_and_suite():
     assert "on conflict (id) do nothing" in inserts[0][0]
 
     other = EvalResult(
-        subject_type="run", subject_id="run_T1", suite_name="task",
-        score=1.0, passed=True, details={},
+        subject_type="run",
+        subject_id="run_T1",
+        suite_name="task",
+        score=1.0,
+        passed=True,
+        details={},
     )
     ledger.record_eval(other)
     other_id = [p[0] for s, p in conn.executed if "insert into eval_results" in s][-1]
@@ -500,15 +517,23 @@ def test_record_eval_id_is_deterministic_from_subject_and_suite():
 
 
 def _trial_record(**overrides):
+    from bakudo.ids import new_episode_id
+    from bakudo.tasks.models import TaskPin
     from bakudo.trials.models import TrialRecord
 
     fields = dict(
         id="trial_T1",
+        episode_id=new_episode_id(),
         experiment_id="exp_T1",
         agent_ref="add-feature@1",
-        scenario_name="sample-bug",
-        scenario_version=1,
-        scenario_digest="sha256:deadbeef",
+        task=TaskPin(
+            source_uri="file:///benchmark-corpus",
+            corpus_revision="test-revision",
+            name="sample-bug",
+            version=1,
+            bundle_digest="sha256:deadbeef",
+            verifier_digest="sha256:feedface",
+        ),
         seed=42,
         status="completed",
     )
@@ -523,18 +548,16 @@ def test_record_trial_self_migrates_the_table_then_inserts():
     seq = _sql_seq(conn)
     ddl_idx = next(i for i, s in enumerate(seq) if "create table if not exists trials" in s)
     index_idx = next(
-        i for i, s in enumerate(seq)
-        if "create index if not exists trials_experiment_idx" in s
+        i for i, s in enumerate(seq) if "create index if not exists trials_experiment_idx" in s
     )
     insert_idx = next(i for i, s in enumerate(seq) if "insert into trials" in s)
     assert ddl_idx < index_idx < insert_idx
 
-    insert_sql, insert_params = next(
-        (s, p) for s, p in conn.executed if "insert into trials" in s
-    )
+    insert_sql, insert_params = next((s, p) for s, p in conn.executed if "insert into trials" in s)
     assert "on conflict (id) do nothing" in insert_sql, "record_trial must be idempotent (F4)"
     assert insert_params[0] == "trial_T1"
-    assert insert_params[4] == "add-feature@1"
+    assert insert_params[5] == "add-feature@1"
+    assert '"corpus_revision": "test-revision"' in insert_params[6]
 
 
 def test_record_trial_duplicate_id_is_idempotent_noop():
@@ -552,9 +575,7 @@ def test_record_trial_duplicate_id_is_idempotent_noop():
 def test_get_trial_selects_by_id():
     conn = FakeConn()
     PostgresLedger(conn).get_trial("trial_T1")
-    select_sql, params = next(
-        (s, p) for s, p in conn.executed if "from trials" in s
-    )
+    select_sql, params = next((s, p) for s, p in conn.executed if "from trials" in s)
     assert "where id = %s" in select_sql
     assert params == ("trial_T1",)
 
@@ -562,9 +583,7 @@ def test_get_trial_selects_by_id():
 def test_list_trials_without_experiment_filter():
     conn = FakeConn()
     PostgresLedger(conn).list_trials()
-    select_sql, params = next(
-        (s, p) for s, p in conn.executed if "from trials" in s
-    )
+    select_sql, params = next((s, p) for s, p in conn.executed if "from trials" in s)
     assert "where experiment_id" not in select_sql
     assert "order by created_at" in select_sql
     assert params == ()
@@ -573,9 +592,7 @@ def test_list_trials_without_experiment_filter():
 def test_list_trials_with_experiment_filter():
     conn = FakeConn()
     PostgresLedger(conn).list_trials(experiment_id="exp_A")
-    select_sql, params = next(
-        (s, p) for s, p in conn.executed if "from trials" in s
-    )
+    select_sql, params = next((s, p) for s, p in conn.executed if "from trials" in s)
     assert "where experiment_id = %s" in select_sql
     assert params == ("exp_A",)
 
@@ -590,9 +607,7 @@ def test_record_experiment_self_migrates_then_inserts_on_conflict_do_nothing():
     )
 
     seq = _sql_seq(conn)
-    ddl_idx = next(
-        i for i, s in enumerate(seq) if "create table if not exists experiments" in s
-    )
+    ddl_idx = next(i for i, s in enumerate(seq) if "create table if not exists experiments" in s)
     insert_idx = next(i for i, s in enumerate(seq) if "insert into experiments" in s)
     assert ddl_idx < insert_idx
 
@@ -608,9 +623,7 @@ def test_record_experiment_self_migrates_then_inserts_on_conflict_do_nothing():
 def test_get_experiment_selects_by_id_without_migrating():
     conn = FakeConn()
     PostgresLedger(conn).get_experiment("exp_T1")
-    select_sql, params = next(
-        (s, p) for s, p in conn.executed if "from experiments" in s
-    )
+    select_sql, params = next((s, p) for s, p in conn.executed if "from experiments" in s)
     assert "where id = %s" in select_sql
     assert params == ("exp_T1",)
     # No self-migration on the read path (mirrors trials): a legacy DB
@@ -622,12 +635,8 @@ def test_get_experiment_selects_by_id_without_migrating():
 def test_update_experiment_result_updates_status_and_result_without_migrating():
     conn = FakeConn()
     conn.rows = [("exp_T1",)]  # `update ... returning id` finds the row
-    PostgresLedger(conn).update_experiment_result(
-        "exp_T1", "completed", {"decision": "promote"}
-    )
-    update_sql, params = next(
-        (s, p) for s, p in conn.executed if "update experiments" in s
-    )
+    PostgresLedger(conn).update_experiment_result("exp_T1", "completed", {"decision": "promote"})
+    update_sql, params = next((s, p) for s, p in conn.executed if "update experiments" in s)
     assert "set status = %s, result = %s" in update_sql
     assert "where id = %s" in update_sql
     assert "returning id" in update_sql
@@ -667,9 +676,7 @@ def test_register_repo_self_migrates_then_inserts_when_name_unknown():
     insert_idx = next(i for i, s in enumerate(seq) if "insert into repos" in s)
     assert ddl_idx < probe_idx < insert_idx
 
-    insert_sql, insert_params = next(
-        (s, p) for s, p in conn.executed if "insert into repos" in s
-    )
+    insert_sql, insert_params = next((s, p) for s, p in conn.executed if "insert into repos" in s)
     assert "coalesce(%s, now())" in insert_sql, "added_at must fall back to now() when unset"
     assert insert_params[:4] == ("add-feature-repo", "/src/x", "/checkouts/x", "main")
 

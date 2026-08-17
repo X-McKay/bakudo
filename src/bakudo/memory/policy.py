@@ -64,7 +64,3 @@ def validate_memory_candidate(
             break
 
     return reasons
-
-
-def is_acceptable(candidate: MemoryItem, existing: list[MemoryItem] | None = None) -> bool:
-    return not validate_memory_candidate(candidate, existing)

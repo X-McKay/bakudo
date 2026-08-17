@@ -35,7 +35,7 @@ with workflow.unsafe.imports_passed_through():
 
     # trial_seed is pure/hash-based (hashlib only) and import-safe, but the
     # module it lives in (bakudo.experiments.design) also imports the
-    # scenario registry -- passed through for the same reason
+    # task source -- passed through for the same reason
     # ..control.optimize is: cheap to import once, not something the
     # sandbox needs to reload/isolate per workflow task.
     from ..experiments.design import trial_seed
@@ -51,7 +51,7 @@ with workflow.unsafe.imports_passed_through():
         collect_signals,
         compact_memories,
         create_run,
-        evaluate_trial_hidden,
+        evaluate_trial_verifier,
         load_agent_spec,
         measure_winner_bench,
         persist_experiment,
@@ -60,7 +60,7 @@ with workflow.unsafe.imports_passed_through():
         provision_trial,
         reconcile_runs,
         render_bundle,
-        resolve_experiment_scenarios,
+        resolve_experiment_tasks,
         run_agent_evolution,
         run_eval_suite,
         run_sandbox,
@@ -141,9 +141,7 @@ class AgentRunWorkflow:
 
     async def _advance(self, run_id: str, phase: str, payload: dict | None = None) -> None:
         self._phase = phase
-        await workflow.execute_activity(
-            persist_run, args=[run_id, phase, payload or {}], **_SHORT
-        )
+        await workflow.execute_activity(persist_run, args=[run_id, phase, payload or {}], **_SHORT)
 
     async def _notify_meta(self, run_id: str, tokens_used: int = 0) -> None:
         """Signal run_completed to the meta workflow so active_runs drains (TMP-5).
@@ -163,9 +161,7 @@ class AgentRunWorkflow:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - best-effort notification
-            workflow.logger.warning(
-                "run_completed signal to %s failed: %s", META_WORKFLOW_ID, exc
-            )
+            workflow.logger.warning("run_completed signal to %s failed: %s", META_WORKFLOW_ID, exc)
 
     @staticmethod
     def _spec_name_version(bundle: dict) -> tuple[str, int]:
@@ -202,15 +198,14 @@ class AgentRunWorkflow:
         except (ActivityError, ChildWorkflowError) as persist_err:
             workflow.logger.warning(
                 "could not persist terminal failed phase for %s: %s",
-                run_id, persist_err,
+                run_id,
+                persist_err,
             )
         await self._notify_meta(run_id)
 
     async def _run_lifecycle(self, inp: AgentRunInput) -> AgentRunOutput:
         workflow_id = workflow.info().workflow_id
-        await workflow.execute_activity(
-            create_run, args=[inp, workflow_id], **_SHORT
-        )
+        await workflow.execute_activity(create_run, args=[inp, workflow_id], **_SHORT)
         self._phase = "created"
 
         bundle = await workflow.execute_activity(render_bundle, inp, **_SHORT)
@@ -243,9 +238,7 @@ class AgentRunWorkflow:
         sandbox_task = asyncio.ensure_future(
             workflow.execute_activity(run_sandbox, bundle, **_SANDBOX)
         )
-        await workflow.wait_condition(
-            lambda: sandbox_task.done() or self._cancelled
-        )
+        await workflow.wait_condition(lambda: sandbox_task.done() or self._cancelled)
         if self._cancelled and not sandbox_task.done():
             sandbox_task.cancel()
             await self._advance(inp.run_id, "cancelled")
@@ -259,9 +252,12 @@ class AgentRunWorkflow:
             await self._advance(inp.run_id, "failed", {"result": result})
             await self._notify_meta(inp.run_id, sandbox.get("tokens_used", 0))
             return AgentRunOutput(
-                inp.run_id, "failed",
-                agent_name, sandbox.get("git_branch", ""),
+                inp.run_id,
+                "failed",
+                agent_name,
+                sandbox.get("git_branch", ""),
                 result=result,
+                denied_commands=sandbox.get("denied_commands", []),
                 runtime_seconds=sandbox.get("runtime_seconds", 0.0),
             )
 
@@ -294,9 +290,7 @@ class AgentRunWorkflow:
                 **_SHORT,
             )
         except (ActivityError, ChildWorkflowError) as exc:
-            workflow.logger.warning(
-                "canary graduation check failed for %s: %s", inp.run_id, exc
-            )
+            workflow.logger.warning("canary graduation check failed for %s: %s", inp.run_id, exc)
 
         await self._notify_meta(inp.run_id, sandbox.get("tokens_used", 0))
         return AgentRunOutput(
@@ -308,6 +302,7 @@ class AgentRunWorkflow:
             scorecard=eval_out.get("scorecard"),
             eval_results=eval_out.get("eval_results", []),
             diff=sandbox.get("diff", ""),
+            denied_commands=sandbox.get("denied_commands", []),
             runtime_seconds=sandbox.get("runtime_seconds", 0.0),
         )
 
@@ -379,15 +374,14 @@ class OptimizationWorkflow:
             handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
             # Charge the whole optimize loop's token spend against the budget
             # (TMP-24).
-            await handle.signal(
-                "run_completed", args=[inp.tracking_run_id, self._tokens_used]
-            )
+            await handle.signal("run_completed", args=[inp.tracking_run_id, self._tokens_used])
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - best-effort notification
             workflow.logger.warning(
                 "optimize run_completed signal to %s failed: %s",
-                META_WORKFLOW_ID, exc,
+                META_WORKFLOW_ID,
+                exc,
             )
 
     async def _run(self, inp: OptimizeInput) -> dict:
@@ -421,9 +415,7 @@ class OptimizationWorkflow:
                         "reason": "scout run failed: "
                         + str(scout_result.get("summary") or "no result collected"),
                     }
-            approaches = list(
-                scout_result.get("proposed_followups", [])
-            )[: inp.max_approaches]
+            approaches = list(scout_result.get("proposed_followups", []))[: inp.max_approaches]
             if not approaches:
                 # The scout found nothing worth trying — a valid outcome.
                 self._phase = "no-change"
@@ -453,9 +445,7 @@ class OptimizationWorkflow:
                 if isinstance(out, asyncio.CancelledError):
                     raise out
                 if isinstance(out, BaseException):
-                    workflow.logger.warning(
-                        "optimize attempt %d crashed: %s", index + 1, out
-                    )
+                    workflow.logger.warning("optimize attempt %d crashed: %s", index + 1, out)
                     attempts.append(
                         {
                             "run_id": None,
@@ -498,9 +488,7 @@ class OptimizationWorkflow:
                     if timings.get("skipped"):
                         skipped = True
                     else:
-                        ok, detail = bench_reproduces(
-                            timings["before"], timings["after"]
-                        )
+                        ok, detail = bench_reproduces(timings["before"], timings["after"])
                 except (ActivityError, ChildWorkflowError) as exc:
                     detail = f"bench verification errored: {exc}"
                 if skipped:
@@ -508,10 +496,9 @@ class OptimizationWorkflow:
                 if ok:
                     verified = True
                     break
-                title = ((winner.get("result") or {}).get("summary") or "attempt")
+                title = (winner.get("result") or {}).get("summary") or "attempt"
                 verify_feedback.append(
-                    f"'{title[:120]}': failed independent bench verification: "
-                    f"{detail}"
+                    f"'{title[:120]}': failed independent bench verification: {detail}"
                 )
                 remaining = [c for c in remaining if c is not winner]
                 winner = select_winner(remaining)
@@ -548,15 +535,16 @@ def _as_dict(out: AgentRunOutput) -> dict:
         "scorecard": out.scorecard,
         "eval_results": out.eval_results,
         "diff": out.diff,
+        "denied_commands": out.denied_commands,
         "runtime_seconds": out.runtime_seconds,
     }
 
 
 # --- Experiment substrate: trial + experiment workflows (Task 11) ---
 #
-# Controller ruling R1: select_scenarios (and any other scenario/agent-spec
+# Controller ruling R1: select_tasks (and any other task/agent-spec
 # file I/O) must never run in workflow code, so ExperimentWorkflow resolves
-# its scenario selection via the resolve_experiment_scenarios activity and
+# its task selection via the resolve_experiment_tasks activity and
 # builds its trial matrix from the returned descriptors using only the pure,
 # hash-based trial_seed helper plus plain loops -- no RNG, no filesystem
 # access, deterministic under replay.
@@ -564,11 +552,11 @@ def _as_dict(out: AgentRunOutput) -> dict:
 
 @workflow.defn
 class TrialWorkflow:
-    """Runs one scenario against one agent version end to end (experiment
+    """Runs one task against one agent version end to end (experiment
     substrate design doc section 6, Temporal-shaped): provision the
-    scenario's fixture, drive the agent through the existing
+    task's fixture, drive the agent through the existing
     ``AgentRunWorkflow`` lifecycle (sandbox activity semantics stay inside
-    it, untouched), grade the collected diff against the scenario's hidden
+    it, untouched), grade the collected diff against the task's verifier
     tests, and persist the outcome as a ``TrialRecord``. Thin: every side
     effect is an activity or the ``AgentRunWorkflow`` child; this workflow
     notifies nothing itself (that is ``ExperimentWorkflow``'s job, via the
@@ -589,7 +577,7 @@ class TrialWorkflow:
 
         provisioned = await workflow.execute_activity(
             provision_trial,
-            {"scenario": inp.scenario, "agent": inp.agent, "seed": inp.seed},
+            {"task": inp.task, "agent": inp.agent, "seed": inp.seed},
             **_SHORT,
         )
 
@@ -616,19 +604,17 @@ class TrialWorkflow:
             set(changed_files_from_diff(diff)) | set(self_reported_changed_files)
         )
 
-        hidden_result = await workflow.execute_activity(
-            evaluate_trial_hidden,
+        verifier_result = await workflow.execute_activity(
+            evaluate_trial_verifier,
             {
-                "scenario": inp.scenario,
+                "task": inp.task,
                 "diff": diff,
                 "seed": inp.seed,
                 "changed_files": changed_files,
-                # AgentRunOutput does not expose denied_commands (that detail
-                # lives inside AgentRunWorkflow's own sandbox/eval activities,
-                # which stay untouched) -- the test_path_violation/
-                # scope_violation hack-flag signals still apply; the
-                # denied-action-retry signal is unavailable on this path.
-                "denied_commands": [],
+                "denied_commands": [
+                    denied.get("command", "")
+                    for denied in out.get("denied_commands", [])
+                ],
                 "actual_status": result.get("status"),
             },
             **_LONG,
@@ -653,29 +639,28 @@ class TrialWorkflow:
 
         trial_record = {
             "id": trial_id,
+            "episode_id": f"episode_{workflow.uuid4().hex}",
             "experiment_id": inp.experiment_id,
             "run_id": out.get("run_id"),
             "objective_id": provisioned["objective"].get("id"),
             "agent_ref": provisioned["agent_ref"],
-            "scenario_name": provisioned["scenario_name"],
-            "scenario_version": provisioned["scenario_version"],
-            "scenario_digest": provisioned["scenario_digest"],
+            "task": provisioned["task_pin"],
             "seed": inp.seed,
-            "pins": provisioned.get("pins") or {},
+            "runtime_pins": provisioned.get("runtime_pins") or {},
             "metrics": metrics,
             "evaluation": {
-                "f2p_rate": hidden_result["f2p_rate"],
-                "p2p_rate": hidden_result["p2p_rate"],
-                "reward": hidden_result["reward"],
-                "detail": hidden_result["detail"],
-                "expected_status": hidden_result["expected_status"],
-                "actual_status": hidden_result["actual_status"],
-                "status_match": hidden_result["status_match"],
+                "f2p_rate": verifier_result["f2p_rate"],
+                "p2p_rate": verifier_result["p2p_rate"],
+                "reward": verifier_result["reward"],
+                "detail": verifier_result["detail"],
+                "expected_status": verifier_result["expected_status"],
+                "actual_status": verifier_result["actual_status"],
+                "status_match": verifier_result["status_match"],
                 # Same key the sync run_trial path uses
                 # (bakudo/trials/runner.py's evaluation["scorecard"]).
                 "scorecard": out.get("scorecard"),
             },
-            "flags": hidden_result["hack_flags"],
+            "integrity": verifier_result["integrity"],
             "status": "completed",
             "started_at": started_at,
             "completed_at": workflow.now().isoformat(),
@@ -690,23 +675,22 @@ def _failed_trial_dict(item: dict, experiment_id: str, exc: BaseException) -> di
     (:func:`bakudo.experiments.runner._failed_trial_record`): a crashed
     TrialWorkflow child becomes a failed TrialRecord instead of failing the
     whole experiment. Pure (no I/O) -- workflow-safe."""
-    name, _, version_s = item["scenario_ref"].partition("@")
     now = workflow.now().isoformat()
     return {
         "id": f"trial_{workflow.uuid4().hex}",
+        "episode_id": f"episode_{workflow.uuid4().hex}",
         "experiment_id": experiment_id,
         "agent_ref": item["agent_ref"],
-        "scenario_name": name,
-        "scenario_version": int(version_s) if version_s else 0,
-        "scenario_digest": item.get("scenario_digest", ""),
+        "task": item["task_pin"],
         "seed": item["seed"],
-        "pins": {},
+        "runtime_pins": {},
         "metrics": {},
         "evaluation": {"f2p_rate": 0.0, "p2p_rate": 0.0, "error": str(exc)},
-        "flags": {
-            "test_path_violation": False,
-            "denied_action_retries": False,
+        "integrity": {
+            "verifier_input_violation": False,
+            "denied_action_violation": False,
             "scope_violation": False,
+            "change_limit_violation": False,
             "details": {},
         },
         "status": "failed",
@@ -716,28 +700,28 @@ def _failed_trial_dict(item: dict, experiment_id: str, exc: BaseException) -> di
 
 
 def _build_trial_matrix(
-    spec: dict[str, Any], scenario_descriptors: list[dict], experiment_id: str
+    spec: dict[str, Any], task_descriptors: list[dict], experiment_id: str
 ) -> list[dict]:
     """Pure, workflow-safe mirror of
     :func:`bakudo.experiments.design.build_matrix`, built from plain
-    descriptor dicts (:func:`resolve_experiment_scenarios`'s activity
-    output) instead of ``LoadedScenario`` objects, since workflow code may
-    not touch the scenario registry (R1). One row per (scenario, repetition,
+    descriptor dicts (:func:`resolve_experiment_tasks`'s activity
+    output) instead of ``LoadedTask`` objects, since workflow code may
+    not touch the task source (R1). One row per (task, repetition,
     arm); baseline and every candidate arm of a cell share ``trial_seed`` --
     the paired design (design doc section 7)."""
     arms = [spec["baseline"], *spec.get("candidates", [])]
     repetitions = spec.get("repetitions", 1)
     trials = []
-    for descriptor in scenario_descriptors:
-        scenario_name = descriptor["name"]
-        scenario_ref = f"{scenario_name}@{descriptor['version']}"
+    for descriptor in task_descriptors:
+        task_name = descriptor["name"]
+        task_ref = f"{task_name}@{descriptor['version']}"
         for repetition in range(repetitions):
-            seed = trial_seed(experiment_id, scenario_name, repetition)
+            seed = trial_seed(experiment_id, task_name, repetition)
             for agent_ref in arms:
                 trials.append(
                     {
-                        "scenario_ref": scenario_ref,
-                        "scenario_digest": descriptor["digest"],
+                        "task_ref": task_ref,
+                        "task_pin": descriptor["task_pin"],
                         "agent_ref": agent_ref,
                         "seed": seed,
                         "repetition": repetition,
@@ -764,7 +748,7 @@ class ExperimentWorkflow:
     synchronous, non-Temporal counterpart over the same matrix/statistics
     building blocks).
 
-    ``persist_experiment(running)`` -> ``resolve_experiment_scenarios`` ->
+    ``persist_experiment(running)`` -> ``resolve_experiment_tasks`` ->
     build the trial matrix (pure, in workflow code) -> up to
     ``_EXPERIMENT_CONCURRENCY`` concurrent ``TrialWorkflow`` children (a
     crashed child is recorded as a failed trial rather than failing the
@@ -793,22 +777,21 @@ class ExperimentWorkflow:
             return
         try:
             handle = workflow.get_external_workflow_handle(META_WORKFLOW_ID)
-            await handle.signal(
-                "run_completed", args=[inp.tracking_run_id, self._tokens_used]
-            )
+            await handle.signal("run_completed", args=[inp.tracking_run_id, self._tokens_used])
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - best-effort notification
             workflow.logger.warning(
                 "experiment run_completed signal to %s failed: %s",
-                META_WORKFLOW_ID, exc,
+                META_WORKFLOW_ID,
+                exc,
             )
 
     async def _run(self, inp: ExperimentInput) -> dict:
         raw_spec = inp.spec
         experiment_id = f"exp_{workflow.uuid4().hex}"
 
-        # Resolve scenarios AND every arm ref (baseline + candidates) up
+        # Resolve tasks AND every arm ref (baseline + candidates) up
         # front, same as the sync path (resolve_arm_pipeline_fn runs before
         # run_experiment is ever called -- ruling (4)): every TrialRecord a
         # TrialWorkflow child records carries the resolved
@@ -818,9 +801,11 @@ class ExperimentWorkflow:
         # must both match what the trials actually recorded, or every
         # statistic silently zeroes on a raw-vs-resolved ref mismatch.
         resolved = await workflow.execute_activity(
-            resolve_experiment_scenarios, {"spec": raw_spec}, **_SHORT,
+            resolve_experiment_tasks,
+            {"spec": raw_spec},
+            **_SHORT,
         )
-        scenario_descriptors = resolved["scenarios"]
+        task_descriptors = resolved["tasks"]
         resolved_arms = resolved["resolvedArms"]
         spec = dict(raw_spec)
         spec["baseline"] = resolved_arms[raw_spec["baseline"]]
@@ -837,7 +822,7 @@ class ExperimentWorkflow:
             **_SHORT,
         )
 
-        matrix = _build_trial_matrix(spec, scenario_descriptors, experiment_id)
+        matrix = _build_trial_matrix(spec, task_descriptors, experiment_id)
 
         semaphore = asyncio.Semaphore(_EXPERIMENT_CONCURRENCY)
 
@@ -846,7 +831,7 @@ class ExperimentWorkflow:
                 return await workflow.execute_child_workflow(
                     TrialWorkflow.run,
                     TrialInput(
-                        scenario=item["scenario_ref"],
+                        task=item["task_ref"],
                         agent=item["agent_ref"],
                         seed=item["seed"],
                         experiment_id=experiment_id,
@@ -867,7 +852,9 @@ class ExperimentWorkflow:
             if isinstance(out, BaseException):
                 workflow.logger.warning(
                     "trial for %s/%s crashed: %s",
-                    item["scenario_ref"], item["agent_ref"], out,
+                    item["task_ref"],
+                    item["agent_ref"],
+                    out,
                 )
                 record = _failed_trial_dict(item, experiment_id, out)
                 await workflow.execute_activity(persist_trial, record, **_SHORT)
@@ -875,7 +862,7 @@ class ExperimentWorkflow:
                 continue
             trials.append(out)
             try:
-                tokens_used += int((out.get("metrics") or {}).get("tokens_used", 0) or 0)
+                tokens_used += int((out.get("metrics") or {}).get("tokens", 0) or 0)
             except (TypeError, ValueError):
                 pass
         self._tokens_used = tokens_used
@@ -885,7 +872,7 @@ class ExperimentWorkflow:
             {
                 "experiment_id": experiment_id,
                 "spec": spec,
-                "scenarios": scenario_descriptors,
+                "tasks": task_descriptors,
             },
             **_LONG,
         )
@@ -1009,9 +996,7 @@ class MetaAgentWorkflow:
         # this is a no-op; once tokens are priced it decrements the ceiling
         # that gates dispatch.
         if tokens_used and self._state.usd_per_1k_tokens:
-            self._state.budget_usd_remaining -= (
-                tokens_used / 1000.0 * self._state.usd_per_1k_tokens
-            )
+            self._state.budget_usd_remaining -= tokens_used / 1000.0 * self._state.usd_per_1k_tokens
 
     def _drop_active_run(self, run_id: str) -> None:
         if run_id in self._state.active_runs:
@@ -1155,7 +1140,8 @@ class MetaAgentWorkflow:
         for run_id in self._stale_active_runs(now):
             workflow.logger.warning(
                 "reconciling leaked active run %s (no completion after %sh)",
-                run_id, self._state.active_run_ttl_hours,
+                run_id,
+                self._state.active_run_ttl_hours,
             )
             self._drop_active_run(run_id)
 
@@ -1188,9 +1174,7 @@ class MetaAgentWorkflow:
             # TTL sweep forever and could block dispatch permanently. Stamp
             # them now so the TTL backstop (and role accounting) covers them.
             for run_id in self._state.active_runs:
-                self._state.active_run_started.setdefault(
-                    run_id, workflow.now().isoformat()
-                )
+                self._state.active_run_started.setdefault(run_id, workflow.now().isoformat())
 
         while True:
             self._reconcile_active_runs(workflow.now())
@@ -1205,14 +1189,18 @@ class MetaAgentWorkflow:
                 # across this deploy.
                 if workflow.patched("idle-heartbeat-wake"):
                     await workflow.wait_condition(
-                        lambda: self._dispatch_candidate() is not None
-                        or self._handled >= self._state.continue_as_new_threshold,
+                        lambda: (
+                            self._dispatch_candidate() is not None
+                            or self._handled >= self._state.continue_as_new_threshold
+                        ),
                         timeout=timedelta(minutes=self._state.idle_wake_minutes),
                     )
                 else:
                     await workflow.wait_condition(
-                        lambda: self._dispatch_candidate() is not None
-                        or self._handled >= self._state.continue_as_new_threshold
+                        lambda: (
+                            self._dispatch_candidate() is not None
+                            or self._handled >= self._state.continue_as_new_threshold
+                        )
                     )
             except TimeoutError:
                 # Idle heartbeat: reconcile leaked slots against the ledger's
@@ -1227,8 +1215,8 @@ class MetaAgentWorkflow:
                     await self._reconcile_via_ledger()
                 except ActivityError as exc:
                     workflow.logger.warning(
-                        "ledger reconcile failed on idle wake; retrying next "
-                        "heartbeat: %s", exc,
+                        "ledger reconcile failed on idle wake; retrying next heartbeat: %s",
+                        exc,
                     )
                 self._handled += 1
                 continue
@@ -1271,9 +1259,7 @@ class MetaAgentWorkflow:
                     workflow.logger.warning(
                         "dead-lettering objective %s: %s", objective.get("id"), reason
                     )
-                    self._state.dead_letter.append(
-                        {"objective": objective, "reason": reason}
-                    )
+                    self._state.dead_letter.append({"objective": objective, "reason": reason})
                     continue
 
             self._track_active_run(run_id, role)
@@ -1324,7 +1310,8 @@ class MetaAgentWorkflow:
             reason = "no optimize-attempt spec resolvable for optimize objective"
             workflow.logger.warning(
                 "dead-lettering optimize objective %s: %s",
-                objective.get("id"), reason,
+                objective.get("id"),
+                reason,
             )
             self._state.dead_letter.append({"objective": objective, "reason": reason})
             return
@@ -1342,6 +1329,7 @@ class MetaAgentWorkflow:
 
 
 # --- Evolution & curriculum workflows (spec sections 11.1, 15, 16) ---
+
 
 @workflow.defn
 class AgentEvolutionWorkflow:

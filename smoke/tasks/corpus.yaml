@@ -1,0 +1,4 @@
+apiVersion: bakudo.ai/v1alpha1
+kind: TaskCorpus
+name: bakudo-core-smoke
+revision: core-3.0.0

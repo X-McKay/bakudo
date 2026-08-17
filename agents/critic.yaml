@@ -49,7 +49,7 @@ tools:
   - name: load-skill
 
 skills:
-  - codebase-navigation@^1.0
+  - codebase-navigation
 
 outputContract:
   requiredFiles:

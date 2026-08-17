@@ -11,6 +11,7 @@ Opt-in because it builds a wheel and creates a venv (`make wheel-smoke`):
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -87,3 +88,16 @@ def test_wheel_bakudo_optimize_help(wheel_venv: Path, clean_cwd: Path):
     result = _run([str(wheel_venv / "bin" / "bakudo"), "optimize", "--help"], cwd=clean_cwd)
     assert result.returncode == 0, result.stderr
     assert "--repo" in result.stdout
+
+
+def test_wheel_bakudo_doctor_loads_packaged_resources(wheel_venv: Path, clean_cwd: Path):
+    result = _run(
+        [str(wheel_venv / "bin" / "bakudo"), "doctor", "--json"],
+        cwd=clean_cwd,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ok"] is True
+    assert next(c for c in report["checks"] if c["name"] == "agent-specs")["status"] == "ok"
+    assert next(c for c in report["checks"] if c["name"] == "skills")["status"] == "ok"
+    assert next(c for c in report["checks"] if c["name"] == "task-source")["status"] == "ok"

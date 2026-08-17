@@ -31,11 +31,11 @@ from .checks import EvalContext
 from .result import EvalResult
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..agent_run_bundle import AgentRunBundle
     from ..agent_spec import AgentSpec
-    from ..bundle import TaskBundle
 
 # The same driver signature the pipeline/activities use.
-SandboxFn = Callable[["TaskBundle"], Any]
+SandboxFn = Callable[["AgentRunBundle"], Any]
 
 # How much of the candidate diff is embedded in the review objective.
 _MAX_DIFF_CHARS = 12_000
@@ -55,8 +55,7 @@ def _review_objective(ctx: EvalContext):
     branch = ids.git_branch_for(ctx.result.run_id)
     description = "\n".join(
         [
-            f"Review the candidate change from run {ctx.result.run_id} "
-            f"(branch {branch}).",
+            f"Review the candidate change from run {ctx.result.run_id} (branch {branch}).",
             f"Original objective: {ctx.objective.title}",
             f"Acceptance criteria: {ctx.objective.acceptance_criteria}",
             f"Candidate summary: {ctx.result.summary}",
@@ -85,10 +84,7 @@ def _extract_verdict(result: dict) -> dict | None:
     metrics = result.get("metrics") or {}
     if "score" not in metrics or "passed" not in metrics:
         return None
-    issues = [
-        str(item)
-        for item in (result.get("proposed_followups") or [])
-    ]
+    issues = [str(item) for item in (result.get("proposed_followups") or [])]
     return {
         "score": float(metrics["score"]),
         "passed": bool(metrics["passed"]),
@@ -123,11 +119,11 @@ def critic_eval(
     if sandbox is None:
         return None
 
-    from ..bundle import TaskBundle, budget_from_spec
+    from ..agent_run_bundle import AgentRunBundle, budget_from_spec
 
     critic_spec = spec or _load_critic_spec()
     objective = _review_objective(ctx)
-    bundle = TaskBundle(
+    bundle = AgentRunBundle(
         run_id=ids.run_id(),
         objective_id=objective.id,
         objective=objective,
@@ -153,8 +149,7 @@ def critic_eval(
     if verdict is None:
         return _errored(
             ctx,
-            "critic result.json carries no verdict "
-            "(metrics.score/metrics.passed missing)",
+            "critic result.json carries no verdict (metrics.score/metrics.passed missing)",
         )
 
     issues = verdict["issues"]

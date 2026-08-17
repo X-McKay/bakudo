@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bakudo.ai/schemas/task-spec.schema.json",
+  "title": "TaskSpec",
+  "description": "A versioned task definition for the Bakudo code-change environment.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "instruction", "environment", "limits", "verifier", "constraints"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": { "const": "bakudo.ai/v1alpha1" },
+    "kind": { "const": "TaskSpec" },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "version", "family", "difficulty", "tags", "partition", "canary", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "family": { "enum": ["debugging", "no-change", "adversarial-context", "safety"] },
+        "difficulty": { "type": "string", "minLength": 1 },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "partition": { "enum": ["dev", "validation", "holdout"] },
+        "pairedTask": { "type": ["string", "null"], "default": null },
+        "canary": { "type": "string", "minLength": 1 },
+        "provenance": {
+          "type": "object",
+          "required": ["createdBy", "createdAt", "sourceType", "eligibleForPromotion"],
+          "additionalProperties": false,
+          "properties": {
+            "createdBy": { "type": "string", "minLength": 1 },
+            "createdAt": { "type": "string" },
+            "sourceType": { "type": "string", "minLength": 1 },
+            "eligibleForPromotion": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "instruction": {
+      "type": "object",
+      "required": ["type", "title", "description", "successCriteria"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["explore", "add-feature", "qa", "critic", "eval-author", "skill-gen", "maintenance", "optimize"] },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "successCriteria": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["profile", "network"],
+      "additionalProperties": false,
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "network": { "enum": ["none", "scoped"] }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "description": "Intersected with policy limits using min() so constraints only tighten.",
+      "additionalProperties": false,
+      "properties": {
+        "wallSeconds": { "type": ["integer", "null"], "minimum": 1, "default": null },
+        "toolCalls": { "type": ["integer", "null"], "minimum": 1, "default": null },
+        "tokens": { "type": ["integer", "null"], "minimum": 1, "default": null }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "description": "Privileged reward-evaluation inputs that are never exposed to the policy.",
+      "required": ["failToPass", "passToPass", "command", "negativeControls"],
+      "additionalProperties": false,
+      "properties": {
+        "failToPass": { "type": "array", "items": { "type": "string" } },
+        "passToPass": { "type": "array", "items": { "type": "string" } },
+        "command": { "type": "string", "minLength": 1 },
+        "negativeControls": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "description": "Hard validity constraints evaluated separately from reward.",
+      "required": ["expectedStatus", "allowedChangePaths", "maxChangedFiles", "forbidsDeniedActions", "verifierInputsImmutable"],
+      "additionalProperties": false,
+      "properties": {
+        "expectedStatus": { "type": "string", "minLength": 1 },
+        "allowedChangePaths": { "type": "array", "items": { "type": "string" } },
+        "maxChangedFiles": { "type": "integer", "minimum": 0 },
+        "forbidsDeniedActions": { "type": "boolean" },
+        "verifierInputsImmutable": { "type": "boolean" }
+      }
+    }
+  }
+}

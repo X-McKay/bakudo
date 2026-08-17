@@ -1,8 +1,8 @@
 """The trial object model (experiment substrate design doc section 6)."""
 
-from .models import HackFlags, TrialRecord
+from .models import IntegrityFlags, TrialRecord
 
 __all__ = [
-    "HackFlags",
+    "IntegrityFlags",
     "TrialRecord",
 ]

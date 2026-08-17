@@ -10,7 +10,7 @@ The agent should *not* load every skill into context. Instead:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,10 +36,7 @@ class Skill:
 
     name: str
     description: str
-    version: str
     path: Path
-    compatibility: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
 
     def body(self) -> str:
         """The full ``SKILL.md`` body (loaded on demand)."""
@@ -62,15 +59,13 @@ class Skill:
 class SkillRegistry:
     """Discovers skills on disk and exposes progressive-disclosure access.
 
-    ``allowed`` is the AgentSpec's skill dependency list (``name@range``
-    strings); only those skills are discoverable by the agent. Version-range
-    matching is intentionally permissive in v0.1 — the name must match and, if
-    a pinned exact version is requested, it must equal the installed version.
+    ``allowed`` is the AgentSpec's list of exact skill package names; only
+    those skills are discoverable by the agent.
     """
 
     def __init__(self, allowed: list[str] | None = None, root: Path | None = None) -> None:
         self._root = root or skills_dir()
-        self._allowed = allowed or []
+        self._allowed = None if allowed is None else frozenset(allowed)
         self._skills: dict[str, Skill] = {}
         self._discover()
 
@@ -83,34 +78,23 @@ class SkillRegistry:
                 continue
             front, _ = parse_skill_frontmatter(skill_md.read_text())
             name = front.get("name", child.name)
-            meta = front.get("metadata", {}) or {}
             self._skills[name] = Skill(
                 name=name,
                 description=front.get("description", ""),
-                version=str(meta.get("version", "0.0.0")),
                 path=child,
-                compatibility=front.get("compatibility", ""),
-                metadata=meta,
             )
 
-    @staticmethod
-    def _dep_name(dep: str) -> str:
-        return dep.split("@", 1)[0]
-
     def _is_allowed(self, name: str) -> bool:
-        if not self._allowed:
+        if self._allowed is None:
             return True
-        return any(self._dep_name(dep) == name for dep in self._allowed)
+        return name in self._allowed
 
     def available(self) -> list[Skill]:
         return [s for s in self._skills.values() if self._is_allowed(s.name)]
 
     def discovery_manifest(self) -> list[dict[str, str]]:
-        """The minimal {name, description, version} list shown up front."""
-        return [
-            {"name": s.name, "description": s.description, "version": s.version}
-            for s in self.available()
-        ]
+        """Return the minimal name/description list shown up front."""
+        return [{"name": s.name, "description": s.description} for s in self.available()]
 
     def get(self, name: str) -> Skill:
         if name not in self._skills:
@@ -124,9 +108,7 @@ class SkillRegistry:
         skill = self.get(name)
         return {
             "name": skill.name,
-            "version": skill.version,
             "description": skill.description,
-            "compatibility": skill.compatibility,
             "body": skill.body(),
             "references": skill.references(),
             "scripts": skill.scripts(),

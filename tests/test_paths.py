@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from bakudo.paths import agents_dir, scenarios_dir, schemas_dir, skills_dir
+from bakudo.paths import agents_dir, schemas_dir, skills_dir, smoke_tasks_dir
 
 # The seed roles every install must be able to resolve by name.
 SEED_AGENTS = {
@@ -21,33 +21,10 @@ SEED_AGENTS = {
     "qa",
 }
 
-# The exemplar scenarios every install must be able to resolve.
-EXEMPLAR_SCENARIOS = {
-    "csv-sum-offbyone",
-    "rate-limiter-nochange",
-    "rate-limiter-fix",
-    "retry-misdiagnosis",
-    "config-scope-trap",
-    "lru-cache-fix",
-    "date-range-fix",
-    "dedupe-orders-fix",
-    "retry-backoff-fix",
-    "slugify-fix",
-    "inventory-stale-read",
-    "lru-cache-nochange",
-    "date-range-nochange",
-    "dedupe-orders-nochange",
-    "retry-backoff-nochange",
-    "slugify-nochange",
-    "wrong-culprit-cache",
-    "log-noise",
-    "readme-red-herring",
-    "test-name-trap",
-    "first-hypothesis-fail",
-    "deps-temptation",
-    "delete-bait",
-    "secrets-probe",
-    "test-weaken-trap",
+# The two smoke tasks every install must be able to resolve.
+EXEMPLAR_TASKS = {
+    "smoke-rate-limiter-fix",
+    "smoke-rate-limiter-nochange",
 }
 
 
@@ -94,13 +71,11 @@ def test_schemas_and_skills_dirs_still_resolve():
     assert skills_dir().is_dir()
 
 
-def test_scenarios_dir_resolves_and_contains_exemplars():
-    directory = scenarios_dir()
+def test_smoke_tasks_dir_resolves_and_contains_exemplars():
+    directory = smoke_tasks_dir()
     assert directory.is_dir()
-    names = {
-        path.name for path in directory.iterdir() if (path / "scenario.yaml").is_file()
-    }
-    assert names == EXEMPLAR_SCENARIOS
+    names = {path.name for path in directory.iterdir() if (path / "task.yaml").is_file()}
+    assert names == EXEMPLAR_TASKS
 
 
 # A hand-built agents path in any spelling: the quoted segment ('agents' or
@@ -153,12 +128,10 @@ def test_every_agents_path_goes_through_paths_module():
     offenders = [
         f"{path.relative_to(package_root)}:{lineno}: {line.strip()}"
         for path in sorted(package_root.rglob("*.py"))
-        if "_data" not in path.parts
-        and path.name != "paths.py"  # the one blessed resolver
+        if "_data" not in path.parts and path.name != "paths.py"  # the one blessed resolver
         for lineno, line in enumerate(path.read_text().splitlines(), start=1)
         if _HAND_BUILT_AGENTS_PATH.search(line)
     ]
     assert offenders == [], (
-        f"resolve agents/*.yaml via bakudo.paths.agents_dir(), not "
-        f"hand-built paths: {offenders}"
+        f"resolve agents/*.yaml via bakudo.paths.agents_dir(), not hand-built paths: {offenders}"
     )

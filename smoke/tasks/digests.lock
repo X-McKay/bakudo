@@ -1,0 +1,4 @@
+{
+  "smoke-rate-limiter-fix@1": "sha256:a66711b68fc95e4d1d27591df15822bb0b9b5ec87633eec288117ae15c78e440",
+  "smoke-rate-limiter-nochange@1": "sha256:3874e582dad14713d2f0ca9332f44dd6329a0b45d9185ed484bbe17c32df49ea"
+}

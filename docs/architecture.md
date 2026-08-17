@@ -28,7 +28,7 @@ repository code. Components:
   policy (§14.5), the in-process `SemanticMemoryStore` (embedding dedup +
   retrieval) and its durable counterpart `PgSemanticMemoryStore` (pgvector
   similarity server-side, auto-wired in the worker from
-  `BAKUDO_POSTGRES_DSN`), and the Neo4j graph adapter with an optional
+  `BAKUDO_POSTGRES_DSN`), and the FalkorDB graph adapter with an optional
   memory-write mirror (§14.2, §21).
 - **Temporal** (`temporal/`) — durable orchestration (see below).
 - **Control API** (`api/`) — the HTTP surface (§25).
@@ -102,4 +102,27 @@ The meta-agent never overwrites an active agent. It creates candidate specs/
 skills/evals, scores them against a baseline, and promotes only tested
 improvements — gated on zero safety regressions, sufficient eval coverage, a
 minimum score improvement, and human approval for privilege-escalating
-mutations. See `evals/promotion.py`.
+  mutations. See `evals/promotion.py`.
+
+## Controlled environment and experiment substrate
+
+`tasks/` defines the storage-neutral environment boundary: typed `TaskSpec`
+contracts, `TaskSource`, deterministic provisioning, published bundle loading,
+the `VerifierRunner` port, and authoring verification. Core ships two smoke
+tasks only. The versioned benchmark corpus and privileged verifier material
+live in the separate private `bakudo-benchmarks` repository and are consumed
+as a directory source or immutable content-addressed bundle.
+
+A task-backed evaluation proceeds as:
+
+```text
+TaskSource → LoadedTask + TaskPin → provision episode → run policy
+           → independent verifier → TrialRecord → experiment statistics
+```
+
+The synchronous and Temporal experiment paths share the same domain models,
+task selection, deterministic seeds, trial persistence, and statistics. Side
+effects remain behind small ports so schemas, loading, provisioning,
+verification, trials, and statistics can each be tested in isolation. See
+[environment-model.md](environment-model.md) for the POMDP correspondence and
+[task-corpus-and-bundles.md](task-corpus-and-bundles.md) for artifact ownership.

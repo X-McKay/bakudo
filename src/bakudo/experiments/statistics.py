@@ -1,5 +1,5 @@
 """Paired-comparison statistics for experiment analysis (experiment substrate
-design doc section 8): per-scenario deltas, a percentile bootstrap confidence
+design doc section 8): per-task deltas, a percentile bootstrap confidence
 interval, and a tie-zone + cost-tiebreak verdict.
 
 Pure stdlib — no numpy/scipy, and no bakudo imports. This is the one module
@@ -18,7 +18,7 @@ from statistics import fmean
 
 @dataclass(frozen=True)
 class PairedAnalysis:
-    n_scenarios: int
+    n_tasks: int
     mean_delta: float
     ci_low: float
     ci_high: float
@@ -28,11 +28,11 @@ class PairedAnalysis:
     verdict: str  # "candidate" | "baseline" | "tie"
 
 
-def scenario_deltas(
+def task_deltas(
     baseline: Mapping[str, list[float]], candidate: Mapping[str, list[float]]
 ) -> dict[str, float]:
-    """Per-scenario paired differences (candidate mean - baseline mean), reps
-    averaged within scenario first. Keys are scenario names; only scenarios
+    """Per-task paired differences (candidate mean - baseline mean), reps
+    averaged within task first. Keys are task names; only tasks
     present in both mappings are used."""
     common = sorted(set(baseline) & set(candidate))
     return {name: fmean(candidate[name]) - fmean(baseline[name]) for name in common}
@@ -44,9 +44,9 @@ def paired_bootstrap_ci(
     resamples: int = 10_000,
     seed: int = 0,
 ) -> tuple[float, float]:
-    """Percentile bootstrap CI over scenario deltas with ``random.Random(seed)``.
+    """Percentile bootstrap CI over task deltas with ``random.Random(seed)``.
 
-    Resamples scenario deltas with replacement ``resamples`` times, computes
+    Resamples task deltas with replacement ``resamples`` times, computes
     each resample's mean, sorts the resample means, and reads the CI off via
     nearest-rank percentile indexing.
     """
@@ -90,25 +90,23 @@ def analyze(
     ``cost_delta < 0`` (a cheaper candidate wins ties); a tie with
     ``cost_delta >= 0`` stays "tie".
     """
-    deltas_by_scenario = scenario_deltas(baseline, candidate)
-    n_scenarios = len(deltas_by_scenario)
+    deltas_by_task = task_deltas(baseline, candidate)
+    n_tasks = len(deltas_by_task)
 
-    if n_scenarios == 0:
+    if n_tasks == 0:
         return PairedAnalysis(0, 0.0, 0.0, 0.0, 0, 0, 0, "tie")
 
-    deltas = list(deltas_by_scenario.values())
+    deltas = list(deltas_by_task.values())
     mean_delta = fmean(deltas)
 
-    if n_scenarios == 1:
+    if n_tasks == 1:
         ci_low, ci_high = deltas[0], deltas[0]
     else:
-        ci_low, ci_high = paired_bootstrap_ci(
-            deltas, confidence=confidence, seed=seed
-        )
+        ci_low, ci_high = paired_bootstrap_ci(deltas, confidence=confidence, seed=seed)
 
     wins = sum(1 for d in deltas if d > win_eps)
     losses = sum(1 for d in deltas if d < -win_eps)
-    ties = n_scenarios - wins - losses
+    ties = n_tasks - wins - losses
 
     is_tie = abs(mean_delta) < tie_zone or (ci_low <= 0 <= ci_high)
     if is_tie:
@@ -120,7 +118,7 @@ def analyze(
         verdict = "candidate" if mean_delta > 0 else "baseline"
 
     return PairedAnalysis(
-        n_scenarios=n_scenarios,
+        n_tasks=n_tasks,
         mean_delta=mean_delta,
         ci_low=ci_low,
         ci_high=ci_high,

@@ -18,7 +18,7 @@ from typing import Any
 
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
-from ..trials.models import HackFlags, TrialRecord
+from ..trials.models import TrialRecord
 from .records import AgentVersionRecord, RepoRecord, RunEvent, RunPhase, RunRecord
 
 # Self-migration DDL for the trials table. infra/postgres/init.sql is the
@@ -30,18 +30,17 @@ from .records import AgentVersionRecord, RepoRecord, RunEvent, RunPhase, RunReco
 _TRIALS_DDL = """\
 create table if not exists trials (
   id text primary key,
+  episode_id text not null,
   experiment_id text,
   run_id text,
   objective_id text,
   agent_ref text not null,
-  scenario_name text not null,
-  scenario_version integer not null,
-  scenario_digest text not null,
+  task_pin jsonb not null,
   seed bigint not null,
-  pins jsonb not null default '{}'::jsonb,
+  runtime_pins jsonb not null default '{}'::jsonb,
   metrics jsonb not null default '{}'::jsonb,
   evaluation jsonb not null default '{}'::jsonb,
-  flags jsonb not null default '{}'::jsonb,
+  integrity jsonb not null default '{}'::jsonb,
   status text not null,
   started_at timestamptz,
   completed_at timestamptz,
@@ -199,9 +198,18 @@ class PostgresLedger:
                         status_reason = excluded.status_reason,
                         decided_at = excluded.decided_at
                 """,
-                (record.id, record.name, record.version, record.spec_yaml,
-                 record.status, record.status_reason, record.decided_at,
-                 record.parent_version, record.created_by, record.created_at),
+                (
+                    record.id,
+                    record.name,
+                    record.version,
+                    record.spec_yaml,
+                    record.status,
+                    record.status_reason,
+                    record.decided_at,
+                    record.parent_version,
+                    record.created_by,
+                    record.created_at,
+                ),
             )
         return record
 
@@ -259,8 +267,12 @@ class PostgresLedger:
             raise ValueError(f"unknown version status {status!r}")
         with self._connection() as conn, conn.transaction():
             applied = self._set_version_status(
-                conn, name, version, status,
-                reason=reason, expected_status=expected_status,
+                conn,
+                name,
+                version,
+                status,
+                reason=reason,
+                expected_status=expected_status,
             )
         if not applied:
             if expected_status is not None:
@@ -313,10 +325,7 @@ class PostgresLedger:
             "insert into outbox (topic, payload) values (%s, %s)",
             (
                 "agent_version_status",
-                json.dumps(
-                    {"name": name, "version": version,
-                     "status": status, "reason": reason}
-                ),
+                json.dumps({"name": name, "version": version, "status": status, "reason": reason}),
             ),
         )
         return True
@@ -326,9 +335,16 @@ class PostgresLedger:
         if row is None:
             return None
         return AgentVersionRecord(
-            id=str(row[0]), name=row[1], version=row[2], spec_yaml=row[3],
-            status=row[4], status_reason=row[5], decided_at=row[6],
-            parent_version=row[7], created_by=row[8], created_at=row[9],
+            id=str(row[0]),
+            name=row[1],
+            version=row[2],
+            spec_yaml=row[3],
+            status=row[4],
+            status_reason=row[5],
+            decided_at=row[6],
+            parent_version=row[7],
+            created_by=row[8],
+            created_at=row[9],
         )
 
     # --- runs ---
@@ -368,9 +384,17 @@ class PostgresLedger:
                 values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 on conflict (id) do nothing
                 """,
-                (record.id, record.temporal_workflow_id, record.abox_task_id,
-                 record.objective_id, record.agent_ref, record.phase.value,
-                 record.git_branch, record.started_at, record.completed_at),
+                (
+                    record.id,
+                    record.temporal_workflow_id,
+                    record.abox_task_id,
+                    record.objective_id,
+                    record.agent_ref,
+                    record.phase.value,
+                    record.git_branch,
+                    record.started_at,
+                    record.completed_at,
+                ),
             )
             self._append_event(
                 conn,
@@ -393,15 +417,19 @@ class PostgresLedger:
         if isinstance(result, str):
             result = json.loads(result)
         return RunRecord(
-            id=row[0], temporal_workflow_id=row[1], abox_task_id=row[2],
-            objective_id=row[3], agent_ref=row[4], phase=RunPhase(row[5]),
-            git_branch=row[6], started_at=row[7], completed_at=row[8],
+            id=row[0],
+            temporal_workflow_id=row[1],
+            abox_task_id=row[2],
+            objective_id=row[3],
+            agent_ref=row[4],
+            phase=RunPhase(row[5]),
+            git_branch=row[6],
+            started_at=row[7],
+            completed_at=row[8],
             result=result,
         )
 
-    def completed_runs(
-        self, agent_ref: str, limit: int | None = None
-    ) -> list[RunRecord]:
+    def completed_runs(self, agent_ref: str, limit: int | None = None) -> list[RunRecord]:
         """Completed runs of one agent version, most recent first (design §3)."""
         sql = (
             "select id, temporal_workflow_id, abox_task_id, objective_id, "
@@ -421,9 +449,15 @@ class PostgresLedger:
                 result = json.loads(result)
             runs.append(
                 RunRecord(
-                    id=row[0], temporal_workflow_id=row[1], abox_task_id=row[2],
-                    objective_id=row[3], agent_ref=row[4], phase=RunPhase(row[5]),
-                    git_branch=row[6], started_at=row[7], completed_at=row[8],
+                    id=row[0],
+                    temporal_workflow_id=row[1],
+                    abox_task_id=row[2],
+                    objective_id=row[3],
+                    agent_ref=row[4],
+                    phase=RunPhase(row[5]),
+                    git_branch=row[6],
+                    started_at=row[7],
+                    completed_at=row[8],
                     result=result,
                 )
             )
@@ -444,13 +478,12 @@ class PostgresLedger:
                     (phase.value, run_id),
                 )
             else:
-                self._do(
-                    conn, "update runs set status = %s where id = %s", (phase.value, run_id)
-                )
+                self._do(conn, "update runs set status = %s where id = %s", (phase.value, run_id))
             self._append_event(
                 conn,
                 RunEvent(
-                    run_id=run_id, event_type="phase",
+                    run_id=run_id,
+                    event_type="phase",
                     payload={"phase": phase.value},
                     idem_key=f"phase:{phase.value}",
                 ),
@@ -463,15 +496,17 @@ class PostgresLedger:
             # the run row, not only inside the finished event payload.
             self._do(
                 conn,
-                "update runs set status = %s, completed_at = now(), result = %s "
-                "where id = %s",
+                "update runs set status = %s, completed_at = now(), result = %s where id = %s",
                 (phase.value, json.dumps(result) if result is not None else None, run_id),
             )
             self._append_event(
                 conn,
-                RunEvent(run_id=run_id, event_type="finished",
-                         payload={"phase": phase.value, "result": result or {}},
-                         idem_key="finished"),
+                RunEvent(
+                    run_id=run_id,
+                    event_type="finished",
+                    payload={"phase": phase.value, "result": result or {}},
+                    idem_key="finished",
+                ),
             )
 
     def _append_event(self, conn: Any, event: RunEvent) -> None:
@@ -484,8 +519,7 @@ class PostgresLedger:
             values (%s,%s,%s,%s,%s)
             on conflict (run_id, idem_key) do nothing
             """,
-            (event.run_id, event.ts, event.event_type,
-             json.dumps(event.payload), event.idem_key),
+            (event.run_id, event.ts, event.event_type, json.dumps(event.payload), event.idem_key),
         )
 
     def append_event(self, event: RunEvent) -> None:
@@ -500,7 +534,9 @@ class PostgresLedger:
         )
         return [
             RunEvent(
-                run_id=r[0], ts=r[1], event_type=r[2],
+                run_id=r[0],
+                ts=r[1],
+                event_type=r[2],
                 payload=r[3] if isinstance(r[3], dict) else json.loads(r[3] or "{}"),
                 idem_key=r[4],
             )
@@ -527,8 +563,15 @@ class PostgresLedger:
             values (%s,%s,%s,%s,%s,%s,%s, now())
             on conflict (id) do nothing
             """,
-            (self._eval_id(result), result.subject_type, result.subject_id,
-             result.suite_name, result.score, result.passed, json.dumps(result.details)),
+            (
+                self._eval_id(result),
+                result.subject_type,
+                result.subject_id,
+                result.suite_name,
+                result.score,
+                result.passed,
+                json.dumps(result.details),
+            ),
         )
 
     def eval_results(self, subject_id: str) -> list[EvalResult]:
@@ -539,8 +582,11 @@ class PostgresLedger:
         )
         return [
             EvalResult(
-                subject_type=r[0], subject_id=r[1], suite_name=r[2],
-                score=float(r[3]), passed=r[4],
+                subject_type=r[0],
+                subject_id=r[1],
+                suite_name=r[2],
+                score=float(r[3]),
+                passed=r[4],
                 details=r[5] if isinstance(r[5], dict) else json.loads(r[5] or "{}"),
             )
             for r in rows
@@ -557,11 +603,20 @@ class PostgresLedger:
             values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
             on conflict (id) do nothing
             """,
-            (decision.id, card.subject_type, card.subject_id,
-             decision.decision.value, decision.rationale,
-             json.dumps(card.model_dump(mode="json")), decision.status,
-             decision.approved_by, decision.comment, decision.resolved_at,
-             json.dumps(decision.gated_mutations), decision.requires_human),
+            (
+                decision.id,
+                card.subject_type,
+                card.subject_id,
+                decision.decision.value,
+                decision.rationale,
+                json.dumps(card.model_dump(mode="json")),
+                decision.status,
+                decision.approved_by,
+                decision.comment,
+                decision.resolved_at,
+                json.dumps(decision.gated_mutations),
+                decision.requires_human,
+            ),
         )
 
     _PROMOTION_COLUMNS = (
@@ -592,8 +647,7 @@ class PostgresLedger:
     def promotions(self, status: str | None = None) -> list[PromotionDecision]:
         if status is None:
             rows = self._all(
-                f"select {self._PROMOTION_COLUMNS} from promotion_decisions "
-                "order by created_at",
+                f"select {self._PROMOTION_COLUMNS} from promotion_decisions order by created_at",
             )
         else:
             rows = self._all(
@@ -640,8 +694,7 @@ class PostgresLedger:
             decision = self._promotion_row(row)
             if decision.status != "pending":
                 raise ValueError(
-                    f"Promotion {promotion_id} already resolved "
-                    f"(status={decision.status})"
+                    f"Promotion {promotion_id} already resolved (status={decision.status})"
                 )
 
             decision.status = "approved" if approved else "rejected"
@@ -664,7 +717,9 @@ class PostgresLedger:
                     # tooling) is a no-op here — the resolution still stands,
                     # matching InMemoryLedger.
                     self._set_version_status(
-                        conn, subject[0], subject[1],
+                        conn,
+                        subject[0],
+                        subject[1],
                         "canary" if approved else "rejected",
                         reason=f"human {verb} by {approved_by}",
                     )
@@ -672,9 +727,9 @@ class PostgresLedger:
 
     # --- trials ---
     _TRIAL_COLUMNS = (
-        "id, experiment_id, run_id, objective_id, agent_ref, scenario_name, "
-        "scenario_version, scenario_digest, seed, pins, metrics, evaluation, "
-        "flags, status, started_at, completed_at"
+        "id, episode_id, experiment_id, run_id, objective_id, agent_ref, "
+        "task_pin, seed, runtime_pins, metrics, evaluation, integrity, "
+        "status, started_at, completed_at"
     )
 
     def _ensure_trials_table(self, conn: Any) -> None:
@@ -700,19 +755,28 @@ class PostgresLedger:
                 conn,
                 """
                 insert into trials
-                    (id, experiment_id, run_id, objective_id, agent_ref,
-                     scenario_name, scenario_version, scenario_digest, seed,
-                     pins, metrics, evaluation, flags, status, started_at,
-                     completed_at)
-                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    (id, episode_id, experiment_id, run_id, objective_id, agent_ref,
+                     task_pin, seed, runtime_pins, metrics, evaluation, integrity,
+                     status, started_at, completed_at)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 on conflict (id) do nothing
                 """,
                 (
-                    t.id, t.experiment_id, t.run_id, t.objective_id, t.agent_ref,
-                    t.scenario_name, t.scenario_version, t.scenario_digest, t.seed,
-                    json.dumps(t.pins), json.dumps(t.metrics), json.dumps(t.evaluation),
-                    json.dumps(t.flags.model_dump(mode="json")), t.status,
-                    t.started_at, t.completed_at,
+                    t.id,
+                    t.episode_id,
+                    t.experiment_id,
+                    t.run_id,
+                    t.objective_id,
+                    t.agent_ref,
+                    json.dumps(t.task.model_dump(mode="json")),
+                    t.seed,
+                    json.dumps(t.runtime_pins),
+                    json.dumps(t.metrics),
+                    json.dumps(t.evaluation),
+                    json.dumps(t.integrity.model_dump(mode="json")),
+                    t.status,
+                    t.started_at,
+                    t.completed_at,
                 ),
             )
 
@@ -725,9 +789,7 @@ class PostgresLedger:
 
     def list_trials(self, experiment_id: str | None = None) -> list[TrialRecord]:
         if experiment_id is None:
-            rows = self._all(
-                f"select {self._TRIAL_COLUMNS} from trials order by created_at"
-            )
+            rows = self._all(f"select {self._TRIAL_COLUMNS} from trials order by created_at")
         else:
             rows = self._all(
                 f"select {self._TRIAL_COLUMNS} from trials "
@@ -758,16 +820,21 @@ class PostgresLedger:
         if row is None:
             return None
         return TrialRecord(
-            id=row[0], experiment_id=row[1], run_id=row[2], objective_id=row[3],
-            agent_ref=row[4], scenario_name=row[5], scenario_version=row[6],
-            scenario_digest=row[7], seed=row[8],
-            pins=cls._trial_json(row[9]),
-            metrics=cls._trial_json(row[10]),
-            evaluation=cls._trial_json(row[11]),
-            flags=HackFlags.model_validate(cls._trial_json(row[12])),
-            status=row[13],
-            started_at=cls._trial_ts(row[14]),
-            completed_at=cls._trial_ts(row[15]),
+            id=row[0],
+            episode_id=row[1],
+            experiment_id=row[2],
+            run_id=row[3],
+            objective_id=row[4],
+            agent_ref=row[5],
+            task=cls._trial_json(row[6]),
+            seed=row[7],
+            runtime_pins=cls._trial_json(row[8]),
+            metrics=cls._trial_json(row[9]),
+            evaluation=cls._trial_json(row[10]),
+            integrity=cls._trial_json(row[11]),
+            status=row[12],
+            started_at=cls._trial_ts(row[13]),
+            completed_at=cls._trial_ts(row[14]),
         )
 
     # --- experiments ---
@@ -780,9 +847,7 @@ class PostgresLedger:
         predates this table) still works without a manual migration."""
         self._do(conn, _EXPERIMENTS_DDL, ())
 
-    def record_experiment(
-        self, experiment_id: str, name: str, spec: dict, status: str
-    ) -> None:
+    def record_experiment(self, experiment_id: str, name: str, spec: dict, status: str) -> None:
         """Insert the experiment row. Idempotent under retry (``on conflict
         do nothing``, matching :meth:`create_run`): a duplicate id is a
         retried write, not an error, and must not clobber an experiment that
@@ -800,9 +865,7 @@ class PostgresLedger:
                 (experiment_id, name, json.dumps(spec), status),
             )
 
-    def update_experiment_result(
-        self, experiment_id: str, status: str, result: dict
-    ) -> None:
+    def update_experiment_result(self, experiment_id: str, status: str, result: dict) -> None:
         # No _ensure_experiments_table call here (see _EXPERIMENTS_DDL
         # comment): this is a read-before-first-write path on a legacy DB,
         # and it's supposed to raise UndefinedTable rather than silently
@@ -832,7 +895,8 @@ class PostgresLedger:
             "name": row[1],
             "spec": row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
             "status": row[3],
-            "result": row[4] if row[4] is None or isinstance(row[4], dict)
+            "result": row[4]
+            if row[4] is None or isinstance(row[4], dict)
             else json.loads(row[4] or "{}"),
             "created_at": row[5],
             "updated_at": row[6],
@@ -860,9 +924,7 @@ class PostgresLedger:
         """
         with self._connection() as conn:
             self._ensure_repos_table(conn)
-            existing = self._do_one(
-                conn, "select path from repos where name = %s", (r.name,)
-            )
+            existing = self._do_one(conn, "select path from repos where name = %s", (r.name,))
             if existing is not None:
                 if existing[0] != r.path:
                     raise ValueError(
@@ -878,8 +940,14 @@ class PostgresLedger:
                     (name, source, path, default_base_ref, provenance, added_at)
                 values (%s,%s,%s,%s,%s, coalesce(%s, now()))
                 """,
-                (r.name, r.source, r.path, r.default_base_ref,
-                 json.dumps(r.provenance), r.added_at),
+                (
+                    r.name,
+                    r.source,
+                    r.path,
+                    r.default_base_ref,
+                    json.dumps(r.provenance),
+                    r.added_at,
+                ),
             )
 
     @staticmethod
@@ -895,15 +963,16 @@ class PostgresLedger:
         if row is None:
             return None
         return RepoRecord(
-            name=row[0], source=row[1], path=row[2], default_base_ref=row[3],
+            name=row[0],
+            source=row[1],
+            path=row[2],
+            default_base_ref=row[3],
             provenance=row[4] if isinstance(row[4], dict) else json.loads(row[4] or "{}"),
             added_at=cls._repo_ts(row[5]),
         )
 
     def get_repo(self, name: str) -> RepoRecord | None:
-        row = self._one(
-            f"select {self._REPO_COLUMNS} from repos where name = %s", (name,)
-        )
+        row = self._one(f"select {self._REPO_COLUMNS} from repos where name = %s", (name,))
         return self._repo_row(row)
 
     def list_repos(self) -> list[RepoRecord]:
@@ -912,8 +981,6 @@ class PostgresLedger:
 
     def deregister_repo(self, name: str) -> None:
         """Remove the routing entry only -- never touches the filesystem."""
-        row = self._one(
-            "delete from repos where name = %s returning name", (name,)
-        )
+        row = self._one("delete from repos where name = %s returning name", (name,))
         if row is None:
             raise KeyError(f"unknown repo: {name!r}")

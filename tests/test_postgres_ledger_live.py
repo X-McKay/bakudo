@@ -110,8 +110,7 @@ def test_create_phase_finish_events_round_trip(ledger):
     ledger.finish_run(RUN_ID, RunPhase.completed, {"status": "success"})
     kinds = [e.event_type for e in ledger.events(RUN_ID)]
     assert kinds.count("finished") == 1
-    assert sum(1 for e in ledger.events(RUN_ID)
-               if e.idem_key == "phase:agent_running") == 1
+    assert sum(1 for e in ledger.events(RUN_ID) if e.idem_key == "phase:agent_running") == 1
 
 
 def test_record_eval_retry_is_idempotent(ledger):
@@ -119,8 +118,12 @@ def test_record_eval_retry_is_idempotent(ledger):
 
     ledger.create_run(_record(), objective=_objective())
     result = EvalResult(
-        subject_type="run", subject_id=RUN_ID, suite_name="safety",
-        score=1.0, passed=True, details={"note": "live idempotency probe"},
+        subject_type="run",
+        subject_id=RUN_ID,
+        suite_name="safety",
+        score=1.0,
+        passed=True,
+        details={"note": "live idempotency probe"},
     )
     ledger.record_eval(result)
     ledger.record_eval(result)  # simulated activity retry
@@ -132,22 +135,30 @@ def test_record_eval_retry_is_idempotent(ledger):
 
 
 def _trial(trial_id: str, experiment_id: str):
-    from bakudo.trials.models import HackFlags, TrialRecord
+    from bakudo.ids import new_episode_id
+    from bakudo.tasks.models import TaskPin
+    from bakudo.trials.models import IntegrityFlags, TrialRecord
 
     return TrialRecord(
         id=trial_id,
+        episode_id=new_episode_id(),
         experiment_id=experiment_id,
         run_id=RUN_ID,
         objective_id=OBJ_ID,
         agent_ref="explore@1",
-        scenario_name="sample-bug",
-        scenario_version=1,
-        scenario_digest="sha256:deadbeef",
+        task=TaskPin(
+            source_uri="file:///benchmark-corpus",
+            corpus_revision="test-revision",
+            name="sample-bug",
+            version=1,
+            bundle_digest="sha256:deadbeef",
+            verifier_digest="sha256:feedface",
+        ),
         seed=7,
-        pins={"bakudo": "0.1.0"},
+        runtime_pins={"bakudo": "0.1.0"},
         metrics={"tokens": 1234.0, "duration_s": 12.5},
         evaluation={"f2p_rate": 1.0},
-        flags=HackFlags(test_path_violation=False),
+        integrity=IntegrityFlags(),
         status="completed",
         started_at="2026-08-15T00:00:00+00:00",
         completed_at="2026-08-15T00:01:00+00:00",
@@ -226,9 +237,7 @@ def test_repo_roundtrip_idempotent_conflict_and_deregister(ledger):
 
     # a conflicting path for the same name raises rather than repointing it
     with pytest.raises(ValueError):
-        ledger.register_repo(
-            RepoRecord(name=REPO_NAME, source="other", path="/checkouts/CONFLICT")
-        )
+        ledger.register_repo(RepoRecord(name=REPO_NAME, source="other", path="/checkouts/CONFLICT"))
     assert ledger.get_repo(REPO_NAME).path == "/checkouts/e2e-x"
 
     ledger.deregister_repo(REPO_NAME)

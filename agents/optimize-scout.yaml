@@ -71,7 +71,7 @@ tools:
   - name: query-memory
 
 skills:
-  - codebase-navigation@^1.0
+  - codebase-navigation
 
 budget:
   # Issue #27: a read-only scout needs a handful of reads and at most one

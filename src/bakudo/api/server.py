@@ -306,18 +306,14 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         return decision.to_dict()
 
     @app.post("/promotions/{promotion_id}/approve")
-    def approve_promotion(
-        promotion_id: str, body: PromotionResolutionIn
-    ) -> dict[str, Any]:
+    def approve_promotion(promotion_id: str, body: PromotionResolutionIn) -> dict[str, Any]:
         """Approve a pending promotion: candidate goes pending_human -> canary
         (spec §25.3). The old bulk /promotions/approve route that trusted
         caller-supplied scorecards is REMOVED (OPT-7/API-7)."""
         return _resolve_promotion(promotion_id, True, body)
 
     @app.post("/promotions/{promotion_id}/reject")
-    def reject_promotion(
-        promotion_id: str, body: PromotionResolutionIn
-    ) -> dict[str, Any]:
+    def reject_promotion(promotion_id: str, body: PromotionResolutionIn) -> dict[str, Any]:
         """Reject a pending promotion: candidate goes pending_human -> rejected."""
         return _resolve_promotion(promotion_id, False, body)
 
@@ -335,8 +331,8 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         GET /trials/{id} can read it back. Same fail-closed sandbox policy
         as /runs and /optimize (OPT-10) gates live execution -- 409 when
         unresolvable, exactly like the existing sandbox-unavailable
-        handling. Hidden-test grading additionally requires
-        ``BAKUDO_ENV=dev`` (ruling R2): it always executes scenario
+        handling. Verifier-test grading additionally requires
+        ``BAKUDO_ENV=dev`` (ruling R2): it always executes task
         fixture/agent code directly on this host via the local test
         runner, independent of whichever sandbox drives the AGENT.
         """
@@ -349,17 +345,17 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
             resolve_arm_pipeline_fn,
             run_experiment,
         )
-        from ..scenarios.registry import ScenarioRegistry
-        from ..scenarios.testrun import local_test_runner
         from ..schema import validate_experiment_spec
+        from ..tasks.source import default_task_source
+        from ..tasks.verifier_runner import local_verifier_runner
 
         sandbox = resolve_sandbox()
         if os.environ.get("BAKUDO_ENV") != "dev":
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "POST /experiments grades hidden tests with the local test "
-                    "runner, which executes scenario fixture/agent code "
+                    "POST /experiments grades verifier tests with the local test "
+                    "runner, which executes task fixture/agent code "
                     "directly on this host; set BAKUDO_ENV=dev to allow it."
                 ),
             )
@@ -372,7 +368,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         try:
-            registry = ScenarioRegistry(paths.scenarios_dir())
+            task_source = default_task_source()
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -387,10 +383,10 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 
         result = run_experiment(
             resolved_spec,
-            registry=registry,
+            task_source=task_source,
             ledger=tools.ledger,
             pipeline_fn=pipeline_fn,
-            test_runner=local_test_runner,
+            verifier_runner=local_verifier_runner,
         )
         return {"id": result["experimentId"]}
 
@@ -398,9 +394,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
     def get_experiment(experiment_id: str) -> dict[str, Any]:
         experiment = tools.ledger.get_experiment(experiment_id)
         if experiment is None:
-            raise HTTPException(
-                status_code=404, detail=f"Unknown experiment: {experiment_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"Unknown experiment: {experiment_id}")
         return experiment
 
     @app.get("/trials/{trial_id}")
@@ -424,7 +418,10 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 
         try:
             record = add_repo_record(
-                body.source, name=body.name, base_ref=body.baseRef, ledger=tools.ledger,
+                body.source,
+                name=body.name,
+                base_ref=body.baseRef,
+                ledger=tools.ledger,
             )
         except RepoTargetExistsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -4,7 +4,7 @@
 place instead of fabricating a fresh scratch repo -- see
 ``tests/test_temporal_experiments.py::
 test_provision_trial_local_sandbox_uses_provisioned_fixture`` for the
-positive case (a scenario's own provisioned fixture, always under the system
+positive case (a task's own provisioned fixture, always under the system
 temp root, must be used in place). This file covers the negative case: an
 absolute ``.git``-bearing path OUTSIDE the system temp root (e.g. a real,
 non-scratch checkout a dev-mode observer objective happens to point at) must
@@ -19,8 +19,8 @@ import tempfile
 from pathlib import Path
 
 from bakudo.abox.local import local_sandbox
+from bakudo.agent_run_bundle import AgentRunBundle, Budget
 from bakudo.agent_spec import load_spec_file
-from bakudo.bundle import Budget, TaskBundle
 from bakudo.curriculum.objective import Objective
 
 AGENTS = Path(__file__).resolve().parents[1] / "agents"
@@ -47,7 +47,7 @@ def test_local_sandbox_outside_temp_root_does_not_mutate_real_repo(tmp_path, mon
 
     spec = load_spec_file(AGENTS / "add-feature.yaml")
     objective = Objective(type="add-feature", repo=str(outside_repo), title="peek")
-    bundle = TaskBundle(
+    bundle = AgentRunBundle(
         run_id="run_outsiderepo1",
         objective_id=objective.id,
         objective=objective,
@@ -93,7 +93,7 @@ def test_local_sandbox_under_temp_root_still_reuses_in_place(tmp_path, monkeypat
 
     spec = load_spec_file(AGENTS / "add-feature.yaml")
     objective = Objective(type="add-feature", repo=str(inside_repo), title="peek")
-    bundle = TaskBundle(
+    bundle = AgentRunBundle(
         run_id="run_insiderepo1",
         objective_id=objective.id,
         objective=objective,

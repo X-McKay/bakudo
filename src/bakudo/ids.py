@@ -93,6 +93,10 @@ def new_trial_id() -> str:
     return new_id("trial")
 
 
+def new_episode_id() -> str:
+    return new_id("episode")
+
+
 def new_experiment_id() -> str:
     return new_id("exp")
 

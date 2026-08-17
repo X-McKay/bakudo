@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from bakudo.agent_run_bundle import AgentRunBundle, MemoryExcerpt
 from bakudo.agent_spec import load_spec_file
-from bakudo.bundle import MemoryExcerpt, TaskBundle
 from bakudo.curriculum import Objective
 from bakudo.skills import SkillRegistry
 from bakudo.strands_tools import ToolContext, Workspace, build_tool_callables
@@ -17,18 +17,24 @@ AGENTS = Path(__file__).resolve().parents[1] / "agents"
 def _bundle():
     spec = load_spec_file(AGENTS / "explore.yaml")
     objective = Objective(type="explore", repo="bakudo", title="map it")
-    return TaskBundle(
+    return AgentRunBundle(
         run_id="run_X",
         objective_id=objective.id,
         objective=objective,
         agent_spec=spec,
         memory_excerpts=[
-            MemoryExcerpt(id="mem_1", type="repo_fact",
-                          content="Webhook retries live in src/webhooks/retry.py.",
-                          confidence=0.9),
-            MemoryExcerpt(id="mem_2", type="repo_fact",
-                          content="Billing events are in src/billing/events.py.",
-                          confidence=0.8),
+            MemoryExcerpt(
+                id="mem_1",
+                type="repo_fact",
+                content="Webhook retries live in src/webhooks/retry.py.",
+                confidence=0.9,
+            ),
+            MemoryExcerpt(
+                id="mem_2",
+                type="repo_fact",
+                content="Billing events are in src/billing/events.py.",
+                confidence=0.8,
+            ),
         ],
     )
 
@@ -68,9 +74,7 @@ def _git_workspace(tmp_path):
     import subprocess
 
     def git(*args):
-        subprocess.run(
-            ["git", *args], check=True, cwd=tmp_path, capture_output=True, text=True
-        )
+        subprocess.run(["git", *args], check=True, cwd=tmp_path, capture_output=True, text=True)
 
     git("init", "-q", "-b", "main")
     git("config", "user.email", "t@t")
@@ -106,6 +110,7 @@ def test_clean_workspace_reports_no_changes(tmp_path):
 
 
 # --- ABOX-19: strands @tool over functools.partial (live-model path) ---
+
 
 def test_to_strands_tools_accepts_context_bound_partials():
     """The real strands ``@tool`` decorator rejects bare ``functools.partial``
@@ -162,8 +167,10 @@ def test_partial_text_salvaged_on_max_tokens():
     exc = MaxTokensReachedException("hit the cap")
     assert _partial_text_on_max_tokens(exc, FakeAgent()) == '{"score": 0.5, "passed":'
     assert _partial_text_on_max_tokens(ValueError("other"), FakeAgent()) is None
+
     class Empty:
         messages = []
+
     assert _partial_text_on_max_tokens(exc, Empty()) is None
 
 
@@ -203,7 +210,8 @@ def test_extract_report_uses_structured_output():
             assert model is AgentReport
             assert prompt and "proposed_followups" in prompt  # extraction guidance
             return AgentReport(
-                status="success", summary="found it",
+                status="success",
+                summary="found it",
                 proposed_followups=["Approach 1: use a set"],
             )
 
@@ -252,7 +260,7 @@ def _live_run(monkeypatch, tmp_path, fake_agent_cls, spec_name="explore"):
     """Drive build_and_run's live path with a fake strands Agent."""
     import strands
 
-    from bakudo.bundle import Budget
+    from bakudo.agent_run_bundle import Budget
     from bakudo.runner.agent import build_and_run
     from bakudo.strands_tools import ToolContext
 
@@ -263,12 +271,17 @@ def _live_run(monkeypatch, tmp_path, fake_agent_cls, spec_name="explore"):
     monkeypatch.setattr("bakudo.runner.agent.build_model", lambda spec: object())
     spec = load_spec_file(AGENTS / f"{spec_name}.yaml")
     objective = Objective(type="explore", repo="bakudo", title="t")
-    bundle = TaskBundle(
-        run_id="run_R", objective_id=objective.id, objective=objective,
-        agent_spec=spec, budget=Budget(timeoutSeconds=600),
+    bundle = AgentRunBundle(
+        run_id="run_R",
+        objective_id=objective.id,
+        objective=objective,
+        agent_spec=spec,
+        budget=Budget(timeoutSeconds=600),
     )
     ctx = ToolContext(
-        workspace=Workspace(tmp_path), skills=SkillRegistry(allowed=[]), run_id="run_R",
+        workspace=Workspace(tmp_path),
+        skills=SkillRegistry(allowed=[]),
+        run_id="run_R",
     )
     return build_and_run(spec, bundle, ctx, offline_driver=None), ctx
 
@@ -298,7 +311,8 @@ def test_report_extracted_on_budget_halt(monkeypatch, tmp_path):
 
     class FakeAgent(_FakeAgentBase):
         extracted = AgentReport(
-            status="success", summary="explored half the repo",
+            status="success",
+            summary="explored half the repo",
             proposed_followups=["Approach 1: use a set"],
         )
 
@@ -374,18 +388,23 @@ def test_halted_extraction_prompt_names_the_stop(monkeypatch, tmp_path):
 
 def test_tool_call_ceiling_wired_from_bundle_budget(tmp_path):
     """bundle.budget.maxToolCalls must land on the ToolContext ceiling."""
-    from bakudo.bundle import Budget
+    from bakudo.agent_run_bundle import Budget
     from bakudo.runner.agent import build_and_run
     from bakudo.strands_tools import ToolContext
 
     spec = load_spec_file(AGENTS / "explore.yaml")
     objective = Objective(type="explore", repo="bakudo", title="t")
-    bundle = TaskBundle(
-        run_id="run_C", objective_id=objective.id, objective=objective,
-        agent_spec=spec, budget=Budget(timeoutSeconds=600, maxToolCalls=7),
+    bundle = AgentRunBundle(
+        run_id="run_C",
+        objective_id=objective.id,
+        objective=objective,
+        agent_spec=spec,
+        budget=Budget(timeoutSeconds=600, maxToolCalls=7),
     )
     ctx = ToolContext(
-        workspace=Workspace(tmp_path), skills=SkillRegistry(allowed=[]), run_id="run_C",
+        workspace=Workspace(tmp_path),
+        skills=SkillRegistry(allowed=[]),
+        run_id="run_C",
     )
     build_and_run(spec, bundle, ctx, offline_driver=lambda s, u, t: "{}")
     assert ctx.tool_call_ceiling == 7

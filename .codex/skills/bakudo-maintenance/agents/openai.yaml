@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bakudo Maintenance"
+  short_description: "Maintain and validate the Bakudo repository"
+  default_prompt: "Use $bakudo-maintenance to update and validate this Bakudo repository change."

@@ -8,8 +8,8 @@ numeric ``metrics``, so counters land there.
 import json
 from pathlib import Path
 
+from bakudo.agent_run_bundle import AgentRunBundle, budget_from_spec
 from bakudo.agent_spec import load_spec_file
-from bakudo.bundle import TaskBundle, budget_from_spec
 from bakudo.curriculum import Objective
 from bakudo.runner.main import cli
 from bakudo.schema import validate_result
@@ -20,7 +20,7 @@ AGENTS = Path(__file__).resolve().parents[1] / "agents"
 def _write_bundle(tmp_path: Path) -> Path:
     spec = load_spec_file(AGENTS / "explore.yaml")
     objective = Objective(type="explore", repo="bakudo", title="map it")
-    bundle = TaskBundle(
+    bundle = AgentRunBundle(
         run_id="run_MAIN1",
         objective_id=objective.id,
         objective=objective,
@@ -41,9 +41,12 @@ def test_agent_runner_writes_observability_metrics(tmp_path, monkeypatch):
 
     exit_code = cli(
         [
-            "--bundle", str(bundle_path),
-            "--result", str(result_path),
-            "--workspace", str(workspace),
+            "--bundle",
+            str(bundle_path),
+            "--result",
+            str(result_path),
+            "--workspace",
+            str(workspace),
         ]
     )
 

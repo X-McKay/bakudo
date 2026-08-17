@@ -68,8 +68,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import ids
+from ..agent_run_bundle import AgentRunBundle
 from ..agent_spec.models import AgentSpec
-from ..bundle import TaskBundle
 from ..schema import SchemaValidationError, validate_result
 
 logger = logging.getLogger(__name__)
@@ -120,8 +120,8 @@ _OBSERVABILITY_METRIC_KEYS = (
 )
 
 
-# Registry-first repo lookup (repo onboarding, P2 Task 1), consulted by
-# resolve_repo() before the legacy $BAKUDO_REPO_ROOT/<name> search. Module
+# Registry-first repo lookup, consulted by resolve_repo() before the
+# $BAKUDO_REPO_ROOT/<name> directory fallback. Module
 # level because AboxRunner is constructed fresh per activity call (see
 # Deps.sandbox_fn in temporal/_impl.py) with no surviving reference a caller
 # could configure later -- set once at process start (Task 2 wires this to
@@ -154,67 +154,6 @@ class ExecResult:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
-
-
-@dataclass(frozen=True)
-class SandboxProfile:
-    """A bakudo sandbox policy profile (spec section 6.4).
-
-    Note: these are *bakudo policy* profiles, never abox ``--template`` names
-    (review finding ABOX-3). The guest OS profile (e.g. ``python-glibc``) is
-    repo-owned ``.abox/project.toml`` config.
-
-    **Advisory, not the enforcement point (SEC-4).** These fields document the
-    intended per-role policy. The enforced controls live elsewhere: the microVM
-    boundary and allowed commands/filesystem in abox's ``.abox/project.toml``;
-    the outbound network via ``build_command``'s ``--network`` (from the
-    AgentSpec's ``networkMode``, which *replaces* the project default per run —
-    see the module docstring's network-mapping note);
-    and ``maxChangedFiles`` when a candidate diff is scored (``evals/corpus.py``).
-    Wiring every dimension here to a runtime check is future work — see
-    ``docs/HUMAN_TASKS.md``. Do not read a value here as an active guarantee.
-    """
-
-    name: str
-    network_mode: str = "scoped"
-    network_bundles: tuple[str, ...] = ()
-    allowed_commands: tuple[str, ...] = ()
-    max_changed_files: int | None = None
-    max_diff_bytes: int | None = None
-    can_merge: bool = False
-    ephemeral: bool = True
-    max_runtime_seconds: int = 3600
-
-
-# The starter profiles named in the spec (section 6.4).
-PROFILES: dict[str, SandboxProfile] = {
-    "explore-readonly": SandboxProfile(
-        name="explore-readonly", network_mode="none", can_merge=False, ephemeral=True
-    ),
-    "add-feature-python": SandboxProfile(
-        name="add-feature-python",
-        network_bundles=("pypi-public",),
-        max_changed_files=20,
-        can_merge=False,
-        ephemeral=False,
-    ),
-    "qa-candidate-branch": SandboxProfile(
-        name="qa-candidate-branch", can_merge=False, ephemeral=False
-    ),
-    "skill-author": SandboxProfile(
-        name="skill-author", can_merge=False, ephemeral=False
-    ),
-    "restricted-network": SandboxProfile(
-        name="restricted-network", network_mode="none", ephemeral=True
-    ),
-    "optimize-python": SandboxProfile(
-        name="optimize-python",
-        network_bundles=("pypi-public",),
-        max_changed_files=10,
-        can_merge=False,
-        ephemeral=False,
-    ),
-}
 
 
 @dataclass
@@ -349,9 +288,7 @@ class AboxRunner:
         version number); a missing binary raises :class:`AboxNotFoundError`.
         """
         try:
-            res = self._executor(
-                [self._abox_bin, "--version"], _HOUSEKEEPING_TIMEOUT_SECONDS
-            )
+            res = self._executor([self._abox_bin, "--version"], _HOUSEKEEPING_TIMEOUT_SECONDS)
         except FileNotFoundError as missing:
             raise AboxNotFoundError(
                 f"abox binary not found: {self._abox_bin!r} is not on PATH "
@@ -387,7 +324,7 @@ class AboxRunner:
 
     # -- routing -----------------------------------------------------------
 
-    def resolve_repo(self, bundle: TaskBundle) -> Path:
+    def resolve_repo(self, bundle: AgentRunBundle) -> Path:
         """Resolve ``objective.repo`` to a host repo path (ABOX-7).
 
         Registry-first (repo onboarding, P2 Task 1): when a resolver is
@@ -426,9 +363,7 @@ class AboxRunner:
         forwarded; nothing is ever defaulted or persisted to disk.
         """
         names = [name for name in _FORWARD_ENV if name in os.environ]
-        names += sorted(
-            name for name in os.environ if name.startswith(_FORWARD_ENV_PREFIX)
-        )
+        names += sorted(name for name in os.environ if name.startswith(_FORWARD_ENV_PREFIX))
         return names
 
     @staticmethod
@@ -438,7 +373,7 @@ class AboxRunner:
         return os.environ.get("BAKUDO_BASE_REF") or spec.sandbox.base_ref
 
     def build_command(
-        self, bundle: TaskBundle, scratch_dir: Path, repo: Path | None = None
+        self, bundle: AgentRunBundle, scratch_dir: Path, repo: Path | None = None
     ) -> list[str]:
         """Construct the abox 0.7.1 ``run`` argv (spec section 6.2)."""
         spec = bundle.agent_spec
@@ -461,12 +396,18 @@ class AboxRunner:
         guest_timeout = spec.sandbox.timeout_seconds + IN_GUEST_SETUP_HEADROOM_SECONDS
 
         argv = [
-            self._abox_bin, "run",
-            "--repo", str(repo),
-            "--task", bundle.run_id,
-            "--base", self._base_ref(spec),
-            "--timeout", str(guest_timeout),
-            "--network", network,
+            self._abox_bin,
+            "run",
+            "--repo",
+            str(repo),
+            "--task",
+            bundle.run_id,
+            "--base",
+            self._base_ref(spec),
+            "--timeout",
+            str(guest_timeout),
+            "--network",
+            network,
         ]
         # Never `--ephemeral`: abox would remove the worktree+branch the moment
         # the agent exits, before result.json can be collected via `abox path`.
@@ -495,18 +436,14 @@ class AboxRunner:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def run(
-        self, bundle: TaskBundle, cancel_event: object | None = None
-    ) -> AboxOutcome:
+    def run(self, bundle: AgentRunBundle, cancel_event: object | None = None) -> AboxOutcome:
         started = time.monotonic()
         # Fail closed if the configured binary is not verifiably abox (SEC-3);
         # skipped for injected executors and when explicitly overridden.
         self._ensure_binary_verified()
         if self._scratch_root is not None:
             self._scratch_root.mkdir(parents=True, exist_ok=True)
-        scratch = Path(
-            tempfile.mkdtemp(prefix=f"{bundle.run_id}-", dir=self._scratch_root)
-        )
+        scratch = Path(tempfile.mkdtemp(prefix=f"{bundle.run_id}-", dir=self._scratch_root))
         repo = self.resolve_repo(bundle)
         spec = bundle.agent_spec
         try:
@@ -554,9 +491,7 @@ class AboxRunner:
                 result, collect_error = self._collect_result(worktree)
                 if collect_error:
                     errors.append(collect_error)
-                diff, changed_files = self._collect_diff(
-                    worktree, self._base_ref(spec)
-                )
+                diff, changed_files = self._collect_diff(worktree, self._base_ref(spec))
 
             outcome = AboxOutcome(
                 run_id=bundle.run_id,
@@ -635,7 +570,9 @@ class AboxRunner:
         def git(*args: str) -> subprocess.CompletedProcess:
             return subprocess.run(
                 ["git", "-C", str(worktree), *args],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
 
         try:
@@ -665,15 +602,13 @@ class AboxRunner:
         if not outcome.result:
             return
         metrics = outcome.result.get("metrics") or {}
-        observability = {
-            key: metrics[key] for key in _OBSERVABILITY_METRIC_KEYS if key in metrics
-        }
+        observability = {key: metrics[key] for key in _OBSERVABILITY_METRIC_KEYS if key in metrics}
         if observability:
             outcome.observability = observability
         outcome.tokens_used = int(metrics.get("tokens_used", 0))
         denied_prefix = "denied:"
         outcome.denied_commands = [
-            {"command": "", "reason": reason[len(denied_prefix):]}
+            {"command": "", "reason": reason[len(denied_prefix) :]}
             for reason in outcome.result.get("blocked_reasons", [])
             if isinstance(reason, str) and reason.startswith(denied_prefix)
         ]

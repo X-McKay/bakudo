@@ -2,7 +2,7 @@ from pathlib import Path
 
 from bakudo.agent_spec import load_spec_file
 from bakudo.curriculum import Objective
-from bakudo.evals.corpus import CaseRun, EvalCase, Expectations
+from bakudo.evals.corpus import CaseRun, EvalCase, OutcomeConstraints
 from bakudo.evals.evolution import (
     evolve_agent,
     infer_mutation_kinds,
@@ -22,9 +22,10 @@ def _cases(n=30):
     return [
         EvalCase(
             name=f"c{i}",
-            objective=Objective(type="add-feature", repo="r", title=f"t{i}",
-                                acceptanceCriteria=["do it"]),
-            expect=Expectations(changes_paths=["*.py"]),
+            objective=Objective(
+                type="add-feature", repo="r", title=f"t{i}", acceptanceCriteria=["do it"]
+            ),
+            constraints=OutcomeConstraints(allowed_change_paths=["*.py"]),
         )
         for i in range(n)
     ]
@@ -42,9 +43,11 @@ def test_prompt_mutation_makes_a_candidate_child_version():
 def test_infer_mutation_kinds_detects_broadened_network():
     base = _spec()
     widened = base.model_copy(
-        update={"sandbox": base.sandbox.model_copy(
-            update={"network_bundles": [*base.sandbox.network_bundles, "internal-lan"]}
-        )}
+        update={
+            "sandbox": base.sandbox.model_copy(
+                update={"network_bundles": [*base.sandbox.network_bundles, "internal-lan"]}
+            )
+        }
     )
     assert "broader-network-access" in infer_mutation_kinds(base, widened)
 
@@ -56,12 +59,17 @@ def test_evolve_agent_promotes_better_candidate():
     def run_fn(spec, objective):
         # The candidate (v2) "performs better": it changes a file and passes.
         good = spec.metadata.version == cand.metadata.version
-        result = RunResult.model_validate({
-            "run_id": "r", "agent": spec.ref, "objective_id": objective.id,
-            "status": "success" if good else "blocked",
-            "summary": "s", "changed_files": ["a.py"] if good else [],
-            "tests_run": [{"command": "pytest", "status": "passed" if good else "failed"}],
-        })
+        result = RunResult.model_validate(
+            {
+                "run_id": "r",
+                "agent": spec.ref,
+                "objective_id": objective.id,
+                "status": "success" if good else "blocked",
+                "summary": "s",
+                "changed_files": ["a.py"] if good else [],
+                "tests_run": [{"command": "pytest", "status": "passed" if good else "failed"}],
+            }
+        )
         return CaseRun(result=result, diff="")
 
     outcome = evolve_agent(base, cand, _cases(30), run_fn)

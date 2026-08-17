@@ -18,7 +18,7 @@ from bakudo.evals import (
     simplicity_eval,
     suite_for,
 )
-from bakudo.evals.corpus import EvalCase, Expectations
+from bakudo.evals.corpus import EvalCase, OutcomeConstraints
 from bakudo.runner.result import RunResult
 
 
@@ -224,17 +224,13 @@ def test_round_feedback_names_each_failure():
 
 # --- corpus ---
 #
-# Task 7 retired the checked-in evals/corpora/optimize.yaml fixture (fictional,
-# unrunnable) in favor of the scenario registry -- but the "optimize" role has
-# no scenario-registry equivalent (scenarios only cover the debugging/
-# no-change/adversarial-context/safety families), so the OPT-4 decoy-churn
-# regression coverage below is preserved with an inline, Python-built corpus
-# instead of a deleted YAML file.
+# The optimize role does not yet have a task-backed environment. Keep its
+# decoy-churn regression coverage as an explicit, Python-built unit-test corpus
+# until that environment exists.
 
 
 def _optimize_cases(n_planted: int = 20, n_decoys: int = 5) -> list[EvalCase]:
-    """The same shape the retired optimize.yaml corpus had: N "planted"
-    cases (a real inefficiency to fix, ``maxChangedFiles`` > 0) plus M
+    """Build N "planted" cases (a real inefficiency to fix) plus M
     "decoy" cases (already optimal -- any change is churn, ``maxChangedFiles``
     == 0), each constraining the diff to one ``targetPaths`` glob."""
     cases: list[EvalCase] = []
@@ -252,8 +248,8 @@ def _optimize_cases(n_planted: int = 20, n_decoys: int = 5) -> list[EvalCase]:
                         "targetPaths": [f"src/billing/mod_{i}/**"],
                     },
                 ),
-                expect=Expectations(
-                    changes_paths=[f"src/billing/mod_{i}/x.py"], max_changed_files=4
+                constraints=OutcomeConstraints(
+                    allowed_change_paths=[f"src/billing/mod_{i}/x.py"], max_changed_files=4
                 ),
             )
         )
@@ -271,7 +267,7 @@ def _optimize_cases(n_planted: int = 20, n_decoys: int = 5) -> list[EvalCase]:
                         "targetPaths": [f"src/billing/decoy_{i}/**"],
                     },
                 ),
-                expect=Expectations(changes_paths=[], max_changed_files=0),
+                constraints=OutcomeConstraints(allowed_change_paths=[], max_changed_files=0),
             )
         )
     return cases
@@ -287,11 +283,11 @@ def test_optimize_corpus_loads_and_validates():
     for case in cases:
         case.objective.validate_against_schema()
 
-    decoys = [c for c in cases if c.expect.max_changed_files == 0]
+    decoys = [c for c in cases if c.constraints.max_changed_files == 0]
     assert len(decoys) == 5, "the corpus must reward leaving optimal code alone"
-    planted = [c for c in cases if (c.expect.max_changed_files or 0) > 0]
+    planted = [c for c in cases if (c.constraints.max_changed_files or 0) > 0]
     assert len(planted) == 20
-    assert all(c.expect.changes_paths for c in planted)
+    assert all(c.constraints.allowed_change_paths for c in planted)
     # Every planted case constrains where the diff may land.
     assert all(c.objective.constraints.target_paths for c in cases)
 
@@ -315,12 +311,17 @@ def _corpus_run_fn(*, churn_decoys: bool):
         target = objective.constraints.target_paths[0]
         decoy = objective.constraints.max_files_changed == 0
         changed = [] if (decoy and not churn_decoys) else [target.replace("**", "x.py")]
-        result = RunResult.model_validate({
-            "run_id": "run_D", "agent": "optimize-attempt@2",
-            "objective_id": objective.id, "status": "success",
-            "summary": "attempted", "changed_files": changed,
-            "tests_run": [{"command": "pytest", "status": "passed"}],
-        })
+        result = RunResult.model_validate(
+            {
+                "run_id": "run_D",
+                "agent": "optimize-attempt@2",
+                "objective_id": objective.id,
+                "status": "success",
+                "summary": "attempted",
+                "changed_files": changed,
+                "tests_run": [{"command": "pytest", "status": "passed"}],
+            }
+        )
         return CaseRun(result=result)
 
     return run_fn
@@ -335,7 +336,9 @@ def test_decoy_churning_candidate_is_rejected():
 
     cases = _optimize_cases()
     results = run_corpus(
-        "optimize-regression", cases, _corpus_run_fn(churn_decoys=True),
+        "optimize-regression",
+        cases,
+        _corpus_run_fn(churn_decoys=True),
         subject_id="optimize-attempt@2",
     )
     card = Scorecard.from_results(results)
@@ -354,7 +357,9 @@ def test_decoy_respecting_candidate_is_eligible():
 
     cases = _optimize_cases()
     results = run_corpus(
-        "optimize-regression", cases, _corpus_run_fn(churn_decoys=False),
+        "optimize-regression",
+        cases,
+        _corpus_run_fn(churn_decoys=False),
         subject_id="optimize-attempt@2",
     )
     card = Scorecard.from_results(results)
@@ -368,8 +373,7 @@ def test_scout_objective_marks_bench_command_off_limits():
     from bakudo.control.optimize import scout_objective
 
     obj = scout_objective(
-        {"title": "t", "description": "d",
-         "constraints": {"benchCommand": "python3 bench.py"}}
+        {"title": "t", "description": "d", "constraints": {"benchCommand": "python3 bench.py"}}
     )
     assert "python3 bench.py" in obj["description"]
     assert "do not run it" in obj["description"].lower()

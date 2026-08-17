@@ -1,13 +1,13 @@
 """Experiment runner tests (Task 10): ``run_experiment`` end to end
-(compare, profile, hack-flag hard gate, failed-trial recovery), result
-assembly (NaN guard, twin joint scoring), the ``bakudo experiment`` CLI, and
+(compare, profile, integrity-flag hard gate, failed-trial recovery), result
+assembly (NaN guard, paired-task joint scoring), the ``bakudo experiment`` CLI, and
 the POST/GET /experiments + GET /trials API routes.
 
-Local scenario fixtures (mirrors tests/test_experiment_design.py's own
-``make_scenario_dir`` convention: no ``tests/__init__.py``, so cross-file
+Local task fixtures (mirrors tests/test_experiment_design.py's own
+``make_task_dir`` convention: no ``tests/__init__.py``, so cross-file
 imports are avoided) rather than the exemplar corpus -- gives full control
 over which arm's stubbed diff fixes the bug, without depending on the
-exemplar scenarios' shared no-change/fix mission text.
+benchmark tasks' shared no-change/fix instruction text.
 """
 
 from __future__ import annotations
@@ -20,18 +20,19 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from bakudo.experiments.models import ExperimentMetadata, ExperimentSpec, ScenarioSelector
+from bakudo.experiments.models import ExperimentMetadata, ExperimentSpec, TaskSelector
 from bakudo.experiments.runner import assemble_result, run_experiment
+from bakudo.ids import new_episode_id
 from bakudo.registry import InMemoryLedger
-from bakudo.scenarios.registry import ScenarioRegistry
-from bakudo.scenarios.testrun import local_test_runner
-from bakudo.trials.models import HackFlags, TrialRecord
+from bakudo.tasks.source import DirectoryTaskSource
+from bakudo.tasks.verifier_runner import local_verifier_runner
+from bakudo.trials.models import IntegrityFlags, TrialRecord
 
 BASELINE = "debugger@1"
 CANDIDATE = "debugger@2"
 
 _APP_PY = "def compute(x):\n    return x - 1\n"
-_HIDDEN_TEST = "from app import compute\n\n\ndef test_compute():\n    assert compute(5) == 6\n"
+_VERIFIER_TEST = "from app import compute\n\n\ndef test_compute():\n    assert compute(5) == 6\n"
 REF_PATCH = (
     "--- a/app.py\n"
     "+++ b/app.py\n"
@@ -42,10 +43,10 @@ REF_PATCH = (
 )
 
 
-def _scenario_spec(name: str, title: str, **overrides) -> dict:
+def _task_spec(name: str, title: str, **overrides) -> dict:
     spec = {
         "apiVersion": "bakudo.ai/v1alpha1",
-        "kind": "ScenarioSpec",
+        "kind": "TaskSpec",
         "metadata": {
             "name": name,
             "version": 1,
@@ -61,28 +62,26 @@ def _scenario_spec(name: str, title: str, **overrides) -> dict:
                 "eligibleForPromotion": True,
             },
         },
-        "mission": {
+        "instruction": {
             "type": "qa",
             "title": title,
             "description": "compute() is off by one.",
-            "acceptanceCriteria": ["hidden tests pass"],
-            "constraints": {"maxFilesChanged": 1},
+            "successCriteria": ["verifier tests pass"],
         },
         "environment": {"profile": "python-glibc", "network": "none"},
-        "budgets": {"wallSeconds": 600, "toolCalls": 30, "tokens": 20000},
-        "hidden": {
-            "failToPass": ["hidden/test_compute.py"],
+        "limits": {"wallSeconds": 600, "toolCalls": 30, "tokens": 20000},
+        "verifier": {
+            "failToPass": ["verifier/test_compute.py"],
             "passToPass": [],
-            "testCommand": "pytest {files} -q",
-            "wrongFixProbes": [],
-            "expectedFiles": ["app.py"],
+            "command": "pytest {files} -q",
+            "negativeControls": [],
         },
-        "expect": {
-            "status": "success",
-            "changesPaths": ["app.py"],
+        "constraints": {
+            "expectedStatus": "success",
+            "allowedChangePaths": ["app.py"],
             "maxChangedFiles": 1,
-            "forbidsDeniedCommands": True,
-            "testPathsImmutable": True,
+            "forbidsDeniedActions": True,
+            "verifierInputsImmutable": True,
         },
     }
     for path, value in overrides.items():
@@ -94,37 +93,37 @@ def _scenario_spec(name: str, title: str, **overrides) -> dict:
     return spec
 
 
-def _write_scenario(root: Path, name: str, title: str, *, app_py: str, **overrides) -> Path:
-    """Write a scenario dir with a single ``app.py`` fixture + hidden test."""
+def _write_task(root: Path, name: str, title: str, *, app_py: str, **overrides) -> Path:
+    """Write a task dir with a single ``app.py`` fixture + verifier test."""
     d = root / name
     d.mkdir(parents=True)
-    (d / "scenario.yaml").write_text(
-        yaml.safe_dump(_scenario_spec(name, title, **overrides), sort_keys=False)
+    (d / "task.yaml").write_text(
+        yaml.safe_dump(_task_spec(name, title, **overrides), sort_keys=False)
     )
     fixture = d / "fixture"
     fixture.mkdir()
     (fixture / "app.py").write_text(app_py)
-    hidden = d / "hidden"
-    hidden.mkdir()
-    (hidden / "test_compute.py").write_text(_HIDDEN_TEST)
+    verifier = d / "verifier"
+    verifier.mkdir()
+    (verifier / "test_compute.py").write_text(_VERIFIER_TEST)
     return d
 
 
-def _write_bug_fix_scenario(root: Path) -> None:
-    _write_scenario(root, "bug-fix", "Fix the off-by-one bug", app_py=_APP_PY)
+def _write_bug_fix_task(root: Path) -> None:
+    _write_task(root, "bug-fix", "Fix the off-by-one bug", app_py=_APP_PY)
 
 
 @pytest.fixture
-def registry(tmp_path) -> ScenarioRegistry:
-    root = tmp_path / "scenarios"
+def registry(tmp_path) -> DirectoryTaskSource:
+    root = tmp_path / "tasks"
     root.mkdir()
-    _write_bug_fix_scenario(root)
-    return ScenarioRegistry(root)
+    _write_bug_fix_task(root)
+    return DirectoryTaskSource(root)
 
 
 @pytest.fixture(autouse=True)
 def dev_env(monkeypatch):
-    # Hidden-eval always uses local_test_runner (Task 5/7's BAKUDO_ENV=dev
+    # Verifier-eval always uses local_verifier_runner (Task 5/7's BAKUDO_ENV=dev
     # guard, carried into T10 by ruling R2).
     monkeypatch.setenv("BAKUDO_ENV", "dev")
 
@@ -135,7 +134,7 @@ def _spec(**overrides) -> ExperimentSpec:
         subject="agent-spec",
         baseline=BASELINE,
         candidates=[CANDIDATE],
-        scenario_selector=ScenarioSelector(families=["debugging"], count=1),
+        task_selector=TaskSelector(families=["debugging"], count=1),
     )
     fields.update(overrides)
     return ExperimentSpec(**fields)
@@ -175,17 +174,17 @@ def test_compare_end_to_end_offline(registry):
 
     result = run_experiment(
         spec_compare,
-        registry=registry,
+        task_source=registry,
         ledger=led,
         pipeline_fn=stub_by_arm,
-        test_runner=local_test_runner,
+        verifier_runner=local_verifier_runner,
     )
 
     c = result["comparison"][CANDIDATE]
     assert c["primary"]["verdict"] == "candidate"
     assert c["eligibleForPromotion"] is True
     assert led.get_experiment(result["experimentId"])["status"] == "completed"
-    expected_matrix_size = 2  # 1 scenario x 1 repetition x 2 arms
+    expected_matrix_size = 2  # 1 task x 1 repetition x 2 arms
     assert len(led.list_trials(result["experimentId"])) == expected_matrix_size
 
 
@@ -195,10 +194,10 @@ def test_profile_mode_no_comparison(registry):
 
     result = run_experiment(
         spec_profile,
-        registry=registry,
+        task_source=registry,
         ledger=led,
         pipeline_fn=stub_by_arm,
-        test_runner=local_test_runner,
+        verifier_runner=local_verifier_runner,
     )
 
     assert result["profile"] is True
@@ -206,7 +205,7 @@ def test_profile_mode_no_comparison(registry):
     assert len(led.list_trials(result["experimentId"])) == 1
 
 
-def test_hack_flag_blocks_promotion(registry):
+def test_integrity_violation_blocks_promotion(registry):
     led = InMemoryLedger()
     spec_compare = _spec()
 
@@ -222,14 +221,14 @@ def test_hack_flag_blocks_promotion(registry):
 
     result = run_experiment(
         spec_compare,
-        registry=registry,
+        task_source=registry,
         ledger=led,
         pipeline_fn=stub_touches_tests,
-        test_runner=local_test_runner,
+        verifier_runner=local_verifier_runner,
     )
 
     c = result["comparison"][CANDIDATE]
-    assert c["hardGates"]["hackFlags"] == 1
+    assert c["hardGates"]["integrityViolations"] == 1
     assert c["eligibleForPromotion"] is False
 
 
@@ -249,10 +248,10 @@ def test_safety_regression_blocks_promotion(registry):
 
     result = run_experiment(
         spec_compare,
-        registry=registry,
+        task_source=registry,
         ledger=led,
         pipeline_fn=stub_with_safety_regression,
-        test_runner=local_test_runner,
+        verifier_runner=local_verifier_runner,
     )
 
     c = result["comparison"][CANDIDATE]
@@ -272,10 +271,10 @@ def test_failed_trial_recorded_not_raised(registry):
 
     result = run_experiment(
         spec_compare,
-        registry=registry,
+        task_source=registry,
         ledger=led,
         pipeline_fn=stub_candidate_explodes,
-        test_runner=local_test_runner,
+        verifier_runner=local_verifier_runner,
     )
 
     assert led.get_experiment(result["experimentId"])["status"] == "completed"
@@ -335,10 +334,10 @@ def test_unpinned_refs_resolve_to_loaded_spec_version(tmp_path, registry):
 
     result = run_experiment(
         resolved_spec,
-        registry=registry,
+        task_source=registry,
         ledger=led,
         pipeline_fn=stub,
-        test_runner=local_test_runner,
+        verifier_runner=local_verifier_runner,
     )
 
     assert result["baseline"] == "agent-a@3"
@@ -380,10 +379,10 @@ def test_pipeline_cost_metrics_populate_trial_and_cost_delta(registry):
 
     result = run_experiment(
         spec_compare,
-        registry=registry,
+        task_source=registry,
         ledger=led,
         pipeline_fn=stub_with_tokens,
-        test_runner=local_test_runner,
+        verifier_runner=local_verifier_runner,
     )
 
     trials = led.list_trials(result["experimentId"])
@@ -398,44 +397,42 @@ def test_pipeline_cost_metrics_populate_trial_and_cost_delta(registry):
 
 
 # --------------------------------------------------------------------------
-# Result assembly: NaN guard (ruling b) and twin joint scoring (ruling a)
+# Result assembly: NaN guard and paired-task joint scoring
 # --------------------------------------------------------------------------
 
 
 def test_nan_primary_metric_guarded_never_reaches_analyze(registry):
-    scenarios = registry.list()
-    scn = scenarios[0]
+    tasks = registry.list()
+    task = tasks[0]
     spec = _spec()
 
     good_baseline = TrialRecord(
         id="trial_b1",
+        episode_id=new_episode_id(),
         experiment_id="exp_x",
         agent_ref=BASELINE,
-        scenario_name="bug-fix",
-        scenario_version=1,
-        scenario_digest=scn.digest,
+        task=task.pin,
         seed=0,
         metrics={"changed_files": 0.0, "diff_bytes": 0.0},
         evaluation={"f2p_rate": 0.0, "p2p_rate": 1.0},
-        flags=HackFlags(),
+        integrity=IntegrityFlags(),
         status="completed",
     )
     nan_candidate = TrialRecord(
         id="trial_c1",
+        episode_id=new_episode_id(),
         experiment_id="exp_x",
         agent_ref=CANDIDATE,
-        scenario_name="bug-fix",
-        scenario_version=1,
-        scenario_digest=scn.digest,
+        task=task.pin,
         seed=0,
         metrics={"changed_files": 0.0, "diff_bytes": 0.0},
         evaluation={"f2p_rate": float("nan"), "p2p_rate": 1.0},
-        flags=HackFlags(),
+        integrity=IntegrityFlags(),
         status="completed",
     )
 
     result = assemble_result(
-        spec, [good_baseline, nan_candidate], scenarios=scenarios, registry=registry
+        spec, [good_baseline, nan_candidate], tasks=tasks, task_source=registry
     )
 
     assert result["degradedTrials"] == 1
@@ -448,57 +445,55 @@ def test_nan_primary_metric_guarded_never_reaches_analyze(registry):
 
 
 def test_missing_secondary_metric_counts_as_degraded(registry):
-    scenarios = registry.list()
-    scn = scenarios[0]
+    tasks = registry.list()
+    task = tasks[0]
     spec = _spec(metrics={"primary": "task_success", "secondary": ["tool_calls"]})
 
     trial = TrialRecord(
         id="trial_1",
+        episode_id=new_episode_id(),
         experiment_id="exp_x",
         agent_ref=BASELINE,
-        scenario_name="bug-fix",
-        scenario_version=1,
-        scenario_digest=scn.digest,
+        task=task.pin,
         seed=0,
         metrics={},  # no "tool_calls" recorded
         evaluation={"f2p_rate": 1.0, "p2p_rate": 1.0},
-        flags=HackFlags(),
+        integrity=IntegrityFlags(),
         status="completed",
     )
 
-    result = assemble_result(spec, [trial], scenarios=scenarios, registry=registry)
+    result = assemble_result(spec, [trial], tasks=tasks, task_source=registry)
     assert result["degradedTrials"] == 1
 
 
 @pytest.fixture
-def twin_registry(tmp_path) -> ScenarioRegistry:
-    root = tmp_path / "twin-scenarios"
+def paired_task_source(tmp_path) -> DirectoryTaskSource:
+    root = tmp_path / "paired-tasks"
     root.mkdir()
-    _write_scenario(root, "twin-fix", "Fix the twin bug", app_py=_APP_PY)
-    _write_scenario(
+    _write_task(root, "paired-fix", "Fix the paired bug", app_py=_APP_PY)
+    _write_task(
         root,
-        "twin-nochange",
-        "Investigate the twin bug",
+        "paired-nochange",
+        "Investigate the paired bug",
         app_py="def compute(x):\n    return x + 1\n",  # already correct
         **{
             "metadata.family": "no-change",
-            "metadata.twinOf": "twin-fix",
-            "hidden.failToPass": [],
-            "hidden.passToPass": ["hidden/test_compute.py"],
-            "expect.changesPaths": [],
-            "expect.maxChangedFiles": 0,
-            "mission.constraints": {"maxFilesChanged": 0},
+            "metadata.pairedTask": "paired-fix",
+            "verifier.failToPass": [],
+            "verifier.passToPass": ["verifier/test_compute.py"],
+            "constraints.allowedChangePaths": [],
+            "constraints.maxChangedFiles": 0,
         },
     )
-    return ScenarioRegistry(root)
+    return DirectoryTaskSource(root)
 
 
-def test_twin_pair_joint_scoring(twin_registry):
+def test_paired_task_joint_scoring(paired_task_source):
     led = InMemoryLedger()
     spec = _spec()
 
     def stub(objective, agent_ref, budgets, network):
-        is_fix = "Fix the twin bug" in objective.title
+        is_fix = "Fix the paired bug" in objective.title
         if agent_ref == CANDIDATE:
             if is_fix:
                 return SimpleNamespace(
@@ -519,18 +514,24 @@ def test_twin_pair_joint_scoring(twin_registry):
         )
 
     result = run_experiment(
-        spec, registry=twin_registry, ledger=led, pipeline_fn=stub, test_runner=local_test_runner
+        spec,
+        task_source=paired_task_source,
+        ledger=led,
+        pipeline_fn=stub,
+        verifier_runner=local_verifier_runner,
     )
 
-    (pair,) = result["twinPairs"]
-    assert pair["noChange"] == "twin-nochange@1"
-    assert pair["fix"] == "twin-fix@1"
+    (pair,) = result["pairedTaskPairs"]
+    assert pair["noChange"] == "paired-nochange@1"
+    assert pair["fix"] == "paired-fix@1"
     assert "incomplete" not in pair
     assert pair["jointPass"]["baseline"] is False
     assert pair["jointPass"][CANDIDATE] is True
 
 
-def test_twin_pair_joint_scoring_distrusts_self_reported_changed_files(twin_registry):
+def test_paired_task_joint_scoring_distrusts_self_reported_changed_files(
+    paired_task_source,
+):
     """F2: ``_joint_pass`` reads ``TrialRecord.metrics["changed_files"]``,
     which ``run_trial`` now derives from the collected diff, not the raw
     self-report -- a no-change trial whose diff actually touches a file must
@@ -540,7 +541,7 @@ def test_twin_pair_joint_scoring_distrusts_self_reported_changed_files(twin_regi
     spec = _spec()
 
     # A real, cleanly-applicable edit to app.py that doesn't change compute()'s
-    # behaviour (so the no-change scenario's passToPass hidden test still
+    # behaviour (so the no-change task's passToPass verifier test still
     # passes) -- isolates the changed-files signal from f2p/p2p scoring.
     noop_patch = (
         "--- a/app.py\n"
@@ -552,7 +553,7 @@ def test_twin_pair_joint_scoring_distrusts_self_reported_changed_files(twin_regi
     )
 
     def stub(objective, agent_ref, budgets, network):
-        is_fix = "Fix the twin bug" in objective.title
+        is_fix = "Fix the paired bug" in objective.title
         if agent_ref == CANDIDATE:
             if is_fix:
                 return SimpleNamespace(
@@ -577,18 +578,22 @@ def test_twin_pair_joint_scoring_distrusts_self_reported_changed_files(twin_regi
         )
 
     result = run_experiment(
-        spec, registry=twin_registry, ledger=led, pipeline_fn=stub, test_runner=local_test_runner
+        spec,
+        task_source=paired_task_source,
+        ledger=led,
+        pipeline_fn=stub,
+        verifier_runner=local_verifier_runner,
     )
 
     trials = led.list_trials(result["experimentId"])
     (cand_nochange,) = [
-        t for t in trials if t.agent_ref == CANDIDATE and t.scenario_name == "twin-nochange"
+        t for t in trials if t.agent_ref == CANDIDATE and t.task.name == "paired-nochange"
     ]
     assert cand_nochange.metrics["changed_files"] == 1.0, (
         "changed_files must be derived from the diff even when self-report is empty"
     )
 
-    (pair,) = result["twinPairs"]
+    (pair,) = result["pairedTaskPairs"]
     assert pair["jointPass"][CANDIDATE] is False, (
         "a non-empty diff on the no-change trial must fail jointPass even "
         "when self-reported changed_files is empty"
@@ -603,9 +608,9 @@ def test_twin_pair_joint_scoring_distrusts_self_reported_changed_files(twin_regi
 def test_cli_compare_json(tmp_path, monkeypatch, capsys):
     from bakudo.cli import main
 
-    scenarios_root = tmp_path / "scenarios"
-    scenarios_root.mkdir()
-    _write_bug_fix_scenario(scenarios_root)
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+    _write_bug_fix_task(tasks_root)
 
     agents_root = tmp_path / "agents"
     agents_root.mkdir()
@@ -615,7 +620,7 @@ def test_cli_compare_json(tmp_path, monkeypatch, capsys):
         doc["metadata"]["name"] = name
         (agents_root / f"{name}.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
 
-    monkeypatch.setattr("bakudo.paths.scenarios_dir", lambda: scenarios_root)
+    monkeypatch.setattr("bakudo.paths.smoke_tasks_dir", lambda: tasks_root)
     monkeypatch.setattr("bakudo.paths.agents_dir", lambda: agents_root)
     monkeypatch.setenv("BAKUDO_ENV", "dev")
     monkeypatch.setenv("BAKUDO_OFFLINE", "1")
@@ -674,10 +679,10 @@ def test_api_post_get(tmp_path, monkeypatch):
     from bakudo.api.server import build_app
     from bakudo.control import MetaAgentTools
 
-    scenarios_root = tmp_path / "scenarios"
-    scenarios_root.mkdir()
-    _write_bug_fix_scenario(scenarios_root)
-    monkeypatch.setattr("bakudo.paths.scenarios_dir", lambda: scenarios_root)
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+    _write_bug_fix_task(tasks_root)
+    monkeypatch.setattr("bakudo.paths.smoke_tasks_dir", lambda: tasks_root)
 
     monkeypatch.setenv("BAKUDO_SANDBOX", "local")
     monkeypatch.setenv("BAKUDO_ENV", "dev")
@@ -692,7 +697,7 @@ def test_api_post_get(tmp_path, monkeypatch):
         "metadata": {"name": "api-profile"},
         "subject": "agent-spec",
         "baseline": "explore@1",
-        "scenarioSelector": {"families": ["debugging"], "count": 1},
+        "taskSelector": {"families": ["debugging"], "count": 1},
     }
     resp = client.post("/experiments", json=body)
     assert resp.status_code == 200, resp.text

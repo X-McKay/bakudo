@@ -1,18 +1,22 @@
-.PHONY: install lint type test check demo wheel wheel-smoke
+PYTHON ?= python3
+
+.PHONY: install doctor lint type test check demo wheel wheel-smoke
 
 install:
-	pip install -e ".[dev]"
+	$(PYTHON) -m pip install -e ".[all,dev]"
+
+doctor:
+	BAKUDO_OFFLINE=1 $(PYTHON) -m bakudo.cli doctor
 
 lint:
-	ruff check src tests
+	$(PYTHON) -m ruff check src tests skills
 
-# python -m avoids picking up a stale mypy/pytest that shadows the venv's on
-# PATH (observed with a ~/.local/bin mypy from another toolchain).
+# python -m keeps every tool on the same interpreter/environment.
 type:
-	python3 -m mypy src/bakudo
+	$(PYTHON) -m mypy src/bakudo
 
 test:
-	python3 -m pytest
+	$(PYTHON) -m pytest
 
 # The full local gate, mirrored by CI (see .github/workflows/ci.yml).
 check: lint type test
@@ -20,17 +24,12 @@ check: lint type test
 demo:
 	bakudo demo
 
-# Build a vendorable wheel stamped with the git SHA (3.0.0.dev0+<sha>) so pip
-# treats every build as a distinct version — a refreshed vendor wheel in a
-# target repo then actually reinstalls instead of "already satisfied".
+# Build without modifying tracked files. Use pip --force-reinstall when
+# replacing another local build with the same development version.
 wheel:
-	@sha=$$(git rev-parse --short HEAD); \
-	sed -i "s/^version = \"3\.0\.0.*\"/version = \"3.0.0.dev0+$$sha\"/" pyproject.toml; \
-	pip wheel . -w dist --no-deps -q; \
-	git checkout -- pyproject.toml; \
-	ls -t dist/bakudo-*.whl | head -1
+	$(PYTHON) -m pip wheel . -w dist --no-deps -q
 
 # API-12 regression guard: build the wheel, install it into a throwaway venv,
 # and run `bakudo demo` (offline) + `optimize --help` from an empty cwd.
 wheel-smoke:
-	BAKUDO_WHEEL_TESTS=1 python3 -m pytest tests/test_wheel_install.py -v
+	BAKUDO_WHEEL_TESTS=1 $(PYTHON) -m pytest tests/test_wheel_install.py -v

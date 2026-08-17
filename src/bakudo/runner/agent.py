@@ -15,8 +15,8 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
+from ..agent_run_bundle import AgentRunBundle
 from ..agent_spec import AgentSpec
-from ..bundle import TaskBundle
 from ..strands_tools import LoopHalt, ToolContext, build_tool_callables
 from .prompts import render_system_prompt, render_user_prompt
 
@@ -129,7 +129,7 @@ def _as_named_callable(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
 
     inner = fn.func
     sig = inspect.signature(inner)
-    params = list(sig.parameters.values())[len(fn.args):]
+    params = list(sig.parameters.values())[len(fn.args) :]
     params = [p for p in params if p.name not in fn.keywords]
 
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -160,7 +160,7 @@ def to_strands_tools(callables: dict[str, Callable[..., Any]]) -> list[Any]:
 
 def build_and_run(
     spec: AgentSpec,
-    bundle: TaskBundle,
+    bundle: AgentRunBundle,
     ctx: ToolContext,
     *,
     offline_driver: OfflineDriver | None = None,
@@ -178,9 +178,7 @@ def build_and_run(
     # + tool-call ceiling), keeping headroom below the abox --timeout so the
     # graceful blocked result wins the race against the VM kill (ABOX-16).
     ctx.set_budget(
-        timeout_seconds=max(
-            1, bundle.budget.timeout_seconds - GUEST_DEADLINE_HEADROOM_SECONDS
-        ),
+        timeout_seconds=max(1, bundle.budget.timeout_seconds - GUEST_DEADLINE_HEADROOM_SECONDS),
         token_cap=bundle.budget.max_tokens,
         tool_call_ceiling=bundle.budget.max_tool_calls,
     )
@@ -282,8 +280,7 @@ def _extract_report(
         # Guest stderr is collected into AboxOutcome — a silent fallback here
         # cost a live diagnosis (the strands-1.45 tools:[] 400 was invisible).
         print(
-            f"[agent-runner] report extraction failed, using fallback: "
-            f"{type(exc).__name__}: {exc}",
+            f"[agent-runner] report extraction failed, using fallback: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
         return fallback

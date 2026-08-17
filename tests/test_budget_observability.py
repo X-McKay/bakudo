@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from bakudo.abox.local import local_sandbox
+from bakudo.agent_run_bundle import AgentRunBundle, Budget, budget_from_spec
 from bakudo.agent_spec import load_spec_file
-from bakudo.bundle import Budget, TaskBundle, budget_from_spec
 from bakudo.control import run_objective
 from bakudo.curriculum import Objective
 from bakudo.runner.agent import GUEST_DEADLINE_HEADROOM_SECONDS, TokenAccounting, build_and_run
@@ -117,8 +117,13 @@ def test_budget_exceeded_yields_blocked_result():
         raise BudgetExceeded("timeout")
 
     out = local_sandbox(
-        TaskBundle(run_id="run_Y", objective_id=objective.id, objective=objective,
-                   agent_spec=spec, budget=Budget(timeoutSeconds=1)),
+        AgentRunBundle(
+            run_id="run_Y",
+            objective_id=objective.id,
+            objective=objective,
+            agent_spec=spec,
+            budget=Budget(timeoutSeconds=1),
+        ),
         offline_driver=budget_blowing_driver,
     )
     assert out.result["status"] == "blocked"
@@ -167,12 +172,17 @@ def test_guest_deadline_has_headroom_below_abox_timeout():
     # ABOX-16: the in-guest deadline must beat the VM kill (abox --timeout).
     spec = load_spec_file(AGENTS / "explore.yaml")
     objective = Objective(type="explore", repo="bakudo", title="t")
-    bundle = TaskBundle(
-        run_id="run_H", objective_id=objective.id, objective=objective,
-        agent_spec=spec, budget=Budget(timeoutSeconds=1000),
+    bundle = AgentRunBundle(
+        run_id="run_H",
+        objective_id=objective.id,
+        objective=objective,
+        agent_spec=spec,
+        budget=Budget(timeoutSeconds=1000),
     )
     ctx = ToolContext(
-        workspace=Workspace(Path(".")), skills=SkillRegistry(allowed=[]), run_id="run_H",
+        workspace=Workspace(Path(".")),
+        skills=SkillRegistry(allowed=[]),
+        run_id="run_H",
     )
     build_and_run(spec, bundle, ctx, offline_driver=lambda s, u, t: "{}")
     remaining = ctx.deadline_monotonic - time.monotonic()
@@ -181,7 +191,9 @@ def test_guest_deadline_has_headroom_below_abox_timeout():
 
 def test_token_accounting_trips_cap_mid_run():
     ctx = ToolContext(
-        workspace=Workspace(Path(".")), skills=SkillRegistry(allowed=[]), run_id="run_T",
+        workspace=Workspace(Path(".")),
+        skills=SkillRegistry(allowed=[]),
+        run_id="run_T",
     )
     ctx.set_budget(token_cap=100)
     hook = TokenAccounting(ctx)
@@ -199,7 +211,9 @@ def test_token_accounting_trips_cap_mid_run():
 
 def test_token_accounting_accumulates_deltas():
     ctx = ToolContext(
-        workspace=Workspace(Path(".")), skills=SkillRegistry(allowed=[]), run_id="run_T",
+        workspace=Workspace(Path(".")),
+        skills=SkillRegistry(allowed=[]),
+        run_id="run_T",
     )
     hook = TokenAccounting(ctx)
 
@@ -236,9 +250,9 @@ def test_run_command_timeout_clamped_to_remaining_budget(tmp_path):
 def test_run_command_subprocess_timeout_reported_not_raised(tmp_path):
     spec, ctx = _ctx(tmp_path)
     tools = build_tool_callables(spec, ctx)
-    # An allowlisted, long-running command (binds an ephemeral port and serves
-    # forever) — `python -c` is denied by the inline-exec guard (SEC-1), so use
-    # `python -m` to exercise the subprocess-timeout path.
-    out = tools["run-command"](command="python -m http.server 0", timeout=1)
+    # Use a file-based Python program because inline execution is denied by
+    # policy and restricted test environments may also deny socket binding.
+    (tmp_path / "wait.py").write_text("import time\ntime.sleep(10)\n")
+    out = tools["run-command"](command="python wait.py", timeout=1)
     assert out["exit_code"] == 124
     assert out["timed_out"] is True

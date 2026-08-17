@@ -55,20 +55,15 @@ mis-pathed or wrong binary from a silent host-subprocess downgrade into a loud
 boot-time error. Set `BAKUDO_ABOX_SKIP_VERSION_CHECK=1` only if a specific abox
 build's `--version` output is unrecognised.
 
-## Sandbox profiles are advisory metadata, not the enforcement point
+## Sandbox policy sources
 
-`abox/runner.py::SandboxProfile` / `PROFILES` describe the *intended* policy per
-role (network mode, max changed files, merge/ephemerality). The **enforced**
-controls are: the microVM boundary and its allowed commands/filesystem (abox,
-via the repo's `.abox/project.toml`), the outbound network (`--network` derived
-from the AgentSpec's `networkMode` — note this *replaces* the project's default
-mode per run, so `AboxRunner` refuses `open` unless the operator sets
-`BAKUDO_ALLOW_NETWORK_OPEN=1`; scoped bundles/domains stay repo-owned), and
-`maxChangedFiles` (checked
-host-side when a candidate diff is scored, `evals/corpus.py`). Wiring every
-`SandboxProfile` dimension to a runtime check is future work (see
-`docs/HUMAN_TASKS.md`); today the profiles are documentation of intent, and this
-document no longer claims otherwise.
+The AgentSpec's `sandbox.profile` is an opaque configuration and provenance
+label; Bakudo does not maintain a second in-process profile registry. Enforced
+controls come from the microVM boundary and allowed commands/filesystem in the
+repo's `.abox/project.toml`, the run-level `networkMode` and timeout, and the
+task and AgentSpec constraints evaluated by the trusted control plane.
+`AboxRunner` refuses `networkMode: open` unless the operator sets
+`BAKUDO_ALLOW_NETWORK_OPEN=1`; scoped bundles and domains remain repo-owned.
 
 ## Human-gated actions (spec §19.2, §27.2)
 
@@ -99,6 +94,4 @@ denies host/private/metadata ranges). Note that under abox 0.7.0 spec
 `networkMode: none` maps to abox `safe`, which is *host-mediated egress*, not
 the 0.6.0 loopback-only guest: a cooperating client inside the guest can still
 reach host-managed domains through the audited abox proxy, so `none` means
-"no repo-approved egress", not "zero egress". (`abox/runner.py::PROFILES`
-documents the intended per-role policy but is not itself the enforcement point;
-see "Sandbox profiles are advisory metadata" above.)
+"no repo-approved egress", not "zero egress".

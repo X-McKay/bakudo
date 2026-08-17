@@ -1,30 +1,42 @@
 from bakudo.curriculum import Objective
 from bakudo.evals import Scorecard
-from bakudo.evals.corpus import CaseRun, EvalCase, Expectations, grade_expectations, run_corpus
+from bakudo.evals.corpus import (
+    CaseRun,
+    EvalCase,
+    OutcomeConstraints,
+    grade_expectations,
+    run_corpus,
+)
 from bakudo.runner.result import RunResult
 
 
 def _result(status="success", changed=("a.py",), tests=(("pytest", "passed"),)):
-    return RunResult.model_validate({
-        "run_id": "run_X", "agent": "add-feature@1", "objective_id": "obj_X",
-        "status": status, "summary": "s",
-        "changed_files": list(changed),
-        "tests_run": [{"command": c, "status": s} for c, s in tests],
-    })
+    return RunResult.model_validate(
+        {
+            "run_id": "run_X",
+            "agent": "add-feature@1",
+            "objective_id": "obj_X",
+            "status": status,
+            "summary": "s",
+            "changed_files": list(changed),
+            "tests_run": [{"command": c, "status": s} for c, s in tests],
+        }
+    )
 
 
 def _case(name="c1", paths=("a.py",)):
     return EvalCase(
         name=name,
-        objective=Objective(type="add-feature", repo="r", title="t",
-                            acceptanceCriteria=["do it"]),
-        expect=Expectations(changes_paths=list(paths)),
+        objective=Objective(type="add-feature", repo="r", title="t", acceptanceCriteria=["do it"]),
+        constraints=OutcomeConstraints(allowed_change_paths=list(paths)),
     )
 
 
 def test_grade_expectations_flags_missing_path_and_denials():
-    run = CaseRun(result=_result(changed=("other.py",)),
-                  denied_commands=[{"command": "sudo", "reason": "sudo"}])
+    run = CaseRun(
+        result=_result(changed=("other.py",)),
+        denied_commands=[{"command": "sudo", "reason": "sudo"}],
+    )
     passed, reasons = grade_expectations(_case(paths=("a.py",)), run)
     assert not passed
     assert any("a.py" in r for r in reasons)

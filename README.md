@@ -44,12 +44,14 @@ Human / API / Scheduler
 src/bakudo/
   agent_spec/    versioned, declarative AgentSpec model + loader (§8)
   curriculum/    objective model, prioritization formula, queues (§16)
-  bundle.py      the task bundle handed to a worker run (§5.3)
+  agent_run_bundle.py  per-run payload handed to an agent worker (§5.3)
   runner/        the worker-plane agent runner: prompts, Strands agent, result (§7, §12.2)
   strands_tools/ scoped, policy-enforced worker tools (§4.3, §8)
   skills/        Open Agent Skills registry with progressive disclosure (§13)
   abox/          abox sandbox runner + a local in-process sandbox for dev (§6)
   evals/         eval levels, scorecard, promotion policy (§15, §22)
+  tasks/         TaskSpec models, sources, published bundles, provisioning,
+                 verifier protocol, and authoring verification
   memory/        evidence-backed memory model, write policy, semantic stores
                  (in-process + durable pgvector), FalkorDB graph (§14)
   registry/      the authoritative ledger (in-memory + Postgres) (§14.1, §20)
@@ -57,14 +59,15 @@ src/bakudo/
   control/       run pipeline, the optimization loop, and the meta-agent's
                  administrative tools (§4.3)
   api/           FastAPI control surface (§25)
-  cli.py         the `bakudo` operator CLI
-schemas/         JSON Schemas: AgentSpec, Objective, RunResult, EvalResult (§29.1)
+  cli.py         the `bakudo` operator CLI and grouped command surface
+  doctor.py      read-only, independently testable local readiness checks
+schemas/         JSON Schemas, including AgentSpec, TaskSpec, ExperimentSpec,
+                 Objective, RunResult, and EvalResult (§29.1)
 agents/          seed AgentSpecs: explore, add-feature, qa, critic,
                  optimize-scout, optimize-attempt (§9)
 skills/          seed skills: codebase-navigation, test-selection, safe-refactor
-evals/           scenarios/: the eval corpus (25 scenarios: debugging,
-                 no-change, adversarial-context, safety) (§22); load with
-                 bakudo.evals.corpus.load_corpus_from_scenarios
+smoke/           exactly two paired smoke tasks for package/integration checks;
+                 the real corpus lives in the private bakudo-benchmarks repo
 infra/           docker-compose, Postgres DDL, vLLM gateway (§20, §21, §24)
 docs/            spec, architecture, security, operations
 ```
@@ -75,17 +78,25 @@ The control-plane domain logic runs with only the light core dependencies — no
 Temporal, Postgres, FalkorDB, abox, or vLLM required.
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[all,dev]"
+
+# Check packaged resources, task-source configuration, optional dependencies,
+# execution posture, and persistence without contacting external services.
+bakudo doctor
 
 # Validate a seed agent spec against the JSON Schema + pydantic model.
-bakudo validate-spec agents/add-feature.yaml
+bakudo agent validate agents/add-feature.yaml
 
 # List discoverable skills (names + descriptions only — progressive disclosure).
-bakudo skills
+bakudo skill list
 
 # Run a sample objective end-to-end with the offline sandbox driver:
-# bundle -> local sandbox -> result.json -> eval suite -> scorecard.
+# agent-run bundle -> local sandbox -> result.json -> eval suite -> scorecard.
 bakudo demo
+
+# Inspect the two packaged smoke tasks. Point BAKUDO_TASK_SOURCE at a private
+# corpus checkout or a locally cached published bundle for real experiments.
+bakudo task list
 
 # Run the optimization loop on a target: an optimize-scout proposes distinct
 # approaches, optimize-attempt runs implement one hypothesis each, and gated
@@ -115,12 +126,34 @@ curl -X POST localhost:8000/objectives -H 'content-type: application/json' -d '{
 }'
 ```
 
+## Maintaining the repository
+
+Repository-local guidance is available to both Claude and Codex through the
+`bakudo-maintenance` skill under `.claude/skills/` and `.codex/skills/`.
+Bakudo's runtime agents use the separately packaged skills under `skills/`.
+After focused tests, run the complete local gate from an environment installed
+with `.[all,dev]`:
+
+```bash
+ruff check src tests skills
+python -m mypy src/bakudo
+python -m pytest
+```
+
+Keep runtime models, JSON Schemas, packaged smoke data, and canonical docs in
+sync. The formal terminology is defined in
+[the environment model](docs/environment-model.md); benchmark ownership and
+artifact provenance are defined in
+[the task corpus guide](docs/task-corpus-and-bundles.md). The complete command
+surface, JSON conventions, exit statuses, and common workflows are documented
+in [the CLI guide](docs/cli.md).
+
 ## Status
 
-This is a **v0.1 vertical slice** following the spec's recommended build order
-(§29). The control-plane domain logic — schemas, agent specs, curriculum,
-evals/promotion, memory policy, registry, the run pipeline, and the meta-agent
-tool surface — is implemented and tested in-process. The Temporal workflows,
+This is a **v0.2 active-development vertical slice** following the spec's recommended build order
+(§29). The control-plane domain logic — schemas, agent specs, task/environment
+contracts, curriculum, evals/promotion, memory policy, ledger, the run pipeline,
+and the meta-agent tool surface — is implemented and tested in-process. The Temporal workflows,
 abox microVM runner, Strands/vLLM model wiring, and Postgres/FalkorDB adapters are
 implemented against their real client libraries (installed via extras) and
 exercised through the same building blocks the offline pipeline uses.
@@ -140,8 +173,10 @@ later runs. **The optimization loop**: `OptimizationWorkflow` (and its offline
 mirror behind `bakudo optimize` / `POST /optimize`) fans an optimize objective
 out to a read-only scout, parallel single-hypothesis attempt runs in sibling
 sandboxes, and hard-gated winner selection that treats "no safe improvement"
-as a first-class outcome — backed by a 25-case corpus whose no-change decoys
-make manufactured churn unpromotable.
+as a first-class outcome. The 25-task benchmark corpus, including paired
+no-change tasks that make manufactured churn unpromotable, now lives in a
+dedicated private `bakudo-benchmarks` repository and is consumed through
+immutable content-addressed bundles.
 
 The 2026-08 hardening passes took the production plane **live end-to-end**
 (real abox microVMs — 0.6.0 then, 0.7.1 now — Temporal + Postgres, hosted vLLM models) and
@@ -166,8 +201,9 @@ plausible-but-false speedup claim (measured −5%) before ending in an honest
 reports, including the live failure ladder. Note the pinned
 `strands-agents>=1.43,<1.45` (1.45+ breaks structured output against vLLM).
 
-See [docs/spec.md](docs/spec.md) for the full design and [docs/operations.md](docs/operations.md)
-for what is wired end-to-end versus what needs live infrastructure.
+See the [environment model and terminology](docs/environment-model.md),
+[task corpus and bundle model](docs/task-corpus-and-bundles.md),
+[full system design](docs/spec.md), and [operations guide](docs/operations.md).
 
 ## License
 

@@ -49,7 +49,7 @@ tools:
   - name: load-skill
 
 skills:
-  - test-selection@^1.0
+  - test-selection
 
 outputContract:
   requiredFiles:

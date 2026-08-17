@@ -41,8 +41,7 @@ def validate(document: Any, schema_filename: str) -> None:
     errors = sorted(validator.iter_errors(document), key=lambda e: list(e.path))
     if errors:
         messages = [
-            f"{'/'.join(str(p) for p in err.path) or '<root>'}: {err.message}"
-            for err in errors
+            f"{'/'.join(str(p) for p in err.path) or '<root>'}: {err.message}" for err in errors
         ]
         raise SchemaValidationError(schema_filename, messages)
 
@@ -68,8 +67,8 @@ def validate_eval_result(document: Any) -> None:
     validate(document, "eval-result.schema.json")
 
 
-def validate_scenario_spec(document: Any) -> None:
-    validate(document, "scenario-spec.schema.json")
+def validate_task_spec(document: Any) -> None:
+    validate(document, "task-spec.schema.json")
 
 
 def validate_experiment_spec(document: Any) -> None:
