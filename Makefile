@@ -60,6 +60,7 @@ wheel:
 	$(PYTHON) -m pip wheel . -w dist --no-deps -q
 
 # API-12 regression guard: build the wheel, install it into a throwaway venv,
-# and run `bakudo demo` (offline) + `optimize --help` from an empty cwd.
+# and exercise the demo, workload, performance, and optimize surfaces from an
+# empty cwd.
 wheel-smoke:
 	BAKUDO_WHEEL_TESTS=1 $(PYTHON) -m pytest tests/test_wheel_install.py -v

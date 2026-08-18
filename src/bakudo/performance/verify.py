@@ -89,6 +89,13 @@ def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
+# Installer byte-compilation caches are not workload content: pip compiles
+# packaged corpora on install, so including them would make a wheel install's
+# content digest diverge from the source checkout that pinned the workload.
+_BYTECODE_CACHE_DIR = "__pycache__"
+_BYTECODE_SUFFIXES = frozenset({".pyc", ".pyo"})
+
+
 def iter_workload_files(root: Path) -> tuple[Path, ...]:
     if not root.is_dir():
         raise WorkloadVerificationError(f"workload root does not exist: {root}")
@@ -99,6 +106,9 @@ def iter_workload_files(root: Path) -> tuple[Path, ...]:
             raise WorkloadVerificationError(
                 f"workload may not contain symlinks: {path.relative_to(root).as_posix()!r}"
             )
+        relative = path.relative_to(root)
+        if _BYTECODE_CACHE_DIR in relative.parts or relative.suffix in _BYTECODE_SUFFIXES:
+            continue
         if not path.is_file():
             continue
         size = path.stat().st_size

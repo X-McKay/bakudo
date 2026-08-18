@@ -53,6 +53,22 @@ def test_verification_pin_is_stable_and_content_sensitive(tmp_path: Path) -> Non
     assert changed.pin.executor_digests != first.pin.executor_digests
 
 
+def test_bytecode_caches_never_enter_the_content_digest(tmp_path: Path) -> None:
+    """pip byte-compiles packaged corpora on install; those cache files must
+    not make a wheel install's digest diverge from the source checkout's."""
+    root = tmp_path / "workloads"
+    root.mkdir()
+    workload = make_workload(root)
+    pristine = workload_content_digest(workload)
+
+    cache = workload / "__pycache__"
+    cache.mkdir()
+    (cache / "run.cpython-311.pyc").write_bytes(b"\x00compiled")
+    (workload / "run.pyc").write_bytes(b"\x00compiled")
+
+    assert workload_content_digest(workload) == pristine
+
+
 def test_environment_cannot_widen_selected_posture(tmp_path: Path) -> None:
     root = tmp_path / "workloads"
     root.mkdir()
