@@ -204,5 +204,4 @@ p50/p95, error/timeout rates, and exclusive attribution. It does not export raw
 payloads or turn Bakudo's own latency into candidate-selection evidence.
 
 See the [environment terminology](environment-model.md) for canonical record
-names and the [performance measurement design](superpowers/specs/2026-08-17-performance-measurement-design.md)
-for the detailed trust rationale.
+names and [security.md](security.md) for the measurement trust rationale.

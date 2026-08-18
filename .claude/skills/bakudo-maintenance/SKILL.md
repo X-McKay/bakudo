@@ -23,8 +23,7 @@ Work from the repository root and treat these as canonical boundaries:
   measurement, capture, snapshot, and comparison.
 - Use `docs/task-corpus-and-bundles.md` for task identity and provenance. Use
   `docs/architecture.md`, `docs/cli.md`, and `docs/operations.md` for the
-  implemented workload/performance and operator contracts. Historical
-  material under `docs/superpowers/` is not an API contract.
+  implemented workload/performance and operator contracts.
 
 Keep evidence families distinct:
 
