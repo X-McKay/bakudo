@@ -130,7 +130,11 @@ Workload directories may nest members freely. abox stages every pinned member
 as a flat read-only input (guest names cannot contain `/`), and a fixed
 in-guest bootstrap reconstructs the exact pinned layout — restoring executable
 bits — under `/tmp/bakudo-workload` before the command argv runs, so
-reconstruction never contaminates timing. The command runs with the repository
+reconstruction never contaminates timing. A member's executable bit is part
+of workload content identity (like a git tree mode) and rides bundle tar
+member modes, so directory- and bundle-distributed workloads behave
+identically; digests of workloads without executables are unchanged from
+earlier releases. The command runs with the repository
 worktree (`/workspace`) as its working directory, and argv entries naming
 workload members resolve against the reconstructed layout. Workload code must
 locate sibling members through its own location (`Path(__file__).parent`) or

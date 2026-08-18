@@ -42,6 +42,41 @@ def test_bundle_is_byte_deterministic_and_loads_identical_pin(tmp_path: Path) ->
     assert (from_archive.root / "workload.yaml").is_file()
 
 
+def test_bundle_round_trips_executable_bits(tmp_path: Path) -> None:
+    """A bundle-distributed workload must behave like its directory-source
+    twin: the exec bit rides the tar member mode, survives extraction, and
+    the exec-aware content digest self-verifies on load."""
+    root = tmp_path / "source" / "workloads"
+    root.mkdir(parents=True)
+    workload = make_workload(root)
+    tool = workload / "tool.sh"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o755)
+    loaded = DirectoryWorkloadSource(
+        root,
+        source_uri="https://example.test/workloads",
+        collection_revision="revision-123",
+    ).load("loop")
+
+    first = publish_workload_bundle(loaded, tmp_path / "first")
+    second = publish_workload_bundle(loaded, tmp_path / "second")
+    assert first.read_bytes() == second.read_bytes()
+
+    from_archive = BundleWorkloadSource(first).load("loop@1.0.0")
+    assert from_archive.pin == loaded.pin
+    assert (from_archive.root / "tool.sh").stat().st_mode & 0o777 == 0o555
+    assert (from_archive.root / "run.py").stat().st_mode & 0o777 == 0o444
+
+    from bakudo.abox.staging import staged_workload_files
+
+    staged = {
+        member.relative_path: member.executable
+        for member in staged_workload_files(from_archive.root)
+    }
+    assert staged["tool.sh"] is True
+    assert staged["run.py"] is False
+
+
 def test_bundle_rejects_content_tampering(tmp_path: Path) -> None:
     loaded = _source(tmp_path / "source").load("loop")
     artifact = publish_workload_bundle(loaded, tmp_path / "artifacts")
