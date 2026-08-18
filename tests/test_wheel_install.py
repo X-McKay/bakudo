@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from bakudo.performance.verify import workload_content_digest
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("BAKUDO_WHEEL_TESTS") != "1",
     reason="wheel-install smoke test; set BAKUDO_WHEEL_TESTS=1 (make wheel-smoke)",
@@ -58,6 +60,11 @@ def wheel_venv(tmp_path_factory) -> Path:
 def clean_cwd(tmp_path, monkeypatch) -> Path:
     """An empty cwd + env so the source tree cannot leak into the run."""
     monkeypatch.delenv("PYTHONPATH", raising=False)
+    # Operator config from a sourced .env must not redirect the packaged
+    # resources these tests certify (or fail doctor on a foreign pin).
+    monkeypatch.delenv("BAKUDO_WORKLOAD_SOURCE", raising=False)
+    monkeypatch.delenv("BAKUDO_TASK_SOURCE", raising=False)
+    monkeypatch.delenv("BAKUDO_PERFORMANCE_ENVIRONMENT", raising=False)
     monkeypatch.setenv("BAKUDO_OFFLINE", "1")
     return tmp_path
 
@@ -107,18 +114,26 @@ def test_wheel_workload_cli_uses_the_packaged_corpus(wheel_venv: Path, clean_cwd
     assert inspected.returncode == 0, inspected.stderr
     document = json.loads(inspected.stdout)
     assert document["pin"]["sourceURI"] == "package://bakudo/smoke-workloads"
-    assert document["pin"]["bundleDigest"].startswith("sha256:")
+    # The wheel-installed corpus must pin the same content as the source
+    # checkout: any digest drift (e.g. installer byte-compilation caches
+    # swept into the bundle) breaks cross-host workload pin verification.
+    expected_digest = workload_content_digest(
+        REPO_ROOT / "smoke" / "workloads" / "python-loop"
+    )
+    assert document["pin"]["bundleDigest"] == expected_digest
     assert document["pin"]["executorDigests"][0]["path"] == "run.py"
 
 
 def test_wheel_exposes_the_performance_cli(wheel_venv: Path, clean_cwd: Path):
-    result = _run(
-        [str(wheel_venv / "bin" / "bakudo"), "performance", "--help"],
-        cwd=clean_cwd,
-    )
+    bakudo = str(wheel_venv / "bin" / "bakudo")
+    result = _run([bakudo, "performance", "--help"], cwd=clean_cwd)
     assert result.returncode == 0, result.stderr
+    # Substring checks against the group help are vacuous ("show" appears in
+    # argparse's own "-h, --help" line); prove each subcommand is registered
+    # by asking argparse to parse it.
     for command in ("measure", "capture", "compare", "show", "regressions"):
-        assert command in result.stdout
+        sub = _run([bakudo, "performance", command, "--help"], cwd=clean_cwd)
+        assert sub.returncode == 0, f"{command}: {sub.stderr}"
 
 
 def test_wheel_bakudo_demo_runs_offline(wheel_venv: Path, clean_cwd: Path):

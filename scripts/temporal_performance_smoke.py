@@ -151,35 +151,43 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
             ],
             activity_executor=executor,
         ):
-            common = {
-                "workload": workload.ref,
-                "environment": _document(environment),
-                "workload_source": "package://bakudo/smoke-workloads",
-                "workload_pin": _document(workload.pin),
-            }
+            measure_input = PerformanceMeasurementInput(
+                operation_id=f"live-measure-{suffix}",
+                revision=_document(baseline),
+                workload=workload.ref,
+                environment=_document(environment),
+                workload_source="package://bakudo/smoke-workloads",
+                workload_pin=_document(workload.pin),
+            )
             measurement = await client.execute_workflow(
                 PerformanceMeasurementWorkflow.run,
-                PerformanceMeasurementInput(
-                    operation_id=f"live-measure-{suffix}",
-                    revision=_document(baseline),
-                    **common,
-                ),
+                measure_input,
                 id=f"bakudo-live-measure-{suffix}",
                 task_queue=queue,
                 execution_timeout=timedelta(minutes=3),
             )
+            if measurement.status != "completed" or measurement.record_id is None:
+                raise RuntimeError(f"measurement smoke failed: {measurement}")
             invocation_count = invoker.calls
+            # Replaying the exact same input under the same operation ID must
+            # return the persisted record without touching the invoker. Both
+            # idempotency checks live here because the comparison and
+            # experiment workflows below reuse the same invoker: their
+            # invocations would advance ``invoker.calls`` and turn a later
+            # count comparison into a false failure.
             measurement_replay = await client.execute_workflow(
                 PerformanceMeasurementWorkflow.run,
-                PerformanceMeasurementInput(
-                    operation_id=f"live-measure-{suffix}",
-                    revision=_document(baseline),
-                    **common,
-                ),
+                measure_input,
                 id=f"bakudo-live-measure-replay-{suffix}",
                 task_queue=queue,
                 execution_timeout=timedelta(minutes=3),
             )
+            if measurement_replay.record_id != measurement.record_id:
+                raise RuntimeError(
+                    "measurement replay was not idempotent: "
+                    f"first={measurement.record_id}, "
+                    f"replay={measurement_replay.record_id}"
+                )
             if invoker.calls != invocation_count:
                 raise RuntimeError("measurement replay executed the workload again")
             comparison = await client.execute_workflow(
@@ -231,13 +239,6 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
         _impl.DEPS = original_deps
         _impl.configured_environment_pin = original_environment_loader
 
-    if measurement.status != "completed" or measurement.record_id is None:
-        raise RuntimeError(f"measurement smoke failed: {measurement}")
-    if measurement_replay.record_id != measurement.record_id:
-        raise RuntimeError(
-            "measurement replay was not idempotent: "
-            f"first={measurement.record_id}, replay={measurement_replay.record_id}"
-        )
     if comparison.status != "completed" or comparison.record_id is None:
         raise RuntimeError(f"comparison smoke failed: {comparison}")
     if experiment.get("subjectKind") != "software-artifact":
@@ -248,7 +249,6 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
         "taskQueue": queue,
         "measurement": measurement.record_id,
         "measurementReplay": measurement_replay.record_id,
-        "measurementReplayIdempotent": True,
         "comparison": comparison.record_id,
         "experiment": experiment["experimentId"],
         "artifactVerdict": experiment["comparison"]["candidate-1"]["primary"][
