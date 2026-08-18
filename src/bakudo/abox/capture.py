@@ -53,6 +53,7 @@ from .runner import IN_GUEST_SETUP_HEADROOM_SECONDS, SUBPROCESS_TIMEOUT_HEADROOM
 from .staging import (
     GUEST_RECONSTRUCT_SNIPPET,
     GUEST_WORKLOAD_ROOT,
+    MAX_GUEST_PAYLOAD_CHARS,
     staged_workload_files,
     staging_input_arguments,
     staging_payload_fields,
@@ -314,6 +315,12 @@ class _FreshAboxExecutor:
             },
             separators=(",", ":"),
         )
+        if len(payload) > MAX_GUEST_PAYLOAD_CHARS:
+            raise AboxProfileCaptureError(
+                "workload staging payload exceeds the single-argv bound "
+                f"({len(payload)} > {MAX_GUEST_PAYLOAD_CHARS} chars); reduce "
+                "the member count or path lengths"
+            )
         guest_timeout = math.ceil(timeout) + IN_GUEST_SETUP_HEADROOM_SECONDS
         command = [
             self._abox_bin,

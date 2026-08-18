@@ -14,11 +14,12 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
 from .. import ids
 from ..performance.models import (
+    FAILURE_DETAIL_MAX_CHARS,
     FailureReason,
     InvocationOutcome,
     InvocationPhase,
@@ -39,6 +40,7 @@ from .runner import (
 from .staging import (
     GUEST_RECONSTRUCT_SNIPPET,
     GUEST_WORKLOAD_ROOT,
+    MAX_GUEST_PAYLOAD_CHARS,
     staged_workload_files,
     staging_input_arguments,
     staging_payload_fields,
@@ -67,19 +69,22 @@ except subprocess.TimeoutExpired as exc:
     stderr = exc.stderr or ""
     if isinstance(stdout, bytes): stdout = stdout.decode(errors="replace")
     if isinstance(stderr, bytes): stderr = stderr.decode(errors="replace")
-except FileNotFoundError as exc:
-    # Missing interpreter/executable in the guest image: report the shell's
-    # command-not-found code through the marker instead of crashing unmarked.
+except OSError as exc:
+    # Launch failures (missing interpreter or cwd, denied exec, bad paths)
+    # must surface through the marker instead of crashing unmarked; the repr
+    # carries the failing path so a missing cwd is not mistaken for a
+    # missing argv[0]. Shell convention: 127 = not found, 126 = not runnable.
     proc = None
     timed_out = False
     stdout = ""
-    stderr = f"workload argv[0] not found in guest: {exc}"
+    stderr = "failed to launch workload argv: %s: %s" % (type(exc).__name__, exc)
+    launch_exit_code = 127 if isinstance(exc, FileNotFoundError) else 126
 elapsed = time.perf_counter() - started
 ended_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
 if proc is not None:
     stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
 else:
-    exit_code = 124 if timed_out else 127
+    exit_code = 124 if timed_out else launch_exit_code
 metrics = {
     "latency_seconds": elapsed,
     "cpu_seconds": max(0.0, (ended_usage.ru_utime + ended_usage.ru_stime)
@@ -106,9 +111,8 @@ class AboxMeasurementError(RuntimeError):
     """A trusted measurement runner failure."""
 
 
-# Bounded diagnostic tail persisted on failed invocations (InvocationOutcome
-# caps failureDetail at 2000 characters).
-_DETAIL_CHARS = 2_000
+# Bounded diagnostic tail persisted on failed invocations.
+_DETAIL_CHARS = FAILURE_DETAIL_MAX_CHARS
 _ANSI_CSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
@@ -189,8 +193,20 @@ class AboxWorkloadInvoker:
     def _guest_argv(workload: LoadedWorkload) -> list[str]:
         argv: list[str] = []
         for argument in workload.spec.command.argv:
-            candidate = workload.root / argument
-            if not argument.startswith("-") and candidate.is_file():
+            # Same safe-member test as the capture runner: only a plain
+            # repo-relative member reference is rewritten — an absolute or
+            # traversing token would otherwise be joined into nonsense (a
+            # Path join with an absolute right side discards the root).
+            relative = PurePosixPath(argument)
+            is_safe_member = (
+                not argument.startswith("-")
+                and "\\" not in argument
+                and not relative.is_absolute()
+                and ".." not in relative.parts
+                and "." not in relative.parts
+                and relative.as_posix() == argument
+            )
+            if is_safe_member and (workload.root / argument).is_file():
                 argv.append(f"{GUEST_WORKLOAD_ROOT}/{argument}")
             else:
                 argv.append(argument)
@@ -218,6 +234,12 @@ class AboxWorkloadInvoker:
             },
             separators=(",", ":"),
         )
+        if len(payload) > MAX_GUEST_PAYLOAD_CHARS:
+            raise AboxMeasurementError(
+                "workload staging payload exceeds the single-argv bound "
+                f"({len(payload)} > {MAX_GUEST_PAYLOAD_CHARS} chars); reduce "
+                "the member count or path lengths"
+            )
         guest_timeout = int(workload.spec.measurement.timeout_seconds) + (
             IN_GUEST_SETUP_HEADROOM_SECONDS
         )
@@ -335,7 +357,26 @@ class AboxWorkloadInvoker:
                     else FailureReason.infrastructure,
                     failure_detail=_failure_detail(result.stderr, result.stdout),
                 )
-            payload = _parse_marker(result.stdout)
+            try:
+                payload = _parse_marker(result.stdout)
+            except AboxMeasurementError:
+                # The most opaque failure mode: abox exited 0 but no trusted
+                # marker came back. Return a typed outcome carrying the
+                # guest/abox output tail — raising instead would be swallowed
+                # by the service into a detail-free adapter failure (which
+                # deliberately persists no host exception text).
+                tail = _failure_detail(result.stderr, result.stdout)
+                return InvocationOutcome(
+                    ordinal=ordinal,
+                    phase=phase,
+                    status=RecordStatus.failed,
+                    exit_code=result.exit_code,
+                    failure_reason=FailureReason.infrastructure,
+                    failure_detail=(
+                        "no trusted JSON marker in guest output; tail: "
+                        f"{tail or '<empty>'}"
+                    )[-_DETAIL_CHARS:],
+                )
             timed_out = bool(payload.get("timed_out"))
             raw_exit_code = payload.get("exit_code", 1)
             if isinstance(raw_exit_code, bool) or not isinstance(raw_exit_code, (int, float)):
@@ -378,7 +419,7 @@ class AboxWorkloadInvoker:
                 failure_detail=None
                 if completed
                 else _failure_detail(
-                    str(payload.get("stderr", "")), str(payload.get("stdout", ""))
+                    str(payload.get("stderr") or ""), str(payload.get("stdout") or "")
                 ),
             )
         finally:

@@ -200,6 +200,10 @@ class PerformanceMeasurementService:
                 failure_reason=FailureReason.timeout,
             )
         except Exception:  # noqa: BLE001 - adapter failures become typed evidence
+            # Deliberately no exception text: arbitrary host exceptions can
+            # carry DSNs or host paths, and records are durable evidence.
+            # Trusted runners persist their own bounded, guest-derived
+            # failureDetail on the outcomes they return instead of raising.
             return InvocationOutcome(
                 ordinal=ordinal,
                 phase=phase,

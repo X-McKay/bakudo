@@ -23,10 +23,22 @@ GUEST_WORKLOAD_ROOT = "/tmp/bakudo-workload"
 # collide two members.
 _GUEST_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
+# Keep flat names comfortably under the 255-byte filename limit even after
+# the ``w<i>-`` prefix; the reconstruction map, not the flat name, carries
+# the member's real path, so truncation loses nothing.
+_GUEST_NAME_MAX_CHARS = 64
+
+# The staging map travels as one JSON argv element; Linux caps a single argv
+# element at MAX_ARG_STRLEN (128 KiB). Callers fail closed with a typed error
+# beyond this bound instead of dying in execve with E2BIG.
+MAX_GUEST_PAYLOAD_CHARS = 100_000
+
 # Shared guest-side bootstrap: parse the payload, rebuild the workload layout
-# from the flat inputs, and restore the executable bit staging drops. Runs
-# before any measurement clock starts, so reconstruction never contaminates
-# timing. Composed into the measurement wrapper and the capture launcher.
+# from the flat inputs, restore the executable bit staging drops, and export
+# BAKUDO_WORKLOAD_DIR so workload code can locate members without relying on
+# the working directory (which stays the repository worktree). Runs before
+# any measurement clock starts, so reconstruction never contaminates timing.
+# Composed into the measurement wrapper and the capture launcher.
 GUEST_RECONSTRUCT_SNIPPET = r"""
 import json, os, shutil, sys
 payload = json.loads(sys.argv[1])
@@ -38,6 +50,7 @@ for flat_name, relative in payload["files"].items():
     shutil.copyfile(os.path.join(inputs_dir, flat_name), destination)
     if flat_name in executables:
         os.chmod(destination, 0o755)
+os.environ["BAKUDO_WORKLOAD_DIR"] = payload["workload_root"]
 """
 
 
@@ -52,7 +65,9 @@ def staged_workload_files(root: Path) -> tuple[StagedFile, ...]:
     """The pinned content set with its flat guest names, in pinned order."""
     return tuple(
         StagedFile(
-            guest_name=f"w{index}-{_GUEST_NAME_UNSAFE.sub('_', path.name)}",
+            guest_name=(
+                f"w{index}-{_GUEST_NAME_UNSAFE.sub('_', path.name)[:_GUEST_NAME_MAX_CHARS]}"
+            ),
             host_path=path,
             relative_path=path.relative_to(root).as_posix(),
             executable=bool(path.stat().st_mode & 0o111),

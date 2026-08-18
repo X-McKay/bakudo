@@ -599,16 +599,25 @@ async def test_measurement_workflow_signal_cancels_blocking_activity(
         # instead of resolving — the intermittent local hang this ordering
         # eliminates. The production server tolerates that race; the test's
         # purpose is the cancel-while-running path, which this ordering pins.
+        # The finally guarantees release even if the wait times out —
+        # otherwise worker shutdown would block on the still-held activity
+        # and the failure mode would be the very hang this test fixes.
+        # Deliberately a short-poll loop: fetch_history_events(
+        # wait_new_event=True) long-polls the Java time-skipping test server
+        # and never returns here (verified live), so the simpler refetch
+        # loop is the one that works.
         async def cancel_requested() -> bool:
             async for event in handle.fetch_history_events():
                 if event.HasField("activity_task_cancel_requested_event_attributes"):
                     return True
             return False
 
-        async with asyncio.timeout(10):
-            while not await cancel_requested():
-                await asyncio.sleep(0.05)
-        invoker.release.set()
+        try:
+            async with asyncio.timeout(10):
+                while not await cancel_requested():
+                    await asyncio.sleep(0.05)
+        finally:
+            invoker.release.set()
         result = await handle.result()
 
     assert result.status == RecordStatus.cancelled.value

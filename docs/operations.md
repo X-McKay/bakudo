@@ -132,9 +132,12 @@ in-guest bootstrap reconstructs the exact pinned layout — restoring executable
 bits — under `/tmp/bakudo-workload` before the command argv runs, so
 reconstruction never contaminates timing. The command runs with the repository
 worktree (`/workspace`) as its working directory, and argv entries naming
-workload members resolve against the reconstructed layout. Guest images ship
-`python3` (the `python-glibc` profile is Debian-based and has no bare
-`python`).
+workload members resolve against the reconstructed layout. Workload code must
+locate sibling members through its own location (`Path(__file__).parent`) or
+the exported `BAKUDO_WORKLOAD_DIR` environment variable — never through the
+working directory, which is the repository under measurement, not the
+workload. Guest images ship `python3` (the `python-glibc` profile is
+Debian-based and has no bare `python`).
 
 Measurement and diagnostic capture answer different questions. `measure`
 runs the workload without instrumentation in fresh abox guests, excludes
