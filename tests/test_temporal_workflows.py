@@ -68,7 +68,7 @@ def _prepared_performance():
     }
     return {
         "status": "completed",
-        "workload": "smoke-python-loop@1.0.0",
+        "workload": "smoke-python-loop@1.0.1",
         "workloadSource": "package://bakudo/smoke-workloads",
         "workloadPin": {
             "sourceURI": "file:///trusted/workloads",

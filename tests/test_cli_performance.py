@@ -22,7 +22,7 @@ def test_workload_list_defaults_to_packaged_smoke_corpus(capsys) -> None:
     assert main(["workload", "list", "--json"]) == 0
 
     records = json.loads(capsys.readouterr().out)
-    assert [record["ref"] for record in records] == ["smoke-python-loop@1.0.0"]
+    assert [record["ref"] for record in records] == ["smoke-python-loop@1.0.1"]
     assert records[0]["sourceURI"] == "package://bakudo/smoke-workloads"
 
 
@@ -42,7 +42,7 @@ def test_workload_validate_accepts_directory_or_manifest(capsys) -> None:
 
     record = json.loads(capsys.readouterr().out)
     assert record["ok"] is True
-    assert record["ref"] == "smoke-python-loop@1.0.0"
+    assert record["ref"] == "smoke-python-loop@1.0.1"
 
 
 def test_workload_validate_reports_clean_error(tmp_path, capsys) -> None:

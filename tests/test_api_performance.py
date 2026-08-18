@@ -62,14 +62,14 @@ def test_workload_routes_list_and_validate_packaged_smoke() -> None:
 
     listed = client.get("/workloads")
     assert listed.status_code == 200
-    assert [item["ref"] for item in listed.json()] == ["smoke-python-loop@1.0.0"]
+    assert [item["ref"] for item in listed.json()] == ["smoke-python-loop@1.0.1"]
 
     document = yaml.safe_load(
         (smoke_workloads_dir() / "python-loop" / "workload.yaml").read_text()
     )
     validated = client.post("/workloads/validate", json={"document": document})
     assert validated.status_code == 200
-    assert validated.json()["ref"] == "smoke-python-loop@1.0.0"
+    assert validated.json()["ref"] == "smoke-python-loop@1.0.1"
     assert validated.json()["manifestDigest"].startswith("sha256:")
 
 

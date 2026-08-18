@@ -96,7 +96,7 @@ def test_wheel_packages_the_smoke_workload(wheel_venv: Path, clean_cwd: Path):
         cwd=clean_cwd,
     )
     assert listed.returncode == 0, listed.stderr
-    assert listed.stdout.strip() == "smoke-python-loop@1.0.0"
+    assert listed.stdout.strip() == "smoke-python-loop@1.0.1"
 
 
 def test_wheel_workload_cli_uses_the_packaged_corpus(wheel_venv: Path, clean_cwd: Path):
@@ -104,11 +104,11 @@ def test_wheel_workload_cli_uses_the_packaged_corpus(wheel_venv: Path, clean_cwd
     listed = _run([bakudo, "workload", "list", "--json"], cwd=clean_cwd)
     assert listed.returncode == 0, listed.stderr
     workloads = json.loads(listed.stdout)
-    assert [entry["ref"] for entry in workloads] == ["smoke-python-loop@1.0.0"]
+    assert [entry["ref"] for entry in workloads] == ["smoke-python-loop@1.0.1"]
     assert workloads[0]["sourceURI"] == "package://bakudo/smoke-workloads"
 
     inspected = _run(
-        [bakudo, "workload", "inspect", "smoke-python-loop@1.0.0", "--json"],
+        [bakudo, "workload", "inspect", "smoke-python-loop@1.0.1", "--json"],
         cwd=clean_cwd,
     )
     assert inspected.returncode == 0, inspected.stderr

@@ -2,7 +2,7 @@ apiVersion: bakudo.ai/v1alpha1
 kind: WorkloadSpec
 metadata:
   name: smoke-python-loop
-  version: 1.0.0
+  version: 1.0.1
   description: Small deterministic CPU workload for package and runner integration
   labels:
     language: python
@@ -10,7 +10,7 @@ metadata:
 subject:
   repo: bakudo-smoke
 command:
-  argv: [python, run.py, --iterations, "25000"]
+  argv: [python3, run.py, --iterations, "25000"]
   cwd: .
   env:
     PYTHONHASHSEED: "0"

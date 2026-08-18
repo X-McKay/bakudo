@@ -33,7 +33,7 @@ from bakudo.temporal.shared import (
 )
 
 _DIGEST = "sha256:" + "a" * 64
-_WORKLOAD = "smoke-python-loop@1.0.0"
+_WORKLOAD = "smoke-python-loop@1.0.1"
 
 
 def _source() -> DirectoryWorkloadSource:

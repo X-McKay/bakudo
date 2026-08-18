@@ -22,7 +22,7 @@ _DIGEST = "sha256:" + "a" * 64
 
 def _loaded() -> LoadedWorkload:
     root = Path(__file__).parents[1] / "smoke" / "workloads"
-    return DirectoryWorkloadSource(root).load("smoke-python-loop@1.0.0")
+    return DirectoryWorkloadSource(root).load("smoke-python-loop@1.0.1")
 
 
 def _revision(char: str) -> RevisionPin:

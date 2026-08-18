@@ -106,5 +106,5 @@ def test_dispatcher_pins_inputs_and_starts_all_performance_workflows(tmp_path: P
     assert client.started[2][1].candidate_revision["commitSHA"] == _git(
         repo, "rev-parse", "HEAD"
     )
-    stored = ledger.get_workload_version("smoke-python-loop@1.0.0")
+    stored = ledger.get_workload_version("smoke-python-loop@1.0.1")
     assert stored is not None
