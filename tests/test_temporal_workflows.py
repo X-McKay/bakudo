@@ -38,7 +38,7 @@ def _performance_contract():
     return {
         "workloadRef": {
             "name": "smoke-python-loop",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "source": "repository",
         },
         "primaryMetric": "latency_seconds",
@@ -75,7 +75,7 @@ def _prepared_performance():
             "sourceKind": "repository",
             "collectionRevision": "base",
             "name": "smoke-python-loop",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "manifestDigest": _PERFORMANCE_DIGEST,
             "bundleDigest": _PERFORMANCE_DIGEST,
         },
