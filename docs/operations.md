@@ -126,6 +126,16 @@ export BAKUDO_SANDBOX=abox
 - `BAKUDO_POSTGRES_DSN` makes measurements, snapshots, comparisons, and
   regression signals durable across worker/API processes.
 
+Workload directories may nest members freely. abox stages every pinned member
+as a flat read-only input (guest names cannot contain `/`), and a fixed
+in-guest bootstrap reconstructs the exact pinned layout — restoring executable
+bits — under `/tmp/bakudo-workload` before the command argv runs, so
+reconstruction never contaminates timing. The command runs with the repository
+worktree (`/workspace`) as its working directory, and argv entries naming
+workload members resolve against the reconstructed layout. Guest images ship
+`python3` (the `python-glibc` profile is Debian-based and has no bare
+`python`).
+
 Measurement and diagnostic capture answer different questions. `measure`
 runs the workload without instrumentation in fresh abox guests, excludes
 warmups, validates every requested sample and unit, and persists raw samples in
