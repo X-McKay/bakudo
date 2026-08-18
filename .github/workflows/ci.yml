@@ -47,7 +47,7 @@ jobs:
           bakudo workload list --json
           bakudo optimize --help
       # API-12 regression guard: the wheel must be a complete install —
-      # builds it, installs into a throwaway venv, runs `bakudo demo`
-      # (offline) from an empty cwd.
+      # builds it, installs into a throwaway venv, and exercises the demo,
+      # workload, performance, and optimize surfaces from an empty cwd.
       - name: Wheel smoke
         run: make wheel-smoke

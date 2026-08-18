@@ -1,8 +1,9 @@
 """API-12 regression guard: the wheel is a complete, runnable install.
 
 Builds the wheel, installs it into a throwaway venv, and runs the CLI from an
-empty working directory — proving ``bakudo demo`` / ``optimize`` no longer
-depend on the source tree (which only exists in dev checkouts).
+empty working directory — proving the demo, optimization, workload, and
+performance surfaces no longer depend on the source tree (which only exists
+in development checkouts).
 
 Opt-in because it builds a wheel and creates a venv (`make wheel-smoke`):
 
@@ -89,6 +90,35 @@ def test_wheel_packages_the_smoke_workload(wheel_venv: Path, clean_cwd: Path):
     )
     assert listed.returncode == 0, listed.stderr
     assert listed.stdout.strip() == "smoke-python-loop@1.0.0"
+
+
+def test_wheel_workload_cli_uses_the_packaged_corpus(wheel_venv: Path, clean_cwd: Path):
+    bakudo = str(wheel_venv / "bin" / "bakudo")
+    listed = _run([bakudo, "workload", "list", "--json"], cwd=clean_cwd)
+    assert listed.returncode == 0, listed.stderr
+    workloads = json.loads(listed.stdout)
+    assert [entry["ref"] for entry in workloads] == ["smoke-python-loop@1.0.0"]
+    assert workloads[0]["sourceURI"] == "package://bakudo/smoke-workloads"
+
+    inspected = _run(
+        [bakudo, "workload", "inspect", "smoke-python-loop@1.0.0", "--json"],
+        cwd=clean_cwd,
+    )
+    assert inspected.returncode == 0, inspected.stderr
+    document = json.loads(inspected.stdout)
+    assert document["pin"]["sourceURI"] == "package://bakudo/smoke-workloads"
+    assert document["pin"]["bundleDigest"].startswith("sha256:")
+    assert document["pin"]["executorDigests"][0]["path"] == "run.py"
+
+
+def test_wheel_exposes_the_performance_cli(wheel_venv: Path, clean_cwd: Path):
+    result = _run(
+        [str(wheel_venv / "bin" / "bakudo"), "performance", "--help"],
+        cwd=clean_cwd,
+    )
+    assert result.returncode == 0, result.stderr
+    for command in ("measure", "capture", "compare", "show", "regressions"):
+        assert command in result.stdout
 
 
 def test_wheel_bakudo_demo_runs_offline(wheel_venv: Path, clean_cwd: Path):

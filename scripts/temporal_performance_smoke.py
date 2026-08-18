@@ -51,6 +51,9 @@ _DIGEST = "sha256:" + "a" * 64
 
 
 class _Invoker:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def invoke(
         self,
         workload: Any,
@@ -61,6 +64,7 @@ class _Invoker:
         ordinal: int,
     ) -> InvocationOutcome:
         del environment
+        self.calls += 1
         definition = workload.spec.measurement.metrics[0]
         value = 10.0 if revision.commit_sha.startswith("a") else 5.0
         return InvocationOutcome(
@@ -121,10 +125,11 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
 
     original_deps = _impl.DEPS
     original_environment_loader = _impl.configured_environment_pin
+    invoker = _Invoker()
     _impl.DEPS = _impl.Deps(
         ledger=ledger,
         performance_workload_source_fn=lambda: source,
-        performance_invoker=_Invoker(),
+        performance_invoker=invoker,
     )
     _impl.configured_environment_pin = lambda: environment
     executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="temporal-live")
@@ -163,6 +168,20 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
                 task_queue=queue,
                 execution_timeout=timedelta(minutes=3),
             )
+            invocation_count = invoker.calls
+            measurement_replay = await client.execute_workflow(
+                PerformanceMeasurementWorkflow.run,
+                PerformanceMeasurementInput(
+                    operation_id=f"live-measure-{suffix}",
+                    revision=_document(baseline),
+                    **common,
+                ),
+                id=f"bakudo-live-measure-replay-{suffix}",
+                task_queue=queue,
+                execution_timeout=timedelta(minutes=3),
+            )
+            if invoker.calls != invocation_count:
+                raise RuntimeError("measurement replay executed the workload again")
             comparison = await client.execute_workflow(
                 PerformanceComparisonWorkflow.run,
                 PerformanceComparisonInput(
@@ -214,6 +233,11 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
 
     if measurement.status != "completed" or measurement.record_id is None:
         raise RuntimeError(f"measurement smoke failed: {measurement}")
+    if measurement_replay.record_id != measurement.record_id:
+        raise RuntimeError(
+            "measurement replay was not idempotent: "
+            f"first={measurement.record_id}, replay={measurement_replay.record_id}"
+        )
     if comparison.status != "completed" or comparison.record_id is None:
         raise RuntimeError(f"comparison smoke failed: {comparison}")
     if experiment.get("subjectKind") != "software-artifact":
@@ -223,6 +247,8 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
         "namespace": namespace,
         "taskQueue": queue,
         "measurement": measurement.record_id,
+        "measurementReplay": measurement_replay.record_id,
+        "measurementReplayIdempotent": True,
         "comparison": comparison.record_id,
         "experiment": experiment["experimentId"],
         "artifactVerdict": experiment["comparison"]["candidate-1"]["primary"][
