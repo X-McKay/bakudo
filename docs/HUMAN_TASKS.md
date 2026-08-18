@@ -131,10 +131,11 @@ The worker plane runs inside abox microVMs. Sandbox selection **fails closed**.
       denied egress appear in the run's audit log. *(Proven live; note the
       branch is deleted by the post-collection `abox stop --clean` — the
       collected diff is the durable artifact, which is also what independent
-      bench verification re-runs.)*
+      verifier evaluation and candidate measurement consume.)*
 - [ ] **⚠ Guest command policy quirk:** abox's in-guest proxy denies mutating
       git ops (`git apply` observed live). Anything needing to materialise a
-      diff must do it host-side (see `abox/bench.py`).
+      diff must do it host-side before starting the guest (see
+      `abox/measurement.py` and `abox/verifier.py`).
 
 ---
 
@@ -173,15 +174,16 @@ Promotion requires `promotionPolicy.minEvalCases` (25) real cases. The private
 `bakudo-benchmarks` repository owns 25 versioned tasks across the
 debugging/no-change/adversarial-context/safety families. Configure it through
 `BAKUDO_TASK_SOURCE`; core contains only two smoke tasks and must not be used as
-a promotion corpus. Roles such as `optimize` need their own task-backed
-environments before they can use the same reproducible trial and provenance
-pipeline.
+a promotion corpus. Agent-spec experiments use those task-backed environments.
+Software-artifact performance work instead uses approved, versioned
+`WorkloadSpec` resources from `BAKUDO_WORKLOAD_SOURCE`; the subject kinds share
+experiment reporting without conflating task rewards and process metrics.
 
 - [ ] For each role the benchmark task source does not cover, curate ≥25 cases
       from real objectives + historical failures (use the `eval-author` role
       to convert failures into cases).
-- [ ] Configure an LLM critic judge (`evals/critic.llm_judge`) and add the
-      `critic` suite to the corpus run where you want review gating.
+- [ ] Configure the sandboxed `critic` role and add its advisory evaluator to
+      corpus runs where you want review gating.
 - [ ] Decide the production `PromotionPolicy` (required suites incl. a
       `regression` corpus, score threshold, canary %).
 - [ ] **Acceptance:** `AgentEvolutionWorkflow` can promote a genuinely-better
@@ -228,7 +230,7 @@ mirror when `FALKORDB_URL` is set). What remains is judgement:
 Schemas, AgentSpec model, curriculum + **live collectors**, the run pipeline,
 Temporal workflows (run/eval/meta/observer/evolution/compaction/optimization),
 scoped tools with command policy + budget + observability, skills registry,
-eval suite + corpus runner + critic (+ perf/simplicity graders), scorecard +
+eval suite + corpus runner + critic, scorecard +
 promotion (safety/human gates), semantic memory + write policy + compaction
 (+ the durable pgvector store, worker-wired), the optimization loop with its
 25-case corpus and `bakudo optimize` / `POST /optimize` entrypoints, the

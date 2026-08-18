@@ -18,6 +18,14 @@ from typing import Any
 
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
+from ..performance.models import (
+    MeasurementRecord,
+    PerformanceComparison,
+    PerformanceRegressionSignal,
+    PerformanceSnapshot,
+    WorkloadSpec,
+)
+from ..performance.pins import WorkloadPin
 from ..trials.models import TrialRecord
 from .records import AgentVersionRecord, RepoRecord, RunEvent, RunPhase, RunRecord
 
@@ -63,12 +71,20 @@ _EXPERIMENTS_DDL = """\
 create table if not exists experiments (
   id text primary key,
   name text not null,
+  subject_kind text not null,
   spec jsonb not null,
   status text not null,
   result jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 )"""
+
+_EXPERIMENTS_SUBJECT_COLUMN_DDL = (
+    "alter table experiments add column if not exists subject_kind text"
+)
+_EXPERIMENTS_SUBJECT_INDEX_DDL = (
+    "create index if not exists experiments_subject_kind_idx on experiments (subject_kind)"
+)
 
 # Self-migration DDL for the repos table (repo onboarding, P2 Task 1).
 # infra/postgres/init.sql is the canonical, documented copy; this constant
@@ -87,6 +103,75 @@ create table if not exists repos (
   provenance jsonb not null default '{}'::jsonb,
   added_at timestamptz not null default now()
 )"""
+
+_WORKLOAD_VERSIONS_DDL = """\
+create table if not exists workload_versions (
+  workload_ref text primary key,
+  source_uri text not null,
+  collection_revision text not null,
+  spec jsonb not null,
+  pin jsonb not null,
+  created_at timestamptz not null default now()
+)"""
+
+_MEASUREMENT_RECORDS_DDL = """\
+create table if not exists measurement_records (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  revision_sha text not null,
+  status text not null,
+  record jsonb not null,
+  created_at timestamptz not null default now()
+)"""
+
+_PERFORMANCE_SNAPSHOTS_DDL = """\
+create table if not exists performance_snapshots (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  revision_sha text not null,
+  status text not null,
+  snapshot jsonb not null,
+  created_at timestamptz not null default now()
+)"""
+
+_PERFORMANCE_COMPARISONS_DDL = """\
+create table if not exists performance_comparisons (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  baseline_revision_sha text not null,
+  candidate_revision_sha text not null,
+  status text not null,
+  verdict text not null,
+  eligible boolean not null,
+  comparison jsonb not null,
+  created_at timestamptz not null default now()
+)"""
+
+_PERFORMANCE_REGRESSIONS_DDL = """\
+create table if not exists performance_regressions (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  metric_name text not null,
+  deduplication_key text not null,
+  approved boolean not null,
+  signal jsonb not null,
+  created_at timestamptz not null default now()
+)"""
+
+_PERFORMANCE_INDEX_DDL = (
+    "create index if not exists measurement_records_lookup_idx "
+    "on measurement_records (repository, workload_ref, created_at)",
+    "create index if not exists performance_snapshots_lookup_idx "
+    "on performance_snapshots (repository, workload_ref, created_at)",
+    "create index if not exists performance_comparisons_lookup_idx "
+    "on performance_comparisons (repository, workload_ref, created_at)",
+    "create index if not exists performance_regressions_lookup_idx "
+    "on performance_regressions (repository, deduplication_key, created_at)",
+)
 
 
 class PostgresLedger:
@@ -838,7 +923,9 @@ class PostgresLedger:
         )
 
     # --- experiments ---
-    _EXPERIMENT_COLUMNS = "id, name, spec, status, result, created_at, updated_at"
+    _EXPERIMENT_COLUMNS = (
+        "id, name, subject_kind, spec, status, result, created_at, updated_at"
+    )
 
     def _ensure_experiments_table(self, conn: Any) -> None:
         """Self-migrate the ``experiments`` table (idempotent), mirroring
@@ -846,8 +933,17 @@ class PostgresLedger:
         write so an already-initialized database (whose ``init.sql``
         predates this table) still works without a manual migration."""
         self._do(conn, _EXPERIMENTS_DDL, ())
+        self._do(conn, _EXPERIMENTS_SUBJECT_COLUMN_DDL, ())
+        self._do(conn, _EXPERIMENTS_SUBJECT_INDEX_DDL, ())
 
-    def record_experiment(self, experiment_id: str, name: str, spec: dict, status: str) -> None:
+    def record_experiment(
+        self,
+        experiment_id: str,
+        name: str,
+        subject_kind: str,
+        spec: dict,
+        status: str,
+    ) -> None:
         """Insert the experiment row. Idempotent under retry (``on conflict
         do nothing``, matching :meth:`create_run`): a duplicate id is a
         retried write, not an error, and must not clobber an experiment that
@@ -858,11 +954,11 @@ class PostgresLedger:
             self._do(
                 conn,
                 """
-                insert into experiments (id, name, spec, status)
-                values (%s,%s,%s,%s)
+                insert into experiments (id, name, subject_kind, spec, status)
+                values (%s,%s,%s,%s,%s)
                 on conflict (id) do nothing
                 """,
-                (experiment_id, name, json.dumps(spec), status),
+                (experiment_id, name, subject_kind, json.dumps(spec), status),
             )
 
     def update_experiment_result(self, experiment_id: str, status: str, result: dict) -> None:
@@ -893,14 +989,243 @@ class PostgresLedger:
         return {
             "id": row[0],
             "name": row[1],
-            "spec": row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"),
-            "status": row[3],
-            "result": row[4]
-            if row[4] is None or isinstance(row[4], dict)
-            else json.loads(row[4] or "{}"),
-            "created_at": row[5],
-            "updated_at": row[6],
+            "subject_kind": row[2],
+            "spec": row[3] if isinstance(row[3], dict) else json.loads(row[3] or "{}"),
+            "status": row[4],
+            "result": row[5]
+            if row[5] is None or isinstance(row[5], dict)
+            else json.loads(row[5] or "{}"),
+            "created_at": row[6],
+            "updated_at": row[7],
         }
+
+    # --- performance evidence ---
+    def _ensure_performance_tables(self, conn: Any) -> None:
+        for statement in (
+            _WORKLOAD_VERSIONS_DDL,
+            _MEASUREMENT_RECORDS_DDL,
+            _PERFORMANCE_SNAPSHOTS_DDL,
+            _PERFORMANCE_COMPARISONS_DDL,
+            _PERFORMANCE_REGRESSIONS_DDL,
+            *_PERFORMANCE_INDEX_DDL,
+        ):
+            self._do(conn, statement, ())
+
+    @staticmethod
+    def _performance_json(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else json.loads(value or "{}")
+
+    def record_workload_version(self, spec: WorkloadSpec, pin: WorkloadPin) -> None:
+        spec_document = spec.to_dict()
+        pin_document = pin.model_dump(by_alias=True, mode="json")
+        with self._connection() as conn:
+            self._ensure_performance_tables(conn)
+            existing = self._do_one(
+                conn,
+                "select spec, pin from workload_versions where workload_ref = %s",
+                (spec.ref,),
+            )
+            if existing is not None:
+                existing_spec = self._performance_json(existing[0])
+                existing_pin = self._performance_json(existing[1])
+                if existing_spec != spec_document or existing_pin != pin_document:
+                    raise ValueError(f"workload version collision for {spec.ref}")
+                return
+            self._do(
+                conn,
+                "insert into workload_versions "
+                "(workload_ref, source_uri, collection_revision, spec, pin) "
+                "values (%s,%s,%s,%s,%s)",
+                (
+                    spec.ref,
+                    pin.source_uri,
+                    pin.collection_revision,
+                    json.dumps(spec_document),
+                    json.dumps(pin_document),
+                ),
+            )
+
+    def get_workload_version(self, workload_ref: str) -> dict[str, Any] | None:
+        row = self._one(
+            "select spec, pin from workload_versions where workload_ref = %s",
+            (workload_ref,),
+        )
+        if row is None:
+            return None
+        return {"spec": self._performance_json(row[0]), "pin": self._performance_json(row[1])}
+
+    def record_measurement(self, record: MeasurementRecord) -> None:
+        with self._connection() as conn:
+            self._ensure_performance_tables(conn)
+            self._do(
+                conn,
+                "insert into measurement_records "
+                "(id, repository, workload_ref, revision_sha, status, record, created_at) "
+                "values (%s,%s,%s,%s,%s,%s,%s) on conflict (id) do nothing",
+                (
+                    record.id,
+                    record.revision.repository,
+                    record.workload.ref,
+                    record.revision.commit_sha,
+                    record.status.value,
+                    json.dumps(record.to_dict()),
+                    record.created_at,
+                ),
+            )
+
+    def get_measurement(self, measurement_id: str) -> MeasurementRecord | None:
+        row = self._one(
+            "select record from measurement_records where id = %s", (measurement_id,)
+        )
+        return (
+            MeasurementRecord.model_validate(self._performance_json(row[0]))
+            if row is not None
+            else None
+        )
+
+    def list_measurements(
+        self, repository: str | None = None, workload_ref: str | None = None
+    ) -> list[MeasurementRecord]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if repository is not None:
+            clauses.append("repository = %s")
+            params.append(repository)
+        if workload_ref is not None:
+            clauses.append("workload_ref = %s")
+            params.append(workload_ref)
+        where = f" where {' and '.join(clauses)}" if clauses else ""
+        rows = self._all(
+            f"select record from measurement_records{where} order by created_at",  # noqa: S608
+            tuple(params),
+        )
+        return [MeasurementRecord.model_validate(self._performance_json(row[0])) for row in rows]
+
+    def record_performance_snapshot(self, snapshot: PerformanceSnapshot) -> None:
+        with self._connection() as conn:
+            self._ensure_performance_tables(conn)
+            self._do(
+                conn,
+                "insert into performance_snapshots "
+                "(id, repository, workload_ref, revision_sha, status, snapshot, created_at) "
+                "values (%s,%s,%s,%s,%s,%s,%s) on conflict (id) do nothing",
+                (
+                    snapshot.id,
+                    snapshot.revision.repository,
+                    snapshot.workload.ref,
+                    snapshot.revision.commit_sha,
+                    snapshot.status.value,
+                    json.dumps(snapshot.to_dict()),
+                    snapshot.created_at,
+                ),
+            )
+
+    def get_performance_snapshot(self, snapshot_id: str) -> PerformanceSnapshot | None:
+        row = self._one(
+            "select snapshot from performance_snapshots where id = %s", (snapshot_id,)
+        )
+        return (
+            PerformanceSnapshot.model_validate(self._performance_json(row[0]))
+            if row is not None
+            else None
+        )
+
+    def record_performance_comparison(self, comparison: PerformanceComparison) -> None:
+        with self._connection() as conn:
+            self._ensure_performance_tables(conn)
+            self._do(
+                conn,
+                "insert into performance_comparisons "
+                "(id, repository, workload_ref, baseline_revision_sha, "
+                "candidate_revision_sha, status, verdict, eligible, comparison, created_at) "
+                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) on conflict (id) do nothing",
+                (
+                    comparison.id,
+                    comparison.baseline_revision.repository,
+                    comparison.workload.ref,
+                    comparison.baseline_revision.commit_sha,
+                    comparison.candidate_revision.commit_sha,
+                    comparison.status.value,
+                    comparison.verdict.value,
+                    comparison.eligible,
+                    json.dumps(comparison.to_dict()),
+                    comparison.created_at,
+                ),
+            )
+
+    def get_performance_comparison(
+        self, comparison_id: str
+    ) -> PerformanceComparison | None:
+        row = self._one(
+            "select comparison from performance_comparisons where id = %s",
+            (comparison_id,),
+        )
+        return (
+            PerformanceComparison.model_validate(self._performance_json(row[0]))
+            if row is not None
+            else None
+        )
+
+    def list_performance_comparisons(
+        self, repository: str | None = None, workload_ref: str | None = None
+    ) -> list[PerformanceComparison]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if repository is not None:
+            clauses.append("repository = %s")
+            params.append(repository)
+        if workload_ref is not None:
+            clauses.append("workload_ref = %s")
+            params.append(workload_ref)
+        where = f" where {' and '.join(clauses)}" if clauses else ""
+        rows = self._all(
+            f"select comparison from performance_comparisons{where} "  # noqa: S608
+            "order by created_at",
+            tuple(params),
+        )
+        return [
+            PerformanceComparison.model_validate(self._performance_json(row[0]))
+            for row in rows
+        ]
+
+    def record_performance_regression(self, signal: PerformanceRegressionSignal) -> None:
+        with self._connection() as conn:
+            self._ensure_performance_tables(conn)
+            self._do(
+                conn,
+                "insert into performance_regressions "
+                "(id, repository, workload_ref, metric_name, deduplication_key, "
+                "approved, signal, created_at) values (%s,%s,%s,%s,%s,%s,%s,%s) "
+                "on conflict (id) do nothing",
+                (
+                    signal.id,
+                    signal.repository,
+                    signal.workload.ref,
+                    signal.metric_name,
+                    signal.deduplication_key,
+                    signal.approved,
+                    json.dumps(signal.to_dict()),
+                    signal.created_at,
+                ),
+            )
+
+    def list_performance_regressions(
+        self, repository: str | None = None
+    ) -> list[PerformanceRegressionSignal]:
+        if repository is None:
+            rows = self._all(
+                "select signal from performance_regressions order by created_at"
+            )
+        else:
+            rows = self._all(
+                "select signal from performance_regressions where repository = %s "
+                "order by created_at",
+                (repository,),
+            )
+        return [
+            PerformanceRegressionSignal.model_validate(self._performance_json(row[0]))
+            for row in rows
+        ]
 
     # --- repos ---
     _REPO_COLUMNS = "name, source, path, default_base_ref, provenance, added_at"

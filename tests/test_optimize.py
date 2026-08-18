@@ -11,15 +11,53 @@ from bakudo.control.optimize import (
 )
 from bakudo.curriculum.objective import Objective
 from bakudo.evals import (
-    OPTIMIZE_SUITE,
     EvalContext,
-    perf_eval,
     run_suite,
-    simplicity_eval,
     suite_for,
 )
 from bakudo.evals.corpus import EvalCase, OutcomeConstraints
+from bakudo.performance.models import (
+    IntegrityResult,
+    MetricComparison,
+    PerformanceComparison,
+    RecordStatus,
+    Verdict,
+)
+from bakudo.performance.pins import EnvironmentPin, RevisionPin, WorkloadPin
+from bakudo.performance.revisions import sha256_text
 from bakudo.runner.result import RunResult
+
+DIGEST = "sha256:" + "0" * 64
+PATCH = "diff --git a/x.py b/x.py\n+faster\n"
+
+
+def performance_contract() -> dict:
+    return {
+        "workloadRef": {
+            "name": "invoice-listing",
+            "version": "1.0.0",
+            "source": "repository",
+        },
+        "primaryMetric": "latency_seconds",
+        "decisionPolicy": {
+            "confidence": 0.95,
+            "minimumRelativeImprovement": 0.05,
+            "protectedMetrics": ["peak_rss_bytes"],
+            "bootstrapResamples": 10000,
+        },
+    }
+
+
+def workload_pin() -> dict:
+    return {
+        "sourceURI": "file:///repo/.bakudo/workloads",
+        "sourceKind": "repository",
+        "collectionRevision": "base",
+        "name": "invoice-listing",
+        "version": "1.0.0",
+        "manifestDigest": DIGEST,
+        "bundleDigest": DIGEST,
+    }
 
 
 def make_objective(**overrides) -> Objective:
@@ -27,9 +65,9 @@ def make_objective(**overrides) -> Objective:
         "type": "optimize",
         "repo": "payments-api",
         "title": "Optimize invoice listing",
+        "performance": performance_contract(),
         "constraints": {
             "maxFilesChanged": 4,
-            "benchCommand": "pytest tests/benchmarks -q",
             "targetPaths": ["src/billing/**"],
         },
     }
@@ -50,58 +88,20 @@ def make_result(metrics: dict | None = None, **overrides) -> RunResult:
     return RunResult.model_validate(data)
 
 
-def ctx_with(metrics: dict | None = None) -> EvalContext:
-    return EvalContext(result=make_result(metrics), objective=make_objective())
-
-
 # --- graders ---
 
 
-def test_perf_eval_scores_improvement():
-    res = perf_eval(ctx_with({"bench_seconds_before": 10.0, "bench_seconds_after": 7.0}))
-    assert res.passed
-    assert res.score == 0.8  # 0.5 neutral + 30% improvement
-    assert res.details["measured"] is True
-
-
-def test_perf_eval_fails_regression_beyond_noise():
-    res = perf_eval(ctx_with({"bench_seconds_before": 10.0, "bench_seconds_after": 11.0}))
-    assert not res.passed
-    assert res.score < 0.5
-
-
-def test_perf_eval_tolerates_measurement_noise():
-    res = perf_eval(ctx_with({"bench_seconds_before": 10.0, "bench_seconds_after": 10.1}))
-    assert res.passed  # within the 2% noise tolerance
-
-
-def test_perf_eval_neutral_when_unmeasured():
-    res = perf_eval(ctx_with())
-    assert res.passed
-    assert res.score == 0.5
-    assert res.details["measured"] is False
-
-
-def test_simplicity_eval_scores_complexity_delta():
-    res = simplicity_eval(ctx_with({"complexity_before": 40.0, "complexity_after": 30.0}))
-    assert res.passed
-    assert res.score == 0.75
-
-    worse = simplicity_eval(ctx_with({"complexity_before": 40.0, "complexity_after": 44.0}))
-    assert not worse.passed
-
-
-def test_suite_selection_adds_optimize_graders_only_for_optimize():
-    assert suite_for("optimize") == OPTIMIZE_SUITE
-    assert perf_eval not in suite_for("add-feature")
+def test_optimize_suite_does_not_trust_candidate_reported_performance():
+    assert suite_for("optimize") == suite_for("add-feature")
 
     results = run_suite(
         EvalContext(
-            result=make_result({"bench_seconds_before": 2.0, "bench_seconds_after": 1.0}),
+            result=make_result({"claimed_speedup": 1000.0}),
             objective=make_objective(),
         )
     )
-    assert {r.suite_name for r in results} >= {"perf", "simplicity", "safety", "code"}
+    assert "perf" not in {result.suite_name for result in results}
+    assert {result.suite_name for result in results} >= {"schema", "safety", "code"}
 
 
 # --- objective builders ---
@@ -132,7 +132,52 @@ def test_attempt_objective_carries_one_hypothesis():
     assert obj["suggestedAgents"] == ["optimize-attempt"]
     assert "[optimize-attempt 2]" in obj["title"]
     assert "Batch the per-invoice queries." in obj["description"]
-    assert "bench_seconds_before" in obj["description"]
+    assert "independent" in obj["description"]
+    assert "self-measured timing or complexity deltas" in obj["description"]
+
+
+def test_optimize_requires_structured_performance_contract_without_legacy_aliases():
+    value = make_objective().to_dict()
+    value.pop("performance")
+    try:
+        Objective.model_validate(value)
+    except ValueError as exc:
+        assert "performance contract" in str(exc)
+    else:
+        raise AssertionError("optimize objective unexpectedly accepted no performance")
+
+    value = make_objective().to_dict()
+    value["constraints"]["benchCommand"] = "python benchmark.py"
+    try:
+        Objective.model_validate(value)
+    except ValueError as exc:
+        assert "benchCommand" in str(exc)
+    else:
+        raise AssertionError("legacy benchCommand unexpectedly accepted")
+
+
+def test_performance_contract_preserves_and_validates_provenance():
+    performance = performance_contract()
+    performance.update(
+        {
+            "workloadPin": workload_pin(),
+            "comparisonId": "comparison_01K2TEST000000000000000000",
+            "regressionSignalId": "regression_01K2TEST000000000000000000",
+        }
+    )
+    objective = make_objective(performance=performance)
+    objective.validate_against_schema()
+    serialized = objective.to_dict()["performance"]
+    assert serialized["workloadPin"]["collectionRevision"] == "base"
+    assert serialized["comparisonId"].startswith("comparison_")
+
+    performance["workloadPin"] = {**workload_pin(), "version": "2.0.0"}
+    try:
+        make_objective(performance=performance)
+    except ValueError as exc:
+        assert "must match workloadRef" in str(exc)
+    else:
+        raise AssertionError("mismatched workload provenance unexpectedly accepted")
 
 
 # --- winner selection ---
@@ -142,17 +187,20 @@ def candidate(
     *,
     run_id: str = "run-a",
     overall: float = 0.8,
-    perf: float = 0.8,
+    effect: float = 0.20,
     simplicity: float = 0.5,
-    passed=("schema", "safety", "task", "code", "perf", "simplicity"),
+    passed=("schema", "safety", "task", "code", "simplicity"),
     safety_regressions: int = 0,
     critical_failures: int = 0,
     status: str = "success",
     changed_files: int = 2,
 ) -> dict:
+    comparison = _performance_comparison(PATCH, effect=effect)
     return {
         "run_id": run_id,
         "git_branch": f"bakudo/{run_id}",
+        "diff": PATCH,
+        "performance_comparison": comparison.to_dict(),
         "result": {
             "status": status,
             "summary": f"attempt {run_id}",
@@ -160,7 +208,7 @@ def candidate(
         },
         "scorecard": {
             "overall_score": overall,
-            "suites": {"perf": perf, "simplicity": simplicity},
+            "suites": {"simplicity": simplicity},
             "passed_suites": list(passed),
             "failed_suites": [],
             "safety_regressions": safety_regressions,
@@ -169,30 +217,144 @@ def candidate(
     }
 
 
+def _performance_comparison(
+    patch: str,
+    *,
+    effect: float = 0.20,
+    verdict: Verdict | None = None,
+    protected_verdict: Verdict = Verdict.equivalent,
+) -> PerformanceComparison:
+    workload = WorkloadPin(
+        source_uri="file:///repo/.bakudo/workloads",
+        source_kind="repository",
+        collection_revision="base",
+        name="invoice-listing",
+        version="1.0.0",
+        manifest_digest=DIGEST,
+        bundle_digest=DIGEST,
+    )
+    baseline_revision = RevisionPin(
+        repository="payments-api",
+        source_uri="file:///repo",
+        commit_sha="a" * 40,
+        tree_digest=DIGEST,
+    )
+    candidate_revision = RevisionPin(
+        repository="payments-api",
+        source_uri="file:///repo",
+        commit_sha="a" * 40,
+        tree_digest=DIGEST,
+        base_commit_sha="a" * 40,
+        patch_digest=sha256_text(patch),
+    )
+    environment = EnvironmentPin(
+        bakudo_version="3.0.0",
+        abox_version="1.0.0",
+        image_digest=DIGEST,
+        profile="python-small",
+        hardware_class="test",
+        architecture="arm64",
+        cpu_count=2,
+        memory_mb=512,
+        os="linux",
+        kernel="6.0",
+        dependency_lock_digest=DIGEST,
+        environment_digest=DIGEST,
+    )
+    selected_verdict = verdict or (
+        Verdict.improved
+        if effect > 0.05
+        else Verdict.regressed
+        if effect < -0.05
+        else Verdict.equivalent
+    )
+    eligible = selected_verdict is Verdict.improved and protected_verdict is not Verdict.regressed
+    primary = MetricComparison(
+        metric_name="latency_seconds",
+        unit="seconds",
+        direction="lower",
+        estimator="median",
+        baseline_summary=10.0,
+        candidate_summary=10.0 * (1 - effect),
+        absolute_effect=10.0 * effect,
+        relative_effect=effect,
+        ci_lower=effect - 0.02,
+        ci_upper=effect + 0.02,
+        practical_threshold=0.05,
+        sample_count=10,
+        verdict=selected_verdict,
+        valid=True,
+    )
+    protected = MetricComparison(
+        metric_name="peak_rss_bytes",
+        unit="bytes",
+        direction="lower",
+        estimator="median",
+        baseline_summary=100.0,
+        candidate_summary=100.0,
+        absolute_effect=0.0,
+        relative_effect=0.0,
+        ci_lower=-0.01,
+        ci_upper=0.01,
+        practical_threshold=0.05,
+        sample_count=10,
+        verdict=protected_verdict,
+        valid=True,
+    )
+    return PerformanceComparison(
+        workload=workload,
+        baseline_revision=baseline_revision,
+        candidate_revision=candidate_revision,
+        baseline_environment=environment,
+        candidate_environment=environment,
+        baseline_measurement_id="measurement_01K2TEST000000000000000000",
+        candidate_measurement_id="measurement_01K2TEST000000000000000001",
+        primary_metric="latency_seconds",
+        metrics=(primary, protected),
+        status=RecordStatus.completed,
+        verdict=selected_verdict,
+        integrity=IntegrityResult(),
+        eligible=eligible,
+        analysis_seed=7,
+        confidence=0.95,
+        bootstrap_resamples=10_000,
+    )
+
+
 def test_select_winner_picks_best_eligible():
     winner = select_winner(
         [
-            candidate(run_id="a", overall=0.7),
-            candidate(run_id="b", overall=0.9),
-            candidate(run_id="c", overall=0.8),
-        ]
+            candidate(run_id="a", overall=0.7, effect=0.10),
+            candidate(run_id="b", overall=0.9, effect=0.30),
+            candidate(run_id="c", overall=0.8, effect=0.20),
+        ],
+        performance=performance_contract(),
     )
     assert winner is not None and winner["run_id"] == "b"
 
 
 def test_select_winner_gates_are_hard():
-    assert select_winner([candidate(safety_regressions=1)]) is None
-    assert select_winner([candidate(critical_failures=1)]) is None
-    assert select_winner([candidate(passed=("schema", "safety", "task"))]) is None
-    assert select_winner([candidate(status="failed")]) is None
-    # A regression in either measured dimension disqualifies.
-    assert select_winner([candidate(perf=0.4)]) is None
-    assert select_winner([candidate(simplicity=0.3)]) is None
+    performance = performance_contract()
+    assert select_winner([candidate(safety_regressions=1)], performance=performance) is None
+    assert select_winner([candidate(critical_failures=1)], performance=performance) is None
+    assert select_winner(
+        [candidate(passed=("schema", "safety", "task"))], performance=performance
+    ) is None
+    assert select_winner([candidate(status="failed")], performance=performance) is None
+    assert select_winner([candidate(effect=-0.10)], performance=performance) is None
+    assert select_winner([candidate(simplicity=0.3)], performance=performance) is None
 
 
-def test_select_winner_rejects_no_measured_improvement():
-    # Both dimensions exactly neutral = churn without measured benefit.
-    assert select_winner([candidate(perf=0.5, simplicity=0.5)]) is None
+def test_select_winner_rejects_missing_trusted_comparison():
+    value = candidate()
+    value.pop("performance_comparison")
+    assert select_winner([value], performance=performance_contract()) is None
+
+
+def test_select_winner_requires_exact_pinned_workload_when_provided():
+    performance = performance_contract()
+    performance["workloadPin"] = {**workload_pin(), "collectionRevision": "other"}
+    assert select_winner([candidate()], performance=performance) is None
 
 
 def test_select_winner_prefers_smaller_diff_on_ties():
@@ -200,20 +362,21 @@ def test_select_winner_prefers_smaller_diff_on_ties():
         [
             candidate(run_id="big", overall=0.8, changed_files=6),
             candidate(run_id="small", overall=0.8, changed_files=2),
-        ]
+        ],
+        performance=performance_contract(),
     )
     assert winner is not None and winner["run_id"] == "small"
 
 
 def test_select_winner_none_when_empty():
-    assert select_winner([]) is None
+    assert select_winner([], performance=performance_contract()) is None
 
 
 def test_round_feedback_names_each_failure():
     feedback = round_feedback(
         [
             candidate(run_id="a", status="failed"),
-            candidate(run_id="b", perf=0.3),
+            candidate(run_id="b", simplicity=0.3),
             candidate(run_id="c"),  # eligible — produces no feedback line
         ]
     )
@@ -242,9 +405,9 @@ def _optimize_cases(n_planted: int = 20, n_decoys: int = 5) -> list[EvalCase]:
                     type="optimize",
                     repo="payments-api",
                     title=f"Optimize hot path {i}",
+                    performance=performance_contract(),
                     constraints={
                         "maxFilesChanged": 4,
-                        "benchCommand": "pytest tests/benchmarks -q",
                         "targetPaths": [f"src/billing/mod_{i}/**"],
                     },
                 ),
@@ -261,9 +424,9 @@ def _optimize_cases(n_planted: int = 20, n_decoys: int = 5) -> list[EvalCase]:
                     type="optimize",
                     repo="payments-api",
                     title=f"Already-optimal path {i}",
+                    performance=performance_contract(),
                     constraints={
                         "maxFilesChanged": 0,
-                        "benchCommand": "pytest tests/benchmarks -q",
                         "targetPaths": [f"src/billing/decoy_{i}/**"],
                     },
                 ),
@@ -295,7 +458,8 @@ def test_optimize_corpus_loads_and_validates():
 def test_optimize_corpus_constraints_are_typed():
     cases = _optimize_cases()
     first = cases[0]
-    assert first.objective.constraints.bench_command is not None
+    assert first.objective.performance is not None
+    assert first.objective.performance.workload_ref.ref == "invoice-listing@1.0.0"
     assert first.objective.constraints.target_paths == ["src/billing/mod_0/**"]
 
 
@@ -367,13 +531,16 @@ def test_decoy_respecting_candidate_is_eligible():
     assert decision.decision is Decision.canary, decision.rationale
 
 
-def test_scout_objective_marks_bench_command_off_limits():
-    """Observed live: the read-only scout burned denials (and once the whole
-    breaker) trying to run the advertised bench command itself."""
+def test_scout_objective_exposes_only_sanitized_workload_identity():
     from bakudo.control.optimize import scout_objective
 
     obj = scout_objective(
-        {"title": "t", "description": "d", "constraints": {"benchCommand": "python3 bench.py"}}
+        {
+            "title": "t",
+            "description": "d",
+            "constraints": {},
+            "performance": performance_contract(),
+        }
     )
-    assert "python3 bench.py" in obj["description"]
-    assert "do not run it" in obj["description"].lower()
+    assert "invoice-listing@1.0.0" in obj["description"]
+    assert "privileged workload" in obj["description"].lower()

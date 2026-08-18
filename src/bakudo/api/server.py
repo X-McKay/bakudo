@@ -11,9 +11,9 @@ import logging
 import os
 import secrets
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..control import MetaAgentTools
 from ..curriculum import QueueName
@@ -29,19 +29,20 @@ class ObjectiveIn(BaseModel):
     type: str
     title: str
     description: str = ""
-    acceptanceCriteria: list[str] = []
-    constraints: dict[str, Any] = {}
+    acceptanceCriteria: list[str] = Field(default_factory=list)
+    constraints: dict[str, Any] = Field(default_factory=dict)
 
 
 class OptimizeIn(BaseModel):
     repo: str
     title: str
     description: str = ""
-    targetPaths: list[str] = []
-    benchCommand: str | None = None
+    targetPaths: list[str] = Field(default_factory=list)
+    performance: dict[str, Any]
     maxFilesChanged: int | None = None
     maxRounds: int = 2
     maxApproaches: int = 3
+    seed: int = 0
 
 
 class RunIn(BaseModel):
@@ -86,6 +87,53 @@ class PromotionResolutionIn(BaseModel):
     comment: str | None = None
 
 
+class WorkloadValidateIn(BaseModel):
+    """Manifest-only validation; corpus bytes are published through trusted tooling."""
+
+    document: dict[str, Any]
+
+
+class PerformanceMeasurementIn(BaseModel):
+    repository: str
+    workload: str
+    revision: str = "HEAD"
+    source: str | None = None
+    environment: dict[str, Any]
+
+
+class PerformanceCaptureIn(BaseModel):
+    repository: str
+    workload: str
+    revision: str = "HEAD"
+    profiler: str
+    source: str | None = None
+    environment: dict[str, Any]
+
+
+class PerformanceComparisonIn(BaseModel):
+    repository: str
+    workload: str
+    baseline_revision: str = Field(alias="baselineRevision")
+    candidate_revision: str = Field(alias="candidateRevision")
+    source: str | None = None
+    environment: dict[str, Any]
+    primary_metric: str | None = Field(default=None, alias="primaryMetric")
+    protected_metrics: list[str] = Field(default_factory=list, alias="protectedMetrics")
+    confidence: float = Field(default=0.95, gt=0, lt=1)
+    bootstrap_resamples: int = Field(default=10_000, alias="bootstrapResamples", ge=1)
+    seed: int = 0
+
+
+class PerformanceDispatcher(Protocol):
+    """Durable operation-start port, normally backed by Temporal."""
+
+    def start_measurement(self, request: PerformanceMeasurementIn) -> str: ...
+
+    def start_capture(self, request: PerformanceCaptureIn) -> str: ...
+
+    def start_comparison(self, request: PerformanceComparisonIn) -> str: ...
+
+
 def _resolve_sandbox() -> Callable[..., Any]:
     """Resolve the run sandbox with the same fail-closed policy as the
     Temporal activity layer (:meth:`bakudo.temporal._impl.Deps.sandbox_fn`,
@@ -96,6 +144,76 @@ def _resolve_sandbox() -> Callable[..., Any]:
     from ..temporal._impl import Deps
 
     return Deps(memory=None).sandbox_fn()
+
+
+def _build_optimize_performance_compare(objective: Any, ledger: Any, *, seed: int):
+    """Pin the trusted workload/baseline before synchronous API attempts run."""
+
+    from pathlib import Path
+
+    from ..abox.measurement import AboxWorkloadInvoker
+    from ..performance.environment import configured_environment_pin
+    from ..performance.revisions import pin_repository_revision
+    from ..performance.service import PerformanceMeasurementService
+    from ..performance.source import default_workload_source
+
+    contract = objective.performance
+    if contract is None:
+        raise ValueError("optimize objective requires a performance contract")
+    workload = default_workload_source().load(contract.workload_ref.ref)
+    if contract.workload_pin is not None and workload.pin != contract.workload_pin:
+        raise ValueError("loaded workload does not match the objective workloadPin")
+    if workload.spec.subject.repo != objective.repo:
+        raise ValueError(
+            f"workload subject {workload.spec.subject.repo!r} does not match "
+            f"repository {objective.repo!r}"
+        )
+    registered = ledger.get_repo(objective.repo)
+    if registered is not None:
+        repo_path = Path(registered.path).expanduser().resolve()
+    else:
+        direct = Path(objective.repo).expanduser()
+        if not direct.is_dir():
+            raise ValueError(
+                f"unknown repository {objective.repo!r}; register it with `bakudo repo add`"
+            )
+        repo_path = direct.resolve()
+    environment = configured_environment_pin()
+    baseline = pin_repository_revision(
+        repo_path,
+        repository=objective.repo,
+        require_clean=True,
+    )
+    ledger.record_workload_version(workload.spec, workload.pin)
+    policy = contract.decision_policy
+
+    def compare_candidate(diff: str):
+        candidate = pin_repository_revision(
+            repo_path,
+            baseline.commit_sha,
+            repository=objective.repo,
+            patch=diff,
+            require_clean=True,
+        )
+        assert candidate.patch_digest is not None
+        invoker = AboxWorkloadInvoker(
+            repo_resolver=lambda _name: repo_path,
+            candidate_patches={candidate.patch_digest: diff},
+        )
+        return PerformanceMeasurementService(invoker, ledger=ledger).compare(
+            workload,
+            baseline,
+            candidate,
+            environment,
+            environment,
+            seed=seed,
+            primary_metric=contract.primary_metric,
+            protected_metrics=policy.protected_metrics,
+            confidence=policy.confidence,
+            bootstrap_resamples=policy.bootstrap_resamples,
+        ).comparison
+
+    return compare_candidate
 
 
 def _register_repo_agent_specs(tools: MetaAgentTools) -> None:
@@ -120,7 +238,12 @@ def _register_repo_agent_specs(tools: MetaAgentTools) -> None:
         tools.register_agent_spec(load_spec_file(spec_path))
 
 
-def build_app(tools: MetaAgentTools | None = None) -> Any:
+def build_app(
+    tools: MetaAgentTools | None = None,
+    *,
+    performance_dispatcher: PerformanceDispatcher | None = None,
+    workload_source: Any | None = None,
+) -> Any:
     """Build the FastAPI app. Requires the ``api`` extra (fastapi, uvicorn)."""
     from fastapi import Depends, FastAPI, HTTPException
     from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -193,6 +316,119 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    def require_performance_dispatcher() -> PerformanceDispatcher:
+        if performance_dispatcher is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "performance workflow dispatch is not configured; start a Temporal "
+                    "worker/client or use `bakudo performance ... --sync`"
+                ),
+            )
+        return performance_dispatcher
+
+    def dispatch_performance(start: Callable[[], str]) -> str:
+        from ..temporal.performance_dispatch import (
+            PerformanceDispatchError,
+            PerformanceSubmissionError,
+        )
+
+        try:
+            return start()
+        except PerformanceSubmissionError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (PerformanceDispatchError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    def resolve_workload_source():
+        if workload_source is not None:
+            return workload_source
+        from ..performance.source import default_workload_source
+
+        try:
+            return default_workload_source()
+        except Exception as exc:  # noqa: BLE001 - configuration becomes an API conflict
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/workloads")
+    def list_workloads() -> list[dict[str, Any]]:
+        source = resolve_workload_source()
+        return [
+            {
+                "ref": summary.ref,
+                "name": summary.name,
+                "version": summary.version,
+                "description": summary.description,
+                "labels": summary.labels,
+                "manifestDigest": summary.manifest_digest,
+                "sourceURI": source.source_uri,
+                "collectionRevision": source.collection_revision,
+            }
+            for summary in source.list()
+        ]
+
+    @app.post("/workloads/validate")
+    def validate_workload(body: WorkloadValidateIn) -> dict[str, Any]:
+        from ..performance.models import WorkloadSpec, canonical_digest
+        from ..schema import validate_workload_spec
+
+        try:
+            validate_workload_spec(body.document)
+            spec = WorkloadSpec.model_validate(body.document)
+        except Exception as exc:  # noqa: BLE001 - stable validation error response
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "ref": spec.ref,
+            "manifestDigest": canonical_digest(spec),
+        }
+
+    @app.post("/performance/measurements", status_code=202)
+    def start_performance_measurement(body: PerformanceMeasurementIn) -> dict[str, str]:
+        operation_id = dispatch_performance(
+            lambda: require_performance_dispatcher().start_measurement(body)
+        )
+        return {"operation_id": operation_id}
+
+    @app.post("/performance/captures", status_code=202)
+    def start_performance_capture(body: PerformanceCaptureIn) -> dict[str, str]:
+        operation_id = dispatch_performance(
+            lambda: require_performance_dispatcher().start_capture(body)
+        )
+        return {"operation_id": operation_id}
+
+    @app.post("/performance/comparisons", status_code=202)
+    def start_performance_comparison(body: PerformanceComparisonIn) -> dict[str, str]:
+        operation_id = dispatch_performance(
+            lambda: require_performance_dispatcher().start_comparison(body)
+        )
+        return {"operation_id": operation_id}
+
+    @app.get("/performance/records/{record_id}")
+    def get_performance_record(record_id: str) -> dict[str, Any]:
+        record: Any | None
+        if record_id.startswith("measurement_"):
+            record = tools.ledger.get_measurement(record_id)
+        elif record_id.startswith("snapshot_"):
+            record = tools.ledger.get_performance_snapshot(record_id)
+        elif record_id.startswith("comparison_"):
+            record = tools.ledger.get_performance_comparison(record_id)
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="record ID must start with measurement_, snapshot_, or comparison_",
+            )
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"unknown record: {record_id}")
+        return record.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    @app.get("/performance/regressions")
+    def list_performance_regressions(repository: str | None = None) -> list[dict[str, Any]]:
+        return [
+            signal.model_dump(by_alias=True, mode="json", exclude_none=True)
+            for signal in tools.ledger.list_performance_regressions(repository)
+        ]
+
     @app.post("/objectives")
     def submit_objective(body: ObjectiveIn) -> dict[str, str]:
         from .. import ids
@@ -254,8 +490,6 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         constraints: dict[str, Any] = {"avoidPublicApiChanges": True}
         if body.targetPaths:
             constraints["targetPaths"] = body.targetPaths
-        if body.benchCommand:
-            constraints["benchCommand"] = body.benchCommand
         if body.maxFilesChanged is not None:
             constraints["maxFilesChanged"] = body.maxFilesChanged
 
@@ -272,9 +506,13 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
                         "No change is made unless it measurably improves the target",
                     ],
                     "constraints": constraints,
+                    "performance": body.performance,
                 }
             )
             objective.validate_against_schema()
+            performance_compare = _build_optimize_performance_compare(
+                objective, tools.ledger, seed=body.seed
+            )
             outcome = run_optimize_loop(
                 objective,
                 load_role_spec("optimize-scout"),
@@ -283,6 +521,7 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
                 max_approaches=body.maxApproaches,
                 ledger=tools.ledger,
                 sandbox=sandbox,
+                performance_compare=performance_compare,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -325,21 +564,17 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 
     @app.post("/experiments")
     def submit_experiment(body: ExperimentSpecIn) -> dict[str, str]:
-        """Run an ExperimentSpec synchronously (design doc §7, T10): schema
-        + pydantic validated, then executed in process against the
-        LEDGER-backed ``tools.ledger`` so GET /experiments/{id} and
-        GET /trials/{id} can read it back. Same fail-closed sandbox policy
-        as /runs and /optimize (OPT-10) gates live execution -- 409 when
-        unresolvable, exactly like the existing sandbox-unavailable
-        handling. Verifier-test grading additionally requires
-        ``BAKUDO_ENV=dev`` (ruling R2): it always executes task
-        fixture/agent code directly on this host via the local test
-        runner, independent of whichever sandbox drives the AGENT.
+        """Run either explicit ExperimentSpec subject synchronously.
+
+        Agent subjects use the fail-closed agent sandbox and independent task
+        verifier. Software-artifact subjects instead use the configured
+        workload, environment pin, abox measurement service, and persisted
+        MeasurementRecord IDs; they never execute through the agent verifier.
         """
         import os
 
         from .. import paths
-        from ..experiments.models import ExperimentSpec
+        from ..experiments.models import ExperimentSpec, SoftwareArtifactSubject
         from ..experiments.runner import (
             adapt_sandbox_fn,
             resolve_arm_pipeline_fn,
@@ -348,6 +583,29 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
         from ..schema import validate_experiment_spec
         from ..tasks.source import default_task_source
         from ..tasks.verifier_runner import local_verifier_runner
+
+        document = body.model_dump()
+        try:
+            validate_experiment_spec(document)
+            spec = ExperimentSpec.model_validate(document)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        if isinstance(spec.subject, SoftwareArtifactSubject):
+            from ..experiments.configured import configured_artifact_measurement_observer
+
+            try:
+                observer = configured_artifact_measurement_observer(
+                    spec, ledger=tools.ledger
+                )
+                result = run_experiment(
+                    spec,
+                    ledger=tools.ledger,
+                    artifact_measure=observer,
+                )
+            except Exception as exc:  # noqa: BLE001 - stable HTTP boundary
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return {"id": result["experimentId"]}
 
         sandbox = resolve_sandbox()
         if os.environ.get("BAKUDO_ENV") != "dev":
@@ -359,13 +617,6 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
                     "directly on this host; set BAKUDO_ENV=dev to allow it."
                 ),
             )
-
-        document = body.model_dump()
-        try:
-            validate_experiment_spec(document)
-            spec = ExperimentSpec.model_validate(document)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         try:
             task_source = default_task_source()
@@ -447,6 +698,15 @@ def build_app(tools: MetaAgentTools | None = None) -> Any:
 def main() -> None:  # pragma: no cover - entrypoint
     import uvicorn
 
+    from ..registry.factory import ledger_from_env
+    from ..temporal.performance_dispatch import TemporalPerformanceDispatcher
+
     host = os.environ.get("BAKUDO_API_HOST", "127.0.0.1")
     port = int(os.environ.get("BAKUDO_API_PORT", "8000"))
-    uvicorn.run(build_app(), host=host, port=port)
+    tools = MetaAgentTools(ledger=ledger_from_env())
+    dispatcher = TemporalPerformanceDispatcher(tools.ledger)
+    uvicorn.run(
+        build_app(tools, performance_dispatcher=dispatcher),
+        host=host,
+        port=port,
+    )

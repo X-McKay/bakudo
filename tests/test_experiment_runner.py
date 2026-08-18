@@ -20,7 +20,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from bakudo.experiments.models import ExperimentMetadata, ExperimentSpec, TaskSelector
+from bakudo.experiments.models import (
+    AgentSpecSubject,
+    ExperimentMetadata,
+    ExperimentSpec,
+    TaskSelector,
+)
 from bakudo.experiments.runner import assemble_result, run_experiment
 from bakudo.ids import new_episode_id
 from bakudo.registry import InMemoryLedger
@@ -129,12 +134,20 @@ def dev_env(monkeypatch):
 
 
 def _spec(**overrides) -> ExperimentSpec:
+    baseline = overrides.pop("baseline", BASELINE)
+    candidates = overrides.pop("candidates", [CANDIDATE])
+    task_selector = overrides.pop(
+        "task_selector", TaskSelector(families=["debugging"], count=1)
+    )
+    use_holdout = overrides.pop("use_holdout", False)
     fields: dict = dict(
         metadata=ExperimentMetadata(name="exp-test"),
-        subject="agent-spec",
-        baseline=BASELINE,
-        candidates=[CANDIDATE],
-        task_selector=TaskSelector(families=["debugging"], count=1),
+        subject=AgentSpecSubject(
+            baseline=baseline,
+            candidates=candidates,
+            task_selector=task_selector,
+            use_holdout=use_holdout,
+        ),
     )
     fields.update(overrides)
     return ExperimentSpec(**fields)
@@ -317,8 +330,8 @@ def test_unpinned_refs_resolve_to_loaded_spec_version(tmp_path, registry):
         sandbox_fn=lambda bundle, repo_path: SimpleNamespace(),  # never invoked below
         agents_root=agents_root,
     )
-    assert resolved_spec.baseline == "agent-a@3"
-    assert resolved_spec.candidates == ["agent-b@5"]
+    assert resolved_spec.subject.baseline == "agent-a@3"
+    assert resolved_spec.subject.candidates == ["agent-b@5"]
 
     led = InMemoryLedger()
 
@@ -655,8 +668,7 @@ def test_cli_experiment_run_exits_nonzero_without_dev_env(monkeypatch, tmp_path,
                 "apiVersion": "bakudo.ai/v1alpha1",
                 "kind": "ExperimentSpec",
                 "metadata": {"name": "t"},
-                "subject": "agent-spec",
-                "baseline": "qa@1",
+                "subject": {"kind": "agent-spec", "baseline": "qa@1"},
             }
         )
     )
@@ -695,9 +707,11 @@ def test_api_post_get(tmp_path, monkeypatch):
         "apiVersion": "bakudo.ai/v1alpha1",
         "kind": "ExperimentSpec",
         "metadata": {"name": "api-profile"},
-        "subject": "agent-spec",
-        "baseline": "explore@1",
-        "taskSelector": {"families": ["debugging"], "count": 1},
+        "subject": {
+            "kind": "agent-spec",
+            "baseline": "explore@1",
+            "taskSelector": {"families": ["debugging"], "count": 1},
+        },
     }
     resp = client.post("/experiments", json=body)
     assert resp.status_code == 200, resp.text

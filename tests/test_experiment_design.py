@@ -15,6 +15,7 @@ import yaml
 
 from bakudo.experiments.design import build_matrix, select_tasks, trial_seed
 from bakudo.experiments.models import (
+    AgentSpecSubject,
     ExperimentMetadata,
     ExperimentSpec,
     TaskSelector,
@@ -133,11 +134,18 @@ def registry(tmp_path):
 
 
 def spec_with(**overrides) -> ExperimentSpec:
+    baseline = overrides.pop("baseline", "add-feature@1")
+    candidates = overrides.pop("candidates", [])
+    task_selector = overrides.pop("task_selector", TaskSelector())
+    use_holdout = overrides.pop("use_holdout", False)
     fields: dict = dict(
         metadata=ExperimentMetadata(name="exp-test"),
-        subject="agent-spec",
-        baseline="add-feature@1",
-        candidates=[],
+        subject=AgentSpecSubject(
+            baseline=baseline,
+            candidates=candidates,
+            task_selector=task_selector,
+            use_holdout=use_holdout,
+        ),
     )
     fields.update(overrides)
     return ExperimentSpec(**fields)
@@ -201,12 +209,13 @@ def test_experiment_ledger_roundtrip():
     experiment_id = new_experiment_id()
     spec = spec_with().to_dict()
 
-    ledger.record_experiment(experiment_id, "exp-test", spec, "running")
+    ledger.record_experiment(experiment_id, "exp-test", "agent-spec", spec, "running")
     ledger.update_experiment_result(experiment_id, "completed", {"decision": "promote"})
     got = ledger.get_experiment(experiment_id)
 
     assert got["id"] == experiment_id
     assert got["name"] == "exp-test"
+    assert got["subject_kind"] == "agent-spec"
     assert got["status"] == "completed"
     assert got["result"] == {"decision": "promote"}
     assert got["spec"]["metadata"]["name"] == "exp-test"

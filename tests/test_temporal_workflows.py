@@ -28,7 +28,116 @@ from bakudo.temporal.workflows import (
     MetaAgentWorkflow,
     MetaState,
     OptimizationWorkflow,
+    PerformanceComparisonWorkflow,
 )
+
+_PERFORMANCE_DIGEST = "sha256:" + "0" * 64
+
+
+def _performance_contract():
+    return {
+        "workloadRef": {
+            "name": "smoke-python-loop",
+            "version": "1.0.0",
+            "source": "repository",
+        },
+        "primaryMetric": "latency_seconds",
+        "decisionPolicy": {
+            "confidence": 0.95,
+            "minimumRelativeImprovement": 0.05,
+            "protectedMetrics": [],
+            "bootstrapResamples": 10_000,
+        },
+    }
+
+
+def _prepared_performance():
+    environment = {
+        "bakudoVersion": "3.0.0",
+        "aboxVersion": "1.0.0",
+        "imageDigest": _PERFORMANCE_DIGEST,
+        "profile": "python-small",
+        "hardwareClass": "test",
+        "architecture": "arm64",
+        "cpuCount": 2,
+        "memoryMb": 512,
+        "os": "linux",
+        "kernel": "test",
+        "dependencyLockDigest": _PERFORMANCE_DIGEST,
+        "environmentDigest": _PERFORMANCE_DIGEST,
+    }
+    return {
+        "status": "completed",
+        "workload": "smoke-python-loop@1.0.0",
+        "workloadSource": "package://bakudo/smoke-workloads",
+        "workloadPin": {
+            "sourceURI": "file:///trusted/workloads",
+            "sourceKind": "repository",
+            "collectionRevision": "base",
+            "name": "smoke-python-loop",
+            "version": "1.0.0",
+            "manifestDigest": _PERFORMANCE_DIGEST,
+            "bundleDigest": _PERFORMANCE_DIGEST,
+        },
+        "baselineRevision": {
+            "repository": "bakudo",
+            "sourceURI": "file:///repo",
+            "commitSHA": "a" * 40,
+            "treeDigest": _PERFORMANCE_DIGEST,
+        },
+        "environment": environment,
+    }
+
+
+def _trusted_performance_comparison(inp, cancel_event=None, *, effect=0.2):
+    from bakudo.temporal.shared import PerformanceWorkflowResult
+
+    del cancel_event
+    prepared = _prepared_performance()
+    verdict = "improved" if effect > 0.05 else "equivalent"
+    record = {
+        "id": inp.comparison_id,
+        "workload": prepared["workloadPin"],
+        "baselineRevision": inp.baseline_revision,
+        "candidateRevision": inp.candidate_revision,
+        "baselineEnvironment": inp.baseline_environment,
+        "candidateEnvironment": inp.candidate_environment,
+        "baselineMeasurementId": inp.baseline_measurement_id,
+        "candidateMeasurementId": inp.candidate_measurement_id,
+        "primaryMetric": "latency_seconds",
+        "metrics": [
+            {
+                "metricName": "latency_seconds",
+                "unit": "seconds",
+                "direction": "lower",
+                "estimator": "median",
+                "baselineSummary": 10.0,
+                "candidateSummary": 10.0 * (1 - effect),
+                "absoluteEffect": 10.0 * effect,
+                "relativeEffect": effect,
+                "ciLower": max(0.0, effect - 0.02),
+                "ciUpper": effect + 0.02,
+                "practicalThreshold": 0.05,
+                "sampleCount": 10,
+                "verdict": verdict,
+                "valid": True,
+            }
+        ],
+        "status": "completed",
+        "verdict": verdict,
+        "integrity": {"valid": True},
+        "eligible": verdict == "improved",
+        "analysisSeed": inp.seed,
+        "confidence": inp.confidence,
+        "bootstrapResamples": inp.bootstrap_resamples,
+    }
+    return PerformanceWorkflowResult(
+        operation_id=inp.operation_id,
+        kind="comparison",
+        status="completed",
+        record_id=inp.comparison_id,
+        record=record,
+    )
 
 # --- deterministic agent-name resolution (TMP-3) ---
 
@@ -73,6 +182,16 @@ def deps(monkeypatch):
     ledger = InMemoryLedger()
     monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
     monkeypatch.setattr(_impl.DEPS, "sandbox", stub_sandbox)
+    monkeypatch.setattr(
+        _impl,
+        "prepare_performance_optimization",
+        lambda _objective: _prepared_performance(),
+    )
+    monkeypatch.setattr(
+        _impl,
+        "run_performance_comparison",
+        _trusted_performance_comparison,
+    )
     return ledger
 
 
@@ -415,7 +534,13 @@ async def test_crashed_optimize_attempt_becomes_feedback_not_failure(env, deps, 
     assert scout_spec and attempt_spec
 
     async with make_worker(
-        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+        env,
+        [
+            OptimizationWorkflow,
+            PerformanceComparisonWorkflow,
+            AgentRunWorkflow,
+            EvalWorkflow,
+        ],
     ):
         out = await env.client.execute_workflow(
             OptimizationWorkflow.run,
@@ -423,6 +548,7 @@ async def test_crashed_optimize_attempt_becomes_feedback_not_failure(env, deps, 
                 objective={
                     "id": "obj_OPT1", "type": "optimize", "repo": "bakudo",
                     "title": "opt", "constraints": {},
+                    "performance": _performance_contract(),
                 },
                 scout_spec=scout_spec,
                 attempt_spec=attempt_spec,
@@ -458,7 +584,13 @@ async def test_blocked_scout_without_followups_is_scout_failed(env, deps, monkey
     assert scout_spec and attempt_spec
 
     async with make_worker(
-        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+        env,
+        [
+            OptimizationWorkflow,
+            PerformanceComparisonWorkflow,
+            AgentRunWorkflow,
+            EvalWorkflow,
+        ],
     ):
         out = await env.client.execute_workflow(
             OptimizationWorkflow.run,
@@ -466,6 +598,7 @@ async def test_blocked_scout_without_followups_is_scout_failed(env, deps, monkey
                 objective={
                     "id": "obj_OPT2", "type": "optimize", "repo": "bakudo",
                     "title": "opt", "constraints": {},
+                    "performance": _performance_contract(),
                 },
                 scout_spec=scout_spec,
                 attempt_spec=attempt_spec,
@@ -486,9 +619,6 @@ def _optimize_scripted_sandbox(diff="--- a/dedupe.py\n+++ b/dedupe.py\n"):
         if "[optimize-scout]" in bundle.objective.title:
             out.result["proposed_followups"] = ["use a set"]
         else:
-            out.result["metrics"] = {
-                "bench_seconds_before": 10.0, "bench_seconds_after": 6.0,
-            }
             out.result["tests_run"] = [{"command": "pytest -q", "status": "passed"}]
             out.result["changed_files"] = ["dedupe.py"]
             out.diff = diff
@@ -504,7 +634,8 @@ def _optimize_input(_impl_mod):
         objective={
             "id": "obj_OPT3", "type": "optimize", "repo": "bakudo",
             "title": "opt", "acceptanceCriteria": ["All existing tests pass"],
-            "constraints": {"benchCommand": "python3 bench.py"},
+            "constraints": {},
+            "performance": _performance_contract(),
         },
         scout_spec=_impl_mod.load_agent_spec("optimize-scout"),
         attempt_spec=_impl_mod.load_agent_spec("optimize-attempt"),
@@ -513,20 +644,26 @@ def _optimize_input(_impl_mod):
     )
 
 
-async def test_optimize_workflow_verifies_winner_bench(env, deps, monkeypatch):
-    """Issue #28 (workflow mirror): the winner's diff is independently
-    re-benched via activity before the workflow returns 'improved'."""
-    measures = []
+async def test_optimize_workflow_requires_trusted_comparison(env, deps, monkeypatch):
+    """The candidate is independently measured before it can be selected."""
+    comparisons = []
 
-    def fake_measure(diff, bench_command):
-        measures.append((diff, bench_command))
-        return (10.0, 4.0)
+    def compare(inp, cancel_event=None):
+        del cancel_event
+        comparisons.append(inp)
+        return _trusted_performance_comparison(inp)
 
     monkeypatch.setattr(_impl.DEPS, "sandbox", _optimize_scripted_sandbox())
-    monkeypatch.setattr(_impl.DEPS, "bench_measure", fake_measure)
+    monkeypatch.setattr(_impl, "run_performance_comparison", compare)
 
     async with make_worker(
-        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+        env,
+        [
+            OptimizationWorkflow,
+            PerformanceComparisonWorkflow,
+            AgentRunWorkflow,
+            EvalWorkflow,
+        ],
     ):
         out = await env.client.execute_workflow(
             OptimizationWorkflow.run, _optimize_input(_impl),
@@ -534,16 +671,26 @@ async def test_optimize_workflow_verifies_winner_bench(env, deps, monkeypatch):
         )
 
     assert out["status"] == "improved"
-    assert out["bench_verified"] is True
-    assert measures == [("--- a/dedupe.py\n+++ b/dedupe.py\n", "python3 bench.py")]
+    assert out["comparison_id"] == comparisons[0].comparison_id
+    assert comparisons[0].candidate_patch == "--- a/dedupe.py\n+++ b/dedupe.py\n"
 
 
-async def test_optimize_workflow_rejects_unreproduced_winner(env, deps, monkeypatch):
+async def test_optimize_workflow_rejects_non_improving_comparison(env, deps, monkeypatch):
     monkeypatch.setattr(_impl.DEPS, "sandbox", _optimize_scripted_sandbox())
-    monkeypatch.setattr(_impl.DEPS, "bench_measure", lambda d, b: (10.0, 10.0))
+    monkeypatch.setattr(
+        _impl,
+        "run_performance_comparison",
+        lambda inp, _cancel=None: _trusted_performance_comparison(inp, effect=0.0),
+    )
 
     async with make_worker(
-        env, [OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+        env,
+        [
+            OptimizationWorkflow,
+            PerformanceComparisonWorkflow,
+            AgentRunWorkflow,
+            EvalWorkflow,
+        ],
     ):
         out = await env.client.execute_workflow(
             OptimizationWorkflow.run, _optimize_input(_impl),
@@ -551,7 +698,6 @@ async def test_optimize_workflow_rejects_unreproduced_winner(env, deps, monkeypa
         )
 
     assert out["status"] == "no-change"
-    assert any("verification" in fb for fb in out.get("feedback", []))
 
 
 # --- Continue-As-New must not kill in-flight runs (TMP-6) ---
@@ -771,10 +917,16 @@ async def test_meta_routes_optimize_objective_into_optimization_workflow(
     verify), not a single AgentRunWorkflow (TMP-19); and the loop notifies
     run_completed so the meta active_runs drains."""
     monkeypatch.setattr(_impl.DEPS, "sandbox", _optimize_scripted_sandbox())
-    monkeypatch.setattr(_impl.DEPS, "bench_measure", lambda d, b: (10.0, 4.0))
 
     async with make_worker(
-        env, [MetaAgentWorkflow, OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+        env,
+        [
+            MetaAgentWorkflow,
+            OptimizationWorkflow,
+            PerformanceComparisonWorkflow,
+            AgentRunWorkflow,
+            EvalWorkflow,
+        ],
     ):
         handle = await env.client.start_workflow(
             MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
@@ -785,7 +937,8 @@ async def test_meta_routes_optimize_objective_into_optimization_workflow(
                 "id": "obj_OPTR", "type": "optimize", "repo": "bakudo",
                 "title": "optimize the thing",
                 "acceptanceCriteria": ["All existing tests pass"],
-                "constraints": {"benchCommand": "python3 bench.py"},
+                "constraints": {},
+                "performance": _performance_contract(),
             },
         )
 
@@ -861,10 +1014,16 @@ async def test_meta_optimize_charges_accumulated_tokens_to_budget(env, deps, mon
         return out
 
     monkeypatch.setattr(_impl.DEPS, "sandbox", scripted_with_tokens)
-    monkeypatch.setattr(_impl.DEPS, "bench_measure", lambda d, b: (10.0, 4.0))
 
     async with make_worker(
-        env, [MetaAgentWorkflow, OptimizationWorkflow, AgentRunWorkflow, EvalWorkflow]
+        env,
+        [
+            MetaAgentWorkflow,
+            OptimizationWorkflow,
+            PerformanceComparisonWorkflow,
+            AgentRunWorkflow,
+            EvalWorkflow,
+        ],
     ):
         handle = await env.client.start_workflow(
             MetaAgentWorkflow.run, id=META_WORKFLOW_ID, task_queue=TASK_QUEUE_CONTROL
@@ -877,7 +1036,8 @@ async def test_meta_optimize_charges_accumulated_tokens_to_budget(env, deps, mon
                 "id": "obj_OPTBUD", "type": "optimize", "repo": "bakudo",
                 "title": "optimize with cost",
                 "acceptanceCriteria": ["All existing tests pass"],
-                "constraints": {"benchCommand": "python3 bench.py"},
+                "constraints": {},
+                "performance": _performance_contract(),
             },
         )
 

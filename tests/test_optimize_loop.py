@@ -11,6 +11,8 @@ from bakudo import ids
 from bakudo.abox.runner import AboxOutcome
 from bakudo.control.optimize import load_role_spec, run_optimize_loop
 from bakudo.curriculum.objective import Objective
+from bakudo.performance.models import Verdict
+from test_optimize import _performance_comparison, performance_contract
 
 SCOUT = load_role_spec("optimize-scout")
 ATTEMPT = load_role_spec("optimize-attempt")
@@ -25,9 +27,9 @@ def make_objective() -> Objective:
             "title": "Optimize invoice listing",
             "description": "The listing endpoint is slow.",
             "acceptanceCriteria": ["All existing tests pass"],
+            "performance": performance_contract(),
             "constraints": {
                 "maxFilesChanged": 4,
-                "benchCommand": "pytest tests/benchmarks -q",
                 "targetPaths": ["src/billing/**"],
             },
         }
@@ -38,11 +40,12 @@ class ScriptedSandbox:
     """Answers scout and attempt bundles from per-round scripts."""
 
     def __init__(self, rounds: list[dict]) -> None:
-        # Each round: {"approaches": [...], "metrics": [{...} per approach]}
+        # Each round: {"approaches": [...], "effects": [relative effect per approach]}
         self.rounds = rounds
         self.scout_calls = 0
         self.attempt_calls = 0
         self.scout_descriptions: list[str] = []
+        self.effects_by_diff: dict[str, float] = {}
 
     def __call__(self, bundle) -> AboxOutcome:
         name = bundle.agent_spec.metadata.name
@@ -65,12 +68,17 @@ class ScriptedSandbox:
             script = self.rounds[self.scout_calls - 1]
             index = self.attempt_calls % max(len(script["approaches"]), 1)
             self.attempt_calls += 1
+            diff = f"diff --git a/x.py b/x.py\n+candidate-{self.attempt_calls}\n"
+            self.effects_by_diff[diff] = script["effects"][index]
+            reported_metrics = {}
+            if script.get("reported_metrics"):
+                reported_metrics.update(script["reported_metrics"][index])
             result = {
                 **base,
                 "status": "success",
                 "changed_files": ["src/billing/listing.py"],
                 "tests_run": [{"command": "pytest -q", "status": "passed"}],
-                "metrics": script["metrics"][index],
+                "metrics": reported_metrics,
             }
         return AboxOutcome(
             run_id=bundle.run_id,
@@ -78,34 +86,47 @@ class ScriptedSandbox:
             exit_code=0,
             git_branch=f"bakudo/{bundle.run_id}",
             result=result,
+            diff=diff if name != "optimize-scout" else "",
         )
 
+    def compare(self, diff: str):
+        return _performance_comparison(diff, effect=self.effects_by_diff[diff])
 
-IMPROVED = {"bench_seconds_before": 10.0, "bench_seconds_after": 6.0}
-REGRESSED = {"bench_seconds_before": 10.0, "bench_seconds_after": 14.0}
-NEUTRAL: dict = {}
+
+IMPROVED = 0.40
+REGRESSED = -0.40
+NEUTRAL = 0.0
+
+
+def run_loop(objective: Objective, sandbox: ScriptedSandbox, **kwargs):
+    return run_optimize_loop(
+        objective,
+        SCOUT,
+        ATTEMPT,
+        sandbox=sandbox,
+        performance_compare=sandbox.compare,
+        **kwargs,
+    )
 
 
 def test_loop_selects_best_attempt_in_one_round():
     sandbox = ScriptedSandbox(
-        [{"approaches": ["batch queries", "cache totals"], "metrics": [
-            {"bench_seconds_before": 10.0, "bench_seconds_after": 8.0},
+        [{"approaches": ["batch queries", "cache totals"], "effects": [
+            0.20,
             IMPROVED,
         ]}]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=2
-    )
+    outcome = run_loop(make_objective(), sandbox, max_rounds=2)
     assert outcome["status"] == "improved"
     assert outcome["rounds_used"] == 1
-    assert outcome["scorecard"]["suites"]["perf"] == 0.9  # 40% improvement
+    assert outcome["performance_comparison"]["verdict"] == "improved"
     assert outcome["git_branch"].startswith("bakudo/")
     assert sandbox.attempt_calls == 2
 
 
 def test_loop_reports_no_change_when_scout_finds_nothing():
-    sandbox = ScriptedSandbox([{"approaches": [], "metrics": []}])
-    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    sandbox = ScriptedSandbox([{"approaches": [], "effects": []}])
+    outcome = run_loop(make_objective(), sandbox)
     assert outcome == {
         "status": "no-change",
         "rounds_used": 1,
@@ -117,44 +138,37 @@ def test_loop_reports_no_change_when_scout_finds_nothing():
 def test_loop_iterates_with_feedback_then_succeeds():
     sandbox = ScriptedSandbox(
         [
-            {"approaches": ["inline the ORM"], "metrics": [REGRESSED]},
-            {"approaches": ["batch queries"], "metrics": [IMPROVED]},
+            {"approaches": ["inline the ORM"], "effects": [REGRESSED]},
+            {"approaches": ["batch queries"], "effects": [IMPROVED]},
         ]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=2
-    )
+    outcome = run_loop(make_objective(), sandbox, max_rounds=2)
     assert outcome["status"] == "improved"
     assert outcome["rounds_used"] == 2
     # Round 2's scout saw round 1's failure feedback in its objective.
-    assert "regressed perf or simplicity" in sandbox.scout_descriptions[1]
+    assert "comparison verdict is regressed" in sandbox.scout_descriptions[1]
     assert "regressed" not in sandbox.scout_descriptions[0]
 
 
 def test_loop_gives_up_honestly_after_round_budget():
     sandbox = ScriptedSandbox(
         [
-            {"approaches": ["idea one"], "metrics": [REGRESSED]},
-            {"approaches": ["idea two"], "metrics": [NEUTRAL]},
+            {"approaches": ["idea one"], "effects": [REGRESSED]},
+            {"approaches": ["idea two"], "effects": [NEUTRAL]},
         ]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=2
-    )
+    outcome = run_loop(make_objective(), sandbox, max_rounds=2)
     assert outcome["status"] == "no-change"
     assert outcome["rounds_used"] == 2
     assert outcome["reason"] == "no attempt cleared the gates"
-    # Neutral metrics = churn without measured benefit; named in feedback.
-    assert any("no measured improvement" in line for line in outcome["feedback"])
+    assert any("equivalent" in line for line in outcome["feedback"])
 
 
 def test_loop_caps_approaches_per_round():
     sandbox = ScriptedSandbox(
-        [{"approaches": ["a", "b", "c", "d", "e"], "metrics": [IMPROVED] * 5}]
+        [{"approaches": ["a", "b", "c", "d", "e"], "effects": [IMPROVED] * 5}]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_approaches=2
-    )
+    outcome = run_loop(make_objective(), sandbox, max_approaches=2)
     assert outcome["status"] == "improved"
     assert sandbox.attempt_calls == 2
 
@@ -188,8 +202,8 @@ class FailingScoutSandbox(ScriptedSandbox):
 
 
 def test_failed_scout_reports_scout_failed_not_no_change():
-    sandbox = FailingScoutSandbox([{"approaches": [], "metrics": []}])
-    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    sandbox = FailingScoutSandbox([{"approaches": [], "effects": []}])
+    outcome = run_loop(make_objective(), sandbox)
     assert outcome["status"] == "scout-failed"
     assert "MaxTokensReachedException" in outcome["reason"]
     assert outcome["status"] != "no-change"
@@ -197,9 +211,9 @@ def test_failed_scout_reports_scout_failed_not_no_change():
 
 def test_failed_scout_is_retried_once_then_proceeds():
     sandbox = FailingScoutSandbox(
-        [{"approaches": ["use a set"], "metrics": [IMPROVED]}], fail_times=1
+        [{"approaches": ["use a set"], "effects": [IMPROVED]}], fail_times=1
     )
-    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    outcome = run_loop(make_objective(), sandbox)
     assert outcome["status"] == "improved"
     assert sandbox.failed_scout_calls == 1 and sandbox.scout_calls == 1  # retry ran
 
@@ -222,9 +236,9 @@ def test_blocked_scout_with_no_followups_is_scout_failed():
     """Observed live: a wall-clock-blocked scout with empty followups read as
     the 'code is already optimal' success outcome. It is a scout failure."""
     sandbox = BlockedScoutSandbox(
-        [{"approaches": [], "metrics": []}, {"approaches": [], "metrics": []}]
+        [{"approaches": [], "effects": []}, {"approaches": [], "effects": []}]
     )
-    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    outcome = run_loop(make_objective(), sandbox)
     assert outcome["status"] == "scout-failed"
     assert outcome["status"] != "no-change"
     assert sandbox.scout_calls == 2  # the one retry ran
@@ -233,95 +247,109 @@ def test_blocked_scout_with_no_followups_is_scout_failed():
 def test_blocked_scout_with_followups_is_still_usable():
     """A halted scout that still delivered hypotheses feeds the attempts."""
     sandbox = BlockedScoutSandbox(
-        [{"approaches": ["batch queries"], "metrics": [IMPROVED]}]
+        [{"approaches": ["batch queries"], "effects": [IMPROVED]}]
     )
-    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox)
+    outcome = run_loop(make_objective(), sandbox)
     assert outcome["status"] == "improved"
     assert sandbox.attempt_calls == 1
 
 
-# --- issue #28 (OPT-3): winner selection must survive independent re-bench ---
+# --- PR7: only independently produced PerformanceComparison evidence wins ---
 
 
-def _measured(before, after):
-    """A fake bench measurer: (diff, bench_command) -> measured seconds."""
-
-    def measure(diff, bench_command):
-        assert bench_command  # only called when the objective benches
-        return before, after
-
-    return measure
-
-
-def test_verified_winner_is_selected():
+def test_trusted_comparison_selects_winner():
     sandbox = ScriptedSandbox(
-        [{"approaches": ["batch queries", "cache totals"], "metrics": [
-            {"bench_seconds_before": 10.0, "bench_seconds_after": 8.0},
-            IMPROVED,
-        ]}]
+        [{"approaches": ["batch queries", "cache totals"], "effects": [0.20, IMPROVED]}]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox,
-        bench_measure=_measured(10.0, 5.9),
-    )
+    outcome = run_loop(make_objective(), sandbox)
     assert outcome["status"] == "improved"
-    assert outcome["bench_verified"] is True
+    assert outcome["performance_comparison"]["verdict"] == "improved"
 
 
-def test_unverifiable_winner_is_rejected_not_trusted():
-    """A winner whose self-reported speedup does not reproduce independently
-    must not be selected (OPT-3: a dishonest/mistaken attempt wins)."""
+def test_agent_claim_cannot_override_regressed_comparison():
     sandbox = ScriptedSandbox(
-        [{"approaches": ["batch queries"], "metrics": [IMPROVED]}]
+        [
+            {
+                "approaches": ["batch queries"],
+                "effects": [REGRESSED],
+                "reported_metrics": [{"claimed_speedup": 1000.0}],
+            }
+        ]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=1,
-        bench_measure=_measured(10.0, 10.1),  # no real improvement
-    )
+    outcome = run_loop(make_objective(), sandbox, max_rounds=1)
     assert outcome["status"] == "no-change"
-    assert any("verification" in fb for fb in outcome["feedback"])
+    assert any("comparison verdict is regressed" in fb for fb in outcome["feedback"])
 
 
 def test_rejected_winner_falls_through_to_next_eligible():
-    """Verification rejects candidates one at a time; the next eligible
-    attempt gets its own independent measurement."""
-    calls = []
-
-    def measure(diff, bench_command):
-        calls.append(diff)
-        # First verification fails to reproduce, second reproduces.
-        return (10.0, 10.0) if len(calls) == 1 else (10.0, 4.0)
-
     sandbox = ScriptedSandbox(
-        [{"approaches": ["a", "b"], "metrics": [
-            IMPROVED,  # ranks first (40% claimed)
-            {"bench_seconds_before": 10.0, "bench_seconds_after": 7.0},
-        ]}]
+        [{"approaches": ["a", "b"], "effects": [REGRESSED, IMPROVED]}]
+    )
+    outcome = run_loop(make_objective(), sandbox)
+    assert outcome["status"] == "improved"
+    assert outcome["result"]["summary"] == "optimize-attempt run"
+    assert outcome["performance_comparison"]["verdict"] == "improved"
+
+
+def test_missing_comparison_callback_fails_closed():
+    sandbox = ScriptedSandbox(
+        [{"approaches": ["simplify"], "effects": [IMPROVED]}]
     )
     outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox,
-        bench_measure=measure,
+        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=1
     )
-    assert outcome["status"] == "improved"
-    assert outcome["bench_verified"] is True
-    assert len(calls) == 2
+    assert outcome["status"] == "no-change"
+    assert any("comparison unavailable" in item for item in outcome["feedback"])
 
 
-def test_no_bench_command_skips_verification():
-    objective = make_objective()
-    objective.constraints.bench_command = None
-    sandbox = ScriptedSandbox(
-        [{"approaches": ["simplify"], "metrics": [
-            # No bench: improvement must come from another measured axis.
-            {"complexity_before": 20.0, "complexity_after": 10.0},
-        ]}]
-    )
+def test_patch_digest_mismatch_is_rejected():
+    sandbox = ScriptedSandbox([{"approaches": ["simplify"], "effects": [IMPROVED]}])
     outcome = run_optimize_loop(
-        objective, SCOUT, ATTEMPT, sandbox=sandbox,
-        bench_measure=_measured(0.0, 0.0),
+        make_objective(),
+        SCOUT,
+        ATTEMPT,
+        sandbox=sandbox,
+        max_rounds=1,
+        performance_compare=lambda _diff: _performance_comparison(
+            "diff --git a/other.py b/other.py\n+unbound\n", effect=IMPROVED
+        ),
     )
-    assert outcome["status"] == "improved"
-    assert outcome["bench_verified"] is False  # nothing to bench-verify
+    assert outcome["status"] == "no-change"
+    assert any("patch digest" in item for item in outcome["feedback"])
+
+
+def test_invalid_comparison_callback_result_fails_closed():
+    sandbox = ScriptedSandbox([{"approaches": ["simplify"], "effects": [IMPROVED]}])
+    outcome = run_optimize_loop(
+        make_objective(),
+        SCOUT,
+        ATTEMPT,
+        sandbox=sandbox,
+        max_rounds=1,
+        performance_compare=lambda _diff: {"verdict": "improved"},  # type: ignore[arg-type,return-value]
+    )
+    assert outcome["status"] == "no-change"
+    assert any("comparison failed" in item for item in outcome["feedback"])
+
+
+def test_protected_metric_regression_is_rejected():
+    sandbox = ScriptedSandbox([{"approaches": ["simplify"], "effects": [IMPROVED]}])
+
+    def compare(diff: str):
+        return _performance_comparison(
+            diff, effect=IMPROVED, protected_verdict=Verdict.regressed
+        )
+
+    outcome = run_optimize_loop(
+        make_objective(),
+        SCOUT,
+        ATTEMPT,
+        sandbox=sandbox,
+        max_rounds=1,
+        performance_compare=compare,
+    )
+    assert outcome["status"] == "no-change"
+    assert any("protected metric" in item for item in outcome["feedback"])
 
 
 class InfraFailingAttemptSandbox(ScriptedSandbox):
@@ -340,11 +368,9 @@ def test_feedback_carries_sandbox_error_for_resultless_attempts():
     """Diagnosing live cycles required a hand-rolled teeing sandbox because
     'run failed' feedback discarded the abox error entirely."""
     sandbox = InfraFailingAttemptSandbox(
-        [{"approaches": ["use a set"], "metrics": [IMPROVED]}]
+        [{"approaches": ["use a set"], "effects": [IMPROVED]}]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=1
-    )
+    outcome = run_loop(make_objective(), sandbox, max_rounds=1)
     assert outcome["status"] == "no-change"
     assert any("did not resolve a worktree" in fb for fb in outcome["feedback"])
 
@@ -354,15 +380,13 @@ def test_feedback_accumulates_across_rounds():
     re-propose them."""
     sandbox = ScriptedSandbox(
         [
-            {"approaches": ["inline the ORM"], "metrics": [REGRESSED]},
-            {"approaches": ["cache totals"], "metrics": [NEUTRAL]},
-            {"approaches": ["batch queries"], "metrics": [IMPROVED]},
+            {"approaches": ["inline the ORM"], "effects": [REGRESSED]},
+            {"approaches": ["cache totals"], "effects": [NEUTRAL]},
+            {"approaches": ["batch queries"], "effects": [IMPROVED]},
         ]
     )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=3
-    )
+    outcome = run_loop(make_objective(), sandbox, max_rounds=3)
     assert outcome["status"] == "improved"
     round3_desc = sandbox.scout_descriptions[2]
-    assert "regressed perf or simplicity" in round3_desc  # round 1's lesson
-    assert "no measured improvement" in round3_desc       # round 2's lesson
+    assert "comparison verdict is regressed" in round3_desc
+    assert "comparison verdict is equivalent" in round3_desc

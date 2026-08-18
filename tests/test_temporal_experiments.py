@@ -24,6 +24,16 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from bakudo.abox.runner import AboxOutcome
+from bakudo.performance.models import (
+    IntegrityResult,
+    MeasurementRecord,
+    MetricDirection,
+    MetricEstimator,
+    MetricSampleSet,
+    MetricUnit,
+    RecordStatus,
+)
+from bakudo.performance.pins import EnvironmentPin, RevisionPin, WorkloadPin
 from bakudo.registry import InMemoryLedger
 from bakudo.temporal import _impl
 from bakudo.temporal.activities import ALL_ACTIVITIES
@@ -31,12 +41,14 @@ from bakudo.temporal.shared import (
     TASK_QUEUE_CONTROL,
     TASK_QUEUE_RUNS,
     ExperimentInput,
+    PerformanceWorkflowResult,
     TrialInput,
 )
 from bakudo.temporal.workflows import (
     AgentRunWorkflow,
     EvalWorkflow,
     ExperimentWorkflow,
+    PerformanceMeasurementWorkflow,
     TrialWorkflow,
 )
 
@@ -165,7 +177,8 @@ def _tasks_stub(input: dict) -> dict:
     test can also exercise Finding #4's resolution contract by asserting on
     it directly, without special-casing this stub further."""
     spec = input["spec"]
-    arm_refs = [spec["baseline"], *spec.get("candidates", [])]
+    subject = spec["subject"]
+    arm_refs = [subject["baseline"], *subject.get("candidates", [])]
 
     def descriptor(name: str, digest: str) -> dict:
         return {
@@ -207,10 +220,12 @@ def _experiment_spec(name: str = "exp-test", candidates: list[str] | None = None
         "apiVersion": "bakudo.ai/v1alpha1",
         "kind": "ExperimentSpec",
         "metadata": {"name": name},
-        "subject": "agent-spec",
-        "baseline": "explore@1",
-        "candidates": candidates if candidates is not None else ["explore@1"],
-        "taskSelector": {"count": 20},
+        "subject": {
+            "kind": "agent-spec",
+            "baseline": "explore@1",
+            "candidates": candidates if candidates is not None else ["explore@1"],
+            "taskSelector": {"count": 20},
+        },
         "repetitions": 1,
     }
 
@@ -417,6 +432,132 @@ async def test_experiment_child_crash_recorded(env, deps, monkeypatch):
     assert "error" in failed[0].evaluation
 
 
+async def test_artifact_experiment_fans_out_persisted_measurements(
+    env, deps, monkeypatch
+):
+    digest = "sha256:" + "a" * 64
+    workload_pin = WorkloadPin(
+        source_uri="bundle://python-loop/1.0.0",
+        source_kind="bundle",
+        collection_revision="test-revision",
+        name="python-loop",
+        version="1.0.0",
+        manifest_digest=digest,
+        bundle_digest=digest,
+    )
+    environment = EnvironmentPin(
+        bakudo_version="3.0.0",
+        abox_version="1.0.0",
+        image_digest=digest,
+        profile="python-small",
+        hardware_class="test",
+        architecture="arm64",
+        cpu_count=2,
+        memory_mb=512,
+        os="linux",
+        kernel="6.0",
+        dependency_lock_digest=digest,
+        environment_digest=digest,
+    )
+
+    def revision(value: str) -> dict:
+        return RevisionPin(
+            repository="example/repository",
+            source_uri="https://example.invalid/repository.git",
+            commit_sha=value * 40,
+            tree_digest=digest,
+        ).model_dump(by_alias=True, mode="json")
+
+    baseline_revision = revision("1")
+    candidate_revision = revision("2")
+    spec = {
+        "apiVersion": "bakudo.ai/v1alpha1",
+        "kind": "ExperimentSpec",
+        "metadata": {"name": "artifact-exp"},
+        "subject": {
+            "kind": "software-artifact",
+            "repository": "example/repository",
+            "baseline": baseline_revision,
+            "candidates": [candidate_revision],
+            "workloadRef": {
+                "name": "python-loop",
+                "version": "1.0.0",
+                "source": "bundle",
+            },
+        },
+        "metrics": {
+            "primary": "latency_seconds",
+            "directions": {"latency_seconds": "lower"},
+        },
+        "decision": {"bootstrapResamples": 100},
+    }
+
+    def prepare(_spec: dict) -> dict:
+        return {
+            "status": "completed",
+            "workload": workload_pin.ref,
+            "workloadSource": "bundle://python-loop/1.0.0",
+            "workloadPin": workload_pin.model_dump(by_alias=True, mode="json"),
+            "environment": environment.model_dump(by_alias=True, mode="json"),
+        }
+
+    def measure(inp, cancel_event=None) -> PerformanceWorkflowResult:
+        del cancel_event
+        requested_revision = RevisionPin.model_validate(inp.revision)
+        summary = 10.0 if requested_revision.commit_sha.startswith("1") else 7.0
+        record = MeasurementRecord(
+            id=inp.measurement_id,
+            workload=workload_pin,
+            revision=requested_revision,
+            environment=environment,
+            plan_digest=digest,
+            metrics=(
+                MetricSampleSet(
+                    metric_name="latency_seconds",
+                    unit=MetricUnit.seconds,
+                    direction=MetricDirection.lower_is_better,
+                    estimator=MetricEstimator.median,
+                    samples=(summary,),
+                    summary=summary,
+                    valid=True,
+                ),
+            ),
+            status=RecordStatus.completed,
+            integrity=IntegrityResult(),
+        )
+        deps.record_measurement(record)
+        return PerformanceWorkflowResult(
+            operation_id=inp.operation_id,
+            kind="measurement",
+            status="completed",
+            record_id=record.id,
+            record=record.to_dict(),
+        )
+
+    monkeypatch.setattr(_impl, "prepare_artifact_experiment", prepare)
+    monkeypatch.setattr(_impl, "run_performance_measurement", measure)
+    monkeypatch.setattr(
+        _impl,
+        "resolve_experiment_tasks",
+        lambda _input: pytest.fail("artifact experiment entered agent task resolution"),
+    )
+
+    async with make_worker(env, [ExperimentWorkflow, PerformanceMeasurementWorkflow]):
+        result = await env.client.execute_workflow(
+            ExperimentWorkflow.run,
+            ExperimentInput(spec=spec),
+            id="experiment-run_ARTIFACT1",
+            task_queue=TASK_QUEUE_CONTROL,
+        )
+
+    assert result["subjectKind"] == "software-artifact"
+    assert result["comparison"]["candidate-1"]["primary"]["verdict"] == "candidate"
+    assert len(result["measurementRecords"]) == 2
+    experiment = next(iter(deps._experiments.values()))
+    assert experiment["subject_kind"] == "software-artifact"
+    assert experiment["status"] == "completed"
+
+
 # --- CRITICAL fix: dev-mode local_sandbox must run against the provisioned
 # fixture, not a fresh empty throwaway repo (abox/local.py workspace_root
 # resolution) ---
@@ -491,7 +632,7 @@ async def test_experiment_workflow_resolves_unpinned_arm_refs(env, deps):
     for the trial matrix's agent refs AND for ``analyze_experiment``'s
     spec/the persisted experiment row -- otherwise every (resolved)
     ``TrialRecord.agent_ref`` never equals the (raw, unpinned)
-    ``spec.baseline`` ``assemble_result`` compares against, and every
+    agent-subject baseline ``assemble_result`` compares against, and every
     per-family/comparison statistic silently zeroes.
 
     Real (non-stubbed) ``resolve_experiment_tasks`` / ``provision_trial``
@@ -508,10 +649,12 @@ async def test_experiment_workflow_resolves_unpinned_arm_refs(env, deps):
         "apiVersion": "bakudo.ai/v1alpha1",
         "kind": "ExperimentSpec",
         "metadata": {"name": "unpinned-exp"},
-        "subject": "agent-spec",
-        "baseline": "explore",  # deliberately unpinned
-        "candidates": [],
-        "taskSelector": {"families": ["no-change"], "count": 1},
+        "subject": {
+            "kind": "agent-spec",
+            "baseline": "explore",  # deliberately unpinned
+            "candidates": [],
+            "taskSelector": {"families": ["no-change"], "count": 1},
+        },
         "repetitions": 1,
     }
 
@@ -529,7 +672,7 @@ async def test_experiment_workflow_resolves_unpinned_arm_refs(env, deps):
     assert result["candidates"] == []
 
     experiment = next(iter(deps._experiments.values()))
-    assert experiment["spec"]["baseline"] == "explore@1", (
+    assert experiment["spec"]["subject"]["baseline"] == "explore@1", (
         "persisted experiment spec must carry the resolved ref, not the raw unpinned one"
     )
 

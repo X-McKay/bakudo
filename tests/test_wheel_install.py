@@ -76,6 +76,21 @@ def test_wheel_packages_the_seed_agents(wheel_venv: Path, clean_cwd: Path):
         assert name in listed.stdout
 
 
+def test_wheel_packages_the_smoke_workload(wheel_venv: Path, clean_cwd: Path):
+    listed = _run(
+        [
+            str(wheel_venv / "bin" / "python"),
+            "-c",
+            "from bakudo.paths import smoke_workloads_dir; "
+            "from bakudo.performance.source import DirectoryWorkloadSource; "
+            "print(DirectoryWorkloadSource(smoke_workloads_dir()).list()[0].ref)",
+        ],
+        cwd=clean_cwd,
+    )
+    assert listed.returncode == 0, listed.stderr
+    assert listed.stdout.strip() == "smoke-python-loop@1.0.0"
+
+
 def test_wheel_bakudo_demo_runs_offline(wheel_venv: Path, clean_cwd: Path):
     # Explicit venv path: a stale `bakudo` elsewhere on PATH must not win.
     demo = _run([str(wheel_venv / "bin" / "bakudo"), "demo"], cwd=clean_cwd)

@@ -250,12 +250,80 @@ create index if not exists trials_experiment_idx on trials (experiment_id);
 create table if not exists experiments (
   id text primary key,
   name text not null,
+  subject_kind text not null,
   spec jsonb not null,
   status text not null,
   result jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+create index if not exists experiments_subject_kind_idx
+  on experiments (subject_kind);
+
+-- Immutable performance evidence. Domain records remain canonical JSON while
+-- identity columns support common repository/workload/revision queries. These
+-- tables are self-migrated by PostgresLedger for existing deployments.
+create table if not exists workload_versions (
+  workload_ref text primary key,
+  source_uri text not null,
+  collection_revision text not null,
+  spec jsonb not null,
+  pin jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists measurement_records (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  revision_sha text not null,
+  status text not null,
+  record jsonb not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists measurement_records_lookup_idx
+  on measurement_records (repository, workload_ref, created_at);
+
+create table if not exists performance_snapshots (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  revision_sha text not null,
+  status text not null,
+  snapshot jsonb not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists performance_snapshots_lookup_idx
+  on performance_snapshots (repository, workload_ref, created_at);
+
+create table if not exists performance_comparisons (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  baseline_revision_sha text not null,
+  candidate_revision_sha text not null,
+  status text not null,
+  verdict text not null,
+  eligible boolean not null,
+  comparison jsonb not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists performance_comparisons_lookup_idx
+  on performance_comparisons (repository, workload_ref, created_at);
+
+create table if not exists performance_regressions (
+  id text primary key,
+  repository text not null,
+  workload_ref text not null,
+  metric_name text not null,
+  deduplication_key text not null,
+  approved boolean not null,
+  signal jsonb not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists performance_regressions_lookup_idx
+  on performance_regressions (repository, deduplication_key, created_at);
 
 -- Repos (repo onboarding, P2 Task 1): the registry an objective's bare
 -- `repo` name resolves against (AboxRunner.resolve_repo's registry-first

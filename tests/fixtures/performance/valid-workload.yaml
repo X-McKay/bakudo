@@ -1,0 +1,41 @@
+apiVersion: bakudo.ai/v1alpha1
+kind: WorkloadSpec
+metadata:
+  name: python-loop
+  version: 1.0.0
+  description: Deterministic CPU loop used by contract tests
+  labels:
+    language: python
+subject:
+  repo: fixture-repo
+command:
+  argv: [python, run.py, data/input.json]
+  cwd: .
+  env:
+    PYTHONHASHSEED: "0"
+dataset:
+  path: data/input.json
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+environment:
+  profile: python-small
+  network: none
+  cpuCount: 2
+  memoryMb: 512
+measurement:
+  warmups: 1
+  repetitions: 5
+  timeoutSeconds: 30
+  schedule: randomized-pairs
+  metrics:
+    - name: latency_seconds
+      unit: seconds
+      direction: lower
+      source: wall-clock
+      estimator: median
+      practicalThreshold: 0.05
+profilers:
+  - name: synthetic
+    adapter: synthetic
+    signals: [cpu-samples]
+    options:
+      samplingHz: 100

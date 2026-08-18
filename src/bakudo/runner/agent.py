@@ -17,6 +17,7 @@ from typing import Any
 
 from ..agent_run_bundle import AgentRunBundle
 from ..agent_spec import AgentSpec
+from ..observability import SpanAttribute, SpanName, SpanSink, phase_span
 from ..strands_tools import LoopHalt, ToolContext, build_tool_callables
 from .prompts import render_system_prompt, render_user_prompt
 
@@ -190,7 +191,15 @@ def build_and_run(
         # No strands agent exists offline, so there is no report phase to run;
         # a halt maps straight to its canned blocked result.
         try:
-            return offline_driver(system_prompt, user_prompt, tool_callables)
+            with phase_span(
+                SpanName.MODEL_GENERATE,
+                sink=ctx.span_sink,
+                attributes={
+                    SpanAttribute.RUN_ID: bundle.run_id,
+                    SpanAttribute.MODEL_ID: spec.model.model_id,
+                },
+            ):
+                return offline_driver(system_prompt, user_prompt, tool_callables)
         except LoopHalt as offline_halt:
             return _halt_fallback(offline_halt)
 
@@ -211,7 +220,15 @@ def build_and_run(
     # never again be a side effect of how the loop happened to end (issue #27).
     halt: LoopHalt | None = None
     try:
-        response = agent(user_prompt)
+        with phase_span(
+            SpanName.MODEL_GENERATE,
+            sink=ctx.span_sink,
+            attributes={
+                SpanAttribute.RUN_ID: bundle.run_id,
+                SpanAttribute.MODEL_ID: spec.model.model_id,
+            },
+        ):
+            response = agent(user_prompt)
         if ctx.tokens_used == 0:
             # Fallback when the hooks API yielded no usage (provider variance).
             _capture_usage(ctx, response)
@@ -245,7 +262,13 @@ def _report_phase(agent: Any, ctx: ToolContext, *, halt: LoopHalt | None, fallba
     best-effort parses as before.
     """
     ctx.begin_report_phase()
-    report = _extract_report(agent, fallback=None, halt=halt)
+    report = _extract_report(
+        agent,
+        fallback=None,
+        halt=halt,
+        span_sink=ctx.span_sink,
+        run_id=ctx.run_id,
+    )
     if report is None:
         return fallback
     if halt is not None:
@@ -258,7 +281,12 @@ def _report_phase(agent: Any, ctx: ToolContext, *, halt: LoopHalt | None, fallba
 
 
 def _extract_report(
-    agent: Any, fallback: Any = None, halt: LoopHalt | None = None
+    agent: Any,
+    fallback: Any = None,
+    halt: LoopHalt | None = None,
+    *,
+    span_sink: SpanSink | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Extract the run report via strands structured output, from history.
 
@@ -274,7 +302,15 @@ def _extract_report(
         # The instructions matter: without them this model fills the scalar
         # fields and leaves arrays empty (verified live against the vLLM
         # deployment — two approaches in prose, followups []).
-        report = agent.structured_output(AgentReport, prompt)
+        if span_sink is None:
+            report = agent.structured_output(AgentReport, prompt)
+        else:
+            with phase_span(
+                SpanName.REPORT_EXTRACT,
+                sink=span_sink,
+                attributes={SpanAttribute.RUN_ID: run_id or "unknown"},
+            ):
+                report = agent.structured_output(AgentReport, prompt)
         return report.model_dump(mode="json")
     except Exception as exc:  # noqa: BLE001 - extraction is an upgrade, not a gate
         # Guest stderr is collected into AboxOutcome — a silent fallback here

@@ -3,7 +3,7 @@ the CLI's ``trial``/``experiment`` commands against a real abox 0.7.1
 sandbox. Gated exactly like ``tests/test_abox_live.py`` -- skipped unless
 ``ABOX_LIVE=1`` (needs KVM; the workspace abox_verifier_runner grades verifier
 tests in gets a synthetic python-glibc ``.abox/`` of its own -- see
-``bakudo.abox.verifier_bench._ensure_guest_environment`` -- and its fixed
+``bakudo.abox.verifier._ensure_guest_environment`` -- and its fixed
 content must be ``abox project trust``-ed once on this machine, same class
 of prerequisite as test_abox_live's "trusted, warmed abox project").
 
@@ -29,7 +29,7 @@ pytestmark = [
     pytest.mark.skipif(
         os.environ.get("ABOX_LIVE") != "1",
         reason="live abox e2e: set ABOX_LIVE=1 (needs KVM + trusted abox_verifier_runner "
-        "synthetic project -- see bakudo.abox.verifier_bench._ensure_guest_environment)",
+        "synthetic project -- see bakudo.abox.verifier._ensure_guest_environment)",
     ),
 ]
 

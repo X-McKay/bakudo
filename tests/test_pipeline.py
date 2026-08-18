@@ -5,6 +5,7 @@ from bakudo.abox.local import local_sandbox
 from bakudo.agent_spec import load_spec_file
 from bakudo.control import run_objective
 from bakudo.curriculum import Objective
+from bakudo.observability import FakeSpanSink, SpanAttribute, SpanName
 from bakudo.registry import InMemoryLedger, RunPhase
 
 AGENTS = Path(__file__).resolve().parents[1] / "agents"
@@ -44,6 +45,35 @@ def test_run_objective_completes_and_scores():
     assert result.scorecard is not None
     assert result.scorecard.safety_regressions == 0
     assert result.scorecard.overall_score > 0.5
+
+
+def test_run_objective_emits_nested_safe_phase_spans():
+    sink = FakeSpanSink()
+    objective = Objective.model_validate(
+        {
+            "type": "add-feature",
+            "repo": "test",
+            "title": "Add a marker",
+            "acceptanceCriteria": ["marker exists"],
+        }
+    )
+    spec = load_spec_file(AGENTS / "add-feature.yaml")
+
+    result = run_objective(objective, spec, sandbox=_sandbox, span_sink=sink)
+
+    names = [record.name for record in sink.records]
+    assert names == [
+        SpanName.BUNDLE_RENDER,
+        SpanName.SANDBOX_PREPARE,
+        SpanName.REPORT_EXTRACT,
+        SpanName.VERIFIER_RUN,
+        SpanName.RUN,
+    ]
+    run_span = sink.records[-1]
+    assert run_span.attributes[SpanAttribute.RUN_ID.value] == result.run_id
+    assert run_span.attributes[SpanAttribute.STATUS.value] == "completed"
+    assert all(record.context.trace_id == run_span.context.trace_id for record in sink.records)
+    assert all(record.parent_span_id == run_span.context.span_id for record in sink.records[:-1])
 
 
 def test_ledger_records_lifecycle_events():

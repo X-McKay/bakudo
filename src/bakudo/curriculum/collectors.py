@@ -21,9 +21,25 @@ import os
 import re
 import subprocess
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..performance.regressions import (
+    ApprovedWorkload,
+    HotspotLookup,
+    InMemoryRegressionStateStore,
+    PerformanceComparisonSource,
+    RegressionDecision,
+    RegressionDecisionReason,
+    RegressionPhase,
+    RegressionPolicy,
+    RegressionState,
+    RegressionStateStore,
+    evaluate_regression,
+    regression_deduplication_key,
+)
 from .observe import CoverageGap, FailingTest, Issue, RepoSignals, Todo
 
 _log = logging.getLogger(__name__)
@@ -45,6 +61,7 @@ def _merge(repo: str, snapshots: list[RepoSignals]) -> RepoSignals:
         merged.todos += s.todos
         merged.coverage_gaps += s.coverage_gaps
         merged.advisories += s.advisories
+        merged.performance_regressions += s.performance_regressions
     return merged
 
 
@@ -196,6 +213,117 @@ class GitHubIssuesCollector:
         )
         resp.raise_for_status()
         return RepoSignals(repo=repo, issues=self.issues_from_json(resp.json()))
+
+
+class PerformanceRegressionCollector:
+    """Collect approved, repeated comparison regressions into typed signals.
+
+    Lifecycle state is injected separately from the comparison source. The
+    default in-memory state is intended for synchronous development; durable
+    orchestration supplies a persistent ``RegressionStateStore`` later.
+    """
+
+    def __init__(
+        self,
+        source: PerformanceComparisonSource,
+        approvals: Sequence[ApprovedWorkload],
+        *,
+        policy: RegressionPolicy | None = None,
+        state_store: RegressionStateStore | None = None,
+        clock: Callable[[], datetime] | None = None,
+        hotspot_lookup: HotspotLookup | None = None,
+    ) -> None:
+        if not approvals:
+            raise ValueError("at least one approved workload is required")
+        keys = [(item.pin.bundle_digest, item.baseline_policy) for item in approvals]
+        if len(keys) != len(set(keys)):
+            raise ValueError("approved workload policies must be unique")
+        self._source = source
+        self._approvals = tuple(
+            sorted(approvals, key=lambda item: (item.pin.ref, item.baseline_policy))
+        )
+        self._policy = policy or RegressionPolicy()
+        self._state_store = state_store or InMemoryRegressionStateStore()
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._hotspot_lookup = hotspot_lookup
+        self._last_decisions: tuple[RegressionDecision, ...] = ()
+
+    @property
+    def last_decisions(self) -> tuple[RegressionDecision, ...]:
+        """Explain why the most recent cycle did or did not emit signals."""
+
+        return self._last_decisions
+
+    def collect(self, repo: str) -> RepoSignals:
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("performance collector clock must return an aware datetime")
+        active_count = sum(
+            state.phase is RegressionPhase.active for state in self._state_store.list(repo)
+        )
+        signals = []
+        decisions: list[RegressionDecision] = []
+        for approval in self._approvals:
+            comparisons = sorted(
+                self._source.list_performance_comparisons(repo, approval.pin.ref),
+                key=lambda comparison: (comparison.created_at, comparison.id),
+            )
+            for comparison in comparisons:
+                top_hotspot_key = (
+                    self._hotspot_lookup(comparison) if self._hotspot_lookup else None
+                )
+                deduplication_key = regression_deduplication_key(
+                    repo,
+                    approval,
+                    comparison.primary_metric,
+                    top_hotspot_key=top_hotspot_key,
+                    split_by_hotspot=self._policy.split_by_hotspot,
+                )
+                state = self._state_store.get(repo, deduplication_key)
+                if (
+                    (state is None or state.phase is not RegressionPhase.active)
+                    and active_count >= self._policy.max_active_signals_per_repository
+                ):
+                    decisions.append(
+                        RegressionDecision(
+                            state
+                            or RegressionState(
+                                repository=repo,
+                                deduplication_key=deduplication_key,
+                            ),
+                            RegressionDecisionReason.concurrency_limited,
+                            details=(
+                                "repository active-signal limit is "
+                                f"{self._policy.max_active_signals_per_repository}",
+                            ),
+                        )
+                    )
+                    continue
+
+                prior_phase = state.phase if state is not None else RegressionPhase.clear
+                decision = evaluate_regression(
+                    comparison,
+                    approval,
+                    self._policy,
+                    state=state,
+                    observed_at=now,
+                    top_hotspot_key=top_hotspot_key,
+                )
+                self._state_store.put(decision.state)
+                decisions.append(decision)
+                if prior_phase is not RegressionPhase.active and (
+                    decision.state.phase is RegressionPhase.active
+                ):
+                    active_count += 1
+                elif prior_phase is RegressionPhase.active and (
+                    decision.state.phase is not RegressionPhase.active
+                ):
+                    active_count -= 1
+                if decision.signal is not None:
+                    signals.append(decision.signal)
+
+        self._last_decisions = tuple(decisions)
+        return RepoSignals(repo=repo, performance_regressions=signals)
 
 
 def build_default_collector(repo: str) -> SignalCollector | None:

@@ -82,7 +82,7 @@ def verify_task(
 
     ``runner`` executes the task's verifier command through the
     :class:`~bakudo.tasks.verifier_runner.VerifierRunner` port;
-    ``llm_check`` is an optional judge for the advisory ``spec_sufficiency``
+    ``llm_check`` is an optional reviewer for the advisory ``spec_sufficiency``
     check -- when omitted that check is recorded as skipped, never failed.
     """
     checks: list[CheckResult] = []

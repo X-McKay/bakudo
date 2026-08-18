@@ -79,7 +79,7 @@ def objective_from_task(task: LoadedTask, repo_path: Path) -> Objective:
         repo=str(repo_path),
         title=instruction.title,
         description=instruction.description,
-        acceptanceCriteria=list(instruction.success_criteria),
+        acceptance_criteria=list(instruction.success_criteria),
         constraints=Constraints.model_validate(constraints_data),
     )
 

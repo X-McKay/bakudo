@@ -212,8 +212,10 @@ def load_corpus_from_tasks(
                     repo=f"{_TASK_REF_PREFIX}{task.ref}",
                     title=instruction.title,
                     description=instruction.description,
-                    acceptanceCriteria=list(instruction.success_criteria),
-                    constraints=Constraints(maxFilesChanged=constraints.max_changed_files),
+                    acceptance_criteria=list(instruction.success_criteria),
+                    constraints=Constraints(
+                        max_files_changed=constraints.max_changed_files
+                    ),
                 ),
                 constraints=OutcomeConstraints(
                     status=constraints.expected_status,

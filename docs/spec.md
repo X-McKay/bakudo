@@ -1793,16 +1793,31 @@ Request:
   "title": "Optimize invoice listing",
   "description": "The listing endpoint issues one query per invoice line.",
   "targetPaths": ["src/billing/**"],
-  "benchCommand": "python -m pytest tests/benchmarks/test_invoice_listing.py -q",
+  "performance": {
+    "workloadRef": {
+      "name": "invoice-listing",
+      "version": "1.0.0",
+      "source": "repository"
+    },
+    "primaryMetric": "latency_seconds",
+    "decisionPolicy": {
+      "confidence": 0.95,
+      "minimumRelativeImprovement": 0.05,
+      "protectedMetrics": ["peak_rss_bytes"],
+      "bootstrapResamples": 10000
+    }
+  },
   "maxFilesChanged": 4,
   "maxRounds": 2,
   "maxApproaches": 3
 }
 ```
 
-Response: the loop outcome — `status` is `improved` (with the winning run id,
-branch, and scorecard) or `no-change` (with the reason). Declining to change
-already-optimal code is a success, not an error.
+Response: the loop outcome — `status` is `improved` only when the winning run
+has a persisted, compatible `PerformanceComparison` (returned as
+`comparison_id`), or `no-change` with the reason. Candidate-reported timing is
+never selection evidence. Declining to change already-optimal code is a
+success, not an error.
 
 ---
 

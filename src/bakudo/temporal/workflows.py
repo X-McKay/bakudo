@@ -15,7 +15,7 @@ Implemented here:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -26,7 +26,6 @@ from temporalio.exceptions import ActivityError, ChildWorkflowError
 with workflow.unsafe.imports_passed_through():
     from ..control.optimize import (
         attempt_objective,
-        bench_reproduces,
         round_feedback,
         scout_objective,
         scout_run_failed,
@@ -39,6 +38,8 @@ with workflow.unsafe.imports_passed_through():
     # ..control.optimize is: cheap to import once, not something the
     # sandbox needs to reload/isolate per workflow task.
     from ..experiments.design import trial_seed
+    from ..ids import deterministic_id
+    from ..performance.revisions import sha256_text
 
     # Pure string parsing (no I/O) -- passed through for the same reason
     # trial_seed is: cheap, import-safe, and TrialWorkflow needs it to derive
@@ -46,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
     # trusting self-reported result.changed_files.
     from ..trials.runner import changed_files_from_diff
     from .activities import (
+        analyze_artifact_experiment,
         analyze_experiment,
         check_canary_graduation,
         collect_signals,
@@ -53,16 +55,20 @@ with workflow.unsafe.imports_passed_through():
         create_run,
         evaluate_trial_verifier,
         load_agent_spec,
-        measure_winner_bench,
         persist_experiment,
         persist_run,
         persist_trial,
+        prepare_artifact_experiment,
+        prepare_performance_optimization,
         provision_trial,
         reconcile_runs,
         render_bundle,
         resolve_experiment_tasks,
         run_agent_evolution,
         run_eval_suite,
+        run_performance_capture,
+        run_performance_comparison,
+        run_performance_measurement,
         run_sandbox,
     )
     from .client import META_WORKFLOW_ID
@@ -75,7 +81,12 @@ with workflow.unsafe.imports_passed_through():
         ExperimentInput,
         ObserveInput,
         OptimizeInput,
+        PerformanceCaptureInput,
+        PerformanceComparisonInput,
+        PerformanceMeasurementInput,
+        PerformanceWorkflowResult,
         TrialInput,
+        deterministic_performance_id,
         resolve_agent_name,
     )
 
@@ -108,12 +119,159 @@ _SANDBOX: dict[str, Any] = dict(
     heartbeat_timeout=timedelta(minutes=5),
     retry_policy=RetryPolicy(maximum_attempts=1),
 )
+_PERFORMANCE: dict[str, Any] = dict(
+    start_to_close_timeout=timedelta(hours=2),
+    heartbeat_timeout=timedelta(minutes=5),
+    retry_policy=RetryPolicy(maximum_attempts=3),
+    cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+)
 
 
 class _MalformedSpec(Exception):
     """Raised when a rendered bundle's agent spec lacks a usable
     name/version (TMP-20). Caught inside AgentRunWorkflow to dead-letter the
     run rather than crash the workflow task into an infinite retry."""
+
+
+def _cancelled_performance_result(operation_id: str, kind: str) -> PerformanceWorkflowResult:
+    return PerformanceWorkflowResult(
+        operation_id=operation_id,
+        kind=kind,
+        status="cancelled",
+        reason="workflow cancelled before the activity completed",
+    )
+
+
+@workflow.defn
+class PerformanceMeasurementWorkflow:
+    """Durably orchestrate one uninstrumented measurement activity."""
+
+    def __init__(self) -> None:
+        self._status = "created"
+        self._cancelled = False
+
+    @workflow.signal
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @workflow.query
+    def status(self) -> str:
+        return self._status
+
+    @workflow.run
+    async def run(self, inp: PerformanceMeasurementInput) -> PerformanceWorkflowResult:
+        resolved = replace(
+            inp,
+            measurement_id=inp.measurement_id
+            or deterministic_performance_id("measurement", inp.operation_id, "measurement"),
+        )
+        if self._cancelled:
+            self._status = "cancelled"
+            return _cancelled_performance_result(inp.operation_id, "measurement")
+        self._status = "running"
+        handle = workflow.start_activity(run_performance_measurement, resolved, **_PERFORMANCE)
+        await workflow.wait_condition(lambda: self._cancelled or handle.done())
+        if self._cancelled and not handle.done():
+            handle.cancel()
+            try:
+                await handle
+            except asyncio.CancelledError:
+                pass
+            self._status = "cancelled"
+            return _cancelled_performance_result(inp.operation_id, "measurement")
+        result = await handle
+        self._status = result.status
+        return result
+
+
+@workflow.defn
+class PerformanceCaptureWorkflow:
+    """Durably orchestrate one diagnostic profiler capture activity."""
+
+    def __init__(self) -> None:
+        self._status = "created"
+        self._cancelled = False
+
+    @workflow.signal
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @workflow.query
+    def status(self) -> str:
+        return self._status
+
+    @workflow.run
+    async def run(self, inp: PerformanceCaptureInput) -> PerformanceWorkflowResult:
+        resolved = replace(
+            inp,
+            snapshot_id=inp.snapshot_id
+            or deterministic_performance_id("snapshot", inp.operation_id, "capture"),
+        )
+        if self._cancelled:
+            self._status = "cancelled"
+            return _cancelled_performance_result(inp.operation_id, "capture")
+        self._status = "running"
+        handle = workflow.start_activity(run_performance_capture, resolved, **_PERFORMANCE)
+        await workflow.wait_condition(lambda: self._cancelled or handle.done())
+        if self._cancelled and not handle.done():
+            handle.cancel()
+            try:
+                await handle
+            except asyncio.CancelledError:
+                pass
+            self._status = "cancelled"
+            return _cancelled_performance_result(inp.operation_id, "capture")
+        result = await handle
+        self._status = result.status
+        return result
+
+
+@workflow.defn
+class PerformanceComparisonWorkflow:
+    """Durably orchestrate a fresh paired baseline/candidate comparison."""
+
+    def __init__(self) -> None:
+        self._status = "created"
+        self._cancelled = False
+
+    @workflow.signal
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @workflow.query
+    def status(self) -> str:
+        return self._status
+
+    @workflow.run
+    async def run(self, inp: PerformanceComparisonInput) -> PerformanceWorkflowResult:
+        resolved = replace(
+            inp,
+            baseline_measurement_id=inp.baseline_measurement_id
+            or deterministic_performance_id("measurement", inp.operation_id, "comparison-baseline"),
+            candidate_measurement_id=inp.candidate_measurement_id
+            or deterministic_performance_id(
+                "measurement", inp.operation_id, "comparison-candidate"
+            ),
+            comparison_id=inp.comparison_id
+            or deterministic_performance_id("comparison", inp.operation_id, "comparison"),
+        )
+        if self._cancelled:
+            self._status = "cancelled"
+            return _cancelled_performance_result(inp.operation_id, "comparison")
+        self._status = "running"
+        handle = workflow.start_activity(run_performance_comparison, resolved, **_PERFORMANCE)
+        await workflow.wait_condition(lambda: self._cancelled or handle.done())
+        if self._cancelled and not handle.done():
+            handle.cancel()
+            try:
+                await handle
+            except asyncio.CancelledError:
+                pass
+            self._status = "cancelled"
+            return _cancelled_performance_result(inp.operation_id, "comparison")
+        result = await handle
+        self._status = result.status
+        return result
 
 
 @workflow.defn
@@ -385,6 +543,20 @@ class OptimizationWorkflow:
             )
 
     async def _run(self, inp: OptimizeInput) -> dict:
+        self._phase = "preparing-performance"
+        prepared = await workflow.execute_activity(
+            prepare_performance_optimization,
+            inp.objective,
+            **_SHORT,
+        )
+        if prepared.get("status") != "completed":
+            self._phase = "invalid-performance-contract"
+            return {
+                "status": "invalid-performance-contract",
+                "rounds_used": 0,
+                "reason": prepared.get("reason") or "performance preparation failed",
+            }
+        performance = inp.objective.get("performance") or {}
         feedback: list[str] = []
         while self._round < inp.max_rounds:
             self._round += 1
@@ -462,47 +634,56 @@ class OptimizationWorkflow:
                     attempts.append(out)
 
             self._phase = "selecting"
-            # Issue #28: a winner's self-reported bench claim must reproduce
-            # in an independent fresh-sandbox measurement before it is
-            # trusted; unreproduced candidates are rejected with feedback and
-            # selection falls through to the next eligible attempt.
-            bench_cmd = (inp.objective.get("constraints") or {}).get("benchCommand")
-            remaining = list(attempts)
-            verify_feedback: list[str] = []
-            verified = False
-            winner = select_winner(remaining)
-            while winner is not None and bench_cmd:
-                ok = False
-                detail = ""
-                skipped = False
+            comparison_feedback: list[str] = []
+            baseline_revision = prepared["baselineRevision"]
+            policy = performance.get("decisionPolicy") or {}
+            for index, candidate in enumerate(attempts):
+                patch = candidate.get("diff") or ""
+                if not patch or candidate.get("scorecard") is None:
+                    continue
+                candidate_revision = {
+                    **baseline_revision,
+                    "baseCommitSHA": baseline_revision["commitSHA"],
+                    "patchDigest": sha256_text(patch),
+                }
+                operation_id = f"{inp.objective.get('id', 'optimize')}-r{self._round}-a{index + 1}"
                 try:
-                    timings = await workflow.execute_activity(
-                        measure_winner_bench,
-                        args=[
-                            winner.get("diff") or "",
-                            bench_cmd,
-                            inp.objective.get("repo", ""),
-                        ],
-                        **_LONG,
+                    measured = await workflow.execute_child_workflow(
+                        PerformanceComparisonWorkflow.run,
+                        PerformanceComparisonInput(
+                            operation_id=operation_id,
+                            workload=prepared["workload"],
+                            workload_source=prepared["workloadSource"],
+                            workload_pin=prepared["workloadPin"],
+                            baseline_revision=baseline_revision,
+                            candidate_revision=candidate_revision,
+                            candidate_patch=patch,
+                            baseline_environment=prepared["environment"],
+                            candidate_environment=prepared["environment"],
+                            seed=index,
+                            primary_metric=performance.get("primaryMetric"),
+                            protected_metrics=list(policy.get("protectedMetrics") or []),
+                            confidence=float(policy.get("confidence", 0.95)),
+                            bootstrap_resamples=int(policy.get("bootstrapResamples", 10_000)),
+                        ),
+                        id=f"performance-{operation_id}",
                     )
-                    if timings.get("skipped"):
-                        skipped = True
-                    else:
-                        ok, detail = bench_reproduces(timings["before"], timings["after"])
                 except (ActivityError, ChildWorkflowError) as exc:
-                    detail = f"bench verification errored: {exc}"
-                if skipped:
-                    break  # no measurer available: accept, marked unverified
-                if ok:
-                    verified = True
-                    break
-                title = (winner.get("result") or {}).get("summary") or "attempt"
-                verify_feedback.append(
-                    f"'{title[:120]}': failed independent bench verification: {detail}"
-                )
-                remaining = [c for c in remaining if c is not winner]
-                winner = select_winner(remaining)
+                    comparison_feedback.append(
+                        f"attempt {index + 1}: performance comparison failed: {type(exc).__name__}"
+                    )
+                    continue
+                if measured.record is not None:
+                    candidate["performance_comparison"] = measured.record
+                else:
+                    comparison_feedback.append(
+                        f"attempt {index + 1}: performance comparison "
+                        f"{measured.status}: {measured.reason or 'no evidence'}"
+                    )
+
+            winner = select_winner(attempts, performance=performance)
             if winner is not None:
+                comparison = winner.get("performance_comparison") or {}
                 self._phase = "improved"
                 return {
                     "status": "improved",
@@ -511,10 +692,11 @@ class OptimizationWorkflow:
                     "git_branch": winner.get("git_branch"),
                     "scorecard": winner.get("scorecard"),
                     "result": winner.get("result"),
-                    "bench_verified": verified,
+                    "performance_comparison": comparison,
+                    "comparison_id": comparison.get("id"),
                 }
             # Accumulate across rounds (OPT-17), mirroring run_optimize_loop.
-            feedback = feedback + round_feedback(list(attempts)) + verify_feedback
+            feedback = feedback + round_feedback(list(attempts)) + comparison_feedback
 
         self._phase = "no-change"
         return {
@@ -612,8 +794,7 @@ class TrialWorkflow:
                 "seed": inp.seed,
                 "changed_files": changed_files,
                 "denied_commands": [
-                    denied.get("command", "")
-                    for denied in out.get("denied_commands", [])
+                    denied.get("command", "") for denied in out.get("denied_commands", [])
                 ],
                 "actual_status": result.get("status"),
             },
@@ -709,7 +890,8 @@ def _build_trial_matrix(
     not touch the task source (R1). One row per (task, repetition,
     arm); baseline and every candidate arm of a cell share ``trial_seed`` --
     the paired design (design doc section 7)."""
-    arms = [spec["baseline"], *spec.get("candidates", [])]
+    subject = spec["subject"]
+    arms = [subject["baseline"], *subject.get("candidates", [])]
     repetitions = spec.get("repetitions", 1)
     trials = []
     for descriptor in task_descriptors:
@@ -725,7 +907,7 @@ def _build_trial_matrix(
                         "agent_ref": agent_ref,
                         "seed": seed,
                         "repetition": repetition,
-                        "arm": "baseline" if agent_ref == spec["baseline"] else agent_ref,
+                        "arm": "baseline" if agent_ref == subject["baseline"] else agent_ref,
                     }
                 )
     return trials
@@ -789,7 +971,19 @@ class ExperimentWorkflow:
 
     async def _run(self, inp: ExperimentInput) -> dict:
         raw_spec = inp.spec
-        experiment_id = f"exp_{workflow.uuid4().hex}"
+        experiment_id = deterministic_id("exp", workflow.info().workflow_id)
+
+        subject = raw_spec.get("subject")
+        subject_kind = subject.get("kind") if isinstance(subject, dict) else None
+        if subject_kind == "agent-spec":
+            return await self._run_agent_subject(raw_spec, experiment_id)
+        if subject_kind == "software-artifact":
+            return await self._run_artifact_subject(raw_spec, experiment_id)
+        raise ValueError(f"unsupported experiment subject kind: {subject_kind!r}")
+
+    async def _run_agent_subject(
+        self, raw_spec: dict[str, Any], experiment_id: str
+    ) -> dict:
 
         # Resolve tasks AND every arm ref (baseline + candidates) up
         # front, same as the sync path (resolve_arm_pipeline_fn runs before
@@ -808,14 +1002,20 @@ class ExperimentWorkflow:
         task_descriptors = resolved["tasks"]
         resolved_arms = resolved["resolvedArms"]
         spec = dict(raw_spec)
-        spec["baseline"] = resolved_arms[raw_spec["baseline"]]
-        spec["candidates"] = [resolved_arms[c] for c in raw_spec.get("candidates", [])]
+        raw_subject = raw_spec["subject"]
+        subject = dict(raw_subject)
+        subject["baseline"] = resolved_arms[raw_subject["baseline"]]
+        subject["candidates"] = [
+            resolved_arms[c] for c in raw_subject.get("candidates", [])
+        ]
+        spec["subject"] = subject
 
         await workflow.execute_activity(
             persist_experiment,
             {
                 "experiment_id": experiment_id,
                 "name": spec["metadata"]["name"],
+                "subject_kind": "agent-spec",
                 "spec": spec,
                 "status": "running",
             },
@@ -882,6 +1082,120 @@ class ExperimentWorkflow:
             {
                 "experiment_id": experiment_id,
                 "name": spec["metadata"]["name"],
+                "subject_kind": "agent-spec",
+                "spec": spec,
+                "status": "completed",
+                "result": result,
+            },
+            **_SHORT,
+        )
+        return result
+
+    async def _run_artifact_subject(
+        self, spec: dict[str, Any], experiment_id: str
+    ) -> dict:
+        prepared = await workflow.execute_activity(
+            prepare_artifact_experiment,
+            spec,
+            **_SHORT,
+        )
+        if prepared.get("status") != "completed":
+            raise ValueError(
+                f"artifact experiment preparation failed: {prepared.get('reason', 'unknown')}"
+            )
+
+        await workflow.execute_activity(
+            persist_experiment,
+            {
+                "experiment_id": experiment_id,
+                "name": spec["metadata"]["name"],
+                "subject_kind": "software-artifact",
+                "spec": spec,
+                "status": "running",
+            },
+            **_SHORT,
+        )
+
+        subject = spec["subject"]
+        arms = [
+            ("baseline", subject["baseline"]),
+            *(
+                (f"candidate-{index}", revision)
+                for index, revision in enumerate(subject["candidates"], start=1)
+            ),
+        ]
+        cells = [
+            (arm, repetition, revision)
+            for repetition in range(spec.get("repetitions", 1))
+            for arm, revision in arms
+        ]
+        semaphore = asyncio.Semaphore(_EXPERIMENT_CONCURRENCY)
+
+        async def _measure_one(
+            arm: str, repetition: int, revision: dict[str, Any]
+        ) -> tuple[str, int, PerformanceWorkflowResult]:
+            async with semaphore:
+                operation_id = f"{experiment_id}:{arm}:{repetition}"
+                measurement_id = deterministic_performance_id(
+                    "measurement", operation_id, "measurement"
+                )
+                result = await workflow.execute_child_workflow(
+                    PerformanceMeasurementWorkflow.run,
+                    PerformanceMeasurementInput(
+                        operation_id=operation_id,
+                        workload=prepared["workload"],
+                        revision=revision,
+                        environment=prepared["environment"],
+                        workload_source=prepared["workloadSource"],
+                        workload_pin=prepared["workloadPin"],
+                        measurement_id=measurement_id,
+                    ),
+                    id=f"artifact-measure-{experiment_id}-{arm}-{repetition}",
+                )
+                return arm, repetition, result
+
+        measured = await asyncio.gather(
+            *(_measure_one(arm, repetition, revision) for arm, repetition, revision in cells),
+            return_exceptions=True,
+        )
+        measurements: list[dict[str, Any]] = []
+        for cell, outcome in zip(cells, measured, strict=True):
+            arm, repetition, _revision = cell
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+            if isinstance(outcome, BaseException):
+                raise RuntimeError(
+                    f"artifact measurement {arm}/{repetition} failed"
+                ) from outcome
+            _, _, measurement_result = outcome
+            if measurement_result.record_id is None:
+                raise RuntimeError(
+                    f"artifact measurement {arm}/{repetition} produced no persisted record: "
+                    f"{measurement_result.reason or measurement_result.status}"
+                )
+            measurements.append(
+                {
+                    "arm": arm,
+                    "repetition": repetition,
+                    "measurement_id": measurement_result.record_id,
+                }
+            )
+
+        result = await workflow.execute_activity(
+            analyze_artifact_experiment,
+            {
+                "experiment_id": experiment_id,
+                "spec": spec,
+                "measurements": measurements,
+            },
+            **_LONG,
+        )
+        await workflow.execute_activity(
+            persist_experiment,
+            {
+                "experiment_id": experiment_id,
+                "name": spec["metadata"]["name"],
+                "subject_kind": "software-artifact",
                 "spec": spec,
                 "status": "completed",
                 "result": result,

@@ -410,6 +410,32 @@ def test_tool_call_ceiling_wired_from_bundle_budget(tmp_path):
     assert ctx.tool_call_ceiling == 7
 
 
+def test_runner_records_nested_model_and_tool_latency_without_payloads(tmp_path):
+    from bakudo.observability import FakeSpanSink, SpanName
+    from bakudo.runner.agent import build_and_run
+
+    bundle = _bundle()
+    (tmp_path / "safe.txt").write_text("safe")
+    sink = FakeSpanSink()
+    ctx = _ctx(bundle, tmp_path)
+    ctx.span_sink = sink
+
+    def driver(system_prompt, user_prompt, tools):
+        del system_prompt, user_prompt
+        assert tools["read-file"](path="safe.txt")["content"] == "safe"
+        return "{}"
+
+    build_and_run(bundle.agent_spec, bundle, ctx, offline_driver=driver)
+
+    tool, model = sink.records
+    assert tool.name is SpanName.TOOL_EXECUTE
+    assert model.name is SpanName.MODEL_GENERATE
+    assert tool.context.trace_id == model.context.trace_id
+    assert tool.parent_span_id == model.context.span_id
+    assert tool.attributes == {"run.id": bundle.run_id, "tool.name": "read-file"}
+    assert "safe.txt" not in repr(tool)
+
+
 # --- denial circuit-breaker: a policy wall must not become a retry loop ---
 
 

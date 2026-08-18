@@ -12,6 +12,14 @@ from typing import Any, Protocol
 
 from ..evals.promotion import PromotionDecision
 from ..evals.result import EvalResult
+from ..performance.models import (
+    MeasurementRecord,
+    PerformanceComparison,
+    PerformanceRegressionSignal,
+    PerformanceSnapshot,
+    WorkloadSpec,
+)
+from ..performance.pins import WorkloadPin
 from ..trials.models import TrialRecord
 from .records import (
     VERSION_STATUSES,
@@ -86,12 +94,40 @@ class Ledger(Protocol):
     # ``update_experiment_result`` when the run (or the statistics pass over
     # its trials) finishes.
     def record_experiment(
-        self, experiment_id: str, name: str, spec: dict, status: str
+        self,
+        experiment_id: str,
+        name: str,
+        subject_kind: str,
+        spec: dict,
+        status: str,
     ) -> None: ...
     def update_experiment_result(
         self, experiment_id: str, status: str, result: dict
     ) -> None: ...
     def get_experiment(self, experiment_id: str) -> dict | None: ...
+
+    # Performance evidence. All records are immutable and same-id writes are
+    # idempotent so Temporal activity retries cannot duplicate evidence.
+    def record_workload_version(self, spec: WorkloadSpec, pin: WorkloadPin) -> None: ...
+    def get_workload_version(self, workload_ref: str) -> dict[str, Any] | None: ...
+    def record_measurement(self, record: MeasurementRecord) -> None: ...
+    def get_measurement(self, measurement_id: str) -> MeasurementRecord | None: ...
+    def list_measurements(
+        self, repository: str | None = None, workload_ref: str | None = None
+    ) -> list[MeasurementRecord]: ...
+    def record_performance_snapshot(self, snapshot: PerformanceSnapshot) -> None: ...
+    def get_performance_snapshot(self, snapshot_id: str) -> PerformanceSnapshot | None: ...
+    def record_performance_comparison(self, comparison: PerformanceComparison) -> None: ...
+    def get_performance_comparison(
+        self, comparison_id: str
+    ) -> PerformanceComparison | None: ...
+    def list_performance_comparisons(
+        self, repository: str | None = None, workload_ref: str | None = None
+    ) -> list[PerformanceComparison]: ...
+    def record_performance_regression(self, signal: PerformanceRegressionSignal) -> None: ...
+    def list_performance_regressions(
+        self, repository: str | None = None
+    ) -> list[PerformanceRegressionSignal]: ...
 
     # Repos (repo onboarding, P2 Task 1): the registry an objective's bare
     # ``repo`` name resolves against (see AboxRunner.resolve_repo's
@@ -119,6 +155,11 @@ class InMemoryLedger:
         self._promotions: list[PromotionDecision] = []
         self._trials: dict[str, TrialRecord] = {}
         self._experiments: dict[str, dict[str, Any]] = {}
+        self._workloads: dict[str, dict[str, Any]] = {}
+        self._measurements: dict[str, MeasurementRecord] = {}
+        self._performance_snapshots: dict[str, PerformanceSnapshot] = {}
+        self._performance_comparisons: dict[str, PerformanceComparison] = {}
+        self._performance_regressions: dict[str, PerformanceRegressionSignal] = {}
         self._repos: dict[str, RepoRecord] = {}
 
     @staticmethod
@@ -359,7 +400,12 @@ class InMemoryLedger:
 
     # --- experiments ---
     def record_experiment(
-        self, experiment_id: str, name: str, spec: dict, status: str
+        self,
+        experiment_id: str,
+        name: str,
+        subject_kind: str,
+        spec: dict,
+        status: str,
     ) -> None:
         # Idempotent, mirroring the Postgres backend's "on conflict do
         # nothing": a retried caller must not clobber an experiment that has
@@ -370,6 +416,7 @@ class InMemoryLedger:
         self._experiments[experiment_id] = {
             "id": experiment_id,
             "name": name,
+            "subject_kind": subject_kind,
             "spec": spec,
             "status": status,
             "result": None,
@@ -388,6 +435,70 @@ class InMemoryLedger:
     def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
         record = self._experiments.get(experiment_id)
         return dict(record) if record is not None else None
+
+    # --- performance evidence ---
+    def record_workload_version(self, spec: WorkloadSpec, pin: WorkloadPin) -> None:
+        record = {"spec": spec.to_dict(), "pin": pin.model_dump(by_alias=True, mode="json")}
+        existing = self._workloads.get(spec.ref)
+        if existing is not None and existing != record:
+            raise ValueError(f"workload version collision for {spec.ref}")
+        self._workloads.setdefault(spec.ref, record)
+
+    def get_workload_version(self, workload_ref: str) -> dict[str, Any] | None:
+        record = self._workloads.get(workload_ref)
+        return dict(record) if record is not None else None
+
+    def record_measurement(self, record: MeasurementRecord) -> None:
+        self._measurements.setdefault(record.id, record)
+
+    def get_measurement(self, measurement_id: str) -> MeasurementRecord | None:
+        return self._measurements.get(measurement_id)
+
+    def list_measurements(
+        self, repository: str | None = None, workload_ref: str | None = None
+    ) -> list[MeasurementRecord]:
+        return [
+            record
+            for record in self._measurements.values()
+            if (repository is None or record.revision.repository == repository)
+            and (workload_ref is None or record.workload.ref == workload_ref)
+        ]
+
+    def record_performance_snapshot(self, snapshot: PerformanceSnapshot) -> None:
+        self._performance_snapshots.setdefault(snapshot.id, snapshot)
+
+    def get_performance_snapshot(self, snapshot_id: str) -> PerformanceSnapshot | None:
+        return self._performance_snapshots.get(snapshot_id)
+
+    def record_performance_comparison(self, comparison: PerformanceComparison) -> None:
+        self._performance_comparisons.setdefault(comparison.id, comparison)
+
+    def get_performance_comparison(
+        self, comparison_id: str
+    ) -> PerformanceComparison | None:
+        return self._performance_comparisons.get(comparison_id)
+
+    def list_performance_comparisons(
+        self, repository: str | None = None, workload_ref: str | None = None
+    ) -> list[PerformanceComparison]:
+        return [
+            comparison
+            for comparison in self._performance_comparisons.values()
+            if (repository is None or comparison.baseline_revision.repository == repository)
+            and (workload_ref is None or comparison.workload.ref == workload_ref)
+        ]
+
+    def record_performance_regression(self, signal: PerformanceRegressionSignal) -> None:
+        self._performance_regressions.setdefault(signal.id, signal)
+
+    def list_performance_regressions(
+        self, repository: str | None = None
+    ) -> list[PerformanceRegressionSignal]:
+        return [
+            signal
+            for signal in self._performance_regressions.values()
+            if repository is None or signal.repository == repository
+        ]
 
     # --- repos ---
     def register_repo(self, r: RepoRecord) -> None:

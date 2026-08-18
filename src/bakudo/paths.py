@@ -1,4 +1,4 @@
-"""Resolution of bundled data directories (schemas, skills, agents, smoke tasks).
+"""Resolution of schemas, skills, agents, and packaged smoke resources.
 
 When bakudo runs from a source checkout, ``schemas/``, ``skills/`` and
 ``agents/`` live at the repository root, and smoke tasks live at
@@ -68,3 +68,9 @@ def smoke_tasks_dir() -> Path:
     """Directory containing Bakudo's two self-test TaskSpecs."""
 
     return _resolve("smoke-tasks", source_subpath="smoke/tasks")
+
+
+def smoke_workloads_dir() -> Path:
+    """Directory containing Bakudo's deterministic performance smoke workload."""
+
+    return _resolve("smoke-workloads", source_subpath="smoke/workloads")

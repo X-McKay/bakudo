@@ -104,3 +104,51 @@ async def start_experiment(client: Any, inp: Any) -> Any:
         id=f"experiment-{uuid.uuid4().hex}",
         task_queue=TASK_QUEUE_RUNS,
     )
+
+
+async def start_performance_measurement(client: Any, inp: Any) -> Any:
+    """Start or attach to one retry-stable measurement workflow."""
+    from temporalio.common import WorkflowIDConflictPolicy
+
+    from .shared import TASK_QUEUE_RUNS
+    from .workflows import PerformanceMeasurementWorkflow
+
+    return await client.start_workflow(
+        PerformanceMeasurementWorkflow.run,
+        inp,
+        id=f"performance-{inp.operation_id}",
+        task_queue=TASK_QUEUE_RUNS,
+        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+    )
+
+
+async def start_performance_capture(client: Any, inp: Any) -> Any:
+    """Start or attach to one retry-stable diagnostic capture workflow."""
+    from temporalio.common import WorkflowIDConflictPolicy
+
+    from .shared import TASK_QUEUE_RUNS
+    from .workflows import PerformanceCaptureWorkflow
+
+    return await client.start_workflow(
+        PerformanceCaptureWorkflow.run,
+        inp,
+        id=f"performance-{inp.operation_id}",
+        task_queue=TASK_QUEUE_RUNS,
+        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+    )
+
+
+async def start_performance_comparison(client: Any, inp: Any) -> Any:
+    """Start or attach to one retry-stable paired comparison workflow."""
+    from temporalio.common import WorkflowIDConflictPolicy
+
+    from .shared import TASK_QUEUE_RUNS
+    from .workflows import PerformanceComparisonWorkflow
+
+    return await client.start_workflow(
+        PerformanceComparisonWorkflow.run,
+        inp,
+        id=f"performance-{inp.operation_id}",
+        task_queue=TASK_QUEUE_RUNS,
+        id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+    )

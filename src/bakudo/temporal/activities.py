@@ -27,6 +27,10 @@ from .shared import (
     EvalInput,
     EvolutionInput,
     ObserveInput,
+    PerformanceCaptureInput,
+    PerformanceComparisonInput,
+    PerformanceMeasurementInput,
+    PerformanceWorkflowResult,
     PromotionInput,
 )
 
@@ -93,10 +97,18 @@ def run_sandbox(bundle: dict) -> dict:
         ctx = contextvars.copy_context()
 
         def _beat() -> None:
-            while not stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
-                activity.heartbeat()
+            while not stop.is_set():
                 if activity.is_cancelled():
                     cancel_event.set()
+                    return
+                try:
+                    activity.heartbeat()
+                finally:
+                    if activity.is_cancelled():
+                        cancel_event.set()
+                if activity.is_cancelled():
+                    return
+                if stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
                     return
 
         beat_thread = threading.Thread(
@@ -113,9 +125,70 @@ def run_sandbox(bundle: dict) -> dict:
             beat_thread.join(timeout=2)
 
 
-@_DEFN(name="measure_winner_bench")
-def measure_winner_bench(diff: str, bench_command: str, repo: str) -> dict:
-    return _impl.measure_winner_bench(diff, bench_command, repo)
+def _run_performance_activity(
+    fn: Callable[[Any, object | None], PerformanceWorkflowResult],
+    inp: Any,
+) -> PerformanceWorkflowResult:
+    """Heartbeat a blocking performance operation and relay cancellation."""
+    stop = threading.Event()
+    cancel_event = threading.Event()
+    beat_thread: threading.Thread | None = None
+    if _in_activity():
+        ctx = contextvars.copy_context()
+
+        def _beat() -> None:
+            while not stop.wait(_HEARTBEAT_INTERVAL_SECONDS):
+                activity.heartbeat()
+                if activity.is_cancelled():
+                    cancel_event.set()
+                    return
+
+        beat_thread = threading.Thread(
+            target=lambda: ctx.run(_beat),
+            name="performance-activity-heartbeat",
+            daemon=True,
+        )
+        beat_thread.start()
+    try:
+        return fn(inp, cancel_event)
+    finally:
+        stop.set()
+        if beat_thread is not None:
+            beat_thread.join(timeout=2)
+
+
+@_DEFN(name="run_performance_measurement")
+def run_performance_measurement(
+    inp: PerformanceMeasurementInput,
+) -> PerformanceWorkflowResult:
+    return _run_performance_activity(_impl.run_performance_measurement, inp)
+
+
+@_DEFN(name="run_performance_capture")
+def run_performance_capture(inp: PerformanceCaptureInput) -> PerformanceWorkflowResult:
+    return _run_performance_activity(_impl.run_performance_capture, inp)
+
+
+@_DEFN(name="run_performance_comparison")
+def run_performance_comparison(
+    inp: PerformanceComparisonInput,
+) -> PerformanceWorkflowResult:
+    return _run_performance_activity(_impl.run_performance_comparison, inp)
+
+
+@_DEFN(name="prepare_performance_optimization")
+def prepare_performance_optimization(objective: dict[str, Any]) -> dict[str, Any]:
+    return _impl.prepare_performance_optimization(objective)
+
+
+@_DEFN(name="prepare_artifact_experiment")
+def prepare_artifact_experiment(spec: dict[str, Any]) -> dict[str, Any]:
+    return _impl.prepare_artifact_experiment(spec)
+
+
+@_DEFN(name="analyze_artifact_experiment")
+def analyze_artifact_experiment(input: dict[str, Any]) -> dict[str, Any]:
+    return _impl.analyze_artifact_experiment(input)
 
 
 @_DEFN(name="persist_run")
@@ -196,7 +269,7 @@ ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     load_agent_spec,
     render_bundle,
     run_sandbox,
-    measure_winner_bench,
+    prepare_performance_optimization,
     persist_run,
     run_eval_suite,
     decide_promotion,
@@ -211,4 +284,9 @@ ALL_ACTIVITIES: Sequence[Callable[..., Any]] = [
     persist_trial,
     persist_experiment,
     analyze_experiment,
+    run_performance_measurement,
+    run_performance_capture,
+    run_performance_comparison,
+    prepare_artifact_experiment,
+    analyze_artifact_experiment,
 ]

@@ -30,7 +30,7 @@
       "type": "object",
       "additionalProperties": { "type": "number" },
       "default": {},
-      "description": "Numeric self-reported measurements, e.g. bench_seconds_before/after."
+      "description": "Numeric explanatory or operational measurements reported by the run; never authoritative performance evidence."
     },
     "blocked_reasons": { "type": "array", "items": { "type": "string" }, "default": [] },
     "proposed_followups": { "type": "array", "items": { "type": "string" }, "default": [] },

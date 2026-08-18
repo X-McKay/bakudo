@@ -7,21 +7,21 @@ the host. Satisfies :data:`bakudo.tasks.verifier_runner.VerifierRunner`
 threaded through -- the same boundary ``local_verifier_runner`` satisfies for
 ``BAKUDO_ENV=dev``, but backed by a real microVM instead of the host process.
 
-Follows :mod:`bakudo.abox.bench`'s guest-invocation pattern exactly:
+Follows the same bounded guest-invocation pattern as the workload runner:
 
 * ``abox run --repo <workspace> --base <ref> --network safe`` -- ``safe``
   because the workspace can hold agent-authored diff content (
   :mod:`bakudo.trials.verifier` applies a candidate's diff before calling this,
-  same as the winner diff bench.py verifies);
+  same as independent candidate measurement);
 * the guest command chains the repo's ``.abox/prepare.sh`` (when present)
   into the actual test command, prepare output routed to stderr so it can
   never collide with anything read from stdout;
 * the command itself rides as its own argv element (``$1`` to an inner
   ``sh -c``) rather than being interpolated into the outer shell script --
-  the same no-quoting-hazards reasoning as bench.py's timer source.
+  the same no-quoting-hazards reasoning as the measurement guest wrapper.
 
-Unlike bench.py -- which forks a *worktree* off a long-lived dev repo and
-must carefully clean up the branch/worktree it creates there -- the
+Unlike candidate measurement -- which forks a *worktree* off a long-lived dev
+repo and must carefully clean up the branch/worktree it creates there -- the
 workspace handed in here is already a throwaway, temp-rooted scratch repo
 (see :mod:`bakudo.trials.verifier`, :mod:`bakudo.tasks.provision`): nobody
 else reads it and the whole directory is discarded by the caller once
@@ -31,10 +31,10 @@ this runner is called -- ``git apply`` and ``shutil.copy2`` never commit) are
 simply committed in place, with a fixed synthetic identity, to produce a ref
 abox can fork -- that commit is never cleaned up, the caller's directory
 removal handles it. Only the abox *sandbox* itself is torn down
-(``abox stop --clean``), same as bench.py/runner.py's unconditional cleanup.
+(``abox stop --clean``), matching the other abox runners' unconditional cleanup.
 
-Unlike ``bench.py`` (which times a command and parses a JSON marker), grading
-only needs exit code + a tail of guest console output -- no marker protocol.
+Unlike workload measurement, grading only needs exit code plus a tail of guest
+console output -- no metric marker protocol.
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ prepare = ".abox/prepare.sh"
 
 _SYNTHETIC_PREPARE_SH = """\
 #!/bin/sh
-# Synthesized by bakudo.abox.verifier_bench (Task 8): the workspace has no
+# Synthesized by bakudo.abox.verifier (Task 8): the workspace has no
 # .abox/ of its own, so nothing else would put pytest in this guest.
 set -eu
 python3 -m pytest --version >/dev/null 2>&1 && exit 0
@@ -148,8 +148,8 @@ def _snapshot_ref(workspace: Path) -> str:
     resulting commit sha for use as abox's ``--base``.
 
     abox forks a worktree from a git *ref*; it does not see a repo's dirty
-    working tree (the same reason bench.py commits the winner diff onto a
-    branch host-side before ever invoking abox -- see its module docstring).
+    working tree (the same reason candidate measurement materializes the exact
+    patch before invoking abox).
     The applied diff and freshly copied-in verifier test file are both still
     uncommitted at this point (``git apply`` and ``shutil.copy2`` never
     commit); a synthetic guest environment is added if the workspace has
@@ -193,8 +193,7 @@ def make_abox_verifier_runner(
 
     ``executor`` defaults to the real subprocess-driving abox CLI
     (:func:`bakudo.abox.runner._subprocess_executor`); tests inject a fake
-    (``tests/test_verifier_bench.py``, mirroring ``tests/test_abox_bench.py``'s
-    pattern).
+    (``tests/test_abox_verifier.py``).
     """
     exec_fn: Executor = executor or _subprocess_executor
 
@@ -218,7 +217,7 @@ def make_abox_verifier_runner(
         guest_timeout = timeout + IN_GUEST_SETUP_HEADROOM_SECONDS
         # The command rides as its own argv element ($1 to the inner
         # `sh -c`), never interpolated into the outer script string -- no
-        # quoting hazards, mirrors bench.py's timer-source handling. PATH
+        # quoting hazards, matching the workload measurement wrapper. PATH
         # picks up `pip install --user`'s bin dir (confirmed live: pip puts
         # console scripts like pytest there, and it is NOT on the guest's
         # default PATH) -- harmless when unused (a repo-owned prepare.sh

@@ -8,6 +8,7 @@ import platform
 import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from . import __version__
@@ -110,6 +111,114 @@ def _task_source_check() -> DiagnosticCheck:
     )
 
 
+def _workload_source_check() -> DiagnosticCheck:
+    from .performance.source import default_workload_source
+
+    try:
+        source = default_workload_source()
+        workloads = source.list()
+    except Exception as exc:  # noqa: BLE001 - diagnostics report all failures
+        return DiagnosticCheck("workload-source", "error", str(exc))
+    if not workloads:
+        return DiagnosticCheck(
+            "workload-source", "error", f"no workloads discovered from {source.source_uri}"
+        )
+    configured = os.environ.get("BAKUDO_WORKLOAD_SOURCE")
+    source_kind = "configured corpus" if configured else "packaged smoke fallback"
+    return DiagnosticCheck(
+        "workload-source",
+        "ok" if configured else "warning",
+        f"{len(workloads)} valid; {source_kind}; revision={source.collection_revision}; "
+        f"source={source.source_uri}",
+    )
+
+
+def _artifact_store_check() -> DiagnosticCheck:
+    configured = os.environ.get("BAKUDO_ARTIFACT_ROOT")
+    if not configured:
+        return DiagnosticCheck(
+            "performance-artifacts",
+            "warning",
+            "in-memory only; set BAKUDO_ARTIFACT_ROOT to retain raw profiles",
+        )
+    root = Path(configured).expanduser()
+    if not root.exists():
+        parent = root.parent
+        if parent.is_dir() and os.access(parent, os.W_OK):
+            return DiagnosticCheck(
+                "performance-artifacts",
+                "ok",
+                f"local content-addressed store will be created at {root}",
+            )
+        return DiagnosticCheck(
+            "performance-artifacts",
+            "error",
+            f"artifact root does not exist and parent is not writable: {root}",
+        )
+    if not root.is_dir() or not os.access(root, os.R_OK | os.W_OK):
+        return DiagnosticCheck(
+            "performance-artifacts",
+            "error",
+            f"artifact root must be a readable, writable directory: {root}",
+        )
+    return DiagnosticCheck(
+        "performance-artifacts", "ok", f"local content-addressed store at {root.resolve()}"
+    )
+
+
+def _performance_runner_check() -> DiagnosticCheck:
+    binary = shutil.which("abox")
+    if binary is None:
+        return DiagnosticCheck(
+            "performance-runner",
+            "warning",
+            "abox is unavailable; workload inspection works, but live measurement does not",
+        )
+    return DiagnosticCheck(
+        "performance-runner", "ok", f"trusted uninstrumented runner available: {binary}"
+    )
+
+
+def _performance_environment_check() -> DiagnosticCheck:
+    from .performance.environment import configured_environment_pin
+
+    configured = os.environ.get("BAKUDO_PERFORMANCE_ENVIRONMENT")
+    if not configured:
+        return DiagnosticCheck(
+            "performance-environment",
+            "warning",
+            "no default EnvironmentPin; pass --environment or set "
+            "BAKUDO_PERFORMANCE_ENVIRONMENT before measuring",
+        )
+    try:
+        environment = configured_environment_pin()
+    except Exception as exc:  # noqa: BLE001 - diagnostics report all failures
+        return DiagnosticCheck("performance-environment", "error", str(exc))
+    return DiagnosticCheck(
+        "performance-environment",
+        "ok",
+        f"profile={environment.profile}; hardware={environment.hardware_class}; "
+        f"digest={environment.environment_digest}",
+    )
+
+
+def _profiler_check() -> DiagnosticCheck:
+    py_spy = shutil.which("py-spy")
+    if py_spy is None:
+        return DiagnosticCheck(
+            "performance-profilers",
+            "warning",
+            "process resources available; Python uses higher-overhead cProfile fallback; "
+            "install py-spy in the abox image for sampling",
+        )
+    return DiagnosticCheck(
+        "performance-profilers",
+        "warning",
+        f"process resources available; py-spy found at {py_spy}, but guest permission "
+        "must be verified before sampling is marked available",
+    )
+
+
 def _optional_dependencies_check() -> DiagnosticCheck:
     modules = {
         "api": "fastapi",
@@ -192,6 +301,11 @@ def build_doctor_report() -> DoctorReport:
         _agent_check(),
         _skill_check(),
         _task_source_check(),
+        _workload_source_check(),
+        _artifact_store_check(),
+        _performance_runner_check(),
+        _performance_environment_check(),
+        _profiler_check(),
         _optional_dependencies_check(),
         _execution_check(),
         _persistence_check(),

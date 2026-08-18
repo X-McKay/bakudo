@@ -118,12 +118,19 @@ def _optimize_objective():
     return Objective(
         type="optimize", repo="r", title="t",
         acceptanceCriteria=["All existing tests pass"],
+        performance={
+            "workloadRef": {
+                "name": "smoke-python-loop",
+                "version": "1.0.0",
+                "source": "directory",
+            },
+            "primaryMetric": "elapsed_seconds",
+        },
     )
 
 
-def test_assemble_suite_is_objective_type_aware():
-    """The one assembler every run path uses is objective-type-aware: an
-    optimize objective picks up perf/simplicity, an add-feature one does not."""
+def test_assemble_suite_does_not_trust_optimize_self_reported_metrics():
+    """Trusted performance evidence is evaluated by the optimization control loop."""
     from bakudo.evals import assemble_suite
 
     add_feature = assemble_suite(
@@ -136,7 +143,7 @@ def test_assemble_suite_is_objective_type_aware():
     add_suites = {r.suite_name for r in add_feature}
     opt_suites = {r.suite_name for r in optimize}
     assert "perf" not in add_suites and "simplicity" not in add_suites
-    assert {"perf", "simplicity"} <= opt_suites
+    assert opt_suites == add_suites
 
 
 def test_assemble_suite_omits_critic_without_a_sandbox():

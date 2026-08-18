@@ -7,12 +7,39 @@ anywhere — including inside the workflow sandbox.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
 # Two task queues separate the trusted control plane from run orchestration.
 TASK_QUEUE_CONTROL = "bakudo-control"
 TASK_QUEUE_RUNS = "bakudo-runs"
+
+_CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def deterministic_performance_id(prefix: str, operation_id: str, role: str) -> str:
+    """Derive a retry-stable performance record ID from workflow input.
+
+    The output intentionally has the same 26-character Crockford shape as
+    Bakudo's generated ULIDs, while being content-derived rather than clock/
+    randomness-derived.  Workflows use this before scheduling an activity so
+    every Temporal retry addresses the same durable record.
+    """
+    if prefix not in {"measurement", "snapshot", "comparison"}:
+        raise ValueError(f"unsupported performance id prefix: {prefix!r}")
+    if not operation_id.strip() or not role.strip():
+        raise ValueError("operation_id and role must not be empty")
+    value = int.from_bytes(
+        hashlib.sha256(f"bakudo-performance-v1\0{operation_id}\0{role}".encode()).digest(),
+        "big",
+    ) % (32**26)
+    encoded: list[str] = []
+    for _ in range(26):
+        value, remainder = divmod(value, 32)
+        encoded.append(_CROCKFORD_ALPHABET[remainder])
+    return f"{prefix}_{''.join(reversed(encoded))}"
+
 
 # Default agent per objective type, used when an objective carries no
 # ``suggestedAgents`` (TMP-3). Types with no sensible default (eval-author,
@@ -163,3 +190,73 @@ class OptimizeInput:
     # run_completed with so the meta-agent's active_runs drains. None when the
     # loop was started out-of-band (bakudo optimize / POST /optimize).
     tracking_run_id: str | None = None
+
+
+# --- Performance measurement and diagnostic profiling ---
+
+
+@dataclass(frozen=True)
+class PerformanceMeasurementInput:
+    """Pinned request for one uninstrumented measurement workflow."""
+
+    operation_id: str
+    workload: str
+    revision: dict[str, Any]
+    environment: dict[str, Any]
+    workload_source: str | None = None
+    workload_pin: dict[str, Any] | None = None
+    integrity: dict[str, Any] = field(default_factory=dict)
+    measurement_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PerformanceCaptureInput:
+    """Pinned request for one diagnostic profiler capture workflow."""
+
+    operation_id: str
+    workload: str
+    revision: dict[str, Any]
+    environment: dict[str, Any]
+    profiler: str
+    workload_source: str | None = None
+    workload_pin: dict[str, Any] | None = None
+    snapshot_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PerformanceComparisonInput:
+    """Pinned request for a fresh paired baseline/candidate comparison."""
+
+    operation_id: str
+    workload: str
+    baseline_revision: dict[str, Any]
+    candidate_revision: dict[str, Any]
+    baseline_environment: dict[str, Any]
+    candidate_environment: dict[str, Any]
+    seed: int
+    workload_source: str | None = None
+    workload_pin: dict[str, Any] | None = None
+    candidate_patch: str | None = None
+    primary_metric: str | None = None
+    protected_metrics: list[str] = field(default_factory=list)
+    confidence: float = 0.95
+    bootstrap_resamples: int = 10_000
+    integrity: dict[str, Any] = field(default_factory=dict)
+    allow_bakudo_patch_difference: bool = False
+    allow_abox_patch_difference: bool = False
+    baseline_measurement_id: str | None = None
+    candidate_measurement_id: str | None = None
+    comparison_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PerformanceWorkflowResult:
+    """JSON-shaped terminal result shared by all performance workflows."""
+
+    operation_id: str
+    kind: str
+    status: str
+    record_id: str | None = None
+    record: dict[str, Any] | None = None
+    related_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    reason: str | None = None

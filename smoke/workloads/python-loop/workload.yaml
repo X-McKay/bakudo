@@ -1,0 +1,40 @@
+apiVersion: bakudo.ai/v1alpha1
+kind: WorkloadSpec
+metadata:
+  name: smoke-python-loop
+  version: 1.0.0
+  description: Small deterministic CPU workload for package and runner integration
+  labels:
+    language: python
+    purpose: smoke
+subject:
+  repo: bakudo-smoke
+command:
+  argv: [python, run.py, --iterations, "25000"]
+  cwd: .
+  env:
+    PYTHONHASHSEED: "0"
+environment:
+  profile: python-glibc
+  network: none
+  cpuCount: 1
+  memoryMb: 256
+measurement:
+  warmups: 1
+  repetitions: 6
+  timeoutSeconds: 30
+  schedule: randomized-pairs
+  metrics:
+    - name: latency_seconds
+      unit: seconds
+      direction: lower
+      source: wall-clock
+      estimator: median
+      practicalThreshold: 0.05
+profilers:
+  - name: python-cpu
+    adapter: python.sampling
+    signals: [function-calls, cpu-time]
+  - name: synthetic
+    adapter: synthetic
+    signals: [cpu-samples]

@@ -67,8 +67,7 @@ def log_sandbox_posture() -> None:
             )
         else:
             logger.info(
-                "sandbox posture: in-process local sandbox (dev-only, not an "
-                "isolation boundary)"
+                "sandbox posture: in-process local sandbox (dev-only, not an isolation boundary)"
             )
     elif mode is None:
         logger.warning(
@@ -104,6 +103,9 @@ def worker_configs() -> list[dict[str, Any]]:
         MemoryCompactionWorkflow,
         MetaAgentWorkflow,
         OptimizationWorkflow,
+        PerformanceCaptureWorkflow,
+        PerformanceComparisonWorkflow,
+        PerformanceMeasurementWorkflow,
         RepoObserverWorkflow,
         TrialWorkflow,
     )
@@ -120,6 +122,9 @@ def worker_configs() -> list[dict[str, Any]]:
         RepoObserverWorkflow,
         TrialWorkflow,
         ExperimentWorkflow,
+        PerformanceMeasurementWorkflow,
+        PerformanceCaptureWorkflow,
+        PerformanceComparisonWorkflow,
     ]
     run_workflows: list[type] = [
         AgentRunWorkflow,
@@ -127,6 +132,9 @@ def worker_configs() -> list[dict[str, Any]]:
         OptimizationWorkflow,
         TrialWorkflow,
         ExperimentWorkflow,
+        PerformanceMeasurementWorkflow,
+        PerformanceCaptureWorkflow,
+        PerformanceComparisonWorkflow,
     ]
 
     return [
@@ -196,8 +204,18 @@ def _wire_dependencies() -> None:
     set."""
     from . import _impl
 
+    performance_capture = None
+    if _impl.resolve_sandbox_mode() == "abox" and os.environ.get(
+        "BAKUDO_ARTIFACT_ROOT"
+    ):
+        from ..abox.capture import configured_profile_capture_service
+
+        performance_capture = configured_profile_capture_service()
+
     dsn = os.environ.get("BAKUDO_POSTGRES_DSN")
     if not dsn:
+        if performance_capture is not None:
+            _impl.configure(performance_capture=performance_capture)
         return
 
     embedder = _resolve_embedder()
@@ -218,6 +236,7 @@ def _wire_dependencies() -> None:
     _impl.configure(
         ledger=PostgresLedger.connect(dsn),
         memory=memory,
+        performance_capture=performance_capture,
     )
 
 

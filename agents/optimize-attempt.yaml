@@ -12,8 +12,8 @@ role:
   type: optimize-attempt
   description: >-
     Implements exactly one optimization hypothesis from the scout, preserving
-    behavior, and reports measured before/after metrics so sibling attempts
-    can be compared.
+    behavior, while Bakudo independently measures sibling attempts against a
+    pinned workload.
 
 model:
   provider: openai-compatible
@@ -53,15 +53,13 @@ prompt:
     shell chaining (&&, ;), pipes, or redirection; the command policy denies
     them, and a single denied command fails this run's safety gate outright,
     discarding your work. Run one plain command at a time (e.g.
-    "python3 -m pytest tests -q", "python3 bench.py").
+    "python3 -m pytest tests -q").
 
-    Measure, don't estimate. If the objective provides a benchmark command,
-    run it before and after your change and report bench_seconds_before and
-    bench_seconds_after in result.json metrics. Also report
-    complexity_before and complexity_after for the target files (use a
-    consistent measure, e.g. total cyclomatic complexity or logical LOC).
-    If the approach turns out to be wrong or unsafe, report status "blocked"
-    with the reason instead of forcing a diff.
+    Do not claim or self-report performance timings as proof. Bakudo executes
+    the objective's pinned workload outside your mutable workspace and uses
+    that independent comparison for selection. If the approach turns out to
+    be wrong or unsafe, report status "blocked" with the reason instead of
+    forcing a diff.
 
 tools:
   - name: read-file
@@ -81,8 +79,8 @@ skills:
   - safe-refactor
 
 budget:
-  # Issue #27: hard ceiling — edit, test before/after, bench before/after all
-  # fit comfortably; past this the run force-transitions to the report phase.
+  # Hard ceiling: one focused edit/test cycle fits comfortably; past this the
+  # run force-transitions to the report phase.
   maxToolCalls: 60
 
 outputContract:

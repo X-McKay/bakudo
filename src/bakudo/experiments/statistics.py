@@ -2,18 +2,17 @@
 design doc section 8): per-task deltas, a percentile bootstrap confidence
 interval, and a tie-zone + cost-tiebreak verdict.
 
-Pure stdlib — no numpy/scipy, and no bakudo imports. This is the one module
-in the codebase where an explicit-seed ``random.Random(seed)`` is allowed,
-since the bootstrap needs a reproducible resampling draw rather than
-:func:`bakudo.experiments.design.trial_seed`'s hash-derived determinism.
+Pure stdlib — no numpy/scipy. Resampling delegates to the shared deterministic
+bootstrap primitive so artifact and agent experiments use one recipe.
 """
 
 from __future__ import annotations
 
-import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from statistics import fmean
+
+from ..statistics import percentile_bootstrap_ci
 
 
 @dataclass(frozen=True)
@@ -56,17 +55,13 @@ def paired_bootstrap_ci(
     if n == 1:
         return (deltas[0], deltas[0])
 
-    rng = random.Random(seed)
-    means = []
-    for _ in range(resamples):
-        sample = [deltas[rng.randrange(n)] for _ in range(n)]
-        means.append(fmean(sample))
-    means.sort()
-
-    alpha = (1 - confidence) / 2
-    lo_idx = min(int(alpha * resamples), resamples - 1)
-    hi_idx = min(int((1 - alpha) * resamples), resamples - 1)
-    return (means[lo_idx], means[hi_idx])
+    return percentile_bootstrap_ci(
+        deltas,
+        statistic=fmean,
+        confidence=confidence,
+        resamples=resamples,
+        seed=seed,
+    )
 
 
 def analyze(
@@ -75,6 +70,7 @@ def analyze(
     *,
     tie_zone: float,
     confidence: float = 0.95,
+    resamples: int = 10_000,
     seed: int = 0,
     cost_delta: float | None = None,
     cost_tiebreak: bool = True,
@@ -102,7 +98,9 @@ def analyze(
     if n_tasks == 1:
         ci_low, ci_high = deltas[0], deltas[0]
     else:
-        ci_low, ci_high = paired_bootstrap_ci(deltas, confidence=confidence, seed=seed)
+        ci_low, ci_high = paired_bootstrap_ci(
+            deltas, confidence=confidence, resamples=resamples, seed=seed
+        )
 
     wins = sum(1 for d in deltas if d > win_eps)
     losses = sum(1 for d in deltas if d < -win_eps)

@@ -7,6 +7,7 @@ through Strands and logged for the agent-observability layer (spec section 18.3)
 from __future__ import annotations
 
 import functools
+import inspect
 import subprocess
 import time
 from collections.abc import Callable
@@ -14,6 +15,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..agent_spec import AgentSpec
+from ..observability import (
+    NOOP_SPAN_SINK,
+    SpanAttribute,
+    SpanName,
+    SpanSink,
+    phase_span,
+)
 from ..skills import SkillRegistry
 from .policy import REPO_SAFE, CommandDenied, CommandPolicy, policy_by_name
 from .workspace import Workspace
@@ -80,6 +88,7 @@ class ToolContext:
     denied_commands: list[dict[str, str]] = field(default_factory=list)
     # Optional control-plane memory retrieval callback (query -> list of dicts).
     memory_query: Callable[[str], list[dict[str, Any]]] | None = None
+    span_sink: SpanSink = NOOP_SPAN_SINK
 
     # --- budget (section 19.1) ---
     deadline_monotonic: float | None = None
@@ -276,5 +285,27 @@ def build_tool_callables(
         # functools.partial binds the ToolContext while preserving the remaining
         # parameters' names and type hints, so Strands can derive a correct
         # input schema for each tool (unlike a **kwargs lambda).
-        bound[tool.name] = functools.partial(impl, ctx)
+        partial = functools.partial(impl, ctx)
+
+        def observed_tool(
+            *args: Any,
+            _tool_name: str = tool.name,
+            _partial: Callable[..., dict[str, Any]] = partial,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            with phase_span(
+                SpanName.TOOL_EXECUTE,
+                sink=ctx.span_sink,
+                attributes={
+                    SpanAttribute.RUN_ID: ctx.run_id,
+                    SpanAttribute.TOOL_NAME: _tool_name,
+                },
+            ):
+                return _partial(*args, **kwargs)
+
+        observed_tool.__name__ = tool.name.replace("-", "_")
+        observed_tool.__qualname__ = observed_tool.__name__
+        observed_tool.__doc__ = impl.__doc__
+        observed_tool.__signature__ = inspect.signature(partial)  # type: ignore[attr-defined]
+        bound[tool.name] = observed_tool
     return bound

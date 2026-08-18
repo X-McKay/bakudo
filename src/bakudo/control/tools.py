@@ -176,8 +176,8 @@ class MetaAgentTools:
             result=pipeline.result, objective=self._objectives[pipeline.result.objective_id]
         )
         # Same assembler as the run paths (TMP-22): objective-type-aware, so an
-        # optimize run gets perf/simplicity here too. No critic — the meta-agent
-        # tool surface has no live sandbox.
+        # optimize run gets its simplicity check here too. Performance remains
+        # independently measured evidence. No critic: this surface has no sandbox.
         results = assemble_suite(ctx, with_critic=False)
         scorecard = Scorecard.from_results(results)
         return {

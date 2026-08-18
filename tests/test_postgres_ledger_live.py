@@ -193,17 +193,22 @@ def test_trial_roundtrip_insert_only_and_list_by_experiment(ledger):
 
 def test_experiment_roundtrip_and_unknown_id_raises(ledger):
     spec = {"metadata": {"name": "e2e-experiment"}, "baseline": "explore@1"}
-    ledger.record_experiment(EXPERIMENT_ID, "e2e-experiment", spec, "running")
+    ledger.record_experiment(
+        EXPERIMENT_ID, "e2e-experiment", "agent-spec", spec, "running"
+    )
     got = ledger.get_experiment(EXPERIMENT_ID)
     assert got is not None
     assert got["id"] == EXPERIMENT_ID
     assert got["name"] == "e2e-experiment"
+    assert got["subject_kind"] == "agent-spec"
     assert got["spec"] == spec
     assert got["status"] == "running"
     assert got["result"] is None
 
     # retried record_experiment must not clobber (on conflict do nothing)
-    ledger.record_experiment(EXPERIMENT_ID, "different-name", {}, "running")
+    ledger.record_experiment(
+        EXPERIMENT_ID, "different-name", "software-artifact", {}, "running"
+    )
     assert ledger.get_experiment(EXPERIMENT_ID)["name"] == "e2e-experiment"
 
     ledger.update_experiment_result(EXPERIMENT_ID, "completed", {"decision": "promote"})

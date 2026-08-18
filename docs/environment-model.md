@@ -43,8 +43,9 @@ intersection of the `AgentSpec` limits and the task's `ResourceLimits`.
 | `TaskPin` | Exact provenance: source URI, corpus revision, task name/version, bundle digest, and verifier digest |
 | Episode | One actual interaction trajectory for an agent, task, and seed |
 | `RunRecord` | Operational execution record used for generic worker lifecycle and telemetry |
-| `TrialRecord` | Experimental measurement of one episode, including its `episode_id`, `TaskPin`, metrics, evaluation, and integrity results |
-| Experiment | A deterministic matrix of baseline and candidate trials with paired statistical analysis |
+| `TrialRecord` | Experimental record of one policy episode, including its `episode_id`, `TaskPin`, metrics, reward/evaluation, and integrity results |
+| `ExperimentSpec` | A deterministic paired design whose explicit subject is either `agent-spec` or `software-artifact` |
+| `ExperimentObservation` | Subject-neutral named metrics plus typed evidence: an embedded `TrialRecord` for agent subjects or a persisted `MeasurementRecord` ID for artifact subjects |
 | `AgentRunBundle` | Per-run worker payload containing an objective, `AgentSpec`, memory excerpts, and effective budget; it is not a published task bundle |
 | Published task bundle | Immutable, content-addressed artifact containing one complete task and its `BundleManifest` |
 
@@ -52,6 +53,41 @@ An `Objective` is a general Bakudo work item. A `TaskInstruction` is the
 benchmark-specific initial observation from which a trial objective is
 derived. They remain separate because ordinary runs need not be part of an
 experiment.
+
+## Canonical performance-evidence terms
+
+Target-repository performance uses a parallel but distinct evidence family:
+
+| Term | Meaning |
+|---|---|
+| `WorkloadSpec` | Versioned, shell-free target-code exercise: subject repository, command, environment requirements, measurement plan, metrics, and optional profilers |
+| `WorkloadSource` | Storage-neutral port resolving a directory corpus or immutable workload bundle |
+| `LoadedWorkload` | Validated immutable workload materialization plus provenance and `WorkloadPin` |
+| `WorkloadPin` | Exact source URI/kind, collection revision, workload name/version, manifest, dataset, executor, and bundle digests |
+| `RevisionPin` | Exact repository source, commit/tree identity, cleanliness, and optional base/patch digest |
+| `EnvironmentPin` | Exact Bakudo/abox/image/runtime/dependency, hardware, OS, and optional profiler identity |
+| `MeasurementPlan` | Warmups, repetitions, timeout, deterministic schedule, and declared `MetricDefinition` values |
+| `MeasurementRecord` | Raw evidence from one revision under one workload/environment/plan. Samples are uninstrumented; warmups never enter summaries |
+| Diagnostic capture | One profiler-enabled execution used to attribute cost or find hotspots; it is not a measurement |
+| `PerformanceSnapshot` | Diagnostic evidence: profiler identity, normalized hotspots, warnings, restricted raw artifacts, and capture duration |
+| `PerformanceComparison` | Derived paired analysis of baseline/candidate `MeasurementRecord` values, including effects, confidence intervals, compatibility/integrity, verdict, and eligibility |
+| `PerformanceRegressionSignal` | Deduplicated, policy-approved repeated regression evidence derived only from persisted comparisons |
+| `ArtifactRef` | Content-addressed URI/digest/size/media metadata for bounded raw diagnostic output |
+
+A task asks, “Did this policy solve the controlled problem?” A workload asks,
+“How did this pinned revision perform under this pinned execution contract?” A
+`RunRecord` reports operational lifecycle. A `TrialRecord`,
+`MeasurementRecord`, and `PerformanceSnapshot` are therefore not aliases and
+must not be substituted for one another.
+
+Use *measure* only for uninstrumented target evidence, *capture* for
+instrumented diagnostics, and *compare* for derived statistical evidence. A
+named environment *profile* is configuration. The legacy command phrase
+`experiment profile` has one narrow meaning: candidate-free behavioral
+characterization of an agent across tasks. It does not run a profiler or
+produce a `PerformanceSnapshot`. Agent-reported timing and
+`PerformanceSnapshot.captureSeconds` may guide investigation, but neither can
+establish improvement or regression.
 
 ## Reward, constraints, and integrity
 
@@ -81,8 +117,10 @@ without pretending they already exist.
 An external environment framework such as NeMo Gym can integrate at the
 existing ports: task discovery/materialization behind `TaskSource`, execution
 behind the sandbox/pipeline boundary, and independent grading behind
-`VerifierRunner`. A future remote adapter should preserve the same `TaskPin`
-and trial contracts rather than introduce a second experiment model.
+`VerifierRunner`. Remote target-performance execution can instead implement
+`MeasurementRunner`/`WorkloadInvoker` or `ProfilerRunner`, while preserving the
+same workload, revision, environment, record, and artifact contracts. A remote
+adapter should not introduce a second experiment or evidence vocabulary.
 
 ## Isolated improvement boundaries
 
@@ -99,6 +137,16 @@ The main components can be evaluated independently:
 | Trial runner | Exercise one episode with stubbed policy and verifier ports |
 | Statistics | Analyze synthetic `TrialRecord` series without any runtime services |
 | Orchestration | Test synchronous or Temporal coordination with activity boundaries stubbed |
+| Workload source/bundle | Discover, pin, round-trip, and reject tampering without running target code |
+| Measurement scheduling/samples | Test ordering, warmup exclusion, units, missing/non-finite samples, and summaries as pure functions |
+| Measurement service | Inject a fake `WorkloadInvoker` and in-memory ledger; test one revision or paired interleaving without abox |
+| Comparison/statistics | Recompute deterministic paired bootstrap evidence from synthetic raw samples without a runner or database |
+| Profiler adapter/normalizer | Test capability, argv construction, bounds, hostile output, and stable hotspot keys without orchestration |
+| Artifact store | Contract-test content addressing, atomic/idempotent puts, byte limits, and integrity without profiling |
+| Regression policy | Reduce persisted comparison fixtures through confidence, recurrence, cooldown, and deduplication without running workloads |
+| Performance orchestration | Inject source/invoker/capture/ledger fakes; test retry-stable IDs and typed terminal states without external services |
+| Experiment subject binding | Inject TrialRecord or MeasurementRecord providers and test one shared direction-aware analysis/reporting path |
+| Self-observability | Record fake monotonic spans and summarize phase attribution without exporting telemetry |
 
 These boundaries are ordinary in-process ports today. They can become remote
 services later without changing the domain vocabulary or persistence shape.

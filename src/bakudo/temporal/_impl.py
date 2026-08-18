@@ -12,7 +12,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .. import __version__ as bakudo_version
 from .. import ids, paths
@@ -29,6 +29,35 @@ from ..evals.evolution import evolve_agent
 from ..evals.promotion import PromotionPolicy, apply_decision, routes_to_canary
 from ..memory.compaction import compact
 from ..memory.semantic import SemanticMemoryStore
+from ..performance.compatibility import CompatibilityPolicy
+from ..performance.environment import configured_environment_pin
+from ..performance.models import (
+    FailureReason,
+    IntegrityResult,
+    InvocationOutcome,
+    InvocationPhase,
+    PerformanceSnapshot,
+    ProfilerSpec,
+    RecordStatus,
+)
+from ..performance.pins import EnvironmentPin, RevisionPin, WorkloadPin
+from ..performance.profiler import (
+    ProfileExecutionError,
+    ProfilerUnsupportedError,
+    ProfileTimeoutError,
+)
+from ..performance.revisions import pin_repository_revision
+from ..performance.service import (
+    PerformanceMeasurementService,
+    PerformanceServiceError,
+    WorkloadInvoker,
+)
+from ..performance.source import (
+    LoadedWorkload,
+    WorkloadLoadError,
+    durable_workload_source_location,
+    workload_source_from_location,
+)
 from ..registry import InMemoryLedger, RunPhase, RunRecord
 from ..registry.ledger import Ledger
 from ..runner.result import RunResult
@@ -41,14 +70,36 @@ from .shared import (
     EvalInput,
     EvolutionInput,
     ObserveInput,
+    PerformanceCaptureInput,
+    PerformanceComparisonInput,
+    PerformanceMeasurementInput,
+    PerformanceWorkflowResult,
     PromotionInput,
 )
 
 if TYPE_CHECKING:
+    from ..performance.source import WorkloadSource
     from ..tasks.source import TaskSource
 
 SandboxFn = Callable[[AgentRunBundle], AboxOutcome]
 TaskSourceFn = Callable[[], "TaskSource"]
+PerformanceWorkloadSourceFn = Callable[[], "WorkloadSource"]
+
+
+class PerformanceCaptureService(Protocol):
+    """Provision-and-capture port owned by the performance activity boundary."""
+
+    def capture(
+        self,
+        workload: LoadedWorkload,
+        revision: RevisionPin,
+        environment: EnvironmentPin,
+        profiler: ProfilerSpec,
+        *,
+        snapshot_id: str,
+        cancel_event: object | None = None,
+    ) -> PerformanceSnapshot: ...
+
 
 # How to turn a sandbox-less deployment into a sandboxed one (TMP-13). Shared
 # by the fail-fast RuntimeError below and the worker's startup posture log
@@ -65,7 +116,7 @@ VERIFIER_EVAL_REMEDIATION = (
     "grading verifier tests outside BAKUDO_ENV=dev requires a resolvable "
     "sandbox posture: set BAKUDO_ENV=dev to use the local (host-executing, "
     "dev-only) test runner, or BAKUDO_SANDBOX=abox to grade inside a real "
-    "abox guest (bakudo.abox.verifier_bench.abox_verifier_runner), or inject "
+    "abox guest (bakudo.abox.verifier.abox_verifier_runner), or inject "
     "Deps.verifier_eval_fn with a trusted runner."
 )
 
@@ -92,6 +143,12 @@ def _default_task_source() -> TaskSource:
     return default_task_source()
 
 
+def _default_performance_workload_source() -> WorkloadSource:
+    from ..performance.source import default_workload_source
+
+    return default_workload_source()
+
+
 def _default_verifier_eval_fn(workspace: Any, command: str) -> VerificationResult:
     """Fail-closed default verifier-test runner (mirrors ``Deps.sandbox_fn``'s
     resolution pattern, :func:`resolve_sandbox_mode`).
@@ -99,7 +156,7 @@ def _default_verifier_eval_fn(workspace: Any, command: str) -> VerificationResul
     ``BAKUDO_ENV=dev`` opts into the local, host-executing runner (the same
     one ``bakudo trial run``/``bakudo experiment run`` use in dev mode).
     Otherwise, ``resolve_sandbox_mode() == "abox"`` opts into the real
-    abox-backed guest runner (:func:`bakudo.abox.verifier_bench.abox_verifier_runner`,
+    abox-backed guest runner (:func:`bakudo.abox.verifier.abox_verifier_runner`,
     Task 8) -- the same posture check ``Deps.sandbox_fn`` uses for the agent
     sandbox itself, so verifier-test grading and agent execution can never
     silently disagree about whether abox is the live boundary. Any other
@@ -111,7 +168,7 @@ def _default_verifier_eval_fn(workspace: Any, command: str) -> VerificationResul
 
         return local_verifier_runner(workspace, command)
     if resolve_sandbox_mode() == "abox":
-        from ..abox.verifier_bench import abox_verifier_runner
+        from ..abox.verifier import abox_verifier_runner
 
         return abox_verifier_runner(workspace, command)
     raise RuntimeError(VERIFIER_EVAL_REMEDIATION)
@@ -125,10 +182,6 @@ class Deps:
     sandbox: SandboxFn | None = None
     memory: object = field(default_factory=SemanticMemoryStore)
     collector: SignalCollector | None = None
-    # Issue #28: injectable independent bench measurer
-    # ((diff, bench_command) -> (before_s, after_s)); None resolves the
-    # fresh-sandbox abox measurer when the abox sandbox is active.
-    bench_measure: Callable[[str, str], tuple[float, float]] | None = None
     # A factory returning a TaskSource (never a source instance -- resolving
     # one may perform directory or archive I/O, so
     # activities call this fresh rather than sharing a stale instance across
@@ -144,6 +197,25 @@ class Deps:
     # bakudo.control.pipeline.run_objective there; tests inject a stub so an
     # evolution run over the task-backed default corpus stays offline.
     run_objective_fn: Callable[..., Any] | None = None
+    # Performance I/O is resolved only in activities. The source is a factory
+    # because loading snapshots performs filesystem work; the invoker and
+    # capture service are replaceable ports for hosted workers and tests.
+    performance_workload_source_fn: PerformanceWorkloadSourceFn = (
+        _default_performance_workload_source
+    )
+    performance_invoker: WorkloadInvoker | None = None
+    performance_capture: PerformanceCaptureService | None = None
+
+    def performance_invoker_or_none(
+        self, candidate_patches: dict[str, str] | None = None
+    ) -> WorkloadInvoker | None:
+        if self.performance_invoker is not None:
+            return self.performance_invoker
+        if resolve_sandbox_mode() != "abox":
+            return None
+        from ..abox.measurement import AboxWorkloadInvoker
+
+        return AboxWorkloadInvoker(candidate_patches=candidate_patches)
 
     def sandbox_fn(self) -> SandboxFn:
         """Resolve the sandbox driver, failing *closed*.
@@ -199,6 +271,9 @@ def configure(
     collector: SignalCollector | None = None,
     task_source_fn: TaskSourceFn | None = None,
     verifier_eval_fn: VerifierRunner | None = None,
+    performance_workload_source_fn: PerformanceWorkloadSourceFn | None = None,
+    performance_invoker: WorkloadInvoker | None = None,
+    performance_capture: PerformanceCaptureService | None = None,
 ) -> None:
     """Inject real dependencies (called by the worker entrypoint)."""
     if ledger is not None:
@@ -213,6 +288,12 @@ def configure(
         DEPS.task_source_fn = task_source_fn
     if verifier_eval_fn is not None:
         DEPS.verifier_eval_fn = verifier_eval_fn
+    if performance_workload_source_fn is not None:
+        DEPS.performance_workload_source_fn = performance_workload_source_fn
+    if performance_invoker is not None:
+        DEPS.performance_invoker = performance_invoker
+    if performance_capture is not None:
+        DEPS.performance_capture = performance_capture
 
 
 def _budget_for(spec: AgentSpec) -> Budget:
@@ -354,23 +435,543 @@ def run_sandbox(bundle_dict: dict, cancel_event: object | None = None) -> dict:
     }
 
 
-def measure_winner_bench(diff: str, bench_command: str, repo: str) -> dict:
-    """Independently re-measure a winner's bench claim (issue #28).
+# --- Performance measurement and diagnostic profiling ---
 
-    Returns ``{"before": s, "after": s}`` from a fresh-sandbox measurement,
-    or ``{"skipped": reason}`` when no measurer is available (non-abox
-    sandboxes) — the workflow then accepts the winner unverified, matching
-    the in-process loop's ``bench_measure=None`` behaviour.
-    """
-    measure = DEPS.bench_measure
-    if measure is None:
-        if os.environ.get("BAKUDO_SANDBOX") != "abox":
-            return {"skipped": "bench verification requires the abox sandbox"}
-        from ..abox.bench import abox_bench_measure, resolve_repo_path
 
-        measure = abox_bench_measure(resolve_repo_path(repo))
-    before, after = measure(diff, bench_command)
-    return {"before": before, "after": after}
+def _performance_reason(error: object) -> str:
+    """Bound failure text before it crosses the durable workflow boundary."""
+    return str(error).strip()[:1_024] or type(error).__name__
+
+
+def _is_cancelled(cancel_event: object | None) -> bool:
+    if cancel_event is None:
+        return False
+    is_set = getattr(cancel_event, "is_set", None)
+    return bool(is_set()) if callable(is_set) else False
+
+
+class _CancellationAwareInvoker:
+    def __init__(self, delegate: WorkloadInvoker, cancel_event: object | None) -> None:
+        self._delegate = delegate
+        self._cancel_event = cancel_event
+
+    def invoke(
+        self,
+        workload: LoadedWorkload,
+        revision: RevisionPin,
+        environment: EnvironmentPin,
+        *,
+        phase: InvocationPhase,
+        ordinal: int,
+    ) -> InvocationOutcome:
+        if _is_cancelled(self._cancel_event):
+            return InvocationOutcome(
+                ordinal=ordinal,
+                phase=phase,
+                status=RecordStatus.cancelled,
+                failure_reason=FailureReason.cancelled,
+            )
+        return self._delegate.invoke(
+            workload,
+            revision,
+            environment,
+            phase=phase,
+            ordinal=ordinal,
+        )
+
+
+def _performance_result(
+    operation_id: str,
+    kind: str,
+    status: str,
+    *,
+    record: Any | None = None,
+    related_records: dict[str, Any] | None = None,
+    reason: str | None = None,
+) -> PerformanceWorkflowResult:
+    return PerformanceWorkflowResult(
+        operation_id=operation_id,
+        kind=kind,
+        status=status,
+        record_id=getattr(record, "id", None),
+        record=record.to_dict() if record is not None else None,
+        related_records={name: value.to_dict() for name, value in (related_records or {}).items()},
+        reason=reason,
+    )
+
+
+def _expected_workload_pin(document: dict[str, Any] | None) -> WorkloadPin | None:
+    return WorkloadPin.model_validate(document) if document is not None else None
+
+
+def _load_performance_workload(
+    ref: str,
+    *,
+    source_location: str | None = None,
+    expected_pin: dict[str, Any] | None = None,
+) -> LoadedWorkload:
+    source = (
+        DEPS.performance_workload_source_fn()
+        if source_location is None
+        else workload_source_from_location(source_location)
+    )
+    workload = source.load(ref)
+    expected = _expected_workload_pin(expected_pin)
+    if expected is not None and workload.pin != expected:
+        raise WorkloadLoadError(
+            f"loaded workload {ref!r} does not match the immutable request pin"
+        )
+    return workload
+
+
+def prepare_performance_optimization(objective_document: dict[str, Any]) -> dict[str, Any]:
+    """Resolve filesystem-backed pins outside deterministic workflow code."""
+
+    try:
+        objective = Objective.model_validate(objective_document)
+        if objective.performance is None:
+            raise PerformanceServiceError("optimize objective has no performance contract")
+        workload = _load_performance_workload(objective.performance.workload_ref.ref)
+        expected_pin = objective.performance.workload_pin
+        if expected_pin is not None and workload.pin != expected_pin:
+            raise PerformanceServiceError(
+                "loaded workload does not match the objective's immutable workload pin"
+            )
+        DEPS.ledger.record_workload_version(workload.spec, workload.pin)
+
+        direct = Path(objective.repo).expanduser()
+        if direct.is_dir():
+            repo_path = direct.resolve()
+        else:
+            registered = DEPS.ledger.get_repo(objective.repo)
+            if registered is not None:
+                repo_path = Path(registered.path).expanduser().resolve()
+            else:
+                root = Path(os.environ.get("BAKUDO_REPO_ROOT", Path.cwd())).expanduser()
+                candidate = root.resolve() / objective.repo
+                repo_path = candidate if candidate.is_dir() else root.resolve()
+        revision = pin_repository_revision(
+            repo_path,
+            repository=objective.repo,
+            require_clean=True,
+        )
+        environment = configured_environment_pin()
+        return {
+            "status": "completed",
+            "workload": workload.ref,
+            "workloadSource": durable_workload_source_location(workload),
+            "workloadPin": workload.pin.model_dump(by_alias=True, mode="json"),
+            "baselineRevision": revision.model_dump(by_alias=True, mode="json"),
+            "environment": environment.model_dump(by_alias=True, mode="json"),
+        }
+    except (
+        KeyError,
+        OSError,
+        ValueError,
+        WorkloadLoadError,
+        PerformanceServiceError,
+    ) as exc:
+        return {"status": "invalid", "reason": _performance_reason(exc)}
+
+
+def prepare_artifact_experiment(spec_document: dict[str, Any]) -> dict[str, Any]:
+    """Resolve an artifact experiment's exact workload and environment pins."""
+    from ..experiments.models import ExperimentSpec, SoftwareArtifactSubject
+
+    try:
+        spec = ExperimentSpec.model_validate(spec_document)
+        if not isinstance(spec.subject, SoftwareArtifactSubject):
+            raise ValueError("artifact preparation requires a software-artifact subject")
+        subject = spec.subject
+        workload = _load_performance_workload(subject.workload_ref.ref)
+        if workload.provenance.source_kind is not subject.workload_ref.source:
+            raise WorkloadLoadError(
+                "resolved workload source kind does not match subject.workloadRef"
+            )
+        if workload.spec.subject.repo != subject.repository:
+            raise WorkloadLoadError(
+                "resolved workload repository does not match artifact subject"
+            )
+        DEPS.ledger.record_workload_version(workload.spec, workload.pin)
+        environment = configured_environment_pin()
+        return {
+            "status": "completed",
+            "workload": workload.ref,
+            "workloadSource": durable_workload_source_location(workload),
+            "workloadPin": workload.pin.model_dump(by_alias=True, mode="json"),
+            "environment": environment.model_dump(by_alias=True, mode="json"),
+        }
+    except (KeyError, OSError, ValueError, WorkloadLoadError) as exc:
+        return {"status": "invalid", "reason": _performance_reason(exc)}
+
+
+def analyze_artifact_experiment(input: dict[str, Any]) -> dict[str, Any]:
+    """Analyze persisted MeasurementRecord IDs through the artifact binding."""
+    from ..experiments.artifact_subject import ArtifactMeasurementRequest, ArtifactSubjectBinding
+    from ..experiments.models import ExperimentSpec
+    from ..experiments.runner import assemble_observation_result
+
+    spec = ExperimentSpec.model_validate(input["spec"])
+    cells: dict[tuple[str, int], str] = {}
+    for cell in input["measurements"]:
+        key = (str(cell["arm"]), int(cell["repetition"]))
+        if key in cells:
+            raise ValueError(f"duplicate artifact measurement cell {key!r}")
+        cells[key] = str(cell["measurement_id"])
+
+    def measurement_id(request: ArtifactMeasurementRequest) -> str:
+        try:
+            return cells[(request.arm, request.repetition)]
+        except KeyError as exc:
+            raise ValueError(
+                f"missing artifact measurement cell {(request.arm, request.repetition)!r}"
+            ) from exc
+
+    provider = ArtifactSubjectBinding(spec, ledger=DEPS.ledger, measure=measurement_id)
+    experiment_id = str(input["experiment_id"])
+    batch = provider.collect(experiment_id)
+    return assemble_observation_result(
+        spec, provider, batch, experiment_id=experiment_id
+    )
+
+
+def _measurement_collision(
+    existing: Any,
+    workload_ref: str,
+    workload_pin: WorkloadPin | None,
+    revision: RevisionPin,
+    environment: EnvironmentPin,
+) -> None:
+    if (
+        existing.workload.ref != workload_ref
+        or (workload_pin is not None and existing.workload != workload_pin)
+        or existing.revision != revision
+        or existing.environment != environment
+    ):
+        raise PerformanceServiceError(
+            f"measurement id {existing.id!r} is already bound to different pins"
+        )
+
+
+def run_performance_measurement(
+    inp: PerformanceMeasurementInput,
+    cancel_event: object | None = None,
+) -> PerformanceWorkflowResult:
+    """Load, execute, and durably record one retry-idempotent measurement."""
+    kind = "measurement"
+    if inp.measurement_id is None:
+        raise ValueError("measurement_id must be resolved by the workflow")
+    if _is_cancelled(cancel_event):
+        return _performance_result(inp.operation_id, kind, RecordStatus.cancelled.value)
+    try:
+        revision = RevisionPin.model_validate(inp.revision)
+        environment = EnvironmentPin.model_validate(inp.environment)
+        workload_pin = _expected_workload_pin(inp.workload_pin)
+        integrity = IntegrityResult.model_validate(inp.integrity or {})
+    except ValueError as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.invalid_workload.value,
+            reason=_performance_reason(exc),
+        )
+
+    existing = DEPS.ledger.get_measurement(inp.measurement_id)
+    if existing is not None:
+        _measurement_collision(
+            existing, inp.workload, workload_pin, revision, environment
+        )
+        return _performance_result(inp.operation_id, kind, existing.status.value, record=existing)
+
+    invoker = DEPS.performance_invoker_or_none()
+    if invoker is None:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.unsupported.value,
+            reason="performance measurement requires the abox sandbox or an injected invoker",
+        )
+    try:
+        workload = _load_performance_workload(
+            inp.workload,
+            source_location=inp.workload_source,
+            expected_pin=inp.workload_pin,
+        )
+        record = PerformanceMeasurementService(
+            _CancellationAwareInvoker(invoker, cancel_event), ledger=DEPS.ledger
+        ).measure(
+            workload,
+            revision,
+            environment,
+            integrity=integrity,
+            record_id=inp.measurement_id,
+        )
+    except (KeyError, WorkloadLoadError, PerformanceServiceError, ValueError) as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.invalid_workload.value,
+            reason=_performance_reason(exc),
+        )
+    return _performance_result(inp.operation_id, kind, record.status.value, record=record)
+
+
+def _comparison_collision(
+    existing: Any,
+    inp: PerformanceComparisonInput,
+    workload_pin: WorkloadPin | None,
+    baseline_revision: RevisionPin,
+    candidate_revision: RevisionPin,
+    baseline_environment: EnvironmentPin,
+    candidate_environment: EnvironmentPin,
+) -> None:
+    if (
+        existing.workload.ref != inp.workload
+        or (workload_pin is not None and existing.workload != workload_pin)
+        or existing.baseline_revision != baseline_revision
+        or existing.candidate_revision != candidate_revision
+        or existing.baseline_environment != baseline_environment
+        or existing.candidate_environment != candidate_environment
+        or existing.baseline_measurement_id != inp.baseline_measurement_id
+        or existing.candidate_measurement_id != inp.candidate_measurement_id
+    ):
+        raise PerformanceServiceError(
+            f"comparison id {existing.id!r} is already bound to different pins"
+        )
+
+
+def run_performance_comparison(
+    inp: PerformanceComparisonInput,
+    cancel_event: object | None = None,
+) -> PerformanceWorkflowResult:
+    """Run and persist a fresh interleaved comparison with stable record IDs."""
+    kind = "comparison"
+    if (
+        inp.baseline_measurement_id is None
+        or inp.candidate_measurement_id is None
+        or inp.comparison_id is None
+    ):
+        raise ValueError("comparison record IDs must be resolved by the workflow")
+    if _is_cancelled(cancel_event):
+        return _performance_result(inp.operation_id, kind, RecordStatus.cancelled.value)
+    try:
+        baseline_revision = RevisionPin.model_validate(inp.baseline_revision)
+        candidate_revision = RevisionPin.model_validate(inp.candidate_revision)
+        baseline_environment = EnvironmentPin.model_validate(inp.baseline_environment)
+        candidate_environment = EnvironmentPin.model_validate(inp.candidate_environment)
+        workload_pin = _expected_workload_pin(inp.workload_pin)
+        integrity = IntegrityResult.model_validate(inp.integrity or {})
+    except ValueError as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.invalid_workload.value,
+            reason=_performance_reason(exc),
+        )
+
+    existing = DEPS.ledger.get_performance_comparison(inp.comparison_id)
+    if existing is not None:
+        _comparison_collision(
+            existing,
+            inp,
+            workload_pin,
+            baseline_revision,
+            candidate_revision,
+            baseline_environment,
+            candidate_environment,
+        )
+        related = {
+            name: record
+            for name, measurement_id in (
+                ("baseline", inp.baseline_measurement_id),
+                ("candidate", inp.candidate_measurement_id),
+            )
+            if (record := DEPS.ledger.get_measurement(measurement_id)) is not None
+        }
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            existing.status.value,
+            record=existing,
+            related_records=related,
+        )
+
+    candidate_patches = (
+        {candidate_revision.patch_digest: inp.candidate_patch}
+        if candidate_revision.patch_digest is not None and inp.candidate_patch is not None
+        else None
+    )
+    invoker = DEPS.performance_invoker_or_none(candidate_patches)
+    if invoker is None:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.unsupported.value,
+            reason="performance comparison requires the abox sandbox or an injected invoker",
+        )
+    try:
+        workload = _load_performance_workload(
+            inp.workload,
+            source_location=inp.workload_source,
+            expected_pin=inp.workload_pin,
+        )
+        run = PerformanceMeasurementService(
+            _CancellationAwareInvoker(invoker, cancel_event), ledger=DEPS.ledger
+        ).compare(
+            workload,
+            baseline_revision,
+            candidate_revision,
+            baseline_environment,
+            candidate_environment,
+            seed=inp.seed,
+            primary_metric=inp.primary_metric,
+            protected_metrics=tuple(inp.protected_metrics),
+            confidence=inp.confidence,
+            bootstrap_resamples=inp.bootstrap_resamples,
+            integrity=integrity,
+            compatibility_policy=CompatibilityPolicy(
+                allow_bakudo_patch_difference=inp.allow_bakudo_patch_difference,
+                allow_abox_patch_difference=inp.allow_abox_patch_difference,
+            ),
+            baseline_record_id=inp.baseline_measurement_id,
+            candidate_record_id=inp.candidate_measurement_id,
+            comparison_id=inp.comparison_id,
+        )
+    except (KeyError, WorkloadLoadError, PerformanceServiceError, ValueError) as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.invalid_workload.value,
+            reason=_performance_reason(exc),
+        )
+    return _performance_result(
+        inp.operation_id,
+        kind,
+        run.comparison.status.value,
+        record=run.comparison,
+        related_records={"baseline": run.baseline, "candidate": run.candidate},
+    )
+
+
+def run_performance_capture(
+    inp: PerformanceCaptureInput,
+    cancel_event: object | None = None,
+) -> PerformanceWorkflowResult:
+    """Run an injected provision-and-profile service and persist its snapshot."""
+    kind = "capture"
+    if inp.snapshot_id is None:
+        raise ValueError("snapshot_id must be resolved by the workflow")
+    if _is_cancelled(cancel_event):
+        return _performance_result(inp.operation_id, kind, RecordStatus.cancelled.value)
+    try:
+        revision = RevisionPin.model_validate(inp.revision)
+        environment = EnvironmentPin.model_validate(inp.environment)
+        workload_pin = _expected_workload_pin(inp.workload_pin)
+    except ValueError as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.invalid_workload.value,
+            reason=_performance_reason(exc),
+        )
+
+    existing = DEPS.ledger.get_performance_snapshot(inp.snapshot_id)
+    if existing is not None:
+        if (
+            existing.workload.ref != inp.workload
+            or (workload_pin is not None and existing.workload != workload_pin)
+            or existing.revision != revision
+            or existing.environment.model_copy(
+                update={"profiler_adapter": None, "profiler_version": None}
+            )
+            != environment.model_copy(
+                update={"profiler_adapter": None, "profiler_version": None}
+            )
+            or existing.descriptor.name != inp.profiler
+        ):
+            raise PerformanceServiceError(
+                f"snapshot id {existing.id!r} is already bound to different pins"
+            )
+        return _performance_result(inp.operation_id, kind, existing.status.value, record=existing)
+
+    capture = DEPS.performance_capture
+    if capture is None:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.unsupported.value,
+            reason="diagnostic capture requires an injected provision-and-capture service",
+        )
+    try:
+        workload = _load_performance_workload(
+            inp.workload,
+            source_location=inp.workload_source,
+            expected_pin=inp.workload_pin,
+        )
+        profiler = next(
+            (item for item in workload.spec.profilers if item.name == inp.profiler), None
+        )
+        if profiler is None:
+            return _performance_result(
+                inp.operation_id,
+                kind,
+                RecordStatus.unsupported.value,
+                reason=f"workload {inp.workload!r} does not declare profiler {inp.profiler!r}",
+            )
+        snapshot = capture.capture(
+            workload,
+            revision,
+            environment,
+            profiler,
+            snapshot_id=inp.snapshot_id,
+            cancel_event=cancel_event,
+        )
+        snapshot = snapshot.model_copy(update={"id": inp.snapshot_id})
+        if (
+            snapshot.workload != workload.pin
+            or snapshot.revision != revision
+            or snapshot.environment.model_copy(
+                update={"profiler_adapter": None, "profiler_version": None}
+            )
+            != environment.model_copy(
+                update={"profiler_adapter": None, "profiler_version": None}
+            )
+            or snapshot.descriptor.name != profiler.name
+            or snapshot.descriptor.adapter != profiler.adapter
+            or snapshot.environment.profiler_adapter != profiler.adapter
+            or snapshot.environment.profiler_version != snapshot.descriptor.version
+        ):
+            raise PerformanceServiceError("capture service returned evidence for different pins")
+        DEPS.ledger.record_performance_snapshot(snapshot)
+    except ProfilerUnsupportedError as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.unsupported.value,
+            reason=_performance_reason(exc),
+        )
+    except (TimeoutError, ProfileTimeoutError) as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.timed_out.value,
+            reason=_performance_reason(exc),
+        )
+    except ProfileExecutionError as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.failed.value,
+            reason=_performance_reason(exc),
+        )
+    except (KeyError, WorkloadLoadError, PerformanceServiceError, ValueError) as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.invalid_workload.value,
+            reason=_performance_reason(exc),
+        )
+    return _performance_result(inp.operation_id, kind, snapshot.status.value, record=snapshot)
 
 
 def persist_run(run_id: str, phase: str, payload: dict) -> None:
@@ -697,7 +1298,7 @@ def resolve_experiment_tasks(input: dict) -> dict:
 
     Runs :func:`bakudo.experiments.design.select_tasks` (task-source file
     I/O) so ``ExperimentWorkflow`` never has to (R1), and resolves every arm
-    ref (``spec.baseline`` + ``spec.candidates``) the same on-disk,
+    ref (``spec.subject.baseline`` + ``spec.subject.candidates``) the same on-disk,
     pinned-version-checked way :func:`provision_trial`
     (``_resolve_trial_agent_spec``) does. Returns
     ``{"tasks": [descriptor, ...], "resolvedArms": {raw_ref: resolved_ref}}``.
@@ -706,17 +1307,20 @@ def resolve_experiment_tasks(input: dict) -> dict:
     ``TrialWorkflow`` child records carries the RESOLVED ref (whatever
     ``provision_trial``/``_resolve_trial_agent_spec`` actually loaded off
     disk), so if ``ExperimentWorkflow`` built its trial matrix and handed
-    ``analyze_experiment`` the RAW (possibly unpinned) ``spec.baseline``/
-    ``candidates`` instead, every ``TrialRecord.agent_ref == spec.baseline``
+    ``analyze_experiment`` the RAW (possibly unpinned) subject baseline/
+    candidates instead, every ``TrialRecord.agent_ref`` lookup
     comparison inside :func:`bakudo.experiments.runner.assemble_result`
     would silently fail to match and zero every statistic. Resolving once,
     here, keeps the trial matrix's arms and the spec ``analyze_experiment``/
     the persisted experiment row carry in lockstep with what actually ran.
     """
     from ..experiments.design import select_tasks
-    from ..experiments.models import ExperimentSpec
+    from ..experiments.models import AgentSpecSubject, ExperimentSpec
 
     spec = ExperimentSpec.model_validate(input["spec"])
+    if not isinstance(spec.subject, AgentSpecSubject):
+        raise TypeError("task resolution requires an agent-spec experiment subject")
+    subject = spec.subject
     source = DEPS.task_source_fn()
     tasks = select_tasks(source, spec)
     descriptors = [
@@ -731,7 +1335,7 @@ def resolve_experiment_tasks(input: dict) -> dict:
     ]
 
     resolved_arms: dict[str, str] = {}
-    for raw_ref in (spec.baseline, *spec.candidates):
+    for raw_ref in (subject.baseline, *subject.candidates):
         if raw_ref in resolved_arms:
             continue
         resolved_arms[raw_ref] = _resolve_trial_agent_spec(raw_ref).ref
@@ -909,7 +1513,13 @@ def persist_experiment(input: dict) -> None:
     ledger = DEPS.ledger
     status = input["status"]
     if status == "running":
-        ledger.record_experiment(input["experiment_id"], input["name"], input["spec"], status)
+        ledger.record_experiment(
+            input["experiment_id"],
+            input["name"],
+            input["subject_kind"],
+            input["spec"],
+            status,
+        )
     else:
         ledger.update_experiment_result(input["experiment_id"], status, input.get("result") or {})
 

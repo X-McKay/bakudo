@@ -119,52 +119,13 @@ def cost_eval(
     )
 
 
-# Relative slowdown tolerated as measurement noise before perf_eval fails.
-PERF_NOISE_TOLERANCE = 0.02
-
-
-def _delta_eval(ctx: EvalContext, suite: str, before_key: str, after_key: str,
-                *, tolerance: float = 0.0) -> EvalResult:
-    """Score a self-reported before/after metric pair.
-
-    Score is 0.5 (neutral) plus the fractional improvement, clamped to 0..1 —
-    so an unchanged metric scores 0.5, a 30% improvement 0.8, a regression
-    below 0.5. Missing metrics are neutral and passing so non-optimize roles
-    are unaffected. A regression beyond ``tolerance`` fails the suite.
-    """
-    before = ctx.result.metrics.get(before_key)
-    after = ctx.result.metrics.get(after_key)
-    if before is None or after is None or before <= 0:
-        return _result(ctx, suite, 0.5, True, measured=False)
-    improvement = (before - after) / before
-    passed = after <= before * (1.0 + tolerance)
-    return _result(
-        ctx, suite, 0.5 + improvement, passed,
-        measured=True, before=before, after=after, improvement=improvement,
-    )
-
-
-def perf_eval(ctx: EvalContext) -> EvalResult:
-    """Did the benchmark get faster? (optimize role; spec section 15)"""
-    return _delta_eval(
-        ctx, "perf", "bench_seconds_before", "bench_seconds_after",
-        tolerance=PERF_NOISE_TOLERANCE,
-    )
-
-
-def simplicity_eval(ctx: EvalContext) -> EvalResult:
-    """Did the code get simpler? Complexity is whatever the run measured
-    (e.g. cyclomatic total or LOC) — only the direction of the delta matters."""
-    return _delta_eval(ctx, "simplicity", "complexity_before", "complexity_after")
-
-
 DEFAULT_SUITE: list[Grader] = [schema_eval, safety_eval, task_eval, code_eval, cost_eval]
-OPTIMIZE_SUITE: list[Grader] = [*DEFAULT_SUITE, perf_eval, simplicity_eval]
 
 
 def suite_for(objective_type: str) -> list[Grader]:
-    """Pick the grader suite for an objective type."""
-    return OPTIMIZE_SUITE if objective_type == "optimize" else DEFAULT_SUITE
+    """Return independently evaluated run gates for every objective type."""
+    del objective_type
+    return DEFAULT_SUITE
 
 
 def run_suite(ctx: EvalContext) -> list[EvalResult]:
@@ -192,7 +153,8 @@ def assemble_suite(
     """The single eval-assembly entry point used by every run path (TMP-22).
 
     The base suite is always the objective-type-aware :func:`run_suite`
-    (optimize objectives get perf/simplicity). The only permitted variation is
+    (optimize objectives add simplicity; performance is independent trusted
+    evidence). The only permitted variation is
     the sandboxed ``critic`` suite, which requires a live sandbox+model: it is
     appended only when ``with_critic`` is set *and* a ``sandbox`` is available;
     a schema/sandbox failure surfaces as an ERRORED critic result, never a

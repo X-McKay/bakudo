@@ -5,11 +5,18 @@ from .collectors import (
     CoverageXmlCollector,
     GitHubIssuesCollector,
     JUnitCollector,
+    PerformanceRegressionCollector,
     SignalCollector,
     TodoCollector,
     build_default_collector,
 )
-from .objective import Objective, ObjectiveType, Priority, PriorityWeights
+from .objective import (
+    Objective,
+    ObjectiveType,
+    Priority,
+    PriorityWeights,
+    objective_from_performance_input,
+)
 from .observe import (
     Advisory,
     CoverageGap,
@@ -26,6 +33,7 @@ __all__ = [
     "ObjectiveType",
     "Priority",
     "PriorityWeights",
+    "objective_from_performance_input",
     "QueueName",
     "ObjectiveQueues",
     "RepoSignals",
@@ -40,6 +48,7 @@ __all__ = [
     "TodoCollector",
     "CoverageXmlCollector",
     "JUnitCollector",
+    "PerformanceRegressionCollector",
     "GitHubIssuesCollector",
     "build_default_collector",
 ]

@@ -3,15 +3,42 @@
 from __future__ import annotations
 
 from bakudo.cli import main
+from bakudo.registry.ledger import InMemoryLedger
+
+_PERFORMANCE = {
+    "workloadRef": {
+        "name": "latency",
+        "version": "1.0.0",
+        "source": "repository",
+    },
+    "primaryMetric": "latency_seconds",
+    "decisionPolicy": {
+        "confidence": 0.95,
+        "minimumRelativeImprovement": 0.05,
+        "protectedMetrics": [],
+        "bootstrapResamples": 10_000,
+    },
+}
+
+
+def _stub_performance_context(monkeypatch, captured: dict | None = None) -> None:
+    def context(args):
+        if captured is not None:
+            captured["performance_args"] = args
+        return _PERFORMANCE, lambda diff: None, InMemoryLedger()
+
+    monkeypatch.setattr("bakudo.cli._optimize_performance_context", context)
 
 
 def test_cli_optimize_runs_offline_end_to_end(capsys, monkeypatch):
     monkeypatch.setenv("BAKUDO_OFFLINE", "1")
+    _stub_performance_context(monkeypatch)
     rc = main(
         [
             "optimize",
             "--repo", "bakudo",
             "--title", "Optimize the schema validator",
+            "--workload", "latency@1.0.0",
             "--target", "src/bakudo/schema.py",
             "--rounds", "1",
         ]
@@ -27,6 +54,7 @@ def test_cli_optimize_runs_offline_end_to_end(capsys, monkeypatch):
 
 def test_cli_optimize_threads_constraints_into_the_loop(monkeypatch, capsys):
     captured: dict = {}
+    _stub_performance_context(monkeypatch, captured)
 
     def fake_loop(objective, scout_spec, attempt_spec, **kwargs):
         captured["objective"] = objective
@@ -39,7 +67,9 @@ def test_cli_optimize_threads_constraints_into_the_loop(monkeypatch, capsys):
             "optimize",
             "--repo", "payments-api",
             "--title", "Optimize dedup",
-            "--bench", "pytest tests/benchmarks -q",
+            "--workload", "latency@1.0.0",
+            "--primary-metric", "latency_seconds",
+            "--protected-metric", "peak_rss_bytes",
             "--target", "src/ledger/**",
             "--max-files", "3",
             "--rounds", "4",
@@ -49,11 +79,13 @@ def test_cli_optimize_threads_constraints_into_the_loop(monkeypatch, capsys):
     assert rc == 0
     objective = captured["objective"]
     assert objective.type.value == "optimize"
-    assert objective.constraints.bench_command == "pytest tests/benchmarks -q"
+    assert objective.performance.workload_ref.ref == "latency@1.0.0"
+    assert objective.performance.primary_metric == "latency_seconds"
     assert objective.constraints.target_paths == ["src/ledger/**"]
     assert objective.constraints.max_files_changed == 3
     assert captured["kwargs"]["max_rounds"] == 4
     assert captured["kwargs"]["max_approaches"] == 5
+    assert captured["kwargs"]["performance_compare"] is not None
 
 
 def test_cli_optimize_resolves_sandbox_when_live(monkeypatch, capsys):
@@ -64,6 +96,7 @@ def test_cli_optimize_resolves_sandbox_when_live(monkeypatch, capsys):
     from bakudo.temporal._impl import Deps
 
     captured = {}
+    _stub_performance_context(monkeypatch)
 
     def fake_loop(objective, scout, attempt, **kw):
         captured.update(kw)
@@ -72,7 +105,9 @@ def test_cli_optimize_resolves_sandbox_when_live(monkeypatch, capsys):
     monkeypatch.setattr("bakudo.control.optimize.run_optimize_loop", fake_loop)
     monkeypatch.setenv("BAKUDO_OFFLINE", "0")
     monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
-    rc = cli.main(["optimize", "--repo", "r", "--title", "t"])
+    rc = cli.main(
+        ["optimize", "--repo", "r", "--title", "t", "--workload", "latency"]
+    )
     assert rc == 0
     expected = Deps(memory=None).sandbox_fn()
     assert captured.get("sandbox") is not None
@@ -80,12 +115,12 @@ def test_cli_optimize_resolves_sandbox_when_live(monkeypatch, capsys):
     assert got == getattr(expected, "__qualname__", "x")
 
 
-def test_cli_optimize_live_abox_wires_bench_verification(monkeypatch):
-    """Issue #28: live abox runs must independently re-bench the winner —
-    the CLI passes a fresh-sandbox bench_measure into the loop."""
+def test_cli_optimize_live_abox_wires_performance_comparison(monkeypatch):
+    """Live optimization always passes the trusted comparison callback."""
     import bakudo.cli as cli
 
     captured = {}
+    _stub_performance_context(monkeypatch)
 
     def fake_loop(objective, scout, attempt, **kw):
         captured.update(kw)
@@ -94,13 +129,16 @@ def test_cli_optimize_live_abox_wires_bench_verification(monkeypatch):
     monkeypatch.setattr("bakudo.control.optimize.run_optimize_loop", fake_loop)
     monkeypatch.setenv("BAKUDO_OFFLINE", "0")
     monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
-    rc = cli.main(["optimize", "--repo", "r", "--title", "t"])
+    rc = cli.main(
+        ["optimize", "--repo", "r", "--title", "t", "--workload", "latency"]
+    )
     assert rc == 0
-    assert captured.get("bench_measure") is not None
+    assert captured.get("performance_compare") is not None
 
 
-def test_cli_optimize_offline_has_no_bench_verifier(monkeypatch, capsys):
+def test_cli_optimize_offline_still_requires_trusted_comparison(monkeypatch, capsys):
     captured = {}
+    _stub_performance_context(monkeypatch)
 
     def fake_loop(objective, scout, attempt, **kw):
         captured.update(kw)
@@ -108,9 +146,11 @@ def test_cli_optimize_offline_has_no_bench_verifier(monkeypatch, capsys):
 
     monkeypatch.setattr("bakudo.control.optimize.run_optimize_loop", fake_loop)
     monkeypatch.setenv("BAKUDO_OFFLINE", "1")
-    rc = main(["optimize", "--repo", "r", "--title", "t"])
+    rc = main(
+        ["optimize", "--repo", "r", "--title", "t", "--workload", "latency"]
+    )
     assert rc == 0
-    assert captured.get("bench_measure") is None
+    assert captured.get("performance_compare") is not None
 
 
 def test_cli_optimize_live_without_sandbox_fails_closed(monkeypatch):
@@ -118,5 +158,7 @@ def test_cli_optimize_live_without_sandbox_fails_closed(monkeypatch):
 
     monkeypatch.setenv("BAKUDO_OFFLINE", "0")
     monkeypatch.delenv("BAKUDO_SANDBOX", raising=False)
-    rc = cli.main(["optimize", "--repo", "r", "--title", "t"])
+    rc = cli.main(
+        ["optimize", "--repo", "r", "--title", "t", "--workload", "latency"]
+    )
     assert rc != 0

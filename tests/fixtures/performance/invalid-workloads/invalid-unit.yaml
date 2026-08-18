@@ -1,0 +1,11 @@
+apiVersion: bakudo.ai/v1alpha1
+kind: WorkloadSpec
+metadata: {name: invalid-unit, version: 1.0.0}
+subject: {repo: fixture-repo}
+command: {argv: [python, run.py], cwd: .}
+environment: {profile: python-small, network: none}
+measurement:
+  repetitions: 2
+  timeoutSeconds: 10
+  metrics:
+    - {name: latency_seconds, unit: bananas, direction: lower, source: wall-clock}

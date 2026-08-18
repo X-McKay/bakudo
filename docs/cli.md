@@ -19,9 +19,11 @@ BAKUDO_OFFLINE=1 bakudo doctor
 ```
 
 `bakudo doctor` checks the Python and Bakudo versions, bundled AgentSpecs,
-runtime skill discovery, the configured task source, optional dependency
-imports, execution posture, and persistence configuration. It never connects
-to Postgres, Temporal, FalkorDB, a model endpoint, or abox.
+runtime skill discovery, configured task and workload sources, the performance
+artifact root, abox measurement availability, the default `EnvironmentPin`,
+profiler capabilities, optional dependency imports, execution posture, and
+persistence configuration. It never connects to Postgres, Temporal, FalkorDB,
+a model endpoint, or abox.
 
 - `--json` emits a structured report.
 - `--strict` returns non-zero for warnings as well as errors.
@@ -36,6 +38,14 @@ to Postgres, Temporal, FalkorDB, a model endpoint, or abox.
 | `bakudo agent list` | List packaged AgentSpecs | `--json` |
 | `bakudo agent validate PATH` | Validate one AgentSpec | `--json` |
 | `bakudo skill list` | List progressive-disclosure skill metadata | `--json` |
+| `bakudo workload list` | List workloads from `BAKUDO_WORKLOAD_SOURCE` or packaged smoke fallback | `--json` |
+| `bakudo workload validate PATH` | Validate and pin one workload directory | `--json` |
+| `bakudo workload inspect REF` | Show a manifest, immutable pin, and provenance | `--json` |
+| `bakudo performance measure` | Collect an uninstrumented `MeasurementRecord` (`--sync` required locally) | `--json` |
+| `bakudo performance capture` | Collect a diagnostic `PerformanceSnapshot` and restricted artifacts | `--json` |
+| `bakudo performance compare` | Interleave baseline/candidate measurements and create a `PerformanceComparison` | `--json` |
+| `bakudo performance show ID` | Read a persisted measurement, snapshot, or comparison | `--json` |
+| `bakudo performance regressions` | List approved regression signals, optionally by repository | `--json` |
 | `bakudo task list` | List tasks from `BAKUDO_TASK_SOURCE` | `--json` |
 | `bakudo task verify REF` | Run the task authoring verification protocol | `--json` |
 | `bakudo task scaffold NAME` | Create an authoring skeleton in an explicit corpus root | — |
@@ -72,6 +82,103 @@ Use `bakudo task scaffold --help` before authoring. Scaffolding writes only
 under the explicit `--root`; publication writes only under `--output`; and
 `repo remove` deregisters a checkout without deleting its files.
 
+`ExperimentSpec.subject` is explicit. `agent-spec` subjects contain agent arms
+and a `taskSelector`; `software-artifact` subjects contain a repository,
+immutable baseline/candidate `RevisionPin` values, and a `WorkloadRef`.
+`bakudo experiment run SPEC.yaml` dispatches either binding. Artifact
+experiments use `BAKUDO_WORKLOAD_SOURCE`, `BAKUDO_PERFORMANCE_ENVIRONMENT`,
+abox, and persisted `MeasurementRecord` evidence; they do not use the agent
+verifier posture. `experiment profile` remains exclusively a candidate-free
+behavioral agent experiment and is unrelated to `performance capture`.
+
+## Workloads and trusted performance evidence
+
+Tasks and workloads are different resources. A task evaluates an agent policy
+and produces a `TrialRecord`; a workload exercises pinned target code and
+produces uninstrumented `MeasurementRecord` samples. Configure their sources
+independently:
+
+```bash
+export BAKUDO_WORKLOAD_SOURCE=/path/to/workload-corpus-or-bundle
+export BAKUDO_PERFORMANCE_ENVIRONMENT=/path/to/environment-pin.json
+
+bakudo workload list --json
+bakudo workload validate /path/to/workload-directory --json
+bakudo workload inspect api-throughput@1.2.0 --json
+```
+
+The manifest declares the shell-free command, environment requirements,
+warmups/repetitions/schedule, typed metrics, practical thresholds, and optional
+profilers. Inspection prints the immutable `WorkloadPin`: source and collection
+revision plus manifest, dataset, executor, and bundle digests.
+
+Local measurement is intentionally explicit and requires abox, a clean git
+revision, and an environment pin:
+
+```bash
+bakudo repo add /path/to/checkout --name payments-api
+
+bakudo performance measure --sync --repo payments-api \
+  --workload api-throughput@1.2.0 --ref HEAD --json
+
+bakudo performance compare --sync --repo payments-api \
+  --workload api-throughput@1.2.0 \
+  --baseline-ref main --candidate-ref candidate \
+  --primary-metric latency_seconds \
+  --protected-metric peak_rss_bytes --seed 17 --json
+
+BAKUDO_ARTIFACT_ROOT=/srv/bakudo/performance-artifacts \
+bakudo performance capture --sync --repo payments-api \
+  --workload api-throughput@1.2.0 --ref HEAD \
+  --profiler python-cpu --json
+```
+
+Without `--sync`, `measure`, `capture`, and `compare` fail before doing work and direct the
+operator to the durable API. Timed comparisons never enable a profiler.
+`performance show` reads durable records from the configured Postgres ledger;
+without `BAKUDO_POSTGRES_DSN`, a new CLI process has an empty in-memory ledger
+and prints a warning.
+
+The optimization CLI uses the same proof path and no longer accepts a benchmark
+command or self-reported timing:
+
+```bash
+bakudo optimize --repo payments-api --title "Reduce request latency" \
+  --target src/payments --workload api-throughput@1.2.0 \
+  --primary-metric latency_seconds \
+  --protected-metric peak_rss_bytes --json
+```
+
+The workload's subject repository must match the registered repository.
+Selection requires a completed, compatible, integrity-valid comparison whose
+candidate patch digest matches the captured attempt diff and whose confidence
+interval clears the policy's minimum improvement. Diagnostic captures may
+suggest hotspots but cannot satisfy this gate.
+
+`bakudo performance capture --sync` and `PerformanceCaptureWorkflow` use the
+same provision-and-capture service. It is available only in abox mode with
+`BAKUDO_ARTIFACT_ROOT` set; the service owns fresh-guest lifecycle, bounded
+artifact persistence, pin checks, and cleanup. Otherwise durable capture
+returns the typed `unsupported` status and the sync command prints an
+actionable configuration error.
+
+## Performance API
+
+The HTTP surface mirrors the domain resources:
+
+- `GET /workloads` and `POST /workloads/validate`
+- `POST /performance/measurements`
+- `POST /performance/captures`
+- `POST /performance/comparisons`
+- `GET /performance/records/{measurement_|snapshot_|comparison_...}`
+- `GET /performance/regressions?repository=NAME`
+
+Create routes return HTTP 202 with an `operation_id`. `bakudo serve` wires the
+Temporal dispatcher; an embedded `build_app()` without an injected dispatcher
+returns HTTP 409 for create calls rather than executing work on the API host.
+Workload validation and record reads remain available. When
+`BAKUDO_API_TOKEN` is set, send it as a bearer token on every route.
+
 ## Output and exit statuses
 
 Machine-facing success data goes to stdout. Validation, configuration, and
@@ -92,10 +199,14 @@ Use the same interpreter for every tool:
 
 ```bash
 make doctor
+make test-performance
 make check
 make wheel-smoke
 ```
 
 `make install` installs `.[all,dev]`. Override `PYTHON` when necessary, for
 example `make PYTHON=.venv/bin/python check`. `make wheel` builds without
-editing `pyproject.toml` or any other tracked file.
+editing `pyproject.toml` or any other tracked file. `make
+test-performance-temporal-live` requires `TEMPORAL_ADDRESS` and validates the
+durable workflow path without KVM. `make test-performance-live` additionally
+requires a trusted, warmed abox/KVM environment.

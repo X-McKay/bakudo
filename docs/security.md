@@ -95,3 +95,30 @@ denies host/private/metadata ranges). Note that under abox 0.7.0 spec
 the 0.6.0 loopback-only guest: a cooperating client inside the guest can still
 reach host-managed domains through the audited abox proxy, so `none` means
 "no repo-approved egress", not "zero egress".
+
+## Workload measurement and diagnostic capture
+
+Target-repository performance evidence is a separate trust domain from agent
+evaluation:
+
+- A `WorkloadSpec` uses a shell-free argv and a verified immutable
+  `WorkloadPin`; traversal, symlink, undeclared-file, digest, and size checks
+  fail before execution.
+- Every warmup, measured invocation, and diagnostic capture starts in a fresh
+  abox guest at an exact `RevisionPin` and `EnvironmentPin`. Target code never
+  runs in the trusted control plane.
+- Timed `MeasurementRecord` invocations never enable a profiler. Instrumented
+  captures create a distinct `PerformanceSnapshot`; capture duration and raw
+  profiler output cannot satisfy a comparison or promotion gate.
+- Raw diagnostic artifacts are bounded, content-addressed, digest-verified,
+  and stored below the explicitly configured restricted artifact root.
+  Normalizers bound hostile output and expose only typed hotspots/warnings.
+- `PerformanceComparison` recomputes summaries from raw samples, rejects
+  profiled or incompatible environments, and treats missing/non-finite/failed
+  evidence and integrity violations as contagious.
+- Temporal requests carry the retrievable workload source separately from the
+  immutable pin and verify the loaded bytes again in the worker. Retry-stable
+  IDs make persistence idempotent and collision checks reject changed inputs.
+
+Software-artifact experiments preserve these boundaries: observations carry
+only persisted `MeasurementRecord` IDs, not target-controlled summaries.

@@ -17,16 +17,66 @@ from bakudo.api.server import build_app  # noqa: E402
 TOKEN = "s3cret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 WRONG_AUTH = {"Authorization": "Bearer wrong"}
+OPTIMIZE_BODY = {
+    "repo": "r",
+    "title": "t",
+    "performance": {
+        "workloadRef": {
+            "name": "smoke-python-loop",
+            "version": "1.0.0",
+            "source": "directory",
+        },
+        "primaryMetric": "latency_seconds",
+    },
+}
 
 # (method, route template, concrete path, JSON body) — one entry per route.
 # test_auth_matrix_covers_every_route ensures this stays exhaustive.
 ROUTES = [
+    ("GET", "/workloads", "/workloads", None),
+    ("POST", "/workloads/validate", "/workloads/validate", {"document": {}}),
+    (
+        "POST",
+        "/performance/measurements",
+        "/performance/measurements",
+        {"repository": "r", "workload": "w", "environment": {}},
+    ),
+    (
+        "POST",
+        "/performance/captures",
+        "/performance/captures",
+        {"repository": "r", "workload": "w", "profiler": "p", "environment": {}},
+    ),
+    (
+        "POST",
+        "/performance/comparisons",
+        "/performance/comparisons",
+        {
+            "repository": "r",
+            "workload": "w",
+            "baselineRevision": "a",
+            "candidateRevision": "b",
+            "environment": {},
+        },
+    ),
+    (
+        "GET",
+        "/performance/records/{record_id}",
+        "/performance/records/measurement_missing",
+        None,
+    ),
+    ("GET", "/performance/regressions", "/performance/regressions", None),
     ("POST", "/objectives", "/objectives", {"repo": "r", "type": "explore", "title": "t"}),
     ("GET", "/objectives", "/objectives", None),
     ("POST", "/runs", "/runs", {"objective_id": "obj_x", "agent": "explore"}),
     ("GET", "/runs/{run_id}", "/runs/run_x", None),
     ("GET", "/runs/{run_id}/logs", "/runs/run_x/logs", None),
-    ("POST", "/optimize", "/optimize", {"repo": "r", "title": "t"}),
+    (
+        "POST",
+        "/optimize",
+        "/optimize",
+        OPTIMIZE_BODY,
+    ),
     (
         "POST",
         "/promotions/{promotion_id}/approve",
@@ -48,8 +98,7 @@ ROUTES = [
             "apiVersion": "bakudo.ai/v1alpha1",
             "kind": "ExperimentSpec",
             "metadata": {"name": "t"},
-            "subject": "agent-spec",
-            "baseline": "explore@1",
+            "subject": {"kind": "agent-spec", "baseline": "explore@1"},
         },
     ),
     ("GET", "/experiments/{experiment_id}", "/experiments/exp_x", None),
@@ -204,7 +253,7 @@ def test_correct_token_round_trip(monkeypatch):
 
 def test_optimize_409_when_sandbox_unset():
     client = TestClient(build_app())
-    resp = client.post("/optimize", json={"repo": "r", "title": "t"})
+    resp = client.post("/optimize", json=OPTIMIZE_BODY)
     assert resp.status_code == 409
     assert "BAKUDO_SANDBOX" in resp.json()["detail"]
 
@@ -212,7 +261,7 @@ def test_optimize_409_when_sandbox_unset():
 def test_optimize_409_when_local_sandbox_outside_dev(monkeypatch):
     monkeypatch.setenv("BAKUDO_SANDBOX", "local")
     client = TestClient(build_app())
-    resp = client.post("/optimize", json={"repo": "r", "title": "t"})
+    resp = client.post("/optimize", json=OPTIMIZE_BODY)
     assert resp.status_code == 409
     assert "BAKUDO_ENV" in resp.json()["detail"]
 
@@ -220,7 +269,7 @@ def test_optimize_409_when_local_sandbox_outside_dev(monkeypatch):
 def test_optimize_409_on_unknown_sandbox_value(monkeypatch):
     monkeypatch.setenv("BAKUDO_SANDBOX", "bogus")
     client = TestClient(build_app())
-    assert client.post("/optimize", json={"repo": "r", "title": "t"}).status_code == 409
+    assert client.post("/optimize", json=OPTIMIZE_BODY).status_code == 409
 
 
 def test_runs_409_when_sandbox_unset():
@@ -241,8 +290,7 @@ _EXPERIMENT_BODY = {
     "apiVersion": "bakudo.ai/v1alpha1",
     "kind": "ExperimentSpec",
     "metadata": {"name": "t"},
-    "subject": "agent-spec",
-    "baseline": "explore@1",
+    "subject": {"kind": "agent-spec", "baseline": "explore@1"},
 }
 
 
@@ -267,7 +315,7 @@ def test_experiments_409_when_dev_env_unset(monkeypatch):
 def test_experiments_422_on_invalid_spec(monkeypatch):
     _dev_local_sandbox(monkeypatch)
     client = TestClient(build_app())
-    bad = {**_EXPERIMENT_BODY, "subject": "not-agent-spec"}
+    bad = {**_EXPERIMENT_BODY, "subject": {"kind": "not-agent-spec"}}
     resp = client.post("/experiments", json=bad)
     assert resp.status_code == 422
 
@@ -280,7 +328,13 @@ def test_experiments_post_get_round_trip(monkeypatch):
     client = TestClient(build_app(tools))
     # count=1 selects one primary task; paired-task closure deliberately adds
     # its counterpart so joint no-change/fix behavior remains measurable.
-    body = {**_EXPERIMENT_BODY, "taskSelector": {"count": 1}}
+    body = {
+        **_EXPERIMENT_BODY,
+        "subject": {
+            **_EXPERIMENT_BODY["subject"],
+            "taskSelector": {"count": 1},
+        },
+    }
     resp = client.post("/experiments", json=body)
     assert resp.status_code == 200, resp.text
     experiment_id = resp.json()["id"]
@@ -315,19 +369,33 @@ def test_optimize_threads_resolved_sandbox_into_loop(monkeypatch):
     _dev_local_sandbox(monkeypatch)
     captured: dict = {}
 
+    def comparison(diff):
+        return None
+
     def fake_loop(objective, scout_spec, attempt_spec, **kwargs):
         captured["objective"] = objective
         captured["kwargs"] = kwargs
         return {"status": "no-change", "rounds_used": 1, "reason": "stub"}
 
     monkeypatch.setattr("bakudo.control.optimize.run_optimize_loop", fake_loop)
+    monkeypatch.setattr(
+        "bakudo.api.server._build_optimize_performance_compare",
+        lambda objective, ledger, seed: comparison,
+    )
     client = TestClient(build_app())
     resp = client.post(
         "/optimize",
         json={
             "repo": "payments-api",
             "title": "Optimize dedup",
-            "benchCommand": "pytest tests/benchmarks -q",
+            "performance": {
+                "workloadRef": {
+                    "name": "smoke-python-loop",
+                    "version": "1.0.0",
+                    "source": "directory",
+                },
+                "primaryMetric": "latency_seconds",
+            },
             "targetPaths": ["src/ledger/**"],
             "maxFilesChanged": 3,
             "maxRounds": 4,
@@ -343,9 +411,11 @@ def test_optimize_threads_resolved_sandbox_into_loop(monkeypatch):
     assert captured["kwargs"]["sandbox"] is local_sandbox
     objective = captured["objective"]
     assert objective.type.value == "optimize"
-    assert objective.constraints.bench_command == "pytest tests/benchmarks -q"
+    assert objective.performance.workload_ref.name == "smoke-python-loop"
+    assert objective.performance.primary_metric == "latency_seconds"
     assert objective.constraints.target_paths == ["src/ledger/**"]
     assert captured["kwargs"]["max_rounds"] == 4
+    assert captured["kwargs"]["performance_compare"] is comparison
 
 
 # --- API-8: POST /runs takes a JSON body and knows the repo's seed agents ---

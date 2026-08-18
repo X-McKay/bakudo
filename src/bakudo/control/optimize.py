@@ -16,21 +16,22 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from ..performance.models import PerformanceComparison, RecordStatus, Verdict, WorkloadPin
+from ..performance.revisions import sha256_text
+
 # An attempt must actually improve at least one measured dimension (score
-# strictly above neutral) and regress neither to be eligible.
+# strictly above neutral) and regress neither to be eligible. Performance is
+# deliberately absent: only a trusted PerformanceComparison can establish it.
 NEUTRAL = 0.5
 
-# Issue #28 (OPT-3): the minimum *independently measured* fractional speedup
-# for a winner's benchmark claim to count as reproduced. Wall-clock timing of
-# the whole bench command carries interpreter-startup noise, so this floor is
-# deliberately above perf_eval's PERF_NOISE_TOLERANCE.
-BENCH_VERIFY_MIN_IMPROVEMENT = 0.05
-
-# Independent measurement hook: (winner_diff, bench_command) ->
-# (measured_before_seconds, measured_after_seconds). Injected so the loop
-# logic stays pure; the live implementation runs both benches in a fresh
-# sandbox (never host-side — the diff is model-authored code).
-BenchMeasure = Callable[[str, str], tuple[float, float]]
+# The callback receives ``AboxOutcome.diff`` unchanged. Its UTF-8 bytes (with
+# no newline or Unicode normalization) define ``candidateRevision.patchDigest``
+# via ``sha256_text``. It must provision that patch outside the agent's mutable
+# tree, rerun the objective's already-pinned workload against fresh baseline/
+# candidate environments, persist the resulting evidence, and return the typed
+# comparison. Exceptions, malformed output, and lineage mismatches are local
+# fail-closed rejections; they never make a candidate eligible.
+PerformanceCompare = Callable[[str], PerformanceComparison]
 
 # Suites that must be present and passing for an attempt to be eligible.
 REQUIRED_PASSED_SUITES = ("schema", "safety", "task", "code")
@@ -50,13 +51,15 @@ def scout_objective(
     constraints = base.get("constraints", {})
     if constraints.get("targetPaths"):
         lines.append(f"Target paths: {', '.join(constraints['targetPaths'])}")
-    if constraints.get("benchCommand"):
-        # The scout's read-only policy denies the bench; advertising it as
-        # runnable burned policy denials in every live cycle.
+    performance = base.get("performance") or {}
+    workload_ref = performance.get("workloadRef") or {}
+    if workload_ref:
         lines.append(
-            f"Benchmark command (context only — your read-only policy denies "
-            f"it, do NOT run it; the attempt agents will): "
-            f"{constraints['benchCommand']}"
+            "Pinned performance evidence: workload "
+            f"{workload_ref.get('name')}@{workload_ref.get('version')}; primary metric "
+            f"{performance.get('primaryMetric')}. Treat this as diagnostic context only. "
+            "Do not attempt to inspect or mutate the privileged workload; Bakudo will "
+            "measure candidates independently."
         )
     lines.append(
         "Propose up to N distinct optimization approaches as proposedFollowups, "
@@ -89,13 +92,10 @@ def attempt_objective(
     description_lines = [
         f"Implement exactly this one optimization approach:\n{approach}",
         "Keep the full test suite green. Do not change public APIs unless the "
-        "objective explicitly allows it. Report bench_seconds_before/"
-        "bench_seconds_after (run the benchmark command before and after your "
-        "change) and complexity_before/complexity_after in result.json "
-        "metrics.",
+        "objective explicitly allows it. Bakudo will independently evaluate "
+        "performance with the pinned workload after this run; do not report "
+        "self-measured timing or complexity deltas as proof.",
     ]
-    if constraints.get("benchCommand"):
-        description_lines.append(f"Benchmark command: {constraints['benchCommand']}")
 
     return {
         **base,
@@ -138,43 +138,114 @@ def _eligible(scorecard: dict[str, Any]) -> tuple[bool, str]:
         return False, f"failed suites: {', '.join(missing)}"
 
     suites = scorecard.get("suites", {})
-    perf = suites.get("perf", NEUTRAL)
     simplicity = suites.get("simplicity", NEUTRAL)
-    if perf < NEUTRAL or simplicity < NEUTRAL:
-        return False, "regressed perf or simplicity"
-    if perf <= NEUTRAL and simplicity <= NEUTRAL:
-        return False, "no measured improvement"
+    if simplicity < NEUTRAL:
+        return False, "regressed simplicity"
     return True, "eligible"
 
 
-def bench_reproduces(measured_before: float, measured_after: float) -> tuple[bool, str]:
-    """Judge an independent bench measurement (issue #28, OPT-3).
-
-    The winner's *claimed* speedup is irrelevant here: selection already
-    gated on it. What must hold is that the measured run shows a real
-    improvement at all — otherwise the claim did not reproduce.
-    """
-    if measured_before <= 0:
-        return False, f"invalid measured baseline {measured_before!r}"
-    improvement = (measured_before - measured_after) / measured_before
-    detail = (
-        f"measured {measured_before:.4f}s -> {measured_after:.4f}s "
-        f"({improvement:+.0%})"
-    )
-    if improvement > BENCH_VERIFY_MIN_IMPROVEMENT:
-        return True, detail
-    return False, f"{detail}: claimed speedup did not reproduce"
+def _comparison(candidate: dict[str, Any]) -> PerformanceComparison | None:
+    value = candidate.get("performance_comparison")
+    if isinstance(value, PerformanceComparison):
+        return value
+    if isinstance(value, dict):
+        try:
+            return PerformanceComparison.model_validate(value)
+        except ValueError:
+            return None
+    return None
 
 
-def select_winner(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _comparison_rejection(
+    comparison: PerformanceComparison,
+    performance: dict[str, Any],
+    *,
+    candidate_diff: str,
+) -> str | None:
+    """Return why trusted evidence is ineligible, or ``None`` when it proves a win."""
+
+    workload_ref = performance.get("workloadRef") or {}
+    if comparison.workload.name != workload_ref.get("name"):
+        return "comparison workload name does not match the objective"
+    if comparison.workload.version != workload_ref.get("version"):
+        return "comparison workload version does not match the objective"
+    workload_pin = performance.get("workloadPin")
+    if workload_pin is not None:
+        try:
+            expected_pin = WorkloadPin.model_validate(workload_pin)
+        except ValueError:
+            return "objective workload pin is invalid"
+        if comparison.workload != expected_pin:
+            return "comparison workload pin does not match the objective"
+    if comparison.primary_metric != performance.get("primaryMetric"):
+        return "comparison primary metric does not match the objective"
+    policy = performance.get("decisionPolicy") or {}
+    confidence = float(policy.get("confidence", 0.95))
+    if comparison.confidence != confidence:
+        return "comparison confidence does not match the objective policy"
+    bootstrap_resamples = int(policy.get("bootstrapResamples", 10_000))
+    if comparison.bootstrap_resamples != bootstrap_resamples:
+        return "comparison bootstrap resamples do not match the objective policy"
+    if comparison.candidate_revision.patch_digest != sha256_text(candidate_diff):
+        return "comparison candidate patch digest does not match the captured diff"
+    if (
+        comparison.candidate_revision.repository
+        != comparison.baseline_revision.repository
+        or comparison.candidate_revision.base_commit_sha
+        != comparison.baseline_revision.commit_sha
+    ):
+        return "comparison candidate revision is not based on the measured baseline"
+    if comparison.status is not RecordStatus.completed:
+        return f"comparison status is {comparison.status.value}"
+    if comparison.verdict is not Verdict.improved:
+        return f"comparison verdict is {comparison.verdict.value}"
+    if (
+        not comparison.integrity.valid
+        or comparison.incompatibilities
+        or comparison.allowed_differences
+        or comparison.baseline_environment != comparison.candidate_environment
+    ):
+        return "comparison integrity or pin compatibility failed"
+
+    metrics = {metric.metric_name: metric for metric in comparison.metrics}
+    primary = metrics.get(comparison.primary_metric)
+    if primary is None or not primary.valid:
+        return "comparison primary metric is invalid"
+    minimum = float(policy.get("minimumRelativeImprovement", 0.05))
+    if (
+        primary.relative_effect is None
+        or primary.ci_lower is None
+        or primary.relative_effect <= minimum
+        or primary.ci_lower <= minimum
+    ):
+        return "comparison does not clear the objective's minimum improvement"
+    for name in policy.get("protectedMetrics", []):
+        metric = metrics.get(name)
+        if metric is None or not metric.valid:
+            return f"protected metric {name!r} is missing or invalid"
+        if metric.verdict is Verdict.regressed:
+            return f"protected metric {name!r} regressed"
+    if not comparison.eligible:
+        return "comparison is not eligible"
+    return None
+
+
+def select_winner(
+    candidates: list[dict[str, Any]],
+    *,
+    performance: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Pick the best eligible attempt, or None when no safe improvement exists.
 
     Candidates are ``AgentRunOutput``-shaped dicts (``result``, ``scorecard``,
     ``git_branch``...). Eligibility is gated (behavior preservation is a hard
     gate, not a weighted score); eligible attempts are ranked by overall
-    scorecard score, ties broken by smaller diff (fewer changed files).
+    performance effect, then scorecard score, then smaller diff. Candidates
+    without trusted comparison evidence are ineligible by construction.
     """
-    eligible: list[tuple[float, int, dict[str, Any]]] = []
+    if not performance:
+        return None
+    eligible: list[tuple[float, float, int, dict[str, Any]]] = []
     for candidate in candidates:
         scorecard = candidate.get("scorecard")
         result = candidate.get("result")
@@ -183,8 +254,21 @@ def select_winner(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         ok, _ = _eligible(scorecard)
         if not ok:
             continue
+        comparison = _comparison(candidate)
+        if comparison is None:
+            continue
+        if _comparison_rejection(
+            comparison, performance, candidate_diff=candidate.get("diff") or ""
+        ) is not None:
+            continue
+        primary = next(
+            metric
+            for metric in comparison.metrics
+            if metric.metric_name == comparison.primary_metric
+        )
         eligible.append(
             (
+                float(primary.relative_effect or 0.0),
                 float(scorecard.get("overall_score", 0.0)),
                 -len(result.get("changed_files", [])),
                 candidate,
@@ -192,8 +276,8 @@ def select_winner(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
         )
     if not eligible:
         return None
-    eligible.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-    return eligible[0][2]
+    eligible.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+    return eligible[0][3]
 
 
 def round_feedback(candidates: list[dict[str, Any]]) -> list[str]:
@@ -215,6 +299,10 @@ def round_feedback(candidates: list[dict[str, Any]]) -> list[str]:
         ok, reason = _eligible(scorecard)
         if not ok:
             feedback.append(f"'{title}': {reason}")
+            continue
+        comparison = _comparison(candidate)
+        if comparison is None:
+            feedback.append(f"'{title}': independent performance comparison unavailable")
     return feedback
 
 
@@ -253,7 +341,7 @@ def run_optimize_loop(
     max_approaches: int = 3,
     ledger: Any = None,
     sandbox: Any = None,
-    bench_measure: BenchMeasure | None = None,
+    performance_compare: PerformanceCompare | None = None,
 ) -> dict[str, Any]:
     """Run the scout → attempts → selection loop in-process.
 
@@ -322,8 +410,9 @@ def run_optimize_loop(
                 {
                     "run_id": attempt.run_id,
                     "git_branch": attempt.outcome.git_branch,
-                    # The agent branch does not survive sandbox cleanup, so the
-                    # collected diff is the only re-benchable artifact (#28).
+                    # The agent branch does not survive sandbox cleanup. The
+                    # exact captured diff is therefore the candidate artifact
+                    # bound into independent measurement evidence.
                     "diff": attempt.outcome.diff,
                     "error": attempt.outcome.error or attempt.outcome.stderr[-500:],
                     "result": attempt.result.to_dict() if attempt.result else None,
@@ -335,9 +424,10 @@ def run_optimize_loop(
                 }
             )
 
-        bench_cmd = base.get("constraints", {}).get("benchCommand")
-        winner, verified, verify_feedback = _verified_winner(
-            candidates, bench_cmd, bench_measure
+        winner, verify_feedback = _compared_winner(
+            candidates,
+            base.get("performance") or {},
+            performance_compare,
         )
         if winner is not None:
             return {
@@ -347,7 +437,7 @@ def run_optimize_loop(
                 "git_branch": winner.get("git_branch"),
                 "scorecard": winner.get("scorecard"),
                 "result": winner.get("result"),
-                "bench_verified": verified,
+                "performance_comparison": winner.get("performance_comparison"),
             }
         # Accumulate across rounds (OPT-17): round N+1's scout must still see
         # round 1's dead ends, or it can re-propose them.
@@ -361,37 +451,47 @@ def run_optimize_loop(
     }
 
 
-def _verified_winner(
+def _compared_winner(
     candidates: list[dict[str, Any]],
-    bench_command: str | None,
-    bench_measure: BenchMeasure | None,
-) -> tuple[dict[str, Any] | None, bool, list[str]]:
-    """Select a winner, independently re-benching each pick (issue #28).
+    performance: dict[str, Any],
+    performance_compare: PerformanceCompare | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Measure every behaviorally eligible candidate, then select by trusted evidence."""
 
-    A candidate whose claimed speedup does not reproduce is rejected (with
-    feedback for the next scout round) and selection falls through to the
-    next eligible attempt. Without a bench command or measurer there is
-    nothing to verify: selection proceeds as before, marked unverified.
-    """
-    remaining = list(candidates)
     verify_feedback: list[str] = []
-    while True:
-        winner = select_winner(remaining)
-        if winner is None:
-            return None, False, verify_feedback
-        if not bench_command or bench_measure is None:
-            return winner, False, verify_feedback
-        try:
-            measured_before, measured_after = bench_measure(
-                winner.get("diff") or "", bench_command
+    for candidate in candidates:
+        scorecard = candidate.get("scorecard")
+        result = candidate.get("result") or {}
+        ok, _reason = _eligible(scorecard) if scorecard else (False, "missing scorecard")
+        if result.get("status") != "success" or not ok:
+            continue
+        title = (result.get("summary") or "attempt")[:120]
+        diff = candidate.get("diff") or ""
+        if not diff.strip():
+            verify_feedback.append(f"'{title}': candidate produced no patch to measure")
+            continue
+        if performance_compare is None:
+            verify_feedback.append(
+                f"'{title}': independent performance comparison unavailable"
             )
-            ok, detail = bench_reproduces(measured_before, measured_after)
-        except Exception as exc:  # noqa: BLE001 - a broken bench must not crash the loop
-            ok, detail = False, f"bench verification errored: {exc}"
-        if ok:
-            return winner, True, verify_feedback
-        title = ((winner.get("result") or {}).get("summary") or "attempt")[:120]
-        verify_feedback.append(
-            f"'{title}': failed independent bench verification: {detail}"
-        )
-        remaining = [c for c in remaining if c is not winner]
+            continue
+        try:
+            returned = performance_compare(diff)
+            comparison = (
+                returned
+                if isinstance(returned, PerformanceComparison)
+                else PerformanceComparison.model_validate(returned)
+            )
+            serialized = comparison.to_dict()
+            rejection = _comparison_rejection(
+                comparison, performance, candidate_diff=diff
+            )
+        except Exception as exc:  # noqa: BLE001 - measurement failure is typed feedback
+            verify_feedback.append(
+                f"'{title}': independent performance comparison failed: {exc}"
+            )
+            continue
+        candidate["performance_comparison"] = serialized
+        if rejection is not None:
+            verify_feedback.append(f"'{title}': {rejection}")
+    return select_winner(candidates, performance=performance), verify_feedback

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from bakudo.paths import agents_dir, schemas_dir, skills_dir, smoke_tasks_dir
+from bakudo.paths import agents_dir, schemas_dir, skills_dir, smoke_tasks_dir, smoke_workloads_dir
 
 # The seed roles every install must be able to resolve by name.
 SEED_AGENTS = {
@@ -76,6 +76,13 @@ def test_smoke_tasks_dir_resolves_and_contains_exemplars():
     assert directory.is_dir()
     names = {path.name for path in directory.iterdir() if (path / "task.yaml").is_file()}
     assert names == EXEMPLAR_TASKS
+
+
+def test_smoke_workloads_dir_resolves_and_contains_exemplar():
+    directory = smoke_workloads_dir()
+    assert directory.is_dir()
+    manifests = sorted(directory.glob("*/workload.yaml"))
+    assert [path.parent.name for path in manifests] == ["python-loop"]
 
 
 # A hand-built agents path in any spelling: the quoted segment ('agents' or

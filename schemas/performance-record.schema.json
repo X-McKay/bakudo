@@ -1,0 +1,1471 @@
+{
+  "$defs": {
+    "EnvironmentPin": {
+      "additionalProperties": false,
+      "properties": {
+        "aboxVersion": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Aboxversion",
+          "type": "string"
+        },
+        "architecture": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Architecture",
+          "type": "string"
+        },
+        "bakudoVersion": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Bakudoversion",
+          "type": "string"
+        },
+        "cpuAffinity": {
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Cpuaffinity",
+          "type": "array"
+        },
+        "cpuCount": {
+          "minimum": 1,
+          "title": "Cpucount",
+          "type": "integer"
+        },
+        "dependencyLockDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Dependencylockdigest",
+          "type": "string"
+        },
+        "environmentDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Environmentdigest",
+          "type": "string"
+        },
+        "hardwareClass": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Hardwareclass",
+          "type": "string"
+        },
+        "imageDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Imagedigest",
+          "type": "string"
+        },
+        "kernel": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Kernel",
+          "type": "string"
+        },
+        "memoryMb": {
+          "minimum": 1,
+          "title": "Memorymb",
+          "type": "integer"
+        },
+        "os": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Os",
+          "type": "string"
+        },
+        "profile": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Profile",
+          "type": "string"
+        },
+        "profilerAdapter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profileradapter"
+        },
+        "profilerVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profilerversion"
+        },
+        "runtimeVersions": {
+          "items": {
+            "$ref": "#/$defs/RuntimeVersion"
+          },
+          "title": "Runtimeversions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "bakudoVersion",
+        "aboxVersion",
+        "imageDigest",
+        "profile",
+        "hardwareClass",
+        "architecture",
+        "cpuCount",
+        "memoryMb",
+        "os",
+        "kernel",
+        "dependencyLockDigest",
+        "environmentDigest"
+      ],
+      "title": "EnvironmentPin",
+      "type": "object"
+    },
+    "FailureReason": {
+      "enum": [
+        "infrastructure",
+        "workload",
+        "adapter",
+        "normalization",
+        "persistence",
+        "timeout",
+        "cancelled",
+        "invalid-sample",
+        "integrity",
+        "incompatible-pins",
+        "unsupported"
+      ],
+      "title": "FailureReason",
+      "type": "string"
+    },
+    "FileDigest": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "path": {
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "digest"
+      ],
+      "title": "FileDigest",
+      "type": "object"
+    },
+    "Hotspot": {
+      "additionalProperties": false,
+      "properties": {
+        "exclusiveCost": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exclusivecost"
+        },
+        "extensions": {
+          "maxProperties": 64,
+          "patternProperties": {
+            "^[a-z][a-z0-9-]*(?:\\.[A-Za-z][A-Za-z0-9_-]*)+$": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "Extensions",
+          "type": "object"
+        },
+        "inclusiveCost": {
+          "minimum": 0,
+          "title": "Inclusivecost",
+          "type": "number"
+        },
+        "kind": {
+          "$ref": "#/$defs/HotspotKind"
+        },
+        "label": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "percentage": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Percentage"
+        },
+        "quality": {
+          "default": "resolved",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Quality",
+          "type": "string"
+        },
+        "sampleCount": {
+          "minimum": 0,
+          "title": "Samplecount",
+          "type": "integer"
+        },
+        "sourceLine": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sourceline"
+        },
+        "sourcePath": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sourcepath"
+        },
+        "stableKey": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Stablekey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "stableKey",
+        "label",
+        "inclusiveCost",
+        "sampleCount"
+      ],
+      "title": "Hotspot",
+      "type": "object"
+    },
+    "HotspotKind": {
+      "enum": [
+        "function",
+        "call-stack",
+        "endpoint",
+        "query",
+        "allocation",
+        "lock",
+        "io",
+        "resource"
+      ],
+      "title": "HotspotKind",
+      "type": "string"
+    },
+    "IntegrityResult": {
+      "additionalProperties": false,
+      "properties": {
+        "details": {
+          "additionalProperties": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "maxProperties": 64,
+          "title": "Details",
+          "type": "object"
+        },
+        "valid": {
+          "default": true,
+          "title": "Valid",
+          "type": "boolean"
+        },
+        "violations": {
+          "default": [],
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Violations",
+          "type": "array"
+        }
+      },
+      "title": "IntegrityResult",
+      "type": "object"
+    },
+    "InvocationOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "elapsedSeconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Elapsedseconds"
+        },
+        "exitCode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exitcode"
+        },
+        "failureReason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/MetricValue"
+          },
+          "maxItems": 64,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "ordinal": {
+          "minimum": 0,
+          "title": "Ordinal",
+          "type": "integer"
+        },
+        "phase": {
+          "$ref": "#/$defs/InvocationPhase"
+        },
+        "status": {
+          "$ref": "#/$defs/RecordStatus"
+        }
+      },
+      "required": [
+        "ordinal",
+        "phase",
+        "status"
+      ],
+      "title": "InvocationOutcome",
+      "type": "object"
+    },
+    "InvocationPhase": {
+      "enum": [
+        "warmup",
+        "measured"
+      ],
+      "title": "InvocationPhase",
+      "type": "string"
+    },
+    "MeasurementRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "completedAt": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completedat"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "pattern": "(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentPin"
+        },
+        "exitCode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exitcode"
+        },
+        "failureReason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "pattern": "^measurement_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "integrity": {
+          "$ref": "#/$defs/IntegrityResult"
+        },
+        "invocations": {
+          "items": {
+            "$ref": "#/$defs/InvocationOutcome"
+          },
+          "maxItems": 10000,
+          "title": "Invocations",
+          "type": "array"
+        },
+        "kind": {
+          "const": "MeasurementRecord",
+          "default": "MeasurementRecord",
+          "title": "Kind",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/MetricSampleSet"
+          },
+          "maxItems": 64,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "planDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Plandigest",
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/RevisionPin"
+        },
+        "schemaVersion": {
+          "const": "1",
+          "default": "1",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "startedAt": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Startedat"
+        },
+        "status": {
+          "$ref": "#/$defs/RecordStatus"
+        },
+        "stderr": {
+          "default": "",
+          "maxLength": 65536,
+          "title": "Stderr",
+          "type": "string"
+        },
+        "stdout": {
+          "default": "",
+          "maxLength": 65536,
+          "title": "Stdout",
+          "type": "string"
+        },
+        "warmups": {
+          "items": {
+            "$ref": "#/$defs/InvocationOutcome"
+          },
+          "maxItems": 1000,
+          "title": "Warmups",
+          "type": "array"
+        },
+        "workload": {
+          "$ref": "#/$defs/WorkloadPin"
+        }
+      },
+      "required": [
+        "workload",
+        "revision",
+        "environment",
+        "planDigest",
+        "status"
+      ],
+      "title": "MeasurementRecord",
+      "type": "object"
+    },
+    "MetricComparison": {
+      "additionalProperties": false,
+      "properties": {
+        "absoluteEffect": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Absoluteeffect"
+        },
+        "baselineDispersion": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baselinedispersion"
+        },
+        "baselineSummary": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Baselinesummary"
+        },
+        "candidateDispersion": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Candidatedispersion"
+        },
+        "candidateSummary": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Candidatesummary"
+        },
+        "ciLower": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cilower"
+        },
+        "ciUpper": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ciupper"
+        },
+        "direction": {
+          "$ref": "#/$defs/MetricDirection"
+        },
+        "estimator": {
+          "$ref": "#/$defs/MetricEstimator"
+        },
+        "metricName": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Metricname",
+          "type": "string"
+        },
+        "practicalThreshold": {
+          "minimum": 0,
+          "title": "Practicalthreshold",
+          "type": "number"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Reasons",
+          "type": "array"
+        },
+        "relativeEffect": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Relativeeffect"
+        },
+        "sampleCount": {
+          "minimum": 0,
+          "title": "Samplecount",
+          "type": "integer"
+        },
+        "unit": {
+          "$ref": "#/$defs/MetricUnit"
+        },
+        "valid": {
+          "title": "Valid",
+          "type": "boolean"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "metricName",
+        "unit",
+        "direction",
+        "estimator",
+        "baselineSummary",
+        "candidateSummary",
+        "absoluteEffect",
+        "relativeEffect",
+        "ciLower",
+        "ciUpper",
+        "practicalThreshold",
+        "sampleCount",
+        "verdict",
+        "valid"
+      ],
+      "title": "MetricComparison",
+      "type": "object"
+    },
+    "MetricDirection": {
+      "enum": [
+        "lower",
+        "higher"
+      ],
+      "title": "MetricDirection",
+      "type": "string"
+    },
+    "MetricEstimator": {
+      "enum": [
+        "median",
+        "mean",
+        "p95",
+        "p99"
+      ],
+      "title": "MetricEstimator",
+      "type": "string"
+    },
+    "MetricSampleSet": {
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/MetricDirection"
+        },
+        "dispersion": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dispersion"
+        },
+        "estimator": {
+          "$ref": "#/$defs/MetricEstimator"
+        },
+        "invalidReasons": {
+          "items": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Invalidreasons",
+          "type": "array"
+        },
+        "invalidSampleCount": {
+          "default": 0,
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Invalidsamplecount",
+          "type": "integer"
+        },
+        "metricName": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Metricname",
+          "type": "string"
+        },
+        "samples": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 10000,
+          "title": "Samples",
+          "type": "array"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "unit": {
+          "$ref": "#/$defs/MetricUnit"
+        },
+        "valid": {
+          "title": "Valid",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "metricName",
+        "unit",
+        "direction",
+        "estimator",
+        "valid"
+      ],
+      "title": "MetricSampleSet",
+      "type": "object"
+    },
+    "MetricUnit": {
+      "enum": [
+        "seconds",
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+        "bytes",
+        "count",
+        "percent",
+        "operations/second",
+        "requests/second"
+      ],
+      "title": "MetricUnit",
+      "type": "string"
+    },
+    "MetricValue": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "unit": {
+          "$ref": "#/$defs/MetricUnit"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "unit",
+        "value"
+      ],
+      "title": "MetricValue",
+      "type": "object"
+    },
+    "PerformanceComparison": {
+      "additionalProperties": false,
+      "properties": {
+        "allowedDifferences": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Alloweddifferences",
+          "type": "array"
+        },
+        "analysisSeed": {
+          "title": "Analysisseed",
+          "type": "integer"
+        },
+        "baselineEnvironment": {
+          "$ref": "#/$defs/EnvironmentPin"
+        },
+        "baselineMeasurementId": {
+          "title": "Baselinemeasurementid",
+          "type": "string"
+        },
+        "baselineRevision": {
+          "$ref": "#/$defs/RevisionPin"
+        },
+        "bootstrapResamples": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Bootstrapresamples",
+          "type": "integer"
+        },
+        "candidateEnvironment": {
+          "$ref": "#/$defs/EnvironmentPin"
+        },
+        "candidateMeasurementId": {
+          "title": "Candidatemeasurementid",
+          "type": "string"
+        },
+        "candidateRevision": {
+          "$ref": "#/$defs/RevisionPin"
+        },
+        "confidence": {
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "pattern": "(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "eligible": {
+          "title": "Eligible",
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^comparison_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "incompatibilities": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Incompatibilities",
+          "type": "array"
+        },
+        "integrity": {
+          "$ref": "#/$defs/IntegrityResult"
+        },
+        "kind": {
+          "const": "PerformanceComparison",
+          "default": "PerformanceComparison",
+          "title": "Kind",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/MetricComparison"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "primaryMetric": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Primarymetric",
+          "type": "string"
+        },
+        "schemaVersion": {
+          "const": "1",
+          "default": "1",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RecordStatus"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        },
+        "workload": {
+          "$ref": "#/$defs/WorkloadPin"
+        }
+      },
+      "required": [
+        "workload",
+        "baselineRevision",
+        "candidateRevision",
+        "baselineEnvironment",
+        "candidateEnvironment",
+        "baselineMeasurementId",
+        "candidateMeasurementId",
+        "primaryMetric",
+        "metrics",
+        "status",
+        "verdict",
+        "eligible",
+        "analysisSeed",
+        "confidence",
+        "bootstrapResamples"
+      ],
+      "title": "PerformanceComparison",
+      "type": "object"
+    },
+    "PerformanceRegressionSignal": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "default": false,
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "comparisonId": {
+          "title": "Comparisonid",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "consecutiveObservations": {
+          "minimum": 1,
+          "title": "Consecutiveobservations",
+          "type": "integer"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "pattern": "(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "deduplicationKey": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Deduplicationkey",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^regression_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "PerformanceRegressionSignal",
+          "default": "PerformanceRegressionSignal",
+          "title": "Kind",
+          "type": "string"
+        },
+        "metricName": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Metricname",
+          "type": "string"
+        },
+        "relativeRegression": {
+          "exclusiveMinimum": 0,
+          "title": "Relativeregression",
+          "type": "number"
+        },
+        "repository": {
+          "title": "Repository",
+          "type": "string"
+        },
+        "schemaVersion": {
+          "const": "1",
+          "default": "1",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "topHotspotKey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tophotspotkey"
+        },
+        "workload": {
+          "$ref": "#/$defs/WorkloadPin"
+        }
+      },
+      "required": [
+        "repository",
+        "workload",
+        "metricName",
+        "comparisonId",
+        "relativeRegression",
+        "confidence",
+        "consecutiveObservations",
+        "deduplicationKey"
+      ],
+      "title": "PerformanceRegressionSignal",
+      "type": "object"
+    },
+    "PerformanceSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/RawProfileArtifact"
+          },
+          "maxItems": 64,
+          "title": "Artifacts",
+          "type": "array"
+        },
+        "captureSeconds": {
+          "minimum": 0,
+          "title": "Captureseconds",
+          "type": "number"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "pattern": "(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "descriptor": {
+          "$ref": "#/$defs/ProfilerDescriptor"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentPin"
+        },
+        "hotspots": {
+          "items": {
+            "$ref": "#/$defs/Hotspot"
+          },
+          "maxItems": 10000,
+          "title": "Hotspots",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^snapshot_[0-9A-HJKMNP-TV-Z]{26}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "PerformanceSnapshot",
+          "default": "PerformanceSnapshot",
+          "title": "Kind",
+          "type": "string"
+        },
+        "observedOverhead": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observedoverhead"
+        },
+        "profilerSpecDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Profilerspecdigest",
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/RevisionPin"
+        },
+        "sanitizationStatus": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Sanitizationstatus",
+          "type": "string"
+        },
+        "schemaVersion": {
+          "const": "1",
+          "default": "1",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RecordStatus"
+        },
+        "visibility": {
+          "default": "restricted",
+          "enum": [
+            "summary",
+            "restricted"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "title": "Warnings",
+          "type": "array"
+        },
+        "workload": {
+          "$ref": "#/$defs/WorkloadPin"
+        }
+      },
+      "required": [
+        "workload",
+        "revision",
+        "environment",
+        "profilerSpecDigest",
+        "descriptor",
+        "captureSeconds",
+        "sanitizationStatus",
+        "status"
+      ],
+      "title": "PerformanceSnapshot",
+      "type": "object"
+    },
+    "ProfilerDescriptor": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Adapter",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "signals": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Signals",
+          "type": "array"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "adapter",
+        "version"
+      ],
+      "title": "ProfilerDescriptor",
+      "type": "object"
+    },
+    "RawProfileArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "byteSize": {
+          "minimum": 0,
+          "title": "Bytesize",
+          "type": "integer"
+        },
+        "complete": {
+          "default": true,
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "mediaType": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Mediatype",
+          "type": "string"
+        },
+        "uri": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "digest",
+        "mediaType",
+        "byteSize"
+      ],
+      "title": "RawProfileArtifact",
+      "type": "object"
+    },
+    "RecordStatus": {
+      "enum": [
+        "completed",
+        "inconclusive",
+        "unsupported",
+        "invalid-workload",
+        "incompatible-environment",
+        "timed-out",
+        "failed",
+        "cancelled"
+      ],
+      "title": "RecordStatus",
+      "type": "string"
+    },
+    "RevisionPin": {
+      "additionalProperties": false,
+      "properties": {
+        "baseCommitSHA": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{40,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Basecommitsha"
+        },
+        "commitSHA": {
+          "pattern": "^[0-9a-f]{40,64}$",
+          "title": "Commitsha",
+          "type": "string"
+        },
+        "dirty": {
+          "default": false,
+          "title": "Dirty",
+          "type": "boolean"
+        },
+        "patchDigest": {
+          "anyOf": [
+            {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Patchdigest"
+        },
+        "repository": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Repository",
+          "type": "string"
+        },
+        "sourceURI": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Sourceuri",
+          "type": "string"
+        },
+        "treeDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Treedigest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository",
+        "sourceURI",
+        "commitSHA",
+        "treeDigest"
+      ],
+      "title": "RevisionPin",
+      "type": "object"
+    },
+    "RuntimeVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "RuntimeVersion",
+      "type": "object"
+    },
+    "Verdict": {
+      "enum": [
+        "improved",
+        "regressed",
+        "equivalent",
+        "inconclusive"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "WorkloadPin": {
+      "additionalProperties": false,
+      "properties": {
+        "bundleDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Bundledigest",
+          "type": "string"
+        },
+        "collectionRevision": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Collectionrevision",
+          "type": "string"
+        },
+        "datasetDigests": {
+          "items": {
+            "$ref": "#/$defs/FileDigest"
+          },
+          "title": "Datasetdigests",
+          "type": "array"
+        },
+        "executorDigests": {
+          "items": {
+            "$ref": "#/$defs/FileDigest"
+          },
+          "title": "Executordigests",
+          "type": "array"
+        },
+        "manifestDigest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Manifestdigest",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "sourceKind": {
+          "enum": [
+            "directory",
+            "repository",
+            "bundle"
+          ],
+          "title": "Sourcekind",
+          "type": "string"
+        },
+        "sourceURI": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Sourceuri",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceURI",
+        "sourceKind",
+        "collectionRevision",
+        "name",
+        "version",
+        "manifestDigest",
+        "bundleDigest"
+      ],
+      "title": "WorkloadPin",
+      "type": "object"
+    }
+  },
+  "$id": "https://bakudo.ai/schemas/performance-record.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/MeasurementRecord"
+    },
+    {
+      "$ref": "#/$defs/PerformanceSnapshot"
+    },
+    {
+      "$ref": "#/$defs/PerformanceComparison"
+    },
+    {
+      "$ref": "#/$defs/PerformanceRegressionSignal"
+    }
+  ],
+  "title": "PerformanceRecord"
+}

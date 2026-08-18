@@ -59,4 +59,11 @@ def test_smoke_tasks_are_force_included_in_the_wheel() -> None:
     source tree (mirrors ``agents`` -> ``bakudo/_data/agents``)."""
     force_include = _force_include()
     assert force_include.get("smoke/tasks") == "bakudo/_data/smoke-tasks"
-    assert set(force_include) == {"agents", "schemas", "skills", "smoke/tasks"}
+    assert force_include.get("smoke/workloads") == "bakudo/_data/smoke-workloads"
+    assert set(force_include) == {
+        "agents",
+        "schemas",
+        "skills",
+        "smoke/tasks",
+        "smoke/workloads",
+    }

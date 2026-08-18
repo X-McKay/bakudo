@@ -603,7 +603,11 @@ def test_list_trials_with_experiment_filter():
 def test_record_experiment_self_migrates_then_inserts_on_conflict_do_nothing():
     conn = FakeConn()
     PostgresLedger(conn).record_experiment(
-        "exp_T1", "exp-name", {"baseline": "add-feature@1"}, "running"
+        "exp_T1",
+        "exp-name",
+        "agent-spec",
+        {"subject": {"kind": "agent-spec", "baseline": "add-feature@1"}},
+        "running",
     )
 
     seq = _sql_seq(conn)
@@ -617,7 +621,8 @@ def test_record_experiment_self_migrates_then_inserts_on_conflict_do_nothing():
     assert "on conflict (id) do nothing" in insert_sql
     assert insert_params[0] == "exp_T1"
     assert insert_params[1] == "exp-name"
-    assert insert_params[3] == "running"
+    assert insert_params[2] == "agent-spec"
+    assert insert_params[4] == "running"
 
 
 def test_get_experiment_selects_by_id_without_migrating():

@@ -1,6 +1,6 @@
 """Task 8: the abox-backed verifier-test runner (offline, subprocess mocked).
 
-Mirrors ``tests/test_abox_bench.py``'s mock-executor pattern: a fake
+Uses an injected fake executor so the unit suite never starts a guest:
 ``Executor`` records argv and answers ``abox run``/``abox stop`` calls, so
 these tests never touch a real abox binary or KVM.
 """
@@ -12,7 +12,7 @@ import subprocess
 import pytest
 
 from bakudo.abox.runner import ExecResult
-from bakudo.abox.verifier_bench import AboxVerifierEvalError, make_abox_verifier_runner
+from bakudo.abox.verifier import AboxVerifierEvalError, make_abox_verifier_runner
 
 
 def _workspace(tmp_path):
@@ -86,8 +86,8 @@ def test_runner_builds_repo_task_network_and_base_ref(tmp_path):
 
 def test_runner_commits_dirty_workspace_before_forking(tmp_path):
     """abox forks a worktree from a git ref -- it never sees a dirty working
-    tree (same reasoning as bench.py's module docstring). The applied diff
-    and copied-in verifier test file must be committed first."""
+    tree (the same reason candidate measurement materializes an exact patch).
+    The applied diff and copied-in verifier test file must be committed first."""
     ws = _workspace(tmp_path)
     status_before = subprocess.run(
         ["git", "-C", str(ws), "status", "--porcelain"], capture_output=True, text=True
@@ -113,7 +113,7 @@ def test_runner_commits_dirty_workspace_before_forking(tmp_path):
 def test_command_rides_as_its_own_argv_element(tmp_path):
     """No shell-quoting hazard: the test command is never interpolated into
     the outer guest script string, only passed as a trailing argv element
-    (bench.py's timer-script pattern)."""
+    (the workload measurement wrapper's argv pattern)."""
     ws = _workspace(tmp_path)
     log = []
     runner = make_abox_verifier_runner(executor=_ok_executor(log))
@@ -264,7 +264,7 @@ def test_synthetic_environment_content_is_fixed_across_workspaces(tmp_path):
     """The abox approval fingerprint is content-derived; a stable fingerprint
     means a one-time `abox project trust` covers every future ephemeral
     verifier-eval workspace, so the synthesized bytes must never vary."""
-    from bakudo.abox.verifier_bench import _ensure_guest_environment
+    from bakudo.abox.verifier import _ensure_guest_environment
 
     ws_a = tmp_path / "a"
     ws_b = tmp_path / "b"
@@ -285,7 +285,7 @@ def test_default_abox_verifier_runner_instance_is_importable():
     """Production callers (Deps.verifier_eval_fn's ladder, the CLI) import a
     ready-to-use instance, same shape as local_verifier_runner -- no factory
     call required at the call site."""
-    from bakudo.abox.verifier_bench import abox_verifier_runner
+    from bakudo.abox.verifier import abox_verifier_runner
     from bakudo.tasks.verifier_runner import VerificationResult
 
     assert callable(abox_verifier_runner)

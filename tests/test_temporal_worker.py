@@ -177,6 +177,20 @@ def test_resolve_graph_defaults_group_id(monkeypatch):
     assert calls["group_id"] == "default"
 
 
+def test_worker_wires_capture_without_requiring_postgres(tmp_path, monkeypatch):
+    from bakudo.abox.capture import AboxProfileCaptureService
+    from bakudo.temporal import _impl, worker
+
+    monkeypatch.delenv("BAKUDO_POSTGRES_DSN", raising=False)
+    monkeypatch.setenv("BAKUDO_SANDBOX", "abox")
+    monkeypatch.setenv("BAKUDO_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(_impl.DEPS, "performance_capture", None)
+
+    worker._wire_dependencies()
+
+    assert isinstance(_impl.DEPS.performance_capture, AboxProfileCaptureService)
+
+
 def test_resolve_embedder_builds_real_openai_embedder(monkeypatch):
     """Integration seam: with the real ``OpenAIEmbedder`` landed, the worker
     resolves it from ``VLLM_EMBED_URL`` (construction is lazy — no network

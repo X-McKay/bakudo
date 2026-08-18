@@ -122,11 +122,12 @@ def test_integrity_flags_rejects_unknown_fields():
 def test_experiment_roundtrip(ledger):
     eid = "exp_ROUNDTRIP"
     spec = {"metadata": {"name": "exp-roundtrip"}, "baseline": "add-feature@1"}
-    ledger.record_experiment(eid, "exp-roundtrip", spec, "running")
+    ledger.record_experiment(eid, "exp-roundtrip", "agent-spec", spec, "running")
 
     got = ledger.get_experiment(eid)
     assert got["id"] == eid
     assert got["name"] == "exp-roundtrip"
+    assert got["subject_kind"] == "agent-spec"
     assert got["spec"] == spec
     assert got["status"] == "running"
     assert got["result"] is None
@@ -143,13 +144,14 @@ def test_get_experiment_unknown_returns_none(ledger):
 
 def test_record_experiment_is_idempotent(ledger):
     eid = "exp_IDEMPOTENT"
-    ledger.record_experiment(eid, "first", {"a": 1}, "running")
+    ledger.record_experiment(eid, "first", "agent-spec", {"a": 1}, "running")
     ledger.update_experiment_result(eid, "completed", {"decision": "promote"})
 
     # A retried record call must not clobber the progress already made.
-    ledger.record_experiment(eid, "second", {"a": 2}, "running")
+    ledger.record_experiment(eid, "second", "software-artifact", {"a": 2}, "running")
     got = ledger.get_experiment(eid)
     assert got["name"] == "first"
+    assert got["subject_kind"] == "agent-spec"
     assert got["status"] == "completed"
     assert got["result"] == {"decision": "promote"}
 

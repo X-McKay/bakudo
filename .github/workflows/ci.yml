@@ -28,7 +28,9 @@ jobs:
       - name: Install
         run: pip install -e ".[all,dev]"
       - name: Lint
-        run: ruff check src tests skills
+        run: ruff check src tests skills scripts
+      - name: Generated schemas
+        run: python scripts/generate_performance_schemas.py --check
       # python -m avoids any stale mypy/pytest shadowing the venv's on PATH.
       - name: Type-check
         run: python -m mypy src/bakudo
@@ -42,7 +44,8 @@ jobs:
           bakudo agent validate agents/optimize-attempt.yaml
           bakudo skill list --json
           bakudo demo --json
-          bakudo optimize --repo bakudo --title "CI smoke" --rounds 1 --json
+          bakudo workload list --json
+          bakudo optimize --help
       # API-12 regression guard: the wheel must be a complete install —
       # builds it, installs into a throwaway venv, runs `bakudo demo`
       # (offline) from an empty cwd.

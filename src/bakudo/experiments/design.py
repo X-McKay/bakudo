@@ -15,7 +15,14 @@ from dataclasses import dataclass
 
 from ..tasks.models import Partition
 from ..tasks.source import LoadedTask, TaskSource
-from .models import ExperimentSpec
+from .models import AgentSpecSubject, ExperimentSpec
+
+
+def _agent_subject(spec: ExperimentSpec) -> AgentSpecSubject:
+    subject = spec.subject
+    if not isinstance(subject, AgentSpecSubject):
+        raise TypeError("task selection and trial matrices require an agent-spec subject")
+    return subject
 
 
 def trial_seed(experiment_id: str, task_name: str, repetition: int) -> int:
@@ -32,7 +39,7 @@ def trial_seed(experiment_id: str, task_name: str, repetition: int) -> int:
 
 
 def _holdout_ok(spec: ExperimentSpec, task: LoadedTask) -> bool:
-    return spec.use_holdout or task.spec.metadata.partition != Partition.holdout
+    return _agent_subject(spec).use_holdout or task.spec.metadata.partition != Partition.holdout
 
 
 def select_tasks(source: TaskSource, spec: ExperimentSpec) -> list[LoadedTask]:
@@ -43,7 +50,7 @@ def select_tasks(source: TaskSource, spec: ExperimentSpec) -> list[LoadedTask]:
       :meth:`TaskSource.list` takes a single family), tags, and
       partitions.
     - Holdout guard: tasks in the ``holdout`` partition are excluded
-      unless ``spec.use_holdout`` is set, regardless of what the selector's
+      unless ``spec.subject.use_holdout`` is set, regardless of what the selector's
       own ``partitions`` list says — an experiment must opt in explicitly to
       touch holdout data.
     - Deterministic order: sorted by task name, then truncated to
@@ -55,7 +62,7 @@ def select_tasks(source: TaskSource, spec: ExperimentSpec) -> list[LoadedTask]:
       measured together or not at all. Paired-task closure still respects the
       holdout guard.
     """
-    selector = spec.task_selector
+    selector = _agent_subject(spec).task_selector
     families: list[str | None] = list(selector.families) if selector.families else [None]
     tags = selector.tags or None
     partitions = selector.partitions or None
@@ -120,17 +127,18 @@ def build_matrix(
     The baseline arm and every candidate arm of a given (task,
     repetition) cell share :func:`trial_seed` — the pairing that lets a
     downstream statistics pass attribute an outcome difference to the agent
-    version rather than to task randomness. With ``spec.candidates``
+    version rather than to task randomness. With ``spec.subject.candidates``
     empty (profile mode) every row's arm is ``"baseline"``.
     """
-    arms = [spec.baseline, *spec.candidates]
+    subject = _agent_subject(spec)
+    arms = [subject.baseline, *subject.candidates]
     trials = []
     for task in tasks:
         task_name = task.spec.metadata.name
         for repetition in range(spec.repetitions):
             seed = trial_seed(experiment_id, task_name, repetition)
             for agent_ref in arms:
-                arm = "baseline" if agent_ref == spec.baseline else agent_ref
+                arm = "baseline" if agent_ref == subject.baseline else agent_ref
                 trials.append(
                     PlannedTrial(
                         agent_ref=agent_ref,

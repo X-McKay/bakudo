@@ -17,12 +17,60 @@
     "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
     "constraints": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "maxFilesChanged": { "type": "integer", "minimum": 0 },
         "avoidPublicApiChanges": { "type": "boolean" },
-        "benchCommand": { "type": "string" },
         "targetPaths": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "required": ["workloadRef", "primaryMetric"],
+      "additionalProperties": false,
+      "properties": {
+        "workloadRef": {
+          "type": "object",
+          "required": ["name", "version", "source"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+            "version": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+            },
+            "source": { "enum": ["repository", "directory", "bundle"] }
+          }
+        },
+        "workloadPin": { "$ref": "#/$defs/workloadPin" },
+        "primaryMetric": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        "decisionPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "confidence": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+            "minimumRelativeImprovement": { "type": "number", "minimum": 0 },
+            "protectedMetrics": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" }
+            },
+            "bootstrapResamples": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          }
+        },
+        "comparisonId": {
+          "type": "string",
+          "pattern": "^comparison_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "regressionSignalId": {
+          "type": "string",
+          "pattern": "^regression_[0-9A-HJKMNP-TV-Z]{26}$"
+        }
       }
     },
     "suggestedAgents": { "type": "array", "items": { "type": "string" } },
@@ -45,5 +93,51 @@
     "status": {
       "enum": ["ready", "blocked", "running", "completed", "failed", "archived", "needs_human"]
     }
-  }
+  },
+  "$defs": {
+    "fileDigest": {
+      "type": "object",
+      "required": ["path", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$"
+        },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "workloadPin": {
+      "type": "object",
+      "required": [
+        "sourceURI", "sourceKind", "collectionRevision", "name", "version",
+        "manifestDigest", "bundleDigest"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sourceURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "sourceKind": { "enum": ["directory", "repository", "bundle"] },
+        "collectionRevision": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "manifestDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "datasetDigests": {
+          "type": "array", "items": { "$ref": "#/$defs/fileDigest" }
+        },
+        "executorDigests": {
+          "type": "array", "items": { "$ref": "#/$defs/fileDigest" }
+        },
+        "bundleDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "optimize" } }, "required": ["type"] },
+      "then": { "required": ["performance"] }
+    }
+  ]
 }

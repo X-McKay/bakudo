@@ -1,0 +1,436 @@
+{
+  "$defs": {
+    "DatasetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Digest",
+          "type": "string"
+        },
+        "path": {
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "digest"
+      ],
+      "title": "DatasetSpec",
+      "type": "object"
+    },
+    "MeasurementPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/MetricDefinition"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "repetitions": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Repetitions",
+          "type": "integer"
+        },
+        "schedule": {
+          "$ref": "#/$defs/MeasurementSchedule",
+          "default": "randomized-pairs"
+        },
+        "timeoutSeconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 86400,
+          "title": "Timeoutseconds",
+          "type": "number"
+        },
+        "warmups": {
+          "default": 0,
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Warmups",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repetitions",
+        "timeoutSeconds",
+        "metrics"
+      ],
+      "title": "MeasurementPlan",
+      "type": "object"
+    },
+    "MeasurementSchedule": {
+      "enum": [
+        "randomized-pairs",
+        "abba",
+        "fixed"
+      ],
+      "title": "MeasurementSchedule",
+      "type": "string"
+    },
+    "MetricDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/MetricDirection"
+        },
+        "estimator": {
+          "$ref": "#/$defs/MetricEstimator",
+          "default": "median"
+        },
+        "minimumSamples": {
+          "default": 1,
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Minimumsamples",
+          "type": "integer"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "practicalThreshold": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Practicalthreshold",
+          "type": "number"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/MetricSource"
+        },
+        "unit": {
+          "$ref": "#/$defs/MetricUnit"
+        }
+      },
+      "required": [
+        "name",
+        "unit",
+        "direction",
+        "source"
+      ],
+      "title": "MetricDefinition",
+      "type": "object"
+    },
+    "MetricDirection": {
+      "enum": [
+        "lower",
+        "higher"
+      ],
+      "title": "MetricDirection",
+      "type": "string"
+    },
+    "MetricEstimator": {
+      "enum": [
+        "median",
+        "mean",
+        "p95",
+        "p99"
+      ],
+      "title": "MetricEstimator",
+      "type": "string"
+    },
+    "MetricSource": {
+      "enum": [
+        "wall-clock",
+        "process",
+        "workload"
+      ],
+      "title": "MetricSource",
+      "type": "string"
+    },
+    "MetricUnit": {
+      "enum": [
+        "seconds",
+        "milliseconds",
+        "microseconds",
+        "nanoseconds",
+        "bytes",
+        "count",
+        "percent",
+        "operations/second",
+        "requests/second"
+      ],
+      "title": "MetricUnit",
+      "type": "string"
+    },
+    "NetworkPolicy": {
+      "enum": [
+        "none",
+        "scoped"
+      ],
+      "title": "NetworkPolicy",
+      "type": "string"
+    },
+    "ProfilerSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$",
+          "title": "Adapter",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "options": {
+          "maxProperties": 64,
+          "patternProperties": {
+            "^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "title": "Options",
+          "type": "object"
+        },
+        "signals": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Signals",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "adapter",
+        "signals"
+      ],
+      "title": "ProfilerSpec",
+      "type": "object"
+    },
+    "WorkloadCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "cwd": {
+          "default": ".",
+          "title": "Cwd",
+          "type": "string"
+        },
+        "env": {
+          "maxProperties": 64,
+          "patternProperties": {
+            "^[A-Z_][A-Z0-9_]{0,127}$": {
+              "maxLength": 4096,
+              "type": "string"
+            }
+          },
+          "title": "Env",
+          "type": "object"
+        }
+      },
+      "required": [
+        "argv"
+      ],
+      "title": "WorkloadCommand",
+      "type": "object"
+    },
+    "WorkloadEnvironment": {
+      "additionalProperties": false,
+      "properties": {
+        "cpuCount": {
+          "anyOf": [
+            {
+              "maximum": 256,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpucount"
+        },
+        "memoryMb": {
+          "anyOf": [
+            {
+              "maximum": 1048576,
+              "minimum": 16,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memorymb"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy",
+          "default": "none"
+        },
+        "profile": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "title": "WorkloadEnvironment",
+      "type": "object"
+    },
+    "WorkloadMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Description",
+          "type": "string"
+        },
+        "labels": {
+          "maxProperties": 32,
+          "patternProperties": {
+            "^[a-z][a-z0-9_.-]{0,63}$": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "title": "Labels",
+          "type": "object"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "WorkloadMetadata",
+      "type": "object"
+    },
+    "WorkloadSubject": {
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Repo",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo"
+      ],
+      "title": "WorkloadSubject",
+      "type": "object"
+    }
+  },
+  "$id": "https://bakudo.ai/schemas/workload-spec.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "bakudo.ai/v1alpha1",
+      "default": "bakudo.ai/v1alpha1",
+      "title": "Apiversion",
+      "type": "string"
+    },
+    "command": {
+      "$ref": "#/$defs/WorkloadCommand"
+    },
+    "dataset": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DatasetSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "environment": {
+      "$ref": "#/$defs/WorkloadEnvironment"
+    },
+    "kind": {
+      "const": "WorkloadSpec",
+      "default": "WorkloadSpec",
+      "title": "Kind",
+      "type": "string"
+    },
+    "measurement": {
+      "$ref": "#/$defs/MeasurementPlan"
+    },
+    "metadata": {
+      "$ref": "#/$defs/WorkloadMetadata"
+    },
+    "profilers": {
+      "items": {
+        "$ref": "#/$defs/ProfilerSpec"
+      },
+      "maxItems": 16,
+      "title": "Profilers",
+      "type": "array"
+    },
+    "subject": {
+      "$ref": "#/$defs/WorkloadSubject"
+    }
+  },
+  "required": [
+    "metadata",
+    "subject",
+    "command",
+    "environment",
+    "measurement"
+  ],
+  "title": "WorkloadSpec",
+  "type": "object"
+}

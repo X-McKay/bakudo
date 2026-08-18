@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bakudo.ai/schemas/experiment-spec.schema.json",
   "title": "ExperimentSpec",
-  "description": "A baseline-vs-candidate comparison (or, with an empty candidates list, a baseline-only profile run) over a deterministic task selection (experiment substrate design doc section 7).",
+  "description": "A paired experiment over an explicit agent-spec or software-artifact subject.",
   "type": "object",
-  "required": ["apiVersion", "kind", "metadata", "subject", "baseline"],
+  "required": ["apiVersion", "kind", "metadata", "subject"],
   "additionalProperties": false,
   "properties": {
     "apiVersion": { "const": "bakudo.ai/v1alpha1" },
@@ -14,41 +14,40 @@
       "required": ["name"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "minLength": 1 }
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
     },
-    "subject": { "const": "agent-spec" },
-    "baseline": { "type": "string", "minLength": 1, "description": "name@version" },
-    "candidates": {
-      "type": "array",
-      "items": { "type": "string" },
-      "default": [],
-      "description": "name@version refs; empty means profile mode (baseline arm only)."
+    "subject": {
+      "oneOf": [
+        { "$ref": "#/$defs/agentSpecSubject" },
+        { "$ref": "#/$defs/softwareArtifactSubject" }
+      ]
     },
-    "taskSelector": {
-      "type": "object",
-      "additionalProperties": false,
-      "default": {},
-      "properties": {
-        "families": { "type": "array", "items": { "type": "string" }, "default": [] },
-        "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
-        "partitions": {
-          "type": "array",
-          "items": { "type": "string" },
-          "default": ["dev", "validation"]
-        },
-        "count": { "type": "integer", "minimum": 1, "default": 20 }
-      }
+    "repetitions": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000,
+      "default": 1
     },
-    "repetitions": { "type": "integer", "minimum": 1, "default": 1 },
-    "useHoldout": { "type": "boolean", "default": false },
     "metrics": {
       "type": "object",
       "additionalProperties": false,
       "default": {},
       "properties": {
-        "primary": { "type": "string", "default": "task_success" },
-        "secondary": { "type": "array", "items": { "type": "string" }, "default": [] }
+        "primary": { "$ref": "#/$defs/metricName" },
+        "secondary": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/metricName" },
+          "default": []
+        },
+        "directions": {
+          "type": "object",
+          "additionalProperties": { "enum": ["lower", "higher"] },
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+          "default": {}
+        }
       }
     },
     "hardGates": {
@@ -65,10 +64,142 @@
       "additionalProperties": false,
       "default": {},
       "properties": {
-        "confidence": { "type": "number", "default": 0.95 },
-        "tieZone": { "type": "number", "default": 0.10 },
-        "costTiebreak": { "type": "boolean", "default": true }
+        "confidence": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.95
+        },
+        "tieZone": { "type": "number", "minimum": 0, "default": 0.10 },
+        "costTiebreak": { "type": "boolean", "default": true },
+        "bootstrapResamples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "default": 10000
+        }
       }
     }
-  }
+  },
+  "$defs": {
+    "metricName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "taskSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "families": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "partitions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["dev", "validation"]
+        },
+        "count": { "type": "integer", "minimum": 1, "default": 20 }
+      }
+    },
+    "agentSpecSubject": {
+      "type": "object",
+      "required": ["kind", "baseline"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "agent-spec" },
+        "baseline": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "candidates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "default": []
+        },
+        "taskSelector": { "$ref": "#/$defs/taskSelector" },
+        "useHoldout": { "type": "boolean", "default": false }
+      }
+    },
+    "workloadRef": {
+      "type": "object",
+      "required": ["name", "version", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+        },
+        "source": { "enum": ["directory", "repository", "bundle"] }
+      }
+    },
+    "revisionPin": {
+      "type": "object",
+      "required": ["repository", "sourceURI", "commitSHA", "treeDigest"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sourceURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "commitSHA": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "treeDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "dirty": { "type": "boolean", "default": false },
+        "baseCommitSHA": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "patchDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      },
+      "dependentRequired": {
+        "baseCommitSHA": ["patchDigest"],
+        "patchDigest": ["baseCommitSHA"]
+      }
+    },
+    "softwareArtifactSubject": {
+      "type": "object",
+      "required": ["kind", "repository", "baseline", "candidates", "workloadRef"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "software-artifact" },
+        "repository": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "baseline": { "$ref": "#/$defs/revisionPin" },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/revisionPin" }
+        },
+        "workloadRef": { "$ref": "#/$defs/workloadRef" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "subject": {
+            "properties": { "kind": { "const": "software-artifact" } },
+            "required": ["kind"]
+          }
+        }
+      },
+      "then": {
+        "required": ["metrics"],
+        "properties": {
+          "metrics": {
+            "required": ["primary"],
+            "properties": {
+              "primary": {
+                "not": {
+                  "enum": ["task_success", "reward", "f2p_rate", "p2p_rate", "scorecard"]
+                }
+              },
+              "secondary": {
+                "items": {
+                  "not": {
+                    "enum": ["task_success", "reward", "f2p_rate", "p2p_rate", "scorecard"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

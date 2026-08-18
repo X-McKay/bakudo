@@ -13,14 +13,14 @@ Bakudo is a durable meta-agent system: it versions agents, runs them in
 sandboxes, evaluates controlled episodes, and promotes improved versions
 through a canary. Its identity is:
 
-> **Bakudo runs reproducible experiments on software agents (and later,
-> software artifacts), accumulates evidence over time, and promotes only
+> **Bakudo runs reproducible experiments on software agents and software
+> artifacts, accumulates evidence over time, and promotes only
 > independently demonstrated improvements.**
 
 Everything is organized around **one loop**, not three subsystems:
 
 ```
-     define benchmark ──► profile baseline ──► research ──► improve
+     define scenario ──► characterize baseline ──► research ──► improve
             ▲                                   (hypothesize)  (candidates)
             │                                                      │
      new tasks                                                 ▼
@@ -29,11 +29,12 @@ Everything is organized around **one loop**, not three subsystems:
             └──────────────── evidence ────────────────────────────┘
 ```
 
-The loop is generic; only the *subject* changes. This phase builds the
-loop's measurement core with one subject wired in — **agents** — and
-leaves a clean seam where **software artifacts** (the current optimize
-loop, generalized) plug in later as a second binding rather than a
-parallel system. The stages `research` and `improve` (hypothesis
+The loop is generic; only the *subject* changes. `ExperimentSpec.subject` is
+an explicit discriminator with two implemented bindings: **agent specs** use
+task-backed `TrialRecord` observations, while **software artifacts** use
+workload-backed `MeasurementRecord` observations. Both normalize into the
+same named-metric statistics/reporting layer without conflating their evidence
+types. The stages `research` and `improve` (hypothesis
 generation, candidate mutation) are deliberately left as explicit empty
 slots this phase: their inputs (evidence objects) and outputs
 (provenance, lineage) are designed now; the generators come later.
@@ -44,7 +45,10 @@ Three primitives carry the loop:
 |---|---|---|
 | **TaskSpec** | A versioned, reproducible environment: instruction + fixture + privileged verifier inputs + reference solution + constraints | Private corpus and published bundles |
 | **Trial** | The immutable measurement of one agent × task × seed episode, pinned to exact versions of everything | Postgres (insert-only) |
-| **Experiment** | A paired baseline-vs-candidate trial matrix with honest statistics — or, with no candidates, a *profile* of one agent | Postgres (spec + result) |
+| **WorkloadSpec** | A versioned, shell-free exercise for measuring one software repository revision, including environment, metric, schedule, and profiler declarations | Private corpus or immutable published bundle |
+| **MeasurementRecord** | Raw, uninstrumented samples from one workload × revision × environment pin | Postgres (insert-only) |
+| **ExperimentObservation** | Subject-neutral metric envelope whose evidence is explicitly either a `TrialRecord` or a `MeasurementRecord` ID | In-process analysis input; IDs retained in results |
+| **Experiment** | A paired baseline-vs-candidate observation matrix with honest statistics — or, only for a candidate-free agent subject, a behavioral profile | Postgres (spec + result) |
 
 ## 2. A task, concretely
 
@@ -134,7 +138,19 @@ A trial is therefore *reproducible* (rerun the pins) and *comparable*
 (two trials differing only in agent version are a legitimate paired
 observation). That's the whole point.
 
-## 4. An experiment, concretely
+## 4. Experiments, concretely
+
+`ExperimentSpec` always nests subject-specific fields under `subject`:
+
+```yaml
+subject:
+  kind: agent-spec
+  baseline: debugger@17
+  candidates: [debugger@18]
+  taskSelector: {families: [debugging], count: 20}
+```
+
+### Agent-spec experiment
 
 ```
 bakudo experiment compare debugger@17 debugger@18 --family debugging --count 20
@@ -163,11 +179,49 @@ bakudo experiment compare debugger@17 debugger@18 --family debugging --count 20
    counterfactual view that tells you *what to fix next*), paired-task
    joint scores, cost deltas, and an advisory promotion verdict.
 
-**Profiling is the same machine with zero candidates.**
+**Behavioral agent profiling is the same machine with zero candidates.**
 `bakudo experiment profile debugger@17` runs the corpus single-arm and
 emits the behavioral fingerprint — per-family success, failure
 structure, cost profile, and integrity results. That fingerprint is precisely what
 a future hypothesis-generating agent reads before proposing mutations.
+
+This word has a deliberately narrow meaning. `experiment profile` never
+captures CPU samples, call stacks, allocations, or process counters. Those are
+diagnostic `PerformanceSnapshot` artifacts produced by
+`bakudo performance capture` and are never admitted into selection timing.
+
+### Software-artifact experiment
+
+A software-artifact subject replaces agent/task arms with immutable revision
+pins and one `WorkloadRef`:
+
+```yaml
+subject:
+  kind: software-artifact
+  repository: payments-service
+  baseline: {repository: payments-service, sourceURI: file:///srv/repos/payments-service, commitSHA: "...", treeDigest: "sha256:...", dirty: false}
+  candidates:
+    - {repository: payments-service, sourceURI: file:///srv/repos/payments-service, commitSHA: "...", treeDigest: "sha256:...", dirty: false}
+  workloadRef: {name: checkout-latency, version: 1.2.0, source: bundle}
+metrics:
+  primary: latency_seconds
+  directions: {latency_seconds: lower}
+```
+
+`bakudo experiment run artifact.yaml` and `POST /experiments` use the same
+subject-binding port. The synchronous operator path resolves
+`BAKUDO_WORKLOAD_SOURCE` (or the packaged smoke corpus), requires the pinned
+environment in `BAKUDO_PERFORMANCE_ENVIRONMENT`, and measures in fresh abox
+guests. The Temporal path resolves the workload and environment in activities,
+then fans out durable measurement children with exact source, workload,
+revision, and environment pins.
+
+Artifact observations retain only persisted `measurementId` evidence. Missing,
+failed, corrupt, incompatible, direction-mismatched, or integrity-invalid
+measurements are contagious: the affected comparison is inconclusive and
+ineligible rather than converted to zero or silently dropped. Artifact subjects
+must have at least one candidate and cannot use task-reward metrics. Diagnostic
+capture remains separate from experiments.
 
 **Promotion stays two-stage, using machinery that already exists.**
 Offline experiments are *screening* (pick the best candidate); the
@@ -204,7 +258,7 @@ The substrate is built so that coding agents can operate the loop:
   tests, statistics, promotion logic — is outside every mutable surface:
   not reachable from AgentSpec mutations, not present in the sandbox.
   The most damaging documented failure of self-improving systems is
-  grader sabotage (Sakana's DGM faked test logs and deleted its own
+  evaluator sabotage (Sakana's DGM faked test logs and deleted its own
   hallucination detectors). Bakudo's config-space design makes that
   *structurally impossible* rather than merely discouraged, and this
   property is now a named, regression-tested invariant.
@@ -246,14 +300,16 @@ materializes those itself.
 | AgentSpec versioning, candidate→canary→active, human gates | exists, unchanged |
 | Temporal orchestration, abox microVM sandboxing, budgets, cancel | exists, unchanged |
 | Eval suites, scorecards, canary graduation | exists, unchanged |
-| Optimize loop (scout→attempts→verify→no-change) | exists; becomes the template for the later artifact binding |
+| Optimize loop (scout→attempts→verify→no-change) | uses structured workload comparison evidence; free-form benchmark fields removed |
 | TaskSpec + provisioner + verifier protocol | implemented in core |
 | Trial persistence + independent evaluation + integrity results | implemented in core |
-| Experiment layer + paired statistics + profile mode | implemented in core |
+| Experiment layer + paired statistics + explicit agent/artifact subject bindings | implemented in core and Temporal |
 | `bakudo task / trial / experiment` CLI + API routes | implemented in core |
 | 25-task corpus (4 families, paired tasks, canaries) | private `bakudo-benchmarks` repository |
 | Content-addressed published bundles + exact `TaskPin` | implemented in core |
 | `bakudo repo add/list/remove` — deliberate repo onboarding | implemented |
+| Workload-backed performance measurement and diagnostic capture | implemented; uninstrumented selection and instrumented diagnosis remain separate |
+| Software-artifact experiment binding | implemented with ID-only measurement evidence and invalid-contagious analysis |
 | In-process `EvalCase` corpus | retained for non-task-backed evaluation roles |
 | Implicit `$BAKUDO_REPO_ROOT` repo convention | absorbed — registry first, directory fallback kept |
 
@@ -279,10 +335,13 @@ Each later phase now has a defined foundation to stand on:
 2. **Statistical promotion.** `PromotionPolicy` starts *requiring* an
    ExperimentResult as evidence; successive-halving shapes for >5
    candidates.
-3. **Artifact binding (Software Evolution, generalized).** The current
-   optimize loop's scout→attempt→verify becomes the second `Benchmark`
-   implementation: measurement commands instead of tasks, PR instead
-   of version-flip, same trials, same statistics, same ledger.
+3. **Broader workload adapters and experiment policies.** Add screened remote
+   Gym/NeMo Gym adapters behind the existing workload-execution port, expand
+   hardware-aware policies, and use the implemented artifact binding for
+   larger software-evolution studies. The trust rules remain those in the
+   [performance measurement design](superpowers/specs/2026-08-17-performance-measurement-design.md)
+   and its
+   [implementation plan](superpowers/plans/2026-08-17-performance-measurement-implementation.md).
 4. **Task Factory.** Failed production runs → minimized, verified
    tasks (the verify loop already accepts machine-generated input);
    perturbation-derived variants refresh the holdout without authoring

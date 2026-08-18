@@ -8,10 +8,19 @@ Temporal activity; the *mapping* logic here is pure and unit-tested.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from .. import ids
-from .objective import Objective, ObjectiveType, Priority, rank
+from ..performance.models import PerformanceRegressionSignal
+from ..performance.regressions import PerformanceObjectiveInput
+from .objective import (
+    Objective,
+    ObjectiveType,
+    Priority,
+    objective_from_performance_input,
+    rank,
+)
 
 
 def _observer_id(repo: str, type_: ObjectiveType, source_key: str) -> str:
@@ -63,6 +72,7 @@ class RepoSignals:
     todos: list[Todo] = field(default_factory=list)
     coverage_gaps: list[CoverageGap] = field(default_factory=list)
     advisories: list[Advisory] = field(default_factory=list)
+    performance_regressions: list[PerformanceRegressionSignal] = field(default_factory=list)
 
 
 _SEVERITY_RISK = {"low": 0.2, "moderate": 0.45, "high": 0.7, "critical": 0.95}
@@ -150,14 +160,56 @@ def _advisory_objective(repo: str, advisory: Advisory) -> Objective:
     )
 
 
-def generate_objectives(signals: RepoSignals) -> list[Objective]:
-    """Map a repo snapshot to deduplicated, priority-ranked objectives."""
+def _performance_objectives(
+    signals: RepoSignals,
+    inputs: Sequence[PerformanceObjectiveInput],
+) -> list[Objective]:
+    observed = {signal.id: signal for signal in signals.performance_regressions}
+    if len(observed) != len(signals.performance_regressions):
+        raise ValueError("performance regression signal ids must be unique")
+
+    objectives: list[Objective] = []
+    consumed: set[str] = set()
+    for value in inputs:
+        evidence = value.performance.evidence
+        signal = observed.get(evidence.regression_signal_id)
+        if signal is None:
+            raise ValueError("performance input has no matching observed regression signal")
+        if evidence.regression_signal_id in consumed:
+            raise ValueError("performance inputs must not reuse a regression signal")
+        if (
+            not signal.approved
+            or value.repo != signals.repo
+            or signal.repository != signals.repo
+            or value.performance.workload_pin != signal.workload
+            or value.performance.primary_metric != signal.metric_name
+            or evidence.comparison_id != signal.comparison_id
+            or evidence.deduplication_key != signal.deduplication_key
+        ):
+            raise ValueError("performance input does not match its approved regression signal")
+        consumed.add(evidence.regression_signal_id)
+        objectives.append(objective_from_performance_input(value))
+    return objectives
+
+
+def generate_objectives(
+    signals: RepoSignals,
+    *,
+    performance_inputs: Sequence[PerformanceObjectiveInput] = (),
+) -> list[Objective]:
+    """Map a repo snapshot and approved performance inputs to objectives.
+
+    Performance inputs are explicit because a regression signal alone does
+    not contain the approval policy, resource-cost, or protected-metric
+    settings needed to construct a safe optimization objective.
+    """
     objectives: list[Objective] = []
     objectives += [_issue_objective(signals.repo, i) for i in signals.issues]
     objectives += [_failing_test_objective(signals.repo, t) for t in signals.failing_tests]
     objectives += [_todo_objective(signals.repo, t) for t in signals.todos]
     objectives += [_coverage_objective(signals.repo, g) for g in signals.coverage_gaps]
     objectives += [_advisory_objective(signals.repo, a) for a in signals.advisories]
+    objectives += _performance_objectives(signals, performance_inputs)
 
     # Dedupe by (type, title) keeping the highest-value instance.
     best: dict[tuple[str, str], Objective] = {}

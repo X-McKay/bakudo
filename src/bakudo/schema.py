@@ -22,7 +22,7 @@ def _validator(schema_filename: str) -> Draft202012Validator:
     path = schemas_dir() / schema_filename
     schema = json.loads(path.read_text())
     Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(schema)
+    return Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)
 
 
 class SchemaValidationError(ValueError):
@@ -73,3 +73,11 @@ def validate_task_spec(document: Any) -> None:
 
 def validate_experiment_spec(document: Any) -> None:
     validate(document, "experiment-spec.schema.json")
+
+
+def validate_workload_spec(document: Any) -> None:
+    validate(document, "workload-spec.schema.json")
+
+
+def validate_performance_record(document: Any) -> None:
+    validate(document, "performance-record.schema.json")

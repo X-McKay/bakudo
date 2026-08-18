@@ -57,6 +57,15 @@ def objective_id() -> str:
     return new_id("obj")
 
 
+def deterministic_id(prefix: str, seed: str) -> str:
+    """Return a stable content-derived ID in the canonical Crockford format."""
+    if not prefix or not prefix.isascii() or not prefix.replace("-", "").isalnum():
+        raise ValueError("prefix must be a non-empty ASCII identifier")
+    digest = hashlib.sha256(seed.encode()).digest()
+    value = int.from_bytes(digest, "big") % (32**_ENCODE_LEN)
+    return f"{prefix}_{_encode(value, _ENCODE_LEN)}"
+
+
 def deterministic_objective_id(seed: str) -> str:
     """A stable, content-derived objective id (``objd_`` + 26 Crockford chars).
 
@@ -68,9 +77,12 @@ def deterministic_objective_id(seed: str) -> str:
     prefix keeps observer-derived objectives distinguishable from operator/API
     ones (``obj_``).
     """
-    digest = hashlib.sha256(seed.encode()).digest()
-    value = int.from_bytes(digest, "big") % (32**_ENCODE_LEN)
-    return f"objd_{_encode(value, _ENCODE_LEN)}"
+    return deterministic_id("objd", seed)
+
+
+def deterministic_regression_id(seed: str) -> str:
+    """A stable, content-derived performance regression identifier."""
+    return deterministic_id("regression", seed)
 
 
 def agent_version_id() -> str:
@@ -99,6 +111,22 @@ def new_episode_id() -> str:
 
 def new_experiment_id() -> str:
     return new_id("exp")
+
+
+def new_measurement_id() -> str:
+    return new_id("measurement")
+
+
+def new_snapshot_id() -> str:
+    return new_id("snapshot")
+
+
+def new_comparison_id() -> str:
+    return new_id("comparison")
+
+
+def new_regression_id() -> str:
+    return new_id("regression")
 
 
 def git_branch_for(run: str) -> str:

@@ -253,10 +253,10 @@ def test_spec_sufficiency_advisory_failure_does_not_fail_report(tmp_path, monkey
     monkeypatch.setenv("BAKUDO_ENV", "dev")
     task = load_loaded_task(tmp_path)
 
-    def judge(title, description):
+    def review(title, description):
         return "instruction is ambiguous about the acceptance bar"
 
-    report = verify_task(task, local_verifier_runner, llm_check=judge)
+    report = verify_task(task, local_verifier_runner, llm_check=review)
     spec_check = next(c for c in report.checks if c.name == "spec_sufficiency")
     assert not spec_check.ok
     assert spec_check.advisory

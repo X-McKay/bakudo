@@ -22,6 +22,13 @@ from ..agent_run_bundle import AgentRunBundle, budget_from_spec
 from ..agent_spec import AgentSpec
 from ..curriculum.objective import Objective
 from ..evals import EvalContext, EvalResult, Scorecard, assemble_suite
+from ..observability import (
+    NOOP_SPAN_SINK,
+    SpanAttribute,
+    SpanName,
+    SpanSink,
+    phase_span,
+)
 from ..registry import InMemoryLedger, RunEvent, RunPhase, RunRecord
 from ..registry.ledger import Ledger
 from ..runner.result import RunResult
@@ -47,23 +54,61 @@ def run_objective(
     sandbox: SandboxFn | None = None,
     workflow_id: str | None = None,
     run_id: str | None = None,
+    span_sink: SpanSink = NOOP_SPAN_SINK,
 ) -> PipelineResult:
     """Run one objective with one agent spec, end to end.
 
     ``run_id`` may be supplied by the caller (the spawn path mints it before
     spec resolution so canary routing is deterministic per run, design §2).
     """
-    ledger = ledger or InMemoryLedger()
-    sandbox = sandbox or local_sandbox
-    run_id = run_id or ids.run_id()
+    resolved_ledger = ledger or InMemoryLedger()
+    resolved_sandbox = sandbox or local_sandbox
+    resolved_run_id = run_id or ids.run_id()
+    with phase_span(
+        SpanName.RUN,
+        sink=span_sink,
+        attributes={
+            SpanAttribute.RUN_ID: resolved_run_id,
+            SpanAttribute.OBJECTIVE_ID: objective.id,
+        },
+    ) as active:
+        result = _run_objective_impl(
+            objective,
+            spec,
+            ledger=resolved_ledger,
+            sandbox=resolved_sandbox,
+            workflow_id=workflow_id,
+            run_id=resolved_run_id,
+            span_sink=span_sink,
+        )
+        active.set_attribute(SpanAttribute.STATUS, result.phase.value)
+        return result
 
-    bundle = AgentRunBundle(
-        run_id=run_id,
-        objective_id=objective.id,
-        objective=objective,
-        agent_spec=spec,
-        budget=budget_from_spec(spec),
-    )
+
+def _run_objective_impl(
+    objective: Objective,
+    spec: AgentSpec,
+    *,
+    ledger: Ledger,
+    sandbox: SandboxFn,
+    workflow_id: str | None,
+    run_id: str,
+    span_sink: SpanSink,
+) -> PipelineResult:
+    """Execute a pre-resolved run inside the public run span."""
+
+    with phase_span(
+        SpanName.BUNDLE_RENDER,
+        sink=span_sink,
+        attributes={SpanAttribute.RUN_ID: run_id},
+    ):
+        bundle = AgentRunBundle(
+            run_id=run_id,
+            objective_id=objective.id,
+            objective=objective,
+            agent_spec=spec,
+            budget=budget_from_spec(spec),
+        )
 
     ledger.create_run(
         RunRecord(
@@ -78,7 +123,15 @@ def run_objective(
 
     ledger.set_phase(run_id, RunPhase.bundle_rendered)
     ledger.set_phase(run_id, RunPhase.agent_running)
-    outcome = sandbox(bundle)
+    with phase_span(
+        SpanName.SANDBOX_PREPARE,
+        sink=span_sink,
+        attributes={SpanAttribute.RUN_ID: run_id},
+    ) as active:
+        outcome = sandbox(bundle)
+        active.set_attribute(
+            SpanAttribute.STATUS, "completed" if outcome.succeeded else "failed"
+        )
     ledger.set_phase(run_id, RunPhase.collecting_artifacts)
 
     if not outcome.succeeded or outcome.result is None:
@@ -93,7 +146,12 @@ def run_objective(
                 failed_result = None
         return PipelineResult(run_id, RunPhase.failed, failed_result, [], None, outcome)
 
-    result = RunResult.model_validate(outcome.result)
+    with phase_span(
+        SpanName.REPORT_EXTRACT,
+        sink=span_sink,
+        attributes={SpanAttribute.RUN_ID: run_id},
+    ):
+        result = RunResult.model_validate(outcome.result)
 
     ledger.set_phase(run_id, RunPhase.evaluating)
     if outcome.observability:
@@ -114,7 +172,12 @@ def run_objective(
     # the in-process pipeline is the offline mirror and has no live sandbox+model
     # to review with. The base (objective-type-aware) suite is identical; the
     # only difference from the Temporal path is the availability-gated critic.
-    eval_results = assemble_suite(ctx, with_critic=False)
+    with phase_span(
+        SpanName.VERIFIER_RUN,
+        sink=span_sink,
+        attributes={SpanAttribute.RUN_ID: run_id},
+    ):
+        eval_results = assemble_suite(ctx, with_critic=False)
     for r in eval_results:
         ledger.record_eval(r)
     scorecard = Scorecard.from_results(eval_results)
