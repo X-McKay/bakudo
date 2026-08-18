@@ -248,6 +248,8 @@ def test_fresh_abox_capture_preserves_pins_and_persists_artifact(tmp_path: Path)
         ],
         "cwd": "/workspace",
         "env": {"PYTHONHASHSEED": "0"},
+        "files": {"w0-README.txt": "README.txt"},
+        "workload_root": "/tmp/bakudo-workload",
     }
     assert any(call[1] == "stop" for call in fake.calls)
     assert list((tmp_path / "scratch").iterdir()) == []
