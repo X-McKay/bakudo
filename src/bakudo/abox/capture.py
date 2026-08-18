@@ -323,9 +323,18 @@ class _FreshAboxExecutor:
             "--network",
             self._network,
         ]
+        # abox rejects guest names containing "/" ("must be a plain file
+        # name"), so members land flat under /abox-meta/inputs/ and nested
+        # layouts fail closed here.
         for path in iter_workload_files(self._workload.root):
             relative = path.relative_to(self._workload.root).as_posix()
-            command += ["--input-file", f"{path}:workload/{relative}"]
+            if "/" in relative:
+                raise AboxProfileCaptureError(
+                    "abox --input-file requires plain guest file names; nested "
+                    f"workload member {relative!r} is not supported (flatten "
+                    "the workload directory)"
+                )
+            command += ["--input-file", f"{path}:{relative}"]
         command += ["--", "python3", "-c", _GUEST_LAUNCHER, payload]
         return command
 
@@ -555,7 +564,7 @@ class AboxProfileCaptureService:
             )
             candidate = workload.root / argument
             if is_safe_member and candidate.is_file():
-                argv.append(f"/abox-meta/inputs/workload/{argument}")
+                argv.append(f"/abox-meta/inputs/{argument}")
             else:
                 argv.append(argument)
         return WorkloadInvocation(

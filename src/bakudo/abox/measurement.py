@@ -28,6 +28,7 @@ from ..performance.models import (
 from ..performance.pins import EnvironmentPin, RevisionPin
 from ..performance.revisions import sha256_text
 from ..performance.source import LoadedWorkload
+from ..performance.verify import iter_workload_files
 from .runner import (
     IN_GUEST_SETUP_HEADROOM_SECONDS,
     SUBPROCESS_TIMEOUT_HEADROOM_SECONDS,
@@ -159,7 +160,7 @@ class AboxWorkloadInvoker:
         for argument in workload.spec.command.argv:
             candidate = workload.root / argument
             if not argument.startswith("-") and candidate.is_file():
-                argv.append(f"/abox-meta/inputs/workload/{argument}")
+                argv.append(f"/abox-meta/inputs/{argument}")
             else:
                 argv.append(argument)
         return argv
@@ -201,9 +202,18 @@ class AboxWorkloadInvoker:
             "--network",
             network,
         ]
-        for path in sorted(item for item in workload.root.rglob("*") if item.is_file()):
+        # Stage exactly the pinned content set. abox rejects guest names
+        # containing "/" ("must be a plain file name"), so members land flat
+        # under /abox-meta/inputs/ and nested layouts fail closed here.
+        for path in iter_workload_files(workload.root):
             relative = path.relative_to(workload.root).as_posix()
-            argv += ["--input-file", f"{path}:workload/{relative}"]
+            if "/" in relative:
+                raise AboxMeasurementError(
+                    "abox --input-file requires plain guest file names; nested "
+                    f"workload member {relative!r} is not supported (flatten "
+                    "the workload directory)"
+                )
+            argv += ["--input-file", f"{path}:{relative}"]
         guest_script = (
             "set -e; "
             "[ ! -f /workspace/.abox/prepare.sh ] || sh /workspace/.abox/prepare.sh >&2; "
