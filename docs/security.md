@@ -31,7 +31,7 @@ tools enforce an in-process `CommandPolicy` (`strands_tools/policy.py`):
 - Both additionally reject the interpreter inline-exec bypasses of the argv[0]
   allowlist (`python -c`, `bash -c`, `node -e`, `find -exec`, …) parsed from the
   argv, so tabs/quoting can't smuggle arbitrary code past an allowlisted
-  program (SEC-1).
+  program.
 - Every denial is recorded and fed to the **safety eval**, which is a hard gate
   in the promotion policy.
 
@@ -42,11 +42,11 @@ policy contain that.
 
 `Workspace` (`strands_tools/workspace.py`) additionally confines all file I/O to
 the worktree root, rejects `..`/absolute-path escapes, and refuses to write
-through a final symlink (SEC-2). This is the only filesystem guard in the
+through a final symlink. This is the only filesystem guard in the
 in-process `local` dev sandbox; production runs rely on abox's filesystem
 isolation.
 
-## abox binary identity (SEC-3)
+## abox binary identity
 
 The production sandbox is only a microVM because `argv[0]` resolves to a real
 abox binary. Before its first run, `AboxRunner` probes `abox --version` and
@@ -90,11 +90,11 @@ repo-owned `.abox/project.toml` (allowed commands, filesystem, package
 registries) — plus the run-level `--network` mode from the AgentSpec (which
 replaces the project's default mode per run; `open` is refused by `AboxRunner`
 without the explicit `BAKUDO_ALLOW_NETWORK_OPEN=1` opt-in, and even then still
-denies host/private/metadata ranges). Note that under abox 0.7.0 spec
-`networkMode: none` maps to abox `safe`, which is *host-mediated egress*, not
-the 0.6.0 loopback-only guest: a cooperating client inside the guest can still
-reach host-managed domains through the audited abox proxy, so `none` means
-"no repo-approved egress", not "zero egress".
+denies host/private/metadata ranges). Note that spec `networkMode: none` maps
+to abox `safe`, which is *host-mediated egress*, not a loopback-only guest: a
+cooperating client inside the guest can still reach host-managed domains
+through the audited abox proxy, so `none` means "no repo-approved egress",
+not "zero egress".
 
 ## Workload measurement and diagnostic capture
 

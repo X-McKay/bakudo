@@ -1,7 +1,10 @@
 # Long-Running Meta-Agent System Spec
 
-**Version:** v0.2 draft
-**Date:** 2026-08-16
+**Role:** the detailed design specification for bakudo. Its section numbers
+(§N) are cited as design anchors throughout the code and documentation; the
+current behavioral contracts live in [architecture.md](architecture.md),
+[cli.md](cli.md), [operations.md](operations.md), and
+[environment-model.md](environment-model.md).
 **Primary technologies:** abox, Temporal, Strands Agents, vLLM, Postgres, FalkorDB, Open Agent Skills, MCP
 
 ---

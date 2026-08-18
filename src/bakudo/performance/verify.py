@@ -131,15 +131,37 @@ def iter_workload_files(root: Path) -> tuple[Path, ...]:
 
 
 def workload_content_digest(root: Path) -> str:
-    """Digest every workload byte together with its normalized relative path."""
+    """Digest every workload byte together with its normalized relative path.
 
+    Two framings share this function. Workloads without executable members
+    keep the legacy framing (``path \\0 content \\1`` per member) byte for
+    byte, so every previously pinned digest stays valid. A workload with an
+    executable member — behavior-relevant, since the abox runners restore
+    ``+x`` in-guest — uses an unambiguous length-prefixed v2 framing whose
+    leading NUL no legacy input can produce (member paths never start with
+    NUL), so the two framings cannot collide.
+    """
+
+    files = iter_workload_files(root)
+    executable = {path for path in files if path.stat().st_mode & 0o111}
     digest = hashlib.sha256()
-    for path in iter_workload_files(root):
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\1")
+    if executable:
+        digest.update(b"\0bakudo-workload-digest-v2\0")
+        for path in files:
+            member_path = path.relative_to(root).as_posix().encode("utf-8")
+            content = path.read_bytes()
+            digest.update(len(member_path).to_bytes(8, "big"))
+            digest.update(member_path)
+            digest.update(b"x" if path in executable else b"-")
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    else:
+        for path in files:
+            relative = path.relative_to(root).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\1")
     return f"sha256:{digest.hexdigest()}"
 
 

@@ -139,8 +139,8 @@ operator to the durable API. Timed comparisons never enable a profiler.
 without `BAKUDO_POSTGRES_DSN`, a new CLI process has an empty in-memory ledger
 and prints a warning.
 
-The optimization CLI uses the same proof path and no longer accepts a benchmark
-command or self-reported timing:
+The optimization CLI uses the same proof path and accepts neither a benchmark
+command nor self-reported timing:
 
 ```bash
 bakudo optimize --repo payments-api --title "Reduce request latency" \

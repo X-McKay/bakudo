@@ -53,6 +53,38 @@ def test_verification_pin_is_stable_and_content_sensitive(tmp_path: Path) -> Non
     assert changed.pin.executor_digests != first.pin.executor_digests
 
 
+def test_content_digest_golden_value_is_stable(tmp_path: Path) -> None:
+    """The digest algorithm is pinned identity: this golden value was
+    computed before executable-awareness landed and must never change for
+    workloads without executables, or every persisted pin breaks."""
+    root = tmp_path / "w"
+    (root / "data").mkdir(parents=True)
+    (root / "run.py").write_bytes(b"print('golden')\n")
+    (root / "data" / "input.json").write_bytes(b'{"n": 1}\n')
+
+    assert (
+        workload_content_digest(root)
+        == "sha256:852359eb8d24662f40cad36aa58a9137d0dddd973a256253c7ce33a05163aa7b"
+    )
+
+
+def test_executable_bit_is_part_of_content_identity(tmp_path: Path) -> None:
+    """The runners restore +x in-guest, so the bit changes behavior and must
+    change identity — same bytes, different mode, different digest."""
+    root = tmp_path / "w"
+    root.mkdir()
+    tool = root / "tool.sh"
+    tool.write_bytes(b"#!/bin/sh\nexit 0\n")
+    baseline = workload_content_digest(root)
+
+    tool.chmod(0o755)
+    with_exec = workload_content_digest(root)
+    assert with_exec != baseline
+
+    tool.chmod(0o644)
+    assert workload_content_digest(root) == baseline
+
+
 def test_bytecode_caches_never_enter_the_content_digest(tmp_path: Path) -> None:
     """pip byte-compiles packaged corpora on install; those cache files must
     not make a wheel install's digest diverge from the source checkout's."""

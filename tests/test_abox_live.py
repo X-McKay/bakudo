@@ -1,11 +1,11 @@
-"""Offline in-sandbox e2e against the *real* abox 0.7.2 binary (plan Task 2.3).
+"""Offline in-sandbox e2e against the *real* abox 0.7.2 binary.
 
 Skipped unless ``ABOX_LIVE=1``: these tests boot KVM microVMs and need the
 repo trusted (``abox project trust``) and warmed (``abox env warm``). They run
 fully offline (``BAKUDO_OFFLINE=1`` inside the guest — the explore spec's
 ``networkMode: none`` maps to abox ``--network safe`` anyway).
 
-Acceptance (HUMAN_TASKS section 4 / validation plan Task 2.3):
+Acceptance:
 
 - a schema-valid ``result.json`` is collected from the abox worktree,
 - branch ``agent/<run_id>`` exists while the sandbox lives,

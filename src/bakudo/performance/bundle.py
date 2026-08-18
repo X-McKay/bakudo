@@ -41,10 +41,12 @@ class WorkloadBundleManifest(BaseModel):
     bundle_digest: str = Field(alias="bundleDigest")
 
 
-def _tar_info(name: str, size: int) -> tarfile.TarInfo:
+def _tar_info(name: str, size: int, *, executable: bool = False) -> tarfile.TarInfo:
     info = tarfile.TarInfo(name)
     info.size = size
-    info.mode = 0o644
+    # Only two mode values keep bundles byte-deterministic while carrying
+    # the one behavior-relevant permission (the runners restore +x in-guest).
+    info.mode = 0o755 if executable else 0o644
     info.mtime = 0
     info.uid = 0
     info.gid = 0
@@ -74,7 +76,11 @@ def publish_workload_bundle(workload: LoadedWorkload, output_dir: Path) -> Path:
             relative = path.relative_to(workload.root).as_posix()
             data = path.read_bytes()
             archive.addfile(
-                _tar_info(f"workload/{relative}", len(data)),
+                _tar_info(
+                    f"workload/{relative}",
+                    len(data),
+                    executable=bool(path.stat().st_mode & 0o111),
+                ),
                 io.BytesIO(data),
             )
     return artifact
@@ -142,6 +148,10 @@ def extract_workload_bundle(
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
+                # Restore the one behavior-relevant permission before the
+                # exec-aware content digest is recomputed and verified.
+                if member.mode & 0o111:
+                    target.chmod(0o755)
             except OSError as exc:
                 raise WorkloadBundleError(
                     f"could not materialize workload bundle member {member.name!r}: {exc}"
