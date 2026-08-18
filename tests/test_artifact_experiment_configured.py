@@ -35,7 +35,7 @@ def _revision(value: str) -> RevisionPin:
 def _environment() -> EnvironmentPin:
     return EnvironmentPin(
         bakudo_version="3.0.0",
-        abox_version="0.7.1",
+        abox_version="0.7.2",
         image_digest=_DIGEST,
         profile="python-glibc",
         hardware_class="test",
@@ -95,7 +95,7 @@ def test_configured_observer_is_independently_injectable_and_cell_idempotent() -
                 ],
                 "workloadRef": {
                     "name": "smoke-python-loop",
-                    "version": "1.0.0",
+                    "version": "1.0.1",
                     "source": "directory",
                 },
             },
@@ -171,7 +171,7 @@ def test_api_dispatches_artifact_subject_without_agent_sandbox(
                 ],
                 "workloadRef": {
                     "name": "smoke-python-loop",
-                    "version": "1.0.0",
+                    "version": "1.0.1",
                     "source": "directory",
                 },
             },
@@ -204,7 +204,7 @@ def test_cli_dispatches_artifact_subject_without_agent_verifier(
                 ],
                 "workloadRef": {
                     "name": "smoke-python-loop",
-                    "version": "1.0.0",
+                    "version": "1.0.1",
                     "source": "directory",
                 },
             },

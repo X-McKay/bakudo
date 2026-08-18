@@ -117,7 +117,7 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
     queue = f"bakudo-performance-live-{uuid.uuid4().hex}"
     suffix = uuid.uuid4().hex
     source = default_workload_source()
-    workload = source.load("smoke-python-loop@1.0.0")
+    workload = source.load("smoke-python-loop@1.0.1")
     environment = _environment()
     baseline = _revision("a")
     candidate = _revision("b")

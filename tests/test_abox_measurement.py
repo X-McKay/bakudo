@@ -78,7 +78,7 @@ def _revision(tmp_path: Path, *, patch_digest: str | None = None) -> RevisionPin
 def _environment() -> EnvironmentPin:
     return EnvironmentPin(
         bakudo_version="3.0.0",
-        abox_version="0.7.1",
+        abox_version="0.7.2",
         image_digest=DIGEST,
         profile="python-small",
         hardware_class="test",
@@ -135,11 +135,33 @@ def test_invocation_uses_pinned_input_argv_and_returns_declared_metric(tmp_path:
     assert outcome.ordinal == 2
     assert outcome.metrics[0].name == "latency_seconds"
     run_argv = next(argv for argv in executor.calls if argv[1] == "run")
-    assert "--input-file" in run_argv
+    # abox rejects guest names containing "/" ("must be a plain file name"),
+    # so every staged member and the rewritten argv use flat names directly
+    # under /abox-meta/inputs/.
+    staged = [run_argv[i + 1] for i, arg in enumerate(run_argv) if arg == "--input-file"]
+    assert staged and all(":" in entry and "/" not in entry.split(":", 1)[1] for entry in staged)
     payload = json.loads(run_argv[-1])
-    assert payload["argv"] == ["python", "/abox-meta/inputs/workload/run.py"]
+    assert payload["argv"] == ["python", "/abox-meta/inputs/run.py"]
     assert payload["env"] == {"MODE": "smoke"}
     assert isinstance(payload["argv"], list)
+
+
+def test_nested_workload_layouts_are_rejected_before_abox_runs(tmp_path: Path) -> None:
+    executor = _Executor(ExecResult(0, stdout=_marker()))
+    loaded = _loaded(tmp_path)
+    nested = loaded.root / "data"
+    nested.mkdir()
+    (nested / "corpus.txt").write_text("x\n")
+
+    with pytest.raises(AboxMeasurementError, match="plain guest file names"):
+        AboxWorkloadInvoker(executor=executor).invoke(
+            loaded,
+            _revision(tmp_path),
+            _environment(),
+            phase=InvocationPhase.measured,
+            ordinal=0,
+        )
+    assert not any(len(argv) > 1 and argv[1] == "run" for argv in executor.calls)
 
 
 def test_abox_failure_is_an_explicit_infrastructure_outcome(tmp_path: Path) -> None:

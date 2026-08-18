@@ -38,7 +38,7 @@ def _performance_contract():
     return {
         "workloadRef": {
             "name": "smoke-python-loop",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "source": "repository",
         },
         "primaryMetric": "latency_seconds",
@@ -68,14 +68,14 @@ def _prepared_performance():
     }
     return {
         "status": "completed",
-        "workload": "smoke-python-loop@1.0.0",
+        "workload": "smoke-python-loop@1.0.1",
         "workloadSource": "package://bakudo/smoke-workloads",
         "workloadPin": {
             "sourceURI": "file:///trusted/workloads",
             "sourceKind": "repository",
             "collectionRevision": "base",
             "name": "smoke-python-loop",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "manifestDigest": _PERFORMANCE_DIGEST,
             "bundleDigest": _PERFORMANCE_DIGEST,
         },
