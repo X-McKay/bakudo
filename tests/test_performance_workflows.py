@@ -590,6 +590,24 @@ async def test_measurement_workflow_signal_cancels_blocking_activity(
         )
         assert await asyncio.to_thread(invoker.started.wait, 5)
         await handle.signal(PerformanceMeasurementWorkflow.cancel)
+
+        # Hold the activity blocked until the server has recorded the
+        # cancellation request. Releasing immediately races the activity's
+        # completion against the workflow's RequestCancelActivityTask
+        # command; when completion wins, the Java time-skipping test server
+        # rejects the workflow task ("ACTIVITY_UNKNOWN") and the run wedges
+        # instead of resolving — the intermittent local hang this ordering
+        # eliminates. The production server tolerates that race; the test's
+        # purpose is the cancel-while-running path, which this ordering pins.
+        async def cancel_requested() -> bool:
+            async for event in handle.fetch_history_events():
+                if event.HasField("activity_task_cancel_requested_event_attributes"):
+                    return True
+            return False
+
+        async with asyncio.timeout(10):
+            while not await cancel_requested():
+                await asyncio.sleep(0.05)
         invoker.release.set()
         result = await handle.result()
 
