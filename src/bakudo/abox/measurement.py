@@ -61,12 +61,19 @@ except subprocess.TimeoutExpired as exc:
     stderr = exc.stderr or ""
     if isinstance(stdout, bytes): stdout = stdout.decode(errors="replace")
     if isinstance(stderr, bytes): stderr = stderr.decode(errors="replace")
+except FileNotFoundError as exc:
+    # Missing interpreter/executable in the guest image: report the shell's
+    # command-not-found code through the marker instead of crashing unmarked.
+    proc = None
+    timed_out = False
+    stdout = ""
+    stderr = f"workload argv[0] not found in guest: {exc}"
 elapsed = time.perf_counter() - started
 ended_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
 if proc is not None:
     stdout, stderr, exit_code = proc.stdout, proc.stderr, proc.returncode
 else:
-    exit_code = 124
+    exit_code = 124 if timed_out else 127
 metrics = {
     "latency_seconds": elapsed,
     "cpu_seconds": max(0.0, (ended_usage.ru_utime + ended_usage.ru_stime)
