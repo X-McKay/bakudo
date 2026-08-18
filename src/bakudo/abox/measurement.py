@@ -40,10 +40,20 @@ from .runner import (
 _MARKER = "bakudo_measurement"
 _MAX_OUTPUT_CHARS = 20_000
 
+# Where the in-guest wrapper reconstructs the staged workload layout. abox
+# stages inputs flat (guest names may not contain "/"), so nested member
+# paths are rebuilt here before the workload argv executes.
+_GUEST_WORKLOAD_ROOT = "/tmp/bakudo-workload"
+
 _WRAPPER = r"""
-import json, os, resource, subprocess, sys, time
+import json, os, resource, shutil, subprocess, sys, time
 
 payload = json.loads(sys.argv[1])
+inputs_dir = os.environ.get("ABOX_INPUT_DIR", "/abox-meta/inputs")
+for flat_name, relative in payload["files"].items():
+    destination = os.path.join(payload["workload_root"], relative)
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    shutil.copyfile(os.path.join(inputs_dir, flat_name), destination)
 env = os.environ.copy()
 env.update(payload["env"])
 started_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -98,6 +108,17 @@ print(json.dumps({"bakudo_measurement": {
 
 class AboxMeasurementError(RuntimeError):
     """A trusted measurement runner failure."""
+
+
+# Bounded diagnostic tail persisted on failed invocations (InvocationOutcome
+# caps failureDetail at 2000 characters).
+_DETAIL_CHARS = 2_000
+
+
+def _failure_detail(stderr: str, stdout: str) -> str | None:
+    """The most useful bounded tail for a failed invocation, if any."""
+    text = (stderr or "").strip() or (stdout or "").strip()
+    return text[-_DETAIL_CHARS:] if text else None
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -167,10 +188,23 @@ class AboxWorkloadInvoker:
         for argument in workload.spec.command.argv:
             candidate = workload.root / argument
             if not argument.startswith("-") and candidate.is_file():
-                argv.append(f"/abox-meta/inputs/{argument}")
+                argv.append(f"{_GUEST_WORKLOAD_ROOT}/{argument}")
             else:
                 argv.append(argument)
         return argv
+
+    @staticmethod
+    def _staged_files(workload: LoadedWorkload) -> list[tuple[str, Path, str]]:
+        """(flat guest name, host path, relative path) for every pinned member.
+
+        abox rejects guest names containing "/" ("must be a plain file
+        name"), so members are staged flat under unique names and the
+        in-guest wrapper reconstructs the layout at ``workload_root``.
+        """
+        return [
+            (f"w{index}-{path.name}", path, path.relative_to(workload.root).as_posix())
+            for index, path in enumerate(iter_workload_files(workload.root))
+        ]
 
     def build_command(
         self,
@@ -183,12 +217,15 @@ class AboxWorkloadInvoker:
     ) -> list[str]:
         network = "scoped" if workload.spec.environment.network.value == "scoped" else "safe"
         cwd_suffix = "" if workload.spec.command.cwd == "." else f"/{workload.spec.command.cwd}"
+        staged = self._staged_files(workload)
         payload = json.dumps(
             {
                 "argv": self._guest_argv(workload),
                 "cwd": f"/workspace{cwd_suffix}",
                 "env": workload.spec.command.env,
                 "timeout": workload.spec.measurement.timeout_seconds,
+                "files": {flat: relative for flat, _, relative in staged},
+                "workload_root": _GUEST_WORKLOAD_ROOT,
             },
             separators=(",", ":"),
         )
@@ -209,18 +246,8 @@ class AboxWorkloadInvoker:
             "--network",
             network,
         ]
-        # Stage exactly the pinned content set. abox rejects guest names
-        # containing "/" ("must be a plain file name"), so members land flat
-        # under /abox-meta/inputs/ and nested layouts fail closed here.
-        for path in iter_workload_files(workload.root):
-            relative = path.relative_to(workload.root).as_posix()
-            if "/" in relative:
-                raise AboxMeasurementError(
-                    "abox --input-file requires plain guest file names; nested "
-                    f"workload member {relative!r} is not supported (flatten "
-                    "the workload directory)"
-                )
-            argv += ["--input-file", f"{path}:{relative}"]
+        for flat, path, _ in staged:
+            argv += ["--input-file", f"{path}:{flat}"]
         guest_script = (
             "set -e; "
             "[ ! -f /workspace/.abox/prepare.sh ] || sh /workspace/.abox/prepare.sh >&2; "
@@ -318,6 +345,7 @@ class AboxWorkloadInvoker:
                     failure_reason=FailureReason.timeout
                     if result.timed_out or result.exit_code == 124
                     else FailureReason.infrastructure,
+                    failure_detail=_failure_detail(result.stderr, result.stdout),
                 )
             payload = _parse_marker(result.stdout)
             timed_out = bool(payload.get("timed_out"))
@@ -359,6 +387,11 @@ class AboxWorkloadInvoker:
                 failure_reason=None
                 if completed
                 else (FailureReason.timeout if timed_out else FailureReason.workload),
+                failure_detail=None
+                if completed
+                else _failure_detail(
+                    str(payload.get("stderr", "")), str(payload.get("stdout", ""))
+                ),
             )
         finally:
             try:

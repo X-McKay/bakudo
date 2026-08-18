@@ -363,6 +363,19 @@
           "default": null,
           "title": "Exitcode"
         },
+        "failureDetail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failuredetail"
+        },
         "failureReason": {
           "anyOf": [
             {

@@ -358,6 +358,9 @@ class InvocationOutcome(_StrictFrozen):
     exit_code: int | None = Field(default=None, alias="exitCode")
     metrics: tuple[MetricValue, ...] = Field(default_factory=tuple, max_length=64)
     failure_reason: FailureReason | None = Field(default=None, alias="failureReason")
+    # Bounded diagnostic tail (runner/guest stderr) for failed invocations;
+    # never populated for completed ones.
+    failure_detail: str | None = Field(default=None, alias="failureDetail", max_length=2_000)
 
     @field_validator("elapsed_seconds")
     @classmethod
