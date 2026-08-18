@@ -53,7 +53,7 @@ def _revision(commit: str) -> RevisionPin:
 def _environment() -> EnvironmentPin:
     return EnvironmentPin(
         bakudo_version="3.0.0",
-        abox_version="0.7.1",
+        abox_version="0.7.2",
         image_digest=_DIGEST,
         profile="python-small",
         hardware_class="test",

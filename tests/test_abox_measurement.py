@@ -78,7 +78,7 @@ def _revision(tmp_path: Path, *, patch_digest: str | None = None) -> RevisionPin
 def _environment() -> EnvironmentPin:
     return EnvironmentPin(
         bakudo_version="3.0.0",
-        abox_version="0.7.1",
+        abox_version="0.7.2",
         image_digest=DIGEST,
         profile="python-small",
         hardware_class="test",

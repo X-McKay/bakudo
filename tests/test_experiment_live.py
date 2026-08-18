@@ -1,5 +1,5 @@
 """Live e2e: the abox-backed verifier-test runner (Task 8) exercised through
-the CLI's ``trial``/``experiment`` commands against a real abox 0.7.1
+the CLI's ``trial``/``experiment`` commands against a real abox 0.7.2
 sandbox. Gated exactly like ``tests/test_abox_live.py`` -- skipped unless
 ``ABOX_LIVE=1`` (needs KVM; the workspace abox_verifier_runner grades verifier
 tests in gets a synthetic python-glibc ``.abox/`` of its own -- see

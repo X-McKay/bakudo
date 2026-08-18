@@ -64,7 +64,7 @@ def _revision_pin() -> RevisionPin:
 def _environment_pin() -> EnvironmentPin:
     return EnvironmentPin(
         bakudoVersion="3.0.0",
-        aboxVersion="0.7.1",
+        aboxVersion="0.7.2",
         imageDigest=_DIGEST,
         profile="python-small",
         hardwareClass="test",

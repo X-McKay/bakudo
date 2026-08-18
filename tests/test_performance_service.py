@@ -37,7 +37,7 @@ def _revision(char: str) -> RevisionPin:
 def _environment(*, profile: str = "python-glibc") -> EnvironmentPin:
     return EnvironmentPin(
         bakudo_version="3.0.0",
-        abox_version="0.7.1",
+        abox_version="0.7.2",
         image_digest=_DIGEST,
         profile=profile,
         hardware_class="test",

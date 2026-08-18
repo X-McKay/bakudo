@@ -84,7 +84,7 @@ def _environment_pin(
 ) -> EnvironmentPin:
     return EnvironmentPin(
         bakudo_version=bakudo_version,
-        abox_version="0.7.1",
+        abox_version="0.7.2",
         image_digest=_DIGEST,
         profile=profile,
         hardware_class="test",

@@ -129,7 +129,7 @@ def _loaded(tmp_path: Path) -> LoadedWorkload:
     )
 
 
-def _environment(*, abox_version: str = "0.7.1") -> EnvironmentPin:
+def _environment(*, abox_version: str = "0.7.2") -> EnvironmentPin:
     return EnvironmentPin(
         bakudo_version="3.0.0",
         abox_version=abox_version,
@@ -152,7 +152,7 @@ class _FakeAbox:
         worktree: Path,
         *,
         run_result: ProfileProcessResult | None = None,
-        version: str = "abox 0.7.1",
+        version: str = "abox 0.7.2",
     ) -> None:
         self.worktree = worktree
         self.run_result = run_result or ProfileProcessResult(0)

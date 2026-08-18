@@ -124,7 +124,7 @@ def _performance_fixture(tmp_path: Path) -> tuple[Path, Path]:
         json.dumps(
             {
                 "bakudoVersion": "3.0.0",
-                "aboxVersion": "0.7.1",
+                "aboxVersion": "0.7.2",
                 "imageDigest": _DIGEST,
                 "profile": "python-glibc",
                 "hardwareClass": "test",

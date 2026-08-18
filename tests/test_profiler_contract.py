@@ -24,7 +24,7 @@ _DIGEST = "sha256:" + "0" * 64
 def _environment() -> EnvironmentPin:
     return EnvironmentPin(
         bakudoVersion="3.0.0",
-        aboxVersion="0.7.1",
+        aboxVersion="0.7.2",
         imageDigest=_DIGEST,
         profile="python-small",
         hardwareClass="test",
