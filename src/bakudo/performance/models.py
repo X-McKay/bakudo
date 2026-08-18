@@ -350,6 +350,12 @@ class MetricValue(_StrictFrozen):
         return value
 
 
+# Single authority for the failureDetail bound: producers truncate to it and
+# the model enforces it, so a lowered bound cannot turn diagnosable failures
+# into ValidationErrors.
+FAILURE_DETAIL_MAX_CHARS = 2_000
+
+
 class InvocationOutcome(_StrictFrozen):
     ordinal: int = Field(ge=0)
     phase: InvocationPhase
@@ -360,7 +366,9 @@ class InvocationOutcome(_StrictFrozen):
     failure_reason: FailureReason | None = Field(default=None, alias="failureReason")
     # Bounded diagnostic tail (runner/guest stderr) for failed invocations;
     # never populated for completed ones.
-    failure_detail: str | None = Field(default=None, alias="failureDetail", max_length=2_000)
+    failure_detail: str | None = Field(
+        default=None, alias="failureDetail", max_length=FAILURE_DETAIL_MAX_CHARS
+    )
 
     @field_validator("elapsed_seconds")
     @classmethod
