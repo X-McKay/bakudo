@@ -83,6 +83,24 @@ def test_directory_source_lists_and_loads_immutable_snapshot(tmp_path: Path) -> 
     assert loaded.root.joinpath("data/input.json").read_bytes() == original_dataset
 
 
+def test_snapshot_preserves_executable_bits_read_only(tmp_path: Path) -> None:
+    """The immutable snapshot keeps executables executable (0o555, never
+    writable): the abox staging layer restores +x in-guest from what it sees
+    here, so a snapshot that flattens modes to 0o444 silently breaks any
+    workload that executes a member directly."""
+    root = tmp_path / "workloads"
+    root.mkdir()
+    workload = make_workload(root)
+    tool = workload / "tool.sh"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o755)
+
+    loaded = DirectoryWorkloadSource(root).load("loop")
+
+    assert (loaded.root / "tool.sh").stat().st_mode & 0o777 == 0o555
+    assert (loaded.root / "run.py").stat().st_mode & 0o777 == 0o444
+
+
 def test_source_detects_mutation_between_discovery_and_load(tmp_path: Path) -> None:
     root = tmp_path / "workloads"
     root.mkdir()

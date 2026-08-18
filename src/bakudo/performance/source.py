@@ -120,18 +120,23 @@ def load_workload_spec(workload_dir: Path) -> WorkloadSpec:
 
 def _copy_snapshot(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=False)
+    executable: set[Path] = set()
     for path in iter_workload_files(source):
         relative = path.relative_to(source)
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
+        if path.stat().st_mode & 0o111:
+            executable.add(target)
     for directory in sorted(
         (item for item in destination.rglob("*") if item.is_dir()), reverse=True
     ):
         directory.chmod(0o555)
     for path in destination.rglob("*"):
         if path.is_file():
-            path.chmod(0o444)
+            # Immutable either way; executables keep their exec bit so the
+            # abox staging layer can restore +x for them in-guest.
+            path.chmod(0o555 if path in executable else 0o444)
     destination.chmod(0o555)
 
 

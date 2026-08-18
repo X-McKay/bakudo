@@ -46,11 +46,17 @@ from ..performance.revisions import pin_repository_revision, sha256_text
 from ..performance.source import LoadedWorkload
 from ..performance.verify import (
     WorkloadVerificationPolicy,
-    iter_workload_files,
     verify_and_pin_workload,
 )
 from .profiler import AboxProfilerRunner, ProfileProcessResult
 from .runner import IN_GUEST_SETUP_HEADROOM_SECONDS, SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
+from .staging import (
+    GUEST_RECONSTRUCT_SNIPPET,
+    GUEST_WORKLOAD_ROOT,
+    staged_workload_files,
+    staging_input_arguments,
+    staging_payload_fields,
+)
 
 _HOUSEKEEPING_TIMEOUT_SECONDS = 120.0
 _HOUSEKEEPING_OUTPUT_CHARS = 4_096
@@ -59,19 +65,7 @@ _POLL_SECONDS = 0.1
 _GUEST_OUTPUT_PATH = "/workspace/.bakudo/profile.raw"
 _SNAPSHOT_ID = re.compile(r"^snapshot_[0-9A-HJKMNP-TV-Z]{26}$")
 
-# Where the in-guest launcher reconstructs the staged workload layout. abox
-# stages inputs flat (guest names may not contain "/"), so nested member
-# paths are rebuilt here before the profiler argv executes.
-_GUEST_WORKLOAD_ROOT = "/tmp/bakudo-workload"
-
-_GUEST_LAUNCHER = r"""
-import json, os, shutil, sys
-payload = json.loads(sys.argv[1])
-inputs_dir = os.environ.get("ABOX_INPUT_DIR", "/abox-meta/inputs")
-for flat_name, relative in payload["files"].items():
-    destination = os.path.join(payload["workload_root"], relative)
-    os.makedirs(os.path.dirname(destination), exist_ok=True)
-    shutil.copyfile(os.path.join(inputs_dir, flat_name), destination)
+_GUEST_LAUNCHER = GUEST_RECONSTRUCT_SNIPPET + r"""
 os.makedirs("/workspace/.bakudo", mode=0o700, exist_ok=True)
 os.chdir(payload["cwd"])
 environment = os.environ.copy()
@@ -304,32 +298,19 @@ class _FreshAboxExecutor:
         self._cancel_event = cancel_event
         self._max_artifact_bytes = max_artifact_bytes
 
-    def _staged_files(self) -> list[tuple[str, Path, str]]:
-        """(flat guest name, host path, relative path) per pinned member.
-
-        abox rejects guest names containing "/" ("must be a plain file
-        name"), so members are staged flat under unique names and the
-        in-guest launcher reconstructs the layout at ``workload_root``.
-        """
-        return [
-            (f"w{index}-{path.name}", path, path.relative_to(self._workload.root).as_posix())
-            for index, path in enumerate(iter_workload_files(self._workload.root))
-        ]
-
     def _run_command(
         self,
         profiler_argv: Sequence[str],
         environment: Mapping[str, str],
         timeout: float,
     ) -> list[str]:
-        staged = self._staged_files()
+        staged = staged_workload_files(self._workload.root)
         payload = json.dumps(
             {
                 "argv": list(profiler_argv),
                 "cwd": _guest_cwd(self._workload_cwd),
                 "env": dict(environment),
-                "files": {flat: relative for flat, _, relative in staged},
-                "workload_root": _GUEST_WORKLOAD_ROOT,
+                **staging_payload_fields(staged),
             },
             separators=(",", ":"),
         )
@@ -348,8 +329,7 @@ class _FreshAboxExecutor:
             "--network",
             self._network,
         ]
-        for flat, path, _ in staged:
-            command += ["--input-file", f"{path}:{flat}"]
+        command += staging_input_arguments(staged)
         command += ["--", "python3", "-c", _GUEST_LAUNCHER, payload]
         return command
 
@@ -579,7 +559,7 @@ class AboxProfileCaptureService:
             )
             candidate = workload.root / argument
             if is_safe_member and candidate.is_file():
-                argv.append(f"{_GUEST_WORKLOAD_ROOT}/{argument}")
+                argv.append(f"{GUEST_WORKLOAD_ROOT}/{argument}")
             else:
                 argv.append(argument)
         return WorkloadInvocation(

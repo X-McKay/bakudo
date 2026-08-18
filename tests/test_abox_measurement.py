@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -175,6 +176,45 @@ def test_nested_workload_layouts_are_staged_flat_and_reconstructed(tmp_path: Pat
     assert payload["argv"] == ["python", "/tmp/bakudo-workload/run.py"]
 
 
+def test_guest_names_are_sanitized_and_executable_bits_recorded(tmp_path: Path) -> None:
+    executor = _Executor(ExecResult(0, stdout=_marker()))
+    loaded = _loaded(tmp_path)
+    hostile = loaded.root / "we ird:name.txt"
+    hostile.write_text("x\n")
+    tool = loaded.root / "tool.sh"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o755)
+
+    outcome = AboxWorkloadInvoker(executor=executor).invoke(
+        loaded,
+        _revision(tmp_path),
+        _environment(),
+        phase=InvocationPhase.measured,
+        ordinal=0,
+    )
+
+    assert outcome.status is RecordStatus.completed
+    run_argv = next(argv for argv in executor.calls if argv[1] == "run")
+    staged = [run_argv[i + 1] for i, arg in enumerate(run_argv) if arg == "--input-file"]
+    guest_names = [entry.rsplit(":", 1)[1] for entry in staged]
+    # abox parses <hostpath>[:<guestname>] and validates guest names, so a
+    # member name may not smuggle separators or shell-hostile characters
+    # into the argv; the flat names are index-unique, sanitization cannot
+    # collide them.
+    assert all(re.fullmatch(r"[A-Za-z0-9._-]+", name) for name in guest_names)
+    payload = json.loads(run_argv[-1])
+    assert payload["files"]["w2-we_ird_name.txt"] == "we ird:name.txt"
+    # Only the executable member is chmod-restored by the wrapper.
+    assert payload["executables"] == ["w1-tool.sh"]
+
+
+def test_failure_detail_strips_ansi_and_control_sequences() -> None:
+    from bakudo.abox.measurement import _failure_detail
+
+    noisy = "\x1b[2m2026-08-18\x1b[0m \x1b[31mERROR\x1b[0m boom\r\nline2\x07"
+    assert _failure_detail(noisy, "") == "2026-08-18 ERROR boom\nline2"
+
+
 def test_wrapper_reconstructs_the_layout_and_emits_the_marker(tmp_path: Path) -> None:
     """Execute the real in-guest wrapper locally against a nested layout."""
     import os
@@ -191,6 +231,9 @@ def test_wrapper_reconstructs_the_layout_and_emits_the_marker(tmp_path: Path) ->
         "corpus = pathlib.Path(__file__).parent / 'data' / 'corpus.txt'\n"
         "print(json.dumps({'corpus_bytes': corpus.stat().st_size}))\n"
     )
+    # Staged files lose their mode bits; the wrapper must restore +x for
+    # members the host recorded as executable.
+    (inputs / "w2-tool.sh").write_text("#!/bin/sh\nexit 0\n")
     root = tmp_path / "reconstructed"
     payload = json.dumps(
         {
@@ -198,7 +241,12 @@ def test_wrapper_reconstructs_the_layout_and_emits_the_marker(tmp_path: Path) ->
             "cwd": str(tmp_path),
             "env": {},
             "timeout": 30,
-            "files": {"w0-corpus.txt": "data/corpus.txt", "w1-run.py": "run.py"},
+            "files": {
+                "w0-corpus.txt": "data/corpus.txt",
+                "w1-run.py": "run.py",
+                "w2-tool.sh": "bin/tool.sh",
+            },
+            "executables": ["w2-tool.sh"],
             "workload_root": str(root),
         }
     )
@@ -214,6 +262,8 @@ def test_wrapper_reconstructs_the_layout_and_emits_the_marker(tmp_path: Path) ->
     assert marker["exit_code"] == 0
     assert marker["metrics"]["corpus_bytes"] == 6.0
     assert (root / "data" / "corpus.txt").read_text() == "hello\n"
+    assert os.access(root / "bin" / "tool.sh", os.X_OK)
+    assert not os.access(root / "run.py", os.X_OK)
 
 
 def test_abox_failure_is_an_explicit_infrastructure_outcome(tmp_path: Path) -> None:

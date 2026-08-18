@@ -9,6 +9,7 @@ temporary git branch, but repository code runs only inside the abox guest.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -28,7 +29,6 @@ from ..performance.models import (
 from ..performance.pins import EnvironmentPin, RevisionPin
 from ..performance.revisions import sha256_text
 from ..performance.source import LoadedWorkload
-from ..performance.verify import iter_workload_files
 from .runner import (
     IN_GUEST_SETUP_HEADROOM_SECONDS,
     SUBPROCESS_TIMEOUT_HEADROOM_SECONDS,
@@ -36,24 +36,20 @@ from .runner import (
     Executor,
     _subprocess_executor,
 )
+from .staging import (
+    GUEST_RECONSTRUCT_SNIPPET,
+    GUEST_WORKLOAD_ROOT,
+    staged_workload_files,
+    staging_input_arguments,
+    staging_payload_fields,
+)
 
 _MARKER = "bakudo_measurement"
 _MAX_OUTPUT_CHARS = 20_000
 
-# Where the in-guest wrapper reconstructs the staged workload layout. abox
-# stages inputs flat (guest names may not contain "/"), so nested member
-# paths are rebuilt here before the workload argv executes.
-_GUEST_WORKLOAD_ROOT = "/tmp/bakudo-workload"
+_WRAPPER = GUEST_RECONSTRUCT_SNIPPET + r"""
+import resource, subprocess, time
 
-_WRAPPER = r"""
-import json, os, resource, shutil, subprocess, sys, time
-
-payload = json.loads(sys.argv[1])
-inputs_dir = os.environ.get("ABOX_INPUT_DIR", "/abox-meta/inputs")
-for flat_name, relative in payload["files"].items():
-    destination = os.path.join(payload["workload_root"], relative)
-    os.makedirs(os.path.dirname(destination), exist_ok=True)
-    shutil.copyfile(os.path.join(inputs_dir, flat_name), destination)
 env = os.environ.copy()
 env.update(payload["env"])
 started_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -113,11 +109,18 @@ class AboxMeasurementError(RuntimeError):
 # Bounded diagnostic tail persisted on failed invocations (InvocationOutcome
 # caps failureDetail at 2000 characters).
 _DETAIL_CHARS = 2_000
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
 
 def _failure_detail(stderr: str, stdout: str) -> str | None:
-    """The most useful bounded tail for a failed invocation, if any."""
+    """The most useful bounded tail for a failed invocation, if any.
+
+    abox and guest output carry ANSI styling and control characters that
+    would only obscure a persisted diagnostic; keep newlines, drop the rest.
+    """
     text = (stderr or "").strip() or (stdout or "").strip()
+    text = _CONTROL_CHARS.sub("", _ANSI_CSI.sub("", text)).strip()
     return text[-_DETAIL_CHARS:] if text else None
 
 
@@ -188,23 +191,10 @@ class AboxWorkloadInvoker:
         for argument in workload.spec.command.argv:
             candidate = workload.root / argument
             if not argument.startswith("-") and candidate.is_file():
-                argv.append(f"{_GUEST_WORKLOAD_ROOT}/{argument}")
+                argv.append(f"{GUEST_WORKLOAD_ROOT}/{argument}")
             else:
                 argv.append(argument)
         return argv
-
-    @staticmethod
-    def _staged_files(workload: LoadedWorkload) -> list[tuple[str, Path, str]]:
-        """(flat guest name, host path, relative path) for every pinned member.
-
-        abox rejects guest names containing "/" ("must be a plain file
-        name"), so members are staged flat under unique names and the
-        in-guest wrapper reconstructs the layout at ``workload_root``.
-        """
-        return [
-            (f"w{index}-{path.name}", path, path.relative_to(workload.root).as_posix())
-            for index, path in enumerate(iter_workload_files(workload.root))
-        ]
 
     def build_command(
         self,
@@ -217,15 +207,14 @@ class AboxWorkloadInvoker:
     ) -> list[str]:
         network = "scoped" if workload.spec.environment.network.value == "scoped" else "safe"
         cwd_suffix = "" if workload.spec.command.cwd == "." else f"/{workload.spec.command.cwd}"
-        staged = self._staged_files(workload)
+        staged = staged_workload_files(workload.root)
         payload = json.dumps(
             {
                 "argv": self._guest_argv(workload),
                 "cwd": f"/workspace{cwd_suffix}",
                 "env": workload.spec.command.env,
                 "timeout": workload.spec.measurement.timeout_seconds,
-                "files": {flat: relative for flat, _, relative in staged},
-                "workload_root": _GUEST_WORKLOAD_ROOT,
+                **staging_payload_fields(staged),
             },
             separators=(",", ":"),
         )
@@ -246,8 +235,7 @@ class AboxWorkloadInvoker:
             "--network",
             network,
         ]
-        for flat, path, _ in staged:
-            argv += ["--input-file", f"{path}:{flat}"]
+        argv += staging_input_arguments(staged)
         guest_script = (
             "set -e; "
             "[ ! -f /workspace/.abox/prepare.sh ] || sh /workspace/.abox/prepare.sh >&2; "
