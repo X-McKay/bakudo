@@ -13,8 +13,8 @@ on:
         description: Registered target repository name below BAKUDO_REPO_ROOT
         required: true
         type: string
-      workload:
-        description: Pinned scenario workload NAME@VERSION from the approved suite
+      scenario:
+        description: Scenario name from the approved suite (its workload and metric policy bind the run)
         required: true
         type: string
       baseline_ref:
@@ -23,10 +23,6 @@ on:
         type: string
       candidate_ref:
         description: Immutable candidate git revision
-        required: true
-        type: string
-      primary_metric:
-        description: Scenario primary metric
         required: true
         type: string
 
@@ -66,22 +62,53 @@ jobs:
         run: uv sync --all-extras --locked --python 3.11
       - name: Fail-closed lab preflight
         run: .venv/bin/bakudo performance preflight --json
-      - name: Resolve the approved scenario suite
+      # The dispatch selects only a scenario NAME; the measured workload and
+      # the complete metric policy (primary + protected) come from the
+      # resolved suite itself, so an approved suite cannot be bypassed by
+      # measuring an unlisted workload or dropping a protected metric.
+      - name: Resolve the requested scenario from the approved suite
         env:
           BAKUDO_PERFORMANCE_SUITE: ${{ inputs.suite }}
-        run: .venv/bin/bakudo workload validate-suite "$BAKUDO_PERFORMANCE_SUITE" --json
+          BAKUDO_PERFORMANCE_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          .venv/bin/bakudo workload validate-suite "$BAKUDO_PERFORMANCE_SUITE" --json \
+            > suite-resolution.json
+          .venv/bin/python - <<'PY' >> "$GITHUB_ENV"
+          import json
+          import os
+          import sys
+
+          with open("suite-resolution.json", encoding="utf-8") as handle:
+              resolution = json.load(handle)
+          requested = os.environ["BAKUDO_PERFORMANCE_SCENARIO"]
+          scenarios = {item["name"]: item for item in resolution["scenarios"]}
+          scenario = scenarios.get(requested)
+          if scenario is None:
+              sys.exit(
+                  f"scenario {requested!r} is not in the approved suite "
+                  f"{resolution['suiteRef']!r}: {sorted(scenarios)}"
+              )
+          workload = scenario["workload"]
+          print(f"SCENARIO_WORKLOAD={workload['name']}@{workload['version']}")
+          print(f"SCENARIO_PRIMARY_METRIC={scenario['primaryMetric']}")
+          protected = " ".join(
+              f"--protected-metric {name}" for name in scenario["protectedMetrics"]
+          )
+          print(f"SCENARIO_PROTECTED_ARGS={protected}")
+          PY
       - name: Measure the requested suite scenario
         env:
           BAKUDO_PERFORMANCE_REPOSITORY: ${{ inputs.repository }}
-          BAKUDO_PERFORMANCE_WORKLOAD: ${{ inputs.workload }}
           BAKUDO_PERFORMANCE_BASELINE_REF: ${{ inputs.baseline_ref }}
           BAKUDO_PERFORMANCE_CANDIDATE_REF: ${{ inputs.candidate_ref }}
-          BAKUDO_PERFORMANCE_PRIMARY_METRIC: ${{ inputs.primary_metric }}
+        # SCENARIO_PROTECTED_ARGS is deliberately unquoted: it expands to zero
+        # or more --protected-metric flags whose names match ^[a-z][a-z0-9_]*$.
         run: >-
           .venv/bin/bakudo performance compare --sync
           --repo "$BAKUDO_PERFORMANCE_REPOSITORY"
-          --workload "$BAKUDO_PERFORMANCE_WORKLOAD"
+          --workload "$SCENARIO_WORKLOAD"
           --baseline-ref "$BAKUDO_PERFORMANCE_BASELINE_REF"
           --candidate-ref "$BAKUDO_PERFORMANCE_CANDIDATE_REF"
-          --primary-metric "$BAKUDO_PERFORMANCE_PRIMARY_METRIC"
+          --primary-metric "$SCENARIO_PRIMARY_METRIC"
+          $SCENARIO_PROTECTED_ARGS
           --json
