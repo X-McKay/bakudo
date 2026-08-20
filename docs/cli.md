@@ -45,6 +45,9 @@ a model endpoint, or abox.
 | `bakudo performance measure` | Collect an uninstrumented `MeasurementRecord` (`--sync` required locally) | `--json` |
 | `bakudo performance capture` | Collect a diagnostic `PerformanceSnapshot` and restricted artifacts | `--json` |
 | `bakudo performance compare` | Interleave baseline/candidate measurements and create a `PerformanceComparison` | `--json` |
+| `bakudo performance prescreen` | Untrusted host A/B of two refs in disposable worktrees; a go/no-go before trusted compare time, never evidence | `--json` |
+| `bakudo performance calibrate` | A/A self-control compare of one revision; a lab that does not report `equivalent` must not be trusted | `--json` |
+| `bakudo performance report ID` | Render a persisted comparison as a PR-ready markdown evidence block | text |
 | `bakudo performance profile-diff` | Align two diagnostic snapshots to explain changed hotspots; never evidence | `--json` |
 | `bakudo performance show ID` | Read a persisted measurement, snapshot, or comparison | `--json` |
 | `bakudo performance regressions` | List approved regression signals, optionally by repository | `--json` |
@@ -148,6 +151,23 @@ bakudo performance capture --sync --repo payments-api \
 
 Without `--sync`, `measure`, `capture`, and `compare` fail before doing work and direct the
 operator to the durable API. Timed comparisons never enable a profiler.
+`measure`, `capture`, `compare`, and `calibrate` echo `pinned REF -> SHA` to
+stderr so the exact revision the evidence binds to is visible, and `compare`
+rejects a `--primary-metric`/`--protected-metric` name the workload does not
+declare before the first guest boots.
+
+Before spending trusted guest time on a candidate, `bakudo performance
+prescreen --repo R --workload W --baseline-ref A --candidate-ref B` runs the
+workload on the host, interleaved across the two refs in disposable git
+worktrees (committed revisions only — working-tree state can never leak into
+either side). Its output is labeled untrusted and is never persisted; the
+verdict vocabulary is `likely-improvement`/`likely-regression`/`unclear`.
+The host must supply the workload's interpreter and the target's
+dependencies (run it from the target's environment, or pass `--python`).
+`bakudo performance calibrate` runs a full trusted A/A comparison of one
+revision against itself and exits non-zero unless the lab reports
+`equivalent` — run it after onboarding a lab machine and after any host
+change that could affect timing stability.
 `performance show` reads durable records from the configured Postgres ledger;
 without `BAKUDO_POSTGRES_DSN`, a new CLI process has an empty in-memory ledger
 and prints a warning.

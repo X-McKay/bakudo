@@ -567,6 +567,103 @@ def _performance_context(args: argparse.Namespace):
     return ledger, repository, repo_path, workload, environment, service
 
 
+def _cmd_performance_calibrate(args: argparse.Namespace) -> int:
+    """A/A self-control: the lab must call one revision against itself equivalent."""
+
+    from .performance.revisions import pin_repository_revision
+
+    try:
+        _ledger, repository, repo_path, workload, environment, service = _performance_context(args)
+        revision = pin_repository_revision(
+            repo_path, args.ref, repository=repository, require_clean=True
+        )
+        _echo_pinned(args.ref, revision)
+        result = service.compare(
+            workload,
+            revision,
+            revision,
+            environment,
+            environment,
+            seed=args.seed,
+            confidence=args.confidence,
+            bootstrap_resamples=args.bootstrap_resamples,
+        )
+    except Exception as exc:  # noqa: BLE001 - operator/configuration failure
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    comparison = result.comparison
+    calibrated = comparison.status.value == "completed" and comparison.verdict.value == "equivalent"
+    _print_performance_record(comparison, as_json=args.json)
+    if calibrated:
+        print("calibration passed: A/A comparison is equivalent", file=sys.stderr)
+        return 0
+    print(
+        "CALIBRATION FAILED: the lab compared a revision against itself and did not "
+        f"report equivalent (verdict {comparison.verdict.value}, status "
+        f"{comparison.status.value}). Do not trust latency decisions from this lab "
+        "until the noise source is found.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _cmd_performance_report(args: argparse.Namespace) -> int:
+    """Render a persisted comparison as a PR-ready markdown evidence block."""
+
+    from .performance.report import comparison_markdown
+    from .registry.factory import ledger_from_env
+    from .registry.ledger import InMemoryLedger
+
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if isinstance(ledger, InMemoryLedger):
+        print(
+            "warning: no DSN configured; records from other processes are not visible",
+            file=sys.stderr,
+        )
+    comparison = ledger.get_performance_comparison(args.comparison_id)
+    if comparison is None:
+        print(f"error: comparison {args.comparison_id!r} not found", file=sys.stderr)
+        return 1
+    print(comparison_markdown(comparison), end="")
+    return 0
+
+
+def _cmd_performance_prescreen(args: argparse.Namespace) -> int:
+    """Untrusted host A/B: is this candidate worth trusted guest time?"""
+
+    from .performance.prescreen import run_prescreen
+    from .registry.factory import ledger_from_env
+
+    print("UNTRUSTED host prescreen - not comparison evidence", file=sys.stderr)
+    try:
+        _repository, repo_path = _resolve_performance_repo(args.repo, ledger_from_env())
+        workload = _workload_source(args.source).load(args.workload)
+        result = run_prescreen(
+            repo_path,
+            workload,
+            args.baseline_ref,
+            args.candidate_ref,
+            runs=args.runs,
+            python=args.python,
+        )
+    except Exception as exc:  # noqa: BLE001 - operator/configuration failure
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        for side in (result.baseline, result.candidate):
+            values = ", ".join(f"{value:.4f}" for value in sorted(side.seconds))
+            print(f"{side.ref} ({side.commit_sha[:12]}): median={side.median:.4f}s [{values}]")
+        print(f"delta: {result.relative_delta * 100:+.2f}%")
+        print(f"verdict: {result.verdict}")
+    return 0
+
+
 def _cmd_performance_preflight(args: argparse.Namespace) -> int:
     """Report whether this process may create trusted latency evidence."""
 
@@ -605,6 +702,13 @@ def _print_performance_record(record, *, as_json: bool) -> None:
         print(f"workload    : {record.workload.ref}")
 
 
+def _echo_pinned(ref: str, revision) -> None:
+    # Evidence binds to the resolved commit, not the mutable ref the operator
+    # typed; echoing the pin makes a wrong branch or stale ref visible before
+    # the results are read.
+    print(f"pinned {ref} -> {revision.commit_sha}", file=sys.stderr)
+
+
 def _cmd_performance_measure(args: argparse.Namespace) -> int:
     from .performance.revisions import pin_repository_revision
 
@@ -613,6 +717,7 @@ def _cmd_performance_measure(args: argparse.Namespace) -> int:
         revision = pin_repository_revision(
             repo_path, args.ref, repository=repository, require_clean=True
         )
+        _echo_pinned(args.ref, revision)
         record = service.measure(workload, revision, environment)
     except Exception as exc:  # noqa: BLE001 - operator/configuration failure
         print(f"error: {exc}", file=sys.stderr)
@@ -631,6 +736,7 @@ def _cmd_performance_capture(args: argparse.Namespace) -> int:
         revision = pin_repository_revision(
             repo_path, args.ref, repository=repository, require_clean=True
         )
+        _echo_pinned(args.ref, revision)
         profiler = next(
             (item for item in workload.spec.profilers if item.name == args.profiler),
             None,
@@ -665,9 +771,11 @@ def _cmd_performance_compare(args: argparse.Namespace) -> int:
         baseline = pin_repository_revision(
             repo_path, args.baseline_ref, repository=repository, require_clean=True
         )
+        _echo_pinned(args.baseline_ref, baseline)
         candidate = pin_repository_revision(
             repo_path, args.candidate_ref, repository=repository, require_clean=True
         )
+        _echo_pinned(args.candidate_ref, candidate)
         result = service.compare(
             workload,
             baseline,
@@ -1591,6 +1699,63 @@ Examples:
         help="Paired bootstrap resample count.",
     )
     p_performance_compare.set_defaults(func=_cmd_performance_compare)
+
+    p_performance_prescreen = performance_sub.add_parser(
+        "prescreen",
+        help="Untrusted host A/B of two refs; a go/no-go before trusted compare time.",
+    )
+    p_performance_prescreen.add_argument(
+        "--repo", required=True, help="Registered repo or checkout."
+    )
+    p_performance_prescreen.add_argument(
+        "--workload", required=True, help="Workload NAME[@VERSION]."
+    )
+    p_performance_prescreen.add_argument(
+        "--source", default=None, help="Corpus directory or immutable bundle path."
+    )
+    p_performance_prescreen.add_argument("--baseline-ref", required=True, help="Baseline git ref.")
+    p_performance_prescreen.add_argument(
+        "--candidate-ref", required=True, help="Candidate git ref."
+    )
+    p_performance_prescreen.add_argument(
+        "--runs", type=_positive_int, default=6, help="Interleaved runs per side."
+    )
+    p_performance_prescreen.add_argument(
+        "--python",
+        default=None,
+        help="Host interpreter substituted for a leading 'python3' argv entry.",
+    )
+    p_performance_prescreen.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_performance_prescreen.set_defaults(func=_cmd_performance_prescreen)
+
+    p_performance_calibrate = performance_sub.add_parser(
+        "calibrate",
+        help="A/A self-control compare of one revision; the lab must report equivalent.",
+    )
+    add_execution_arguments(p_performance_calibrate)
+    p_performance_calibrate.add_argument(
+        "--ref", default="HEAD", help="Git revision compared against itself."
+    )
+    p_performance_calibrate.add_argument(
+        "--seed", type=int, default=0, help="Schedule/analysis seed."
+    )
+    p_performance_calibrate.add_argument(
+        "--confidence", type=float, default=0.95, help="Bootstrap confidence level."
+    )
+    p_performance_calibrate.add_argument(
+        "--bootstrap-resamples",
+        type=_positive_int,
+        default=10_000,
+        help="Bootstrap resamples.",
+    )
+    p_performance_calibrate.set_defaults(func=_cmd_performance_calibrate)
+
+    p_performance_report = performance_sub.add_parser(
+        "report",
+        help="Render a persisted comparison as a PR-ready markdown evidence block.",
+    )
+    p_performance_report.add_argument("comparison_id", help="comparison_... record ID.")
+    p_performance_report.set_defaults(func=_cmd_performance_report)
 
     p_performance_show = performance_sub.add_parser(
         "show", help="Show a persisted measurement, snapshot, or comparison."
