@@ -169,9 +169,16 @@ def test_performance_measure_sync_emits_record_and_show_reads_same_ledger(
         )
         == 0
     )
-    record = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    record = json.loads(captured.out)
     assert record["kind"] == "MeasurementRecord"
     assert record["status"] == "completed"
+    # The resolved pin is echoed so an operator sees the exact revision the
+    # evidence binds to, not the mutable ref they typed.
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert f"pinned HEAD -> {head}" in captured.err
 
     assert main(["performance", "show", record["id"], "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
@@ -303,3 +310,110 @@ def test_performance_preflight_reports_an_unconfigured_runner(monkeypatch, capsy
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
     assert any("BAKUDO_PERFORMANCE_RUNNER" in issue for issue in report["issues"])
+
+
+def test_performance_prescreen_is_labeled_untrusted_and_never_persists(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from bakudo.performance import prescreen
+    from bakudo.registry import factory
+
+    repo, _environment = _performance_fixture(tmp_path)
+    ledger = InMemoryLedger()
+    monkeypatch.setattr(factory, "ledger_from_env", lambda: ledger)
+
+    result = prescreen.PrescreenResult(
+        workload_ref="smoke-python-loop@1.0.1",
+        baseline=prescreen.PrescreenSide("main", "a" * 40, (1.0, 1.02)),
+        candidate=prescreen.PrescreenSide("cand", "b" * 40, (0.8, 0.81)),
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run(repo_path, workload, baseline_ref, candidate_ref, *, runs, python):
+        seen.update(
+            repo=repo_path, workload=workload.ref, refs=(baseline_ref, candidate_ref), runs=runs
+        )
+        return result
+
+    monkeypatch.setattr(prescreen, "run_prescreen", fake_run)
+
+    assert (
+        main(
+            [
+                "performance",
+                "prescreen",
+                "--repo",
+                str(repo),
+                "--workload",
+                "smoke-python-loop",
+                "--baseline-ref",
+                "main",
+                "--candidate-ref",
+                "cand",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "UNTRUSTED host prescreen" in captured.err
+    document = json.loads(captured.out)
+    assert document["evidence"] is False
+    assert document["verdict"] == "likely-improvement"
+    assert seen["refs"] == ("main", "cand")
+    assert seen["runs"] == 6
+    assert ledger.list_performance_comparisons() == []
+
+
+def test_performance_calibrate_passes_on_an_equivalent_aa_comparison(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from bakudo.abox import measurement
+    from bakudo.registry import factory
+
+    repo, environment = _performance_fixture(tmp_path)
+    ledger = InMemoryLedger()
+    monkeypatch.setattr(measurement, "AboxWorkloadInvoker", _FakeAboxWorkloadInvoker)
+    monkeypatch.setattr(factory, "ledger_from_env", lambda: ledger)
+
+    assert (
+        main(
+            [
+                "performance",
+                "calibrate",
+                "--repo",
+                str(repo),
+                "--workload",
+                "smoke-python-loop",
+                "--environment",
+                str(environment),
+                "--sync",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    comparison = json.loads(captured.out)
+    assert comparison["verdict"] == "equivalent"
+    assert (
+        comparison["baselineRevision"]["commitSHA"] == comparison["candidateRevision"]["commitSHA"]
+    )
+    assert "calibration passed" in captured.err
+
+    # The persisted comparison renders as a PR-ready evidence block.
+    assert main(["performance", "report", comparison["id"]]) == 0
+    markdown = capsys.readouterr().out
+    assert "**Verdict: equivalent**" in markdown
+    assert comparison["workload"]["bundleDigest"] in markdown
+    assert comparison["baselineRevision"]["commitSHA"] in markdown
+    assert "| `latency_seconds` | primary |" in markdown
+
+
+def test_performance_report_missing_comparison_fails_cleanly(monkeypatch, capsys) -> None:
+    from bakudo.registry import factory
+
+    monkeypatch.setattr(factory, "ledger_from_env", lambda: InMemoryLedger())
+
+    assert main(["performance", "report", "comparison_" + "2" * 26]) == 1
+    assert "not found" in capsys.readouterr().err

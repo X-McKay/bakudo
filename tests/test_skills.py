@@ -5,7 +5,19 @@ from bakudo.skills import SkillRegistry, parse_skill_frontmatter
 
 def test_discovery_manifest_lists_seed_skills():
     names = {s["name"] for s in SkillRegistry().discovery_manifest()}
-    assert {"codebase-navigation", "test-selection", "safe-refactor"} <= names
+    assert {
+        "codebase-navigation",
+        "test-selection",
+        "safe-refactor",
+        "workload-authoring",
+        "repo-onboarding",
+    } <= names
+
+
+def test_operator_onramp_skills_load_their_procedures():
+    reg = SkillRegistry()
+    assert "wall clock" in reg.load_skill("workload-authoring")["body"]
+    assert "prepare.sh" in reg.load_skill("repo-onboarding")["body"]
 
 
 def test_progressive_disclosure_body_loaded_on_demand():
