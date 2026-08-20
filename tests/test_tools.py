@@ -19,8 +19,13 @@ def tools(monkeypatch):
 
 def test_create_and_list_objectives(tools):
     oid = tools.create_objective(
-        {"id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ0", "type": "explore",
-         "repo": "bakudo", "title": "map", "priority": {"value": 0.9}}
+        {
+            "id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ0",
+            "type": "explore",
+            "repo": "bakudo",
+            "title": "map",
+            "priority": {"value": 0.9},
+        }
     )
     listed = tools.list_objectives()
     assert listed[0]["id"] == oid
@@ -28,8 +33,12 @@ def test_create_and_list_objectives(tools):
 
 def test_spawn_run_and_query(tools):
     oid = tools.create_objective(
-        {"id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ1", "type": "explore",
-         "repo": "bakudo", "title": "map it"}
+        {
+            "id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ1",
+            "type": "explore",
+            "repo": "bakudo",
+            "title": "map it",
+        }
     )
     run_id = tools.spawn_agent_run(oid, "explore")
     info = tools.query_agent_run(run_id)
@@ -139,8 +148,12 @@ def test_resolve_spec_without_active_version_raises(tools):
 def test_spawn_agent_run_records_the_routed_agent_ref(tools):
     _version(tools, 2, "canary")
     oid = tools.create_objective(
-        {"id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ2", "type": "explore",
-         "repo": "bakudo", "title": "route me"}
+        {
+            "id": "obj_01HZZZZZZZZZZZZZZZZZZZZZZ2",
+            "type": "explore",
+            "repo": "bakudo",
+            "title": "route me",
+        }
     )
     run_id = tools.spawn_agent_run(oid, "explore")
     record = tools.ledger.get_run(run_id)

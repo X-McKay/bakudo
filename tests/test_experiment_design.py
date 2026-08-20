@@ -13,7 +13,7 @@ import copy
 import pytest
 import yaml
 
-from bakudo.experiments.design import build_matrix, select_tasks, trial_seed
+from bakudo.experiments.design import analysis_seed, build_matrix, select_tasks, trial_seed
 from bakudo.experiments.models import (
     AgentSpecSubject,
     ExperimentMetadata,
@@ -166,6 +166,13 @@ def test_seed_fits_signed_bigint():
             for repetition in range(20):
                 seed = trial_seed(experiment_id, task_name, repetition)
                 assert 0 <= seed <= 2**63 - 1
+
+
+def test_analysis_seed_is_deterministic_and_uses_a_separate_domain():
+    assert analysis_seed("exp_A") == analysis_seed("exp_A")
+    assert analysis_seed("exp_A") != analysis_seed("exp_B")
+    assert analysis_seed("exp_A") != trial_seed("exp_A", "analysis", 0)
+    assert 0 <= analysis_seed("exp_A") <= 2**63 - 1
 
 
 def test_matrix_pairs_share_seed(registry):

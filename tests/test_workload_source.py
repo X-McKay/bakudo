@@ -154,9 +154,10 @@ def test_source_detects_version_digest_collision(tmp_path: Path) -> None:
     second = make_workload(root, directory="b")
     (second / "run.py").write_text("print('different')\n")
     # Both manifests still identify loop@1.0.0.
-    assert yaml.safe_load((first / "workload.yaml").read_text())["metadata"] == yaml.safe_load(
-        (second / "workload.yaml").read_text()
-    )["metadata"]
+    assert (
+        yaml.safe_load((first / "workload.yaml").read_text())["metadata"]
+        == yaml.safe_load((second / "workload.yaml").read_text())["metadata"]
+    )
 
     with pytest.raises(WorkloadLoadError, match="version/digest collision"):
         DirectoryWorkloadSource(root)

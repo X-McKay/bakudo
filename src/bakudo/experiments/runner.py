@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from ..ids import new_experiment_id
 from ..trials.models import TrialRecord
 from ..trials.runner import PipelineFn, build_pipeline_fn
 from .artifact_subject import ArtifactMeasurementObserver, ArtifactSubjectBinding
+from .design import analysis_seed
 from .models import (
     AgentSpecSubject,
     ExperimentObservation,
@@ -131,6 +133,12 @@ class _MetricAnalysis:
     invalid_reasons: tuple[str, ...]
 
 
+def _metric_analysis_seed(analysis_root_seed: int, candidate_arm: str, metric_name: str) -> int:
+    """Derive an independent, replayable bootstrap stream per comparison."""
+    digest = hashlib.sha256(f"{analysis_root_seed}:{candidate_arm}:{metric_name}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
 def _metric_series(
     observations: tuple[ExperimentObservation, ...],
     arm: str,
@@ -152,8 +160,10 @@ def _metric_series(
             continue
         directions.add(metric.direction)
         if invalid_contagious and (not metric.valid or not observation.integrity_valid):
-            detail = metric.invalid_reasons or observation.degradation_reasons or (
-                "invalid observation",
+            detail = (
+                metric.invalid_reasons
+                or observation.degradation_reasons
+                or ("invalid observation",)
             )
             reasons.extend(
                 f"{arm}/{observation.pair_key}/{observation.repetition}: {reason}"
@@ -177,6 +187,7 @@ def _analyze_metric(
     candidate_arm: str,
     metric_name: str,
     *,
+    analysis_root_seed: int,
     cost_delta: float | None = None,
 ) -> _MetricAnalysis:
     baseline, baseline_directions, baseline_reasons = _metric_series(
@@ -207,7 +218,7 @@ def _analyze_metric(
             tie_zone=spec.decision.tie_zone,
             confidence=spec.decision.confidence,
             resamples=spec.decision.bootstrap_resamples,
-            seed=0,
+            seed=_metric_analysis_seed(analysis_root_seed, candidate_arm, metric_name),
             cost_delta=cost_delta,
             cost_tiebreak=spec.decision.cost_tiebreak,
         )
@@ -218,6 +229,7 @@ def _analyze_metric(
 def _analysis_dict(value: _MetricAnalysis) -> dict[str, Any]:
     analysis = value.analysis
     return {
+        "pairedObservations": analysis.n_tasks,
         "meanDelta": analysis.mean_delta,
         "ciLow": analysis.ci_low,
         "ciHigh": analysis.ci_high,
@@ -240,6 +252,11 @@ def assemble_observation_result(
 ) -> dict[str, Any]:
     """Analyze either subject kind through one normalized metric pipeline."""
     result = provider.base_result(experiment_id, batch)
+    root_analysis_seed = analysis_seed(experiment_id)
+    # Retain the root seed in the durable result. Individual bootstrap streams
+    # are deterministically derived from it, the candidate arm, and metric.
+    result["analysisSeed"] = root_analysis_seed
+    result["analysisVersion"] = "paired-bootstrap-v1"
     if provider.profile:
         return result
 
@@ -252,12 +269,13 @@ def assemble_observation_result(
             batch,
             candidate_arm,
             spec.metrics.primary,
+            analysis_root_seed=root_analysis_seed,
             cost_delta=cost_delta,
         )
         secondary: dict[str, dict[str, Any]] = {}
         for name in spec.metrics.secondary:
             metric = _analyze_metric(
-                spec, provider, batch, candidate_arm, name
+                spec, provider, batch, candidate_arm, name, analysis_root_seed=root_analysis_seed
             )
             deltas = task_deltas(
                 _metric_series(
@@ -281,8 +299,13 @@ def assemble_observation_result(
             }
 
         safety, integrity = provider.hard_gate_counts(batch, candidate_arm)
+        sufficient_paired_evidence = (
+            not isinstance(spec.subject, AgentSpecSubject)
+            or primary.analysis.n_tasks >= spec.decision.min_paired_observations
+        )
         eligible = (
             primary.valid
+            and sufficient_paired_evidence
             and safety <= spec.hard_gates.safety_regressions
             and integrity <= spec.hard_gates.integrity_violations
             and primary.analysis.verdict == "candidate"
@@ -297,6 +320,12 @@ def assemble_observation_result(
             },
             "eligibleForPromotion": eligible,
         }
+        if isinstance(spec.subject, AgentSpecSubject):
+            comparison[candidate_arm]["promotionEvidence"] = {
+                "observedPairedObservations": primary.analysis.n_tasks,
+                "minimumPairedObservations": spec.decision.min_paired_observations,
+                "sufficient": sufficient_paired_evidence,
+            }
     result["comparison"] = comparison
     return result
 
@@ -328,9 +357,7 @@ def run_experiment(
         artifact_measure=artifact_measure,
     )
     batch = provider.collect(experiment_id)
-    result = assemble_observation_result(
-        spec, provider, batch, experiment_id=experiment_id
-    )
+    result = assemble_observation_result(spec, provider, batch, experiment_id=experiment_id)
     ledger.update_experiment_result(experiment_id, "completed", result)
     return result
 
@@ -354,6 +381,4 @@ def assemble_result(
         selected_tasks=tasks,
     )
     batch = provider.collect(experiment_id)
-    return assemble_observation_result(
-        spec, provider, batch, experiment_id=experiment_id
-    )
+    return assemble_observation_result(spec, provider, batch, experiment_id=experiment_id)

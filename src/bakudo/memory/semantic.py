@@ -53,9 +53,7 @@ class SemanticMemoryStore:
             # A near-duplicate already exists; reject unless this one is
             # strictly more confident (in which case it supersedes).
             if nearest.item.confidence >= item.confidence:
-                raise MemoryRejected(
-                    "near-duplicate of an equally/more confident memory"
-                )
+                raise MemoryRejected("near-duplicate of an equally/more confident memory")
             nearest.item, nearest.embedding = item, embedding
             return item
 
@@ -73,13 +71,12 @@ class SemanticMemoryStore:
         candidates = self._entries
         if scope:
             candidates = [
-                e for e in candidates
-                if all(e.item.scope.get(k) == v for k, v in scope.items())
+                e for e in candidates if all(e.item.scope.get(k) == v for k, v in scope.items())
             ]
         if text is None:
-            return [e.item for e in sorted(
-                candidates, key=lambda e: e.item.confidence, reverse=True
-            )][:limit]
+            return [
+                e.item for e in sorted(candidates, key=lambda e: e.item.confidence, reverse=True)
+            ][:limit]
 
         q = self.embedder.embed(text)
         scored = [(cosine(q, e.embedding), e.item) for e in candidates]

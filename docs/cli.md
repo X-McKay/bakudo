@@ -41,9 +41,11 @@ a model endpoint, or abox.
 | `bakudo workload list` | List workloads from `BAKUDO_WORKLOAD_SOURCE` or packaged smoke fallback | `--json` |
 | `bakudo workload validate PATH` | Validate and pin one workload directory | `--json` |
 | `bakudo workload inspect REF` | Show a manifest, immutable pin, and provenance | `--json` |
+| `bakudo performance preflight` | Verify fail-closed trusted-runner readiness before latency evidence | `--json` |
 | `bakudo performance measure` | Collect an uninstrumented `MeasurementRecord` (`--sync` required locally) | `--json` |
 | `bakudo performance capture` | Collect a diagnostic `PerformanceSnapshot` and restricted artifacts | `--json` |
 | `bakudo performance compare` | Interleave baseline/candidate measurements and create a `PerformanceComparison` | `--json` |
+| `bakudo performance profile-diff` | Align two diagnostic snapshots to explain changed hotspots; never evidence | `--json` |
 | `bakudo performance show ID` | Read a persisted measurement, snapshot, or comparison | `--json` |
 | `bakudo performance regressions` | List approved regression signals, optionally by repository | `--json` |
 | `bakudo task list` | List tasks from `BAKUDO_TASK_SOURCE` | `--json` |
@@ -101,10 +103,15 @@ independently:
 ```bash
 export BAKUDO_WORKLOAD_SOURCE=/path/to/workload-corpus-or-bundle
 export BAKUDO_PERFORMANCE_ENVIRONMENT=/path/to/environment-pin.json
+export BAKUDO_PERFORMANCE_RUNNER=trusted
+export BAKUDO_SANDBOX=abox
+export BAKUDO_POSTGRES_DSN='postgresql://...'
 
 bakudo workload list --json
 bakudo workload validate /path/to/workload-directory --json
 bakudo workload inspect api-throughput@1.2.0 --json
+bakudo workload validate-suite /path/to/performance-suite.yaml --json
+bakudo performance preflight --json
 ```
 
 The manifest declares the shell-free command, environment requirements,
@@ -112,8 +119,14 @@ warmups/repetitions/schedule, typed metrics, practical thresholds, and optional
 profilers. Inspection prints the immutable `WorkloadPin`: source and collection
 revision plus manifest, dataset, executor, and bundle digests.
 
+A `PerformanceSuiteSpec` is a declarative group of workload references and
+pre-registered primary/protected metric policies. `workload validate-suite`
+resolves every reference, checks the scenario's minimum paired evidence against
+the workload repetitions, and ensures requested regression profilers are
+declared. It executes no target code and creates no measurement evidence.
+
 Local measurement is intentionally explicit and requires abox, a clean git
-revision, and an environment pin:
+revision, an environment pin, and a passing trusted-runner preflight:
 
 ```bash
 bakudo repo add /path/to/checkout --name payments-api
@@ -138,6 +151,17 @@ operator to the durable API. Timed comparisons never enable a profiler.
 `performance show` reads durable records from the configured Postgres ledger;
 without `BAKUDO_POSTGRES_DSN`, a new CLI process has an empty in-memory ledger
 and prints a warning.
+
+Use `profile-diff` only after compatible captures with the same workload,
+environment, and profiler descriptor. It ranks normalized hotspot cost deltas
+for diagnosis; it neither reads measurement records nor creates a promotion
+eligible comparison:
+
+```bash
+bakudo performance profile-diff \
+  --baseline-snapshot-id snapshot_BASELINE \
+  --candidate-snapshot-id snapshot_CANDIDATE --json
+```
 
 The optimization CLI uses the same proof path and accepts neither a benchmark
 command nor self-reported timing:

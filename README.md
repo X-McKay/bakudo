@@ -190,7 +190,8 @@ the separately packaged skills under `skills/`. The full local gate:
 
 ```bash
 make doctor
-make check      # generated schemas + ruff + mypy + pytest
+make check      # hermetic schemas + Ruff format/lint + mypy + tests
+make ci         # check + uv-lock validation + CLI and wheel smoke tests
 ```
 
 Keep runtime models, JSON Schemas, packaged smoke data, and the docs above in

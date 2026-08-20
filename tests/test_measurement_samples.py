@@ -147,20 +147,14 @@ def test_invocation_collection_rejects_unit_mismatch_and_undeclared_metrics() ->
         ordinal=0,
         phase=InvocationPhase.measured,
         status=RecordStatus.completed,
-        metrics=(
-            MetricValue(name="latency_seconds", unit=MetricUnit.bytes, value=2.0),
-        ),
+        metrics=(MetricValue(name="latency_seconds", unit=MetricUnit.bytes, value=2.0),),
     )
     sample_set = metric_sample_sets_from_invocations(plan, (wrong_unit,))[0]
     assert not sample_set.valid
     assert "expected seconds" in sample_set.invalid_reasons[0]
 
     undeclared = wrong_unit.model_copy(
-        update={
-            "metrics": (
-                MetricValue(name="query_count", unit=MetricUnit("count"), value=1.0),
-            )
-        }
+        update={"metrics": (MetricValue(name="query_count", unit=MetricUnit("count"), value=1.0),)}
     )
     with pytest.raises(ValueError, match="undeclared metrics: query_count"):
         metric_sample_sets_from_invocations(plan, (undeclared,))

@@ -28,6 +28,7 @@ from ..performance.models import (
     RecordStatus,
 )
 from ..performance.pins import EnvironmentPin, RevisionPin
+from ..performance.readiness import require_trusted_performance_runner
 from ..performance.revisions import sha256_text
 from ..performance.source import LoadedWorkload
 from .runner import (
@@ -49,7 +50,9 @@ from .staging import (
 _MARKER = "bakudo_measurement"
 _MAX_OUTPUT_CHARS = 20_000
 
-_WRAPPER = GUEST_RECONSTRUCT_SNIPPET + r"""
+_WRAPPER = (
+    GUEST_RECONSTRUCT_SNIPPET
+    + r"""
 import resource, subprocess, time
 
 env = os.environ.copy()
@@ -105,6 +108,7 @@ print(json.dumps({"bakudo_measurement": {
     "metrics": metrics, "stdout": stdout[-20000:], "stderr": stderr[-20000:]
 }}))
 """
+)
 
 
 class AboxMeasurementError(RuntimeError):
@@ -167,6 +171,9 @@ def _parse_marker(stdout: str) -> dict[str, object]:
 class AboxWorkloadInvoker:
     """Execute one warmup or measured invocation in a fresh abox guest."""
 
+    # Composition code uses the real executor by default. Tests and explicit
+    # injected adapters pass an executor, keeping trusted-host admission from
+    # leaking into deterministic adapter tests.
     def __init__(
         self,
         *,
@@ -175,12 +182,33 @@ class AboxWorkloadInvoker:
         repo_resolver: Callable[[str], Path | str | None] | None = None,
         candidate_patches: Mapping[str, str] | None = None,
         scratch_root: Path | None = None,
+        preflight: Callable[[EnvironmentPin, str], None] | None = None,
     ) -> None:
         self._abox_bin = abox_bin
         self._executor = executor or _subprocess_executor
         self._repo_resolver = repo_resolver
         self._candidate_patches = dict(candidate_patches or {})
         self._scratch_root = scratch_root
+        self.requires_trusted_readiness = executor is None
+        self._preflight: Callable[[EnvironmentPin, str], None] | None
+        if preflight is not None:
+            self._preflight = preflight
+        elif executor is None:
+            self._preflight = self._trusted_preflight
+        else:
+            self._preflight = None
+
+    @property
+    def abox_bin(self) -> str:
+        """The abox binary this invoker execs; admission must probe the same one."""
+        return self._abox_bin
+
+    def _trusted_preflight(self, environment: EnvironmentPin, source: str) -> None:
+        require_trusted_performance_runner(
+            environment=environment,
+            workload_source=source,
+            abox_bin=self._abox_bin,
+        )
 
     def resolve_repo(self, revision: RevisionPin) -> Path:
         if self._repo_resolver is not None:
@@ -257,6 +285,14 @@ class AboxWorkloadInvoker:
             "--network",
             network,
         ]
+        # A workload's declared allocation is part of its immutable execution
+        # contract.  Forward it to abox so the guest that produces a
+        # MeasurementRecord actually matches the EnvironmentPin checked by
+        # PerformanceMeasurementService.
+        if workload.spec.environment.cpu_count is not None:
+            argv += ["--cpus", str(workload.spec.environment.cpu_count)]
+        if workload.spec.environment.memory_mb is not None:
+            argv += ["--memory", str(workload.spec.environment.memory_mb)]
         argv += staging_input_arguments(staged)
         guest_script = (
             "set -e; "
@@ -278,9 +314,7 @@ class AboxWorkloadInvoker:
                 f"candidate patch bytes unavailable for {revision.patch_digest}"
             ) from exc
         if sha256_text(patch) != revision.patch_digest:
-            raise AboxMeasurementError(
-                "candidate patch bytes do not match the pinned patch digest"
-            )
+            raise AboxMeasurementError("candidate patch bytes do not match the pinned patch digest")
         if "\x00" in patch:
             raise AboxMeasurementError("candidate patch contains a NUL byte")
         worktree = scratch / "candidate"
@@ -317,7 +351,8 @@ class AboxWorkloadInvoker:
         phase: InvocationPhase,
         ordinal: int,
     ) -> InvocationOutcome:
-        del environment  # equality/compatibility is enforced by the service
+        if self._preflight is not None:
+            self._preflight(environment, workload.provenance.source_uri)
         if self._scratch_root is not None:
             self._scratch_root.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix="bakudo-measure-", dir=self._scratch_root))
@@ -373,8 +408,7 @@ class AboxWorkloadInvoker:
                     exit_code=result.exit_code,
                     failure_reason=FailureReason.infrastructure,
                     failure_detail=(
-                        "no trusted JSON marker in guest output; tail: "
-                        f"{tail or '<empty>'}"
+                        f"no trusted JSON marker in guest output; tail: {tail or '<empty>'}"
                     )[-_DETAIL_CHARS:],
                 )
             timed_out = bool(payload.get("timed_out"))
@@ -386,8 +420,7 @@ class AboxWorkloadInvoker:
             if not isinstance(raw_metrics, dict):
                 raise AboxMeasurementError("measurement marker metrics are malformed")
             declared = {
-                definition.name: definition
-                for definition in workload.spec.measurement.metrics
+                definition.name: definition for definition in workload.spec.measurement.metrics
             }
             metrics: list[MetricValue] = []
             for name, definition in declared.items():

@@ -200,18 +200,22 @@ def _build_optimize_performance_compare(objective: Any, ledger: Any, *, seed: in
             repo_resolver=lambda _name: repo_path,
             candidate_patches={candidate.patch_digest: diff},
         )
-        return PerformanceMeasurementService(invoker, ledger=ledger).compare(
-            workload,
-            baseline,
-            candidate,
-            environment,
-            environment,
-            seed=seed,
-            primary_metric=contract.primary_metric,
-            protected_metrics=policy.protected_metrics,
-            confidence=policy.confidence,
-            bootstrap_resamples=policy.bootstrap_resamples,
-        ).comparison
+        return (
+            PerformanceMeasurementService(invoker, ledger=ledger)
+            .compare(
+                workload,
+                baseline,
+                candidate,
+                environment,
+                environment,
+                seed=seed,
+                primary_metric=contract.primary_metric,
+                protected_metrics=policy.protected_metrics,
+                confidence=policy.confidence,
+                bootstrap_resamples=policy.bootstrap_resamples,
+            )
+            .comparison
+        )
 
     return compare_candidate
 
@@ -595,9 +599,7 @@ def build_app(
             from ..experiments.configured import configured_artifact_measurement_observer
 
             try:
-                observer = configured_artifact_measurement_observer(
-                    spec, ledger=tools.ledger
-                )
+                observer = configured_artifact_measurement_observer(spec, ledger=tools.ledger)
                 result = run_experiment(
                     spec,
                     ledger=tools.ledger,

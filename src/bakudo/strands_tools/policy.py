@@ -52,12 +52,7 @@ _CODE_FLAG_EXACT: dict[str, frozenset[str]] = {
 
 def _is_short_cluster(token: str) -> bool:
     """A single-dash short-option group like ``-Ic`` (not ``--long`` or ``-``)."""
-    return (
-        len(token) >= 2
-        and token[0] == "-"
-        and token[1] != "-"
-        and "=" not in token
-    )
+    return len(token) >= 2 and token[0] == "-" and token[1] != "-" and "=" not in token
 
 
 @dataclass(frozen=True)
@@ -106,9 +101,7 @@ class CommandPolicy:
         # `--flag=value` attached form (`node --eval=CODE`).
         for token in argv[1:]:
             if token in exact or token.split("=", 1)[0] in exact:
-                raise CommandDenied(
-                    command, f"'{program} {token}' can execute arbitrary code"
-                )
+                raise CommandDenied(command, f"'{program} {token}' can execute arbitrary code")
         # Short-option clusters belong to the *interpreter* only while they
         # lead the argv; after the first positional (script path, module name,
         # subcommand) or a `--`, flags belong to the sub-program — `python -m
@@ -136,13 +129,39 @@ REPO_SAFE = CommandPolicy(
     name="repo-safe",
     allowed_programs=frozenset(
         {
-            "ls", "cat", "head", "tail", "wc", "find", "tree", "stat",
-            "grep", "rg", "sed", "awk", "diff",
+            "ls",
+            "cat",
+            "head",
+            "tail",
+            "wc",
+            "find",
+            "tree",
+            "stat",
+            "grep",
+            "rg",
+            "sed",
+            "awk",
+            "diff",
             "git",
-            "python", "python3", "pip", "uv", "pytest", "ruff", "mypy",
-            "node", "npm", "npx", "pnpm", "yarn",
-            "make", "just", "cargo", "go",
-            "echo", "true", "test",
+            "python",
+            "python3",
+            "pip",
+            "uv",
+            "pytest",
+            "ruff",
+            "mypy",
+            "node",
+            "npm",
+            "npx",
+            "pnpm",
+            "yarn",
+            "make",
+            "just",
+            "cargo",
+            "go",
+            "echo",
+            "true",
+            "test",
         }
     ),
     denied_substrings=(
@@ -154,7 +173,7 @@ REPO_SAFE = CommandPolicy(
         "scp ",
         "nc ",
         "chmod 777",
-        ":(){",          # fork bomb
+        ":(){",  # fork bomb
         "/etc/passwd",
         "/etc/shadow",
         "~/.ssh",

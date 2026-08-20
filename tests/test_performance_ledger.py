@@ -142,9 +142,7 @@ def test_in_memory_snapshot_comparison_and_regression_round_trip() -> None:
             update={"profiler_adapter": "synthetic", "profiler_version": "1"}
         ),
         profiler_spec_digest=DIGEST,
-        descriptor=ProfilerDescriptor(
-            name="synthetic", adapter="synthetic", version="1"
-        ),
+        descriptor=ProfilerDescriptor(name="synthetic", adapter="synthetic", version="1"),
         capture_seconds=1.0,
         hotspots=(
             Hotspot(
@@ -227,9 +225,7 @@ def test_workload_version_collision_fails_closed() -> None:
     ledger.record_workload_version(spec, _workload_pin())
 
     changed = spec.model_copy(
-        update={
-            "measurement": spec.measurement.model_copy(update={"warmups": 1})
-        }
+        update={"measurement": spec.measurement.model_copy(update={"warmups": 1})}
     )
     try:
         ledger.record_workload_version(changed, _workload_pin())

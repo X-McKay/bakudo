@@ -86,16 +86,12 @@ class SyntheticProfilerAdapter:
             )
         return CapturedProfile(content, _MEDIA_TYPE, diagnostic_duration)
 
-    def normalize(
-        self, artifact: CapturedProfile, symbols: SymbolMap
-    ) -> tuple[Hotspot, ...]:
+    def normalize(self, artifact: CapturedProfile, symbols: SymbolMap) -> tuple[Hotspot, ...]:
         if artifact.media_type != _MEDIA_TYPE:
             raise NormalizationError(f"unsupported synthetic media type: {artifact.media_type}")
         try:
             document = json.loads(artifact.content)
-            if document.get("schemaVersion") != 1 or not isinstance(
-                document.get("hotspots"), list
-            ):
+            if document.get("schemaVersion") != 1 or not isinstance(document.get("hotspots"), list):
                 raise ValueError("invalid synthetic profile shape")
             rows = tuple(
                 RawHotspot(

@@ -219,6 +219,59 @@ def test_performance_capture_sync_persists_diagnostic_snapshot(
     assert ledger.get_performance_snapshot(record["id"]) is not None
 
 
+def test_profile_diff_is_persisted_snapshot_diagnostics_only(tmp_path, monkeypatch, capsys) -> None:
+    from bakudo.abox import capture, measurement
+    from bakudo.registry import factory
+
+    repo, environment = _performance_fixture(tmp_path)
+    ledger = InMemoryLedger()
+    monkeypatch.setattr(measurement, "AboxWorkloadInvoker", _FakeAboxWorkloadInvoker)
+    monkeypatch.setattr(
+        capture,
+        "configured_profile_capture_service",
+        lambda **_kwargs: _FakeCaptureService(),
+    )
+    monkeypatch.setattr(factory, "ledger_from_env", lambda: ledger)
+    capture_args = [
+        "performance",
+        "capture",
+        "--repo",
+        str(repo),
+        "--workload",
+        "smoke-python-loop",
+        "--environment",
+        str(environment),
+        "--profiler",
+        "synthetic",
+        "--sync",
+        "--json",
+    ]
+
+    assert main(capture_args) == 0
+    baseline = json.loads(capsys.readouterr().out)
+    assert main(capture_args) == 0
+    candidate = json.loads(capsys.readouterr().out)
+
+    assert (
+        main(
+            [
+                "performance",
+                "profile-diff",
+                "--baseline-snapshot-id",
+                baseline["id"],
+                "--candidate-snapshot-id",
+                candidate["id"],
+                "--json",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["kind"] == "DiagnosticProfileComparison"
+    assert report["diagnosticOnly"] is True
+    assert report["hotspots"] == []
+
+
 def test_performance_execution_requires_explicit_sync_mode(capsys) -> None:
     assert (
         main(
@@ -234,3 +287,19 @@ def test_performance_execution_requires_explicit_sync_mode(capsys) -> None:
         == 2
     )
     assert "select an execution mode with --sync" in capsys.readouterr().err
+
+
+def test_performance_preflight_reports_an_unconfigured_runner(monkeypatch, capsys) -> None:
+    for name in (
+        "BAKUDO_PERFORMANCE_RUNNER",
+        "BAKUDO_SANDBOX",
+        "BAKUDO_POSTGRES_DSN",
+        "BAKUDO_WORKLOAD_SOURCE",
+        "BAKUDO_PERFORMANCE_ENVIRONMENT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert main(["performance", "preflight", "--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    assert any("BAKUDO_PERFORMANCE_RUNNER" in issue for issue in report["issues"])

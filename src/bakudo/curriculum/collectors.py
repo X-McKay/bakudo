@@ -269,9 +269,7 @@ class PerformanceRegressionCollector:
                 key=lambda comparison: (comparison.created_at, comparison.id),
             )
             for comparison in comparisons:
-                top_hotspot_key = (
-                    self._hotspot_lookup(comparison) if self._hotspot_lookup else None
-                )
+                top_hotspot_key = self._hotspot_lookup(comparison) if self._hotspot_lookup else None
                 deduplication_key = regression_deduplication_key(
                     repo,
                     approval,
@@ -281,9 +279,8 @@ class PerformanceRegressionCollector:
                 )
                 state = self._state_store.get(repo, deduplication_key)
                 if (
-                    (state is None or state.phase is not RegressionPhase.active)
-                    and active_count >= self._policy.max_active_signals_per_repository
-                ):
+                    state is None or state.phase is not RegressionPhase.active
+                ) and active_count >= self._policy.max_active_signals_per_repository:
                     decisions.append(
                         RegressionDecision(
                             state

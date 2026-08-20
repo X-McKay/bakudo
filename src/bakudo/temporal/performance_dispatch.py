@@ -94,8 +94,7 @@ def _repository(ledger: Ledger, value: str) -> tuple[str, Path]:
         if candidate.is_dir():
             return value, candidate
     raise PerformanceDispatchError(
-        f"unknown repository {value!r}; pass a checkout path or register it with "
-        "`bakudo repo add`"
+        f"unknown repository {value!r}; pass a checkout path or register it with `bakudo repo add`"
     )
 
 
@@ -151,9 +150,7 @@ class TemporalPerformanceDispatcher:
         return str(inp.operation_id)
 
     def start_measurement(self, request: MeasurementRequest) -> str:
-        repository, path, _spec, workload, source, workload_pin, environment = self._pins(
-            request
-        )
+        repository, path, _spec, workload, source, workload_pin, environment = self._pins(request)
         revision = pin_repository_revision(
             path, request.revision, repository=repository, require_clean=True
         )
@@ -169,9 +166,7 @@ class TemporalPerformanceDispatcher:
         return self._submit(start_performance_measurement, inp)
 
     def start_capture(self, request: CaptureRequest) -> str:
-        repository, path, spec, workload, source, workload_pin, environment = self._pins(
-            request
-        )
+        repository, path, spec, workload, source, workload_pin, environment = self._pins(request)
         if request.profiler not in {profiler.name for profiler in spec.profilers}:
             raise PerformanceDispatchError(
                 f"profiler {request.profiler!r} is not declared by workload {workload}"
@@ -192,9 +187,7 @@ class TemporalPerformanceDispatcher:
         return self._submit(start_performance_capture, inp)
 
     def start_comparison(self, request: ComparisonRequest) -> str:
-        repository, path, _spec, workload, source, workload_pin, environment = self._pins(
-            request
-        )
+        repository, path, _spec, workload, source, workload_pin, environment = self._pins(request)
         baseline = pin_repository_revision(
             path,
             request.baseline_revision,

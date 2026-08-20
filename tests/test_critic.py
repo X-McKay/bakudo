@@ -20,10 +20,16 @@ DIFF = "--- a/a.py\n+++ b/a.py\n+code\n"
 
 
 def _ctx():
-    result = RunResult.model_validate({
-        "run_id": "run_X", "agent": "add-feature@1", "objective_id": "obj_X",
-        "status": "success", "summary": "did it", "changed_files": ["a.py"],
-    })
+    result = RunResult.model_validate(
+        {
+            "run_id": "run_X",
+            "agent": "add-feature@1",
+            "objective_id": "obj_X",
+            "status": "success",
+            "summary": "did it",
+            "changed_files": ["a.py"],
+        }
+    )
     return EvalContext(
         result=result,
         objective=Objective(type="add-feature", repo="payments-api", title="t"),
@@ -142,8 +148,12 @@ def test_sandbox_exception_errors_the_suite():
 def test_failed_sandbox_outcome_errors_the_suite():
     def sandbox(bundle):
         return AboxOutcome(
-            run_id=bundle.run_id, abox_task_id=bundle.run_id,
-            exit_code=1, git_branch="", result=None, error="no result.json",
+            run_id=bundle.run_id,
+            abox_task_id=bundle.run_id,
+            exit_code=1,
+            git_branch="",
+            result=None,
+            error="no result.json",
         )
 
     _assert_errored(critic_eval(_ctx(), sandbox), "no result.json")
@@ -167,17 +177,19 @@ def _eval_input():
 
     return EvalInput(
         run_id="run_X",
-        objective={"id": "obj_X", "type": "add-feature", "repo": "payments-api",
-                   "title": "t"},
-        result={"run_id": "run_X", "agent": "add-feature@1", "objective_id": "obj_X",
-                "status": "success", "summary": "ok"},
+        objective={"id": "obj_X", "type": "add-feature", "repo": "payments-api", "title": "t"},
+        result={
+            "run_id": "run_X",
+            "agent": "add-feature@1",
+            "objective_id": "obj_X",
+            "status": "success",
+            "summary": "ok",
+        },
         diff=DIFF,
     )
 
 
-def test_run_eval_suite_includes_critic_when_sandbox_available(
-    monkeypatch, _eval_input
-):
+def test_run_eval_suite_includes_critic_when_sandbox_available(monkeypatch, _eval_input):
     from bakudo.temporal import _impl
 
     monkeypatch.setattr(_impl.DEPS, "sandbox", _sandbox(score=0.9, passed=True))

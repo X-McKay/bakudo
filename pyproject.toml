@@ -82,7 +82,15 @@ packages = ["src/bakudo"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q"
+# Reject an accidental marker typo instead of silently running or deselecting
+# the wrong tests.  The live markers describe capabilities that are supplied
+# by an explicitly configured environment; the hermetic test tier never
+# requires them.
+addopts = "-q --strict-markers"
+markers = [
+  "live: touches live external services; skipped unless its required environment is configured",
+  "live_abox: drives the real abox binary in a trusted, warmed KVM environment",
+]
 
 [tool.ruff]
 line-length = 100

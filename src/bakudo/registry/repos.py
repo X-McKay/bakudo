@@ -93,17 +93,14 @@ def add_repo(
         root = repo_root if repo_root is not None else _default_repo_root()
         target = root / repo_name
         if target.exists():
-            raise RepoTargetExistsError(
-                f"{target} already exists; refusing to clone over it"
-            )
+            raise RepoTargetExistsError(f"{target} already exists; refusing to clone over it")
         try:
-            subprocess.run(
-                ["git", "clone", source, str(target)], check=True, capture_output=True
-            )
+            subprocess.run(["git", "clone", source, str(target)], check=True, capture_output=True)
         except subprocess.CalledProcessError as exc:
             stderr = (
                 exc.stderr.decode(errors="replace")
-                if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+                if isinstance(exc.stderr, bytes)
+                else (exc.stderr or "")
             )
             raise RepoCloneError(f"git clone failed: {stderr.strip() or exc}") from exc
         cloned_target = target  # this invocation created it -- rollback-eligible
@@ -118,7 +115,10 @@ def add_repo(
         path = candidate.resolve()
 
     record = RepoRecord(
-        name=repo_name, source=source, path=str(path), default_base_ref=base_ref or "main",
+        name=repo_name,
+        source=source,
+        path=str(path),
+        default_base_ref=base_ref or "main",
     )
     try:
         ledger.register_repo(record)

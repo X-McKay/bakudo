@@ -50,8 +50,7 @@ def percentile_bootstrap_ci(
 
     rng = random.Random(seed)
     estimates = [
-        statistic([values[rng.randrange(len(values))] for _ in values])
-        for _ in range(resamples)
+        statistic([values[rng.randrange(len(values))] for _ in values]) for _ in range(resamples)
     ]
     return _percentile_bounds(estimates, confidence=confidence, resamples=resamples)
 

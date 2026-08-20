@@ -5,8 +5,13 @@ from bakudo.curriculum.objective import DEFAULT_WEIGHTS, rank
 def test_priority_formula_matches_spec():
     # priority = .35v + .20u + .15l + .15c + .10d - .25r - .10cost
     p = Priority(
-        value=1.0, urgency=1.0, learningValue=1.0, confidence=1.0,
-        dependencyUnblockingValue=1.0, risk=1.0, estimatedCost=1.0,
+        value=1.0,
+        urgency=1.0,
+        learningValue=1.0,
+        confidence=1.0,
+        dependencyUnblockingValue=1.0,
+        risk=1.0,
+        estimatedCost=1.0,
     )
     expected = 0.35 + 0.20 + 0.15 + 0.15 + 0.10 - 0.25 - 0.10
     assert abs(p.compute() - expected) < 1e-9

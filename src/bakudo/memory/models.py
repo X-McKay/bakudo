@@ -11,8 +11,8 @@ from .. import ids
 
 
 class MemoryType(str, Enum):
-    episodic = "episodic_memory"      # what happened in a run
-    semantic = "semantic_memory"      # stable repo/domain/API facts
+    episodic = "episodic_memory"  # what happened in a run
+    semantic = "semantic_memory"  # stable repo/domain/API facts
     procedural = "procedural_memory"  # skills, workflows, recipes
     evaluative = "evaluative_memory"  # what made outputs good/bad
     relational = "relational_memory"  # graph relationships (FalkorDB)

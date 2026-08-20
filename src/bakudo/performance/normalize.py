@@ -74,9 +74,7 @@ class RawHotspot:
         numeric = (self.inclusive_cost, self.exclusive_cost, self.percentage)
         if any(value is not None and not math.isfinite(value) for value in numeric):
             raise NormalizationError("hotspot costs and percentage must be finite")
-        if self.inclusive_cost < 0 or (
-            self.exclusive_cost is not None and self.exclusive_cost < 0
-        ):
+        if self.inclusive_cost < 0 or (self.exclusive_cost is not None and self.exclusive_cost < 0):
             raise NormalizationError("hotspot costs must be non-negative")
         if self.sample_count < 0:
             raise NormalizationError("hotspot sample_count must be non-negative")
@@ -188,9 +186,7 @@ def normalize_hotspots(
     if max_hotspots < 1 or max_hotspots > MAX_NORMALIZED_HOTSPOTS:
         raise ValueError(f"max_hotspots must be between 1 and {MAX_NORMALIZED_HOTSPOTS}")
     if len(rows) > max_hotspots:
-        raise NormalizationError(
-            f"profile contains {len(rows)} hotspots; limit is {max_hotspots}"
-        )
+        raise NormalizationError(f"profile contains {len(rows)} hotspots; limit is {max_hotspots}")
 
     aggregates: dict[str, _Aggregate] = {}
     for row in rows:

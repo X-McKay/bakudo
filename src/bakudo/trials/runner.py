@@ -64,18 +64,28 @@ class PipelineResultLike(Protocol):
 PipelineFn = Callable[[Objective, str, ResourceLimits, str], PipelineResultLike]
 
 
-def objective_from_task(task: LoadedTask, repo_path: Path) -> Objective:
+def objective_from_task(task: LoadedTask, repo_path: str | Path) -> Objective:
     """Derive the :class:`Objective` a policy attempts from a task instruction.
 
-    ``repo`` is set to the provisioned workspace path (not a bare repo name
-    to be resolved elsewhere) since the task has already been
-    materialized there. The TaskSpec's hard constraints remain authoritative;
-    only the subset understood by the generic Objective contract is projected.
+    ``repo`` is set to the caller-provided materialized workspace path (or a
+    stable ``task://`` locator for corpus-only evaluation), rather than a bare
+    repository name to resolve elsewhere. The TaskSpec's hard constraints
+    remain authoritative; only the subset understood by the generic Objective
+    contract is projected.
     """
     instruction = task.spec.instruction
+    objective_type = ObjectiveType(instruction.type)
+    # ``TaskInstruction.type: optimize`` describes a code-level optimization
+    # task.  It does not carry the trusted, pinned performance contract that
+    # an orchestration-level ``ObjectiveType.optimize`` requires before it can
+    # participate in performance promotion.  Materialise such benchmark tasks
+    # as maintenance work; their task-local verifier and constraints remain
+    # authoritative and no unpinned performance claim is introduced.
+    if objective_type is ObjectiveType.optimize:
+        objective_type = ObjectiveType.maintenance
     constraints_data: dict[str, Any] = {"maxFilesChanged": task.spec.constraints.max_changed_files}
     return Objective(
-        type=ObjectiveType(instruction.type),
+        type=objective_type,
         repo=str(repo_path),
         title=instruction.title,
         description=instruction.description,
@@ -283,9 +293,7 @@ def compute_integrity_flags(
         details["denied_action_violation"] = ", ".join(sorted(set(denied_commands)))
 
     outside = [
-        path
-        for path in changed_files
-        if not _within_scope(path, constraints.allowed_change_paths)
+        path for path in changed_files if not _within_scope(path, constraints.allowed_change_paths)
     ]
     scope_violation = bool(outside)
     if outside:

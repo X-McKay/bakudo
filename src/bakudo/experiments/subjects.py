@@ -70,9 +70,7 @@ def _has_integrity_violation(integrity: IntegrityFlags) -> bool:
     )
 
 
-def _failed_trial_record(
-    planned: PlannedTrial, experiment_id: str, exc: Exception
-) -> TrialRecord:
+def _failed_trial_record(planned: PlannedTrial, experiment_id: str, exc: Exception) -> TrialRecord:
     now = datetime.now(UTC).isoformat()
     return TrialRecord(
         id=new_trial_id(),
@@ -307,9 +305,7 @@ class AgentSubjectBinding:
             "baseline": self.baseline_arm,
             "candidates": list(self.candidate_arms),
             "perFamily": _per_family(self.spec, trials, family_by_name),
-            "pairedTaskPairs": _paired_task_pairs(
-                self.spec, tasks, context.task_source, trials
-            ),
+            "pairedTaskPairs": _paired_task_pairs(self.spec, tasks, context.task_source, trials),
             "degradedTrials": sum(
                 1
                 for observation in batch.observations
@@ -375,8 +371,7 @@ def _joint_pass(nochange: list[TrialRecord], fix: list[TrialRecord]) -> bool:
     if not nochange or not fix:
         return False
     return all(
-        trial.evaluation.get("p2p_rate") == 1.0
-        and trial.metrics.get("changed_files") == 0.0
+        trial.evaluation.get("p2p_rate") == 1.0 and trial.metrics.get("changed_files") == 0.0
         for trial in nochange
     ) and all(trial.evaluation.get("f2p_rate") == 1.0 for trial in fix)
 
@@ -419,9 +414,7 @@ def _paired_task_pairs(
                 if trial.agent_ref == arm and trial.task.name == nochange_name
             ]
             fix_trials = [
-                trial
-                for trial in trials
-                if trial.agent_ref == arm and trial.task.name == fix_name
+                trial for trial in trials if trial.agent_ref == arm and trial.task.name == fix_name
             ]
             joint[label] = _joint_pass(nochange_trials, fix_trials)
         item["jointPass"] = joint

@@ -325,9 +325,7 @@ def metric_sample_sets_from_invocations(
                 continue
             if value is None:
                 invalid_by_metric[name] += 1
-                reasons_by_metric[name].append(
-                    f"invocation {outcome.ordinal} did not emit {name}"
-                )
+                reasons_by_metric[name].append(f"invocation {outcome.ordinal} did not emit {name}")
                 continue
             if value.unit is not definition.unit:
                 invalid_by_metric[name] += 1

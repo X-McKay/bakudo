@@ -4,7 +4,7 @@ tests/test_task_models.py)."""
 import pytest
 from pydantic import ValidationError
 
-from bakudo.experiments.models import ExperimentSpec, TaskSelector
+from bakudo.experiments.models import DecisionPolicy, ExperimentSpec, TaskSelector
 
 MINIMAL = {
     "apiVersion": "bakudo.ai/v1alpha1",
@@ -27,6 +27,7 @@ def test_minimal_experiment_parses_with_defaults():
     assert spec.decision.confidence == 0.95
     assert spec.decision.tie_zone == 0.10
     assert spec.decision.cost_tiebreak is True
+    assert spec.decision.min_paired_observations == 5
 
 
 @pytest.mark.parametrize("bad_count", [0, -1])
@@ -57,7 +58,12 @@ def test_camelcase_aliases_round_trip():
             "useHoldout": True,
         },
         "hardGates": {"safetyRegressions": 1, "integrityViolations": 2},
-        "decision": {"confidence": 0.9, "tieZone": 0.05, "costTiebreak": False},
+        "decision": {
+            "confidence": 0.9,
+            "tieZone": 0.05,
+            "costTiebreak": False,
+            "minPairedObservations": 8,
+        },
     }
     spec = ExperimentSpec.model_validate(doc)
     assert spec.subject.use_holdout is True
@@ -65,8 +71,15 @@ def test_camelcase_aliases_round_trip():
     assert spec.hard_gates.integrity_violations == 2
     assert spec.decision.tie_zone == 0.05
     assert spec.decision.cost_tiebreak is False
+    assert spec.decision.min_paired_observations == 8
     assert spec.to_dict()["subject"]["useHoldout"] is True
     assert spec.to_dict()["hardGates"]["safetyRegressions"] == 1
+    assert spec.to_dict()["decision"]["minPairedObservations"] == 8
+
+
+def test_one_paired_observation_cannot_be_configured_as_promotion_evidence():
+    with pytest.raises(ValidationError):
+        DecisionPolicy(minPairedObservations=1)
 
 
 def test_json_schema_accepts_minimal():
@@ -81,3 +94,10 @@ def test_json_schema_rejects_bad_subject():
     bad = {**MINIMAL, "subject": {"kind": "not-agent-spec", "baseline": "a@1"}}
     with pytest.raises(SchemaValidationError):
         validate_experiment_spec(bad)
+
+
+def test_json_schema_rejects_one_paired_observation_minimum():
+    from bakudo.schema import SchemaValidationError, validate_experiment_spec
+
+    with pytest.raises(SchemaValidationError):
+        validate_experiment_spec({**MINIMAL, "decision": {"minPairedObservations": 1}})

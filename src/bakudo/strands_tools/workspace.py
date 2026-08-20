@@ -74,9 +74,7 @@ class Workspace:
         """
         parts = [self.run(["git", "diff", "--no-color"]).stdout]
         for name in self._untracked_files():
-            proc = self.run(
-                ["git", "diff", "--no-color", "--no-index", "--", "/dev/null", name]
-            )
+            proc = self.run(["git", "diff", "--no-color", "--no-index", "--", "/dev/null", name])
             parts.append(proc.stdout)
         return "".join(parts)
 

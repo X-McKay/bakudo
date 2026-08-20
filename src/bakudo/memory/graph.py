@@ -186,9 +186,7 @@ class FalkorGraphMemory:
         deadline = time.monotonic() + timeout
         while True:
             listing = self._graph.list_constraints()
-            status = {
-                (c["label"], tuple(c["properties"])): c["status"] for c in listing
-            }
+            status = {(c["label"], tuple(c["properties"])): c["status"] for c in listing}
             failed = sorted(k for k in wanted if status.get(k) == "FAILED")
             if failed:
                 raise RuntimeError(
@@ -201,8 +199,7 @@ class FalkorGraphMemory:
             if time.monotonic() >= deadline:
                 stuck = sorted(k for k in wanted if status.get(k) != "OPERATIONAL")
                 raise RuntimeError(
-                    f"FalkorDB constraints not operational after {timeout}s: "
-                    f"{stuck}"
+                    f"FalkorDB constraints not operational after {timeout}s: {stuck}"
                 )
             time.sleep(_CONSTRAINT_POLL_INTERVAL_SECONDS)
 

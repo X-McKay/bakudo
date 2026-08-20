@@ -25,9 +25,7 @@ def load_environment_pin(path: Path) -> EnvironmentPin:
     try:
         text = resolved.read_text()
         document: Any = (
-            json.loads(text)
-            if resolved.suffix.lower() == ".json"
-            else yaml.safe_load(text)
+            json.loads(text) if resolved.suffix.lower() == ".json" else yaml.safe_load(text)
         )
         if not isinstance(document, dict):
             raise ValueError("document must be an object")

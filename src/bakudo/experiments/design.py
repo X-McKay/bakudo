@@ -5,7 +5,9 @@ its inputs, so the same ``(experiment_id, task_name, repetition)`` always
 produces the same seed, on any machine, without any stored state. Baseline
 and candidate arms of the same (task, repetition) cell share that seed —
 the "paired" part of the design — so a difference in outcome reflects the
-agent version, not a different random draw.
+agent version, not a different random draw. The analysis seed is derived and
+persisted separately so bootstrap replay does not accidentally share the
+trial seed's domain.
 """
 
 from __future__ import annotations
@@ -35,6 +37,18 @@ def trial_seed(experiment_id: str, task_name: str, repetition: int) -> int:
     the ledger persists it into a Postgres ``bigint`` column, which an
     unsigned 64-bit value overflows about half the time."""
     digest = hashlib.sha256(f"{experiment_id}:{task_name}:{repetition}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+def analysis_seed(experiment_id: str) -> int:
+    """Return the deterministic root seed for an experiment's analysis.
+
+    This is intentionally independent of :func:`trial_seed`: resampling must
+    be reproducible from the persisted experiment result without reusing the
+    policy/environment randomization domain. The 63-bit range remains safe
+    for every current ledger backend and external consumer.
+    """
+    digest = hashlib.sha256(f"analysis:{experiment_id}".encode()).digest()
     return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 

@@ -18,9 +18,13 @@ from ..performance.models import MetricDirection, MetricName, RevisionPin, Workl
 from ..trials.models import TrialRecord
 
 AgentRef = Annotated[str, StringConstraints(min_length=1, max_length=256)]
-MeasurementId = Annotated[
-    str, StringConstraints(pattern=r"^measurement_[0-9A-HJKMNP-TV-Z]{26}$")
-]
+MeasurementId = Annotated[str, StringConstraints(pattern=r"^measurement_[0-9A-HJKMNP-TV-Z]{26}$")]
+
+# Repetitions are averaged within each task before the paired analysis, so the
+# independent evidence unit for an agent experiment is a distinct task pair,
+# not a raw trial. Five is deliberately below the default task selection (20)
+# while ruling out a promotion claim from one anomalous pair.
+DEFAULT_MIN_PAIRED_OBSERVATIONS = 5
 
 
 class _Strict(BaseModel):
@@ -119,14 +123,16 @@ class DecisionPolicy(_Strict):
     confidence: float = Field(default=0.95, gt=0, lt=1)
     tie_zone: float = Field(default=0.10, alias="tieZone", ge=0)
     cost_tiebreak: bool = Field(default=True, alias="costTiebreak")
-    bootstrap_resamples: int = Field(
-        default=10_000, alias="bootstrapResamples", ge=1, le=1_000_000
+    bootstrap_resamples: int = Field(default=10_000, alias="bootstrapResamples", ge=1, le=1_000_000)
+    min_paired_observations: int = Field(
+        default=DEFAULT_MIN_PAIRED_OBSERVATIONS,
+        alias="minPairedObservations",
+        ge=2,
+        le=1_000_000,
     )
 
 
-_TASK_REWARD_METRICS = frozenset(
-    {"task_success", "reward", "f2p_rate", "p2p_rate", "scorecard"}
-)
+_TASK_REWARD_METRICS = frozenset({"task_success", "reward", "f2p_rate", "p2p_rate", "scorecard"})
 
 
 class ExperimentSpec(_Strict):
@@ -237,9 +243,7 @@ class ExperimentObservation(_StrictFrozen):
             raise ValueError("observation metrics must have unique names")
         if self.degraded and not self.degradation_reasons:
             raise ValueError("degraded observations require a reason")
-        expected = (
-            "trial-record" if self.subject_kind == "agent-spec" else "measurement-record"
-        )
+        expected = "trial-record" if self.subject_kind == "agent-spec" else "measurement-record"
         if self.evidence.kind != expected:
             raise ValueError("observation evidence kind does not match subject kind")
         return self

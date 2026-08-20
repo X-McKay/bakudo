@@ -30,10 +30,52 @@
             "createdBy": { "type": "string", "minLength": 1 },
             "createdAt": { "type": "string" },
             "sourceType": { "type": "string", "minLength": 1 },
-            "eligibleForPromotion": { "type": "boolean" }
+            "eligibleForPromotion": { "type": "boolean" },
+            "publicSource": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["sourceName", "sourceURI", "sourceRevision", "instanceId", "repositoryURI", "baseCommit", "imageDigest", "repositoryLicense", "rightsReview", "acquiredAt", "transformDigest", "calibrationOnly"],
+              "properties": {
+                "sourceName": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "sourceURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                "sourceRevision": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "instanceId": { "type": "string", "minLength": 1, "maxLength": 512 },
+                "repositoryURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                "baseCommit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+                "imageDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                "repositoryLicense": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "rightsReview": { "const": "approved" },
+                "acquiredAt": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "transformDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                "calibrationOnly": { "const": true }
+              }
+            }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "provenance": {
+                "required": ["publicSource"],
+                "properties": { "publicSource": { "type": "object" } }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "partition": { "const": "dev" },
+              "provenance": {
+                "properties": {
+                  "sourceType": { "const": "external-public" },
+                  "eligibleForPromotion": { "const": false }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "instruction": {
       "type": "object",

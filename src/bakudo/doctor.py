@@ -179,6 +179,32 @@ def _performance_runner_check() -> DiagnosticCheck:
     )
 
 
+def _performance_readiness_check() -> DiagnosticCheck:
+    """Report, but do not implicitly admit, the latency-decision posture."""
+
+    from .performance.readiness import RUNNER_MODE_ENV, inspect_performance_runner
+
+    readiness = inspect_performance_runner()
+    if readiness.ready:
+        assert readiness.environment is not None
+        return DiagnosticCheck(
+            "performance-readiness",
+            "ok",
+            "trusted latency-decision runner admitted; "
+            f"environment={readiness.environment.environment_digest}",
+        )
+    # Ordinary development and generic CI do not run target benchmarks. They
+    # remain diagnostically healthy but are visibly ineligible. An operator
+    # who explicitly claims trusted mode gets an error for an incomplete or
+    # unsafe contract, making bootstrap mistakes fail closed.
+    status: CheckStatus = "error" if os.environ.get(RUNNER_MODE_ENV) else "warning"
+    return DiagnosticCheck(
+        "performance-readiness",
+        status,
+        "not admitted for latency decisions: " + "; ".join(readiness.issues),
+    )
+
+
 def _performance_environment_check() -> DiagnosticCheck:
     from .performance.environment import configured_environment_pin
 
@@ -228,9 +254,7 @@ def _optional_dependencies_check() -> DiagnosticCheck:
         "temporal": "temporalio",
     }
     missing = [
-        label
-        for label, module in modules.items()
-        if importlib.util.find_spec(module) is None
+        label for label, module in modules.items() if importlib.util.find_spec(module) is None
     ]
     if missing:
         return DiagnosticCheck(
@@ -304,6 +328,7 @@ def build_doctor_report() -> DoctorReport:
         _workload_source_check(),
         _artifact_store_check(),
         _performance_runner_check(),
+        _performance_readiness_check(),
         _performance_environment_check(),
         _profiler_check(),
         _optional_dependencies_check(),

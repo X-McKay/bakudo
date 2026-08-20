@@ -115,9 +115,7 @@ def test_valid_workload_has_schema_and_model_parity() -> None:
 
 
 def test_workload_reference_uses_canonical_source_kinds() -> None:
-    ref = WorkloadRef(
-        name="python-loop", version="1.0.0", source=SourceKind.repository
-    )
+    ref = WorkloadRef(name="python-loop", version="1.0.0", source=SourceKind.repository)
     assert ref.to_dict()["source"] == "repository"
     with pytest.raises(ValidationError):
         WorkloadRef(name="python-loop", version="1.0.0", source="repo")

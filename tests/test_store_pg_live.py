@@ -120,9 +120,7 @@ def test_supersede_replaces_less_confident_near_duplicate(
     assert old.id not in {m.id for m in remaining}
 
 
-def test_expired_rows_are_invisible_and_purgeable(
-    store: PgSemanticMemoryStore, repo: str
-) -> None:
+def test_expired_rows_are_invisible_and_purgeable(store: PgSemanticMemoryStore, repo: str) -> None:
     expired = store.write_candidate(
         _item(repo, "This ephemeral fact expires immediately after writing.", 0.8, ttl="0m")
     )
@@ -143,9 +141,7 @@ def test_expired_rows_are_invisible_and_purgeable(
     assert fresh.id in remaining_ids
 
 
-def test_ttl_round_trips_through_the_column(
-    store: PgSemanticMemoryStore, repo: str
-) -> None:
+def test_ttl_round_trips_through_the_column(store: PgSemanticMemoryStore, repo: str) -> None:
     store.write_candidate(
         _item(repo, "Facts about the webhook subsystem stay fresh for 180 days.", 0.8, ttl="180d")
     )

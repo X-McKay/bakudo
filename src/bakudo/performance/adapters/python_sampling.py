@@ -43,12 +43,14 @@ class PythonSamplingAdapter:
         py_spy_version: str | None = None,
         discover_py_spy: bool = True,
         sampling_permission_verified: bool = False,
+        cprofile_version: str | None = None,
     ) -> None:
         self._py_spy_path = py_spy_path
         if self._py_spy_path is None and discover_py_spy:
             self._py_spy_path = shutil.which("py-spy")
         self._py_spy_version = py_spy_version
         self._sampling_permission_verified = sampling_permission_verified
+        self._cprofile_version = cprofile_version
 
     @property
     def descriptor(self) -> ProfilerDescriptor:
@@ -62,7 +64,10 @@ class PythonSamplingAdapter:
         return ProfilerDescriptor(
             name="python-sampling",
             adapter="python.sampling",
-            version=f"cProfile-{platform.python_version()}",
+            # A capture service can run on a different Python interpreter
+            # than its fresh abox guest.  It supplies the guest's pinned
+            # version; direct/local adapter use retains the host fallback.
+            version=f"cProfile-{self._cprofile_version or platform.python_version()}",
             signals=("function-calls", "cpu-time"),
         )
 
@@ -145,9 +150,7 @@ class PythonSamplingAdapter:
         diagnostic_duration: DiagnosticDuration,
         max_bytes: int,
     ) -> CapturedProfile:
-        media_type = (
-            _SPEEDSCOPE_MEDIA_TYPE if prepared.mode == "py-spy" else _PSTATS_MEDIA_TYPE
-        )
+        media_type = _SPEEDSCOPE_MEDIA_TYPE if prepared.mode == "py-spy" else _PSTATS_MEDIA_TYPE
         return CapturedProfile(
             _read_bounded(prepared.output_path, max_bytes),
             media_type,
@@ -155,9 +158,7 @@ class PythonSamplingAdapter:
             warnings=("instrumenting cProfile fallback",) if prepared.mode == "cprofile" else (),
         )
 
-    def normalize(
-        self, artifact: CapturedProfile, symbols: SymbolMap
-    ) -> tuple[Hotspot, ...]:
+    def normalize(self, artifact: CapturedProfile, symbols: SymbolMap) -> tuple[Hotspot, ...]:
         if artifact.media_type == _PSTATS_MEDIA_TYPE:
             return _normalize_pstats(artifact.content, symbols)
         if artifact.media_type == _SPEEDSCOPE_MEDIA_TYPE:
@@ -209,9 +210,7 @@ def _normalize_pstats(content: bytes, symbols: SymbolMap) -> tuple[Hotspot, ...]
             inclusive_cost=max(0.0, inclusive),
             exclusive_cost=max(0.0, exclusive),
             sample_count=max(0, total_calls),
-            percentage=(100.0 * max(0.0, exclusive) / total_exclusive)
-            if total_exclusive
-            else None,
+            percentage=(100.0 * max(0.0, exclusive) / total_exclusive) if total_exclusive else None,
             quality="unknown" if filename.startswith(("<", "~")) else "resolved",
             extensions={"python.primitiveCalls": max(0, primitive_calls)},
         )

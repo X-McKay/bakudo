@@ -1,10 +1,10 @@
 # Python CI for bakudo.
 #
-# Mirrors `make check` (ruff + mypy + pytest) plus an offline smoke test of
-# the operator surface, on the same interpreters the package supports. It
-# installs the full `[all,dev]` extras so pytest and mypy exercise the same
-# surface as a fully-provisioned dev box (temporalio, strands, psycopg,
-# httpx, fastapi) instead of silently skipping the heavy-dependency suites.
+# `make ci` is the single reproducible quality target.  It validates the uv
+# lock, generated schemas, Ruff formatting/linting, typing, the hermetic test
+# tier, offline CLI smoke surface, and wheel isolation.  Real Postgres,
+# FalkorDB, Temporal, and abox/KVM tests remain explicit opt-in lanes because
+# GitHub-hosted runners cannot provide a trustworthy instance of those systems.
 
 name: CI
 
@@ -21,33 +21,13 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-      - name: Install
-        run: pip install -e ".[all,dev]"
-      - name: Lint
-        run: ruff check src tests skills scripts
-      - name: Generated schemas
-        run: python scripts/generate_performance_schemas.py --check
-      # python -m avoids any stale mypy/pytest shadowing the venv's on PATH.
-      - name: Type-check
-        run: python -m mypy src/bakudo
-      - name: Test
-        run: python -m pytest
-      - name: Smoke
-        run: |
-          bakudo doctor --json
-          bakudo agent validate agents/add-feature.yaml
-          bakudo agent validate agents/optimize-scout.yaml
-          bakudo agent validate agents/optimize-attempt.yaml
-          bakudo skill list --json
-          bakudo demo --json
-          bakudo workload list --json
-          bakudo optimize --help
-      # API-12 regression guard: the wheel must be a complete install —
-      # builds it, installs into a throwaway venv, and exercises the demo,
-      # workload, performance, and optimize surfaces from an empty cwd.
-      - name: Wheel smoke
-        run: make wheel-smoke
+      - name: Install locked environment
+        run: uv sync --all-extras --locked --python ${{ matrix.python-version }}
+      - name: Reproducible quality gate
+        run: make PYTHON=.venv/bin/python ci

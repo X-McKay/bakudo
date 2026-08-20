@@ -90,8 +90,8 @@ def test_repo_safe_blocks_attached_value_exact_flags():
     """`--eval=CODE` is one token, so neither the exact-match nor the
     short-cluster check used to see it — the cheapest bypass of SEC-1."""
     for cmd in (
-        'node --eval=console.log(1)',
-        'node --print=process.env',
+        "node --eval=console.log(1)",
+        "node --print=process.env",
     ):
         with pytest.raises(CommandDenied):
             REPO_SAFE.check(cmd)

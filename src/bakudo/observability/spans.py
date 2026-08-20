@@ -140,9 +140,7 @@ class FakeSpanSink:
             self._dropped_count = 0
 
 
-_CURRENT_SPAN: ContextVar[SpanContext | None] = ContextVar(
-    "bakudo_current_span", default=None
-)
+_CURRENT_SPAN: ContextVar[SpanContext | None] = ContextVar("bakudo_current_span", default=None)
 
 
 def current_span_context() -> SpanContext | None:

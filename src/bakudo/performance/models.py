@@ -39,7 +39,9 @@ MAX_EXTENSION_ENTRIES = 64
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 SemanticVersion = Annotated[
     str,
-    StringConstraints(pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$")
+    StringConstraints(
+        pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+    ),
 ]
 MetricName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
 RelativePath = Annotated[
@@ -313,9 +315,7 @@ class ProfilerSpec(_StrictFrozen):
 
 
 class WorkloadSpec(_StrictFrozen):
-    api_version: Literal["bakudo.ai/v1alpha1"] = Field(
-        "bakudo.ai/v1alpha1", alias="apiVersion"
-    )
+    api_version: Literal["bakudo.ai/v1alpha1"] = Field("bakudo.ai/v1alpha1", alias="apiVersion")
     kind: Literal["WorkloadSpec"] = "WorkloadSpec"
     metadata: WorkloadMetadata
     subject: WorkloadSubject
@@ -426,9 +426,7 @@ class MetricSampleSet(_StrictFrozen):
 
 class IntegrityResult(_StrictFrozen):
     valid: bool = True
-    violations: tuple[Annotated[str, StringConstraints(min_length=1, max_length=256)], ...] = (
-        ()
-    )
+    violations: tuple[Annotated[str, StringConstraints(min_length=1, max_length=256)], ...] = ()
     details: dict[str, Annotated[str, StringConstraints(max_length=1_024)]] = Field(
         default_factory=dict, max_length=64
     )
@@ -453,9 +451,7 @@ class MeasurementRecord(_StrictFrozen):
     id: Annotated[str, StringConstraints(pattern=r"^measurement_[0-9A-HJKMNP-TV-Z]{26}$")] = Field(
         default_factory=new_measurement_id
     )
-    created_at: AwareTimestamp = Field(
-        default_factory=lambda: datetime.now(UTC), alias="createdAt"
-    )
+    created_at: AwareTimestamp = Field(default_factory=lambda: datetime.now(UTC), alias="createdAt")
     started_at: AwareTimestamp | None = Field(default=None, alias="startedAt")
     completed_at: AwareTimestamp | None = Field(default=None, alias="completedAt")
     workload: WorkloadPin
@@ -542,9 +538,7 @@ class PerformanceSnapshot(_StrictFrozen):
     id: Annotated[str, StringConstraints(pattern=r"^snapshot_[0-9A-HJKMNP-TV-Z]{26}$")] = Field(
         default_factory=new_snapshot_id
     )
-    created_at: AwareTimestamp = Field(
-        default_factory=lambda: datetime.now(UTC), alias="createdAt"
-    )
+    created_at: AwareTimestamp = Field(default_factory=lambda: datetime.now(UTC), alias="createdAt")
     workload: WorkloadPin
     revision: RevisionPin
     environment: EnvironmentPin
@@ -606,9 +600,7 @@ class PerformanceComparison(_StrictFrozen):
     id: Annotated[str, StringConstraints(pattern=r"^comparison_[0-9A-HJKMNP-TV-Z]{26}$")] = Field(
         default_factory=new_comparison_id
     )
-    created_at: AwareTimestamp = Field(
-        default_factory=lambda: datetime.now(UTC), alias="createdAt"
-    )
+    created_at: AwareTimestamp = Field(default_factory=lambda: datetime.now(UTC), alias="createdAt")
     workload: WorkloadPin
     baseline_revision: RevisionPin = Field(alias="baselineRevision")
     candidate_revision: RevisionPin = Field(alias="candidateRevision")
@@ -655,9 +647,7 @@ class PerformanceRegressionSignal(_StrictFrozen):
     id: Annotated[str, StringConstraints(pattern=r"^regression_[0-9A-HJKMNP-TV-Z]{26}$")] = Field(
         default_factory=new_regression_id
     )
-    created_at: AwareTimestamp = Field(
-        default_factory=lambda: datetime.now(UTC), alias="createdAt"
-    )
+    created_at: AwareTimestamp = Field(default_factory=lambda: datetime.now(UTC), alias="createdAt")
     repository: str
     workload: WorkloadPin
     metric_name: MetricName = Field(alias="metricName")

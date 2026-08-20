@@ -82,9 +82,7 @@ def test_dispatcher_pins_inputs_and_starts_all_performance_workflows(tmp_path: P
     }
 
     measurement = dispatcher.start_measurement(PerformanceMeasurementIn(**common))
-    capture = dispatcher.start_capture(
-        PerformanceCaptureIn(**common, profiler="synthetic")
-    )
+    capture = dispatcher.start_capture(PerformanceCaptureIn(**common, profiler="synthetic"))
     comparison = dispatcher.start_comparison(
         PerformanceComparisonIn(
             **common,
@@ -103,8 +101,6 @@ def test_dispatcher_pins_inputs_and_starts_all_performance_workflows(tmp_path: P
     assert client.started[0][1].workload_source == "package://bakudo/smoke-workloads"
     assert client.started[0][1].revision["commitSHA"] == _git(repo, "rev-parse", "HEAD")
     assert client.started[2][1].baseline_revision["commitSHA"] == baseline
-    assert client.started[2][1].candidate_revision["commitSHA"] == _git(
-        repo, "rev-parse", "HEAD"
-    )
+    assert client.started[2][1].candidate_revision["commitSHA"] == _git(repo, "rev-parse", "HEAD")
     stored = ledger.get_workload_version("smoke-python-loop@1.0.1")
     assert stored is not None

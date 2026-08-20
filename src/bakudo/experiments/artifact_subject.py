@@ -32,9 +32,7 @@ class ArtifactMeasurementRequest:
     seed: int
 
 
-ArtifactMeasurementObserver = Callable[
-    [ArtifactMeasurementRequest], MeasurementRecord | str
-]
+ArtifactMeasurementObserver = Callable[[ArtifactMeasurementRequest], MeasurementRecord | str]
 
 
 @dataclass(frozen=True)
@@ -85,9 +83,7 @@ class ArtifactSubjectBinding:
             *tuple(zip(self.candidate_arms, self.subject.candidates, strict=True)),
         )
 
-    def _persisted_record(
-        self, request: ArtifactMeasurementRequest
-    ) -> MeasurementRecord:
+    def _persisted_record(self, request: ArtifactMeasurementRequest) -> MeasurementRecord:
         returned = self.measure(request)
         if isinstance(returned, MeasurementRecord):
             self.ledger.record_measurement(returned)
@@ -192,9 +188,7 @@ class ArtifactSubjectBinding:
             metric.model_copy(
                 update={
                     "valid": False,
-                    "invalid_reasons": tuple(
-                        dict.fromkeys((*metric.invalid_reasons, *reasons))
-                    ),
+                    "invalid_reasons": tuple(dict.fromkeys((*metric.invalid_reasons, *reasons))),
                 }
             )
             for metric in observation.metrics
@@ -228,9 +222,7 @@ class ArtifactSubjectBinding:
                 record = self._persisted_record(request)
                 records.append((arm, repetition, record))
                 observations.append(
-                    self._observation(
-                        experiment_id, arm, repetition, revision, record
-                    )
+                    self._observation(experiment_id, arm, repetition, revision, record)
                 )
 
         by_cell = {(arm, repetition): record for arm, repetition, record in records}
@@ -248,9 +240,7 @@ class ArtifactSubjectBinding:
                     index = observations_by_cell[(arm, repetition)]
                     observations[index] = self._invalidate(observations[index], reasons)
 
-        return ObservationBatch(
-            tuple(observations), ArtifactObservationContext(tuple(records))
-        )
+        return ObservationBatch(tuple(observations), ArtifactObservationContext(tuple(records)))
 
     @staticmethod
     def _context(batch: ObservationBatch) -> ArtifactObservationContext:
@@ -299,9 +289,7 @@ class ArtifactSubjectBinding:
                     "arm": arm,
                     "revision": revision.model_dump(by_alias=True, mode="json"),
                 }
-                for arm, revision in zip(
-                    self.candidate_arms, self.subject.candidates, strict=True
-                )
+                for arm, revision in zip(self.candidate_arms, self.subject.candidates, strict=True)
             ],
             "workloadRef": self.subject.workload_ref.to_dict(),
             "measurementRecords": records,

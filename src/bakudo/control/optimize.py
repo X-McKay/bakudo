@@ -37,9 +37,7 @@ PerformanceCompare = Callable[[str], PerformanceComparison]
 REQUIRED_PASSED_SUITES = ("schema", "safety", "task", "code")
 
 
-def scout_objective(
-    base: dict[str, Any], *, feedback: list[str] | None = None
-) -> dict[str, Any]:
+def scout_objective(base: dict[str, Any], *, feedback: list[str] | None = None) -> dict[str, Any]:
     """Build the read-only scout objective for one round.
 
     The scout inherits the optimize objective's repo/targets and returns its
@@ -80,9 +78,7 @@ def scout_objective(
     }
 
 
-def attempt_objective(
-    base: dict[str, Any], *, approach: str, index: int
-) -> dict[str, Any]:
+def attempt_objective(base: dict[str, Any], *, approach: str, index: int) -> dict[str, Any]:
     """Build one single-hypothesis attempt objective.
 
     One hypothesis per attempt keeps candidate diffs attributable when they
@@ -189,10 +185,8 @@ def _comparison_rejection(
     if comparison.candidate_revision.patch_digest != sha256_text(candidate_diff):
         return "comparison candidate patch digest does not match the captured diff"
     if (
-        comparison.candidate_revision.repository
-        != comparison.baseline_revision.repository
-        or comparison.candidate_revision.base_commit_sha
-        != comparison.baseline_revision.commit_sha
+        comparison.candidate_revision.repository != comparison.baseline_revision.repository
+        or comparison.candidate_revision.base_commit_sha != comparison.baseline_revision.commit_sha
     ):
         return "comparison candidate revision is not based on the measured baseline"
     if comparison.status is not RecordStatus.completed:
@@ -257,9 +251,12 @@ def select_winner(
         comparison = _comparison(candidate)
         if comparison is None:
             continue
-        if _comparison_rejection(
-            comparison, performance, candidate_diff=candidate.get("diff") or ""
-        ) is not None:
+        if (
+            _comparison_rejection(
+                comparison, performance, candidate_diff=candidate.get("diff") or ""
+            )
+            is not None
+        ):
             continue
         primary = next(
             metric
@@ -399,9 +396,7 @@ def run_optimize_loop(
         candidates: list[dict[str, Any]] = []
         for index, approach in enumerate(approaches):
             attempt = run_objective(
-                Objective.model_validate(
-                    attempt_objective(base, approach=approach, index=index)
-                ),
+                Objective.model_validate(attempt_objective(base, approach=approach, index=index)),
                 attempt_spec,
                 ledger=ledger,
                 sandbox=sandbox,
@@ -417,9 +412,7 @@ def run_optimize_loop(
                     "error": attempt.outcome.error or attempt.outcome.stderr[-500:],
                     "result": attempt.result.to_dict() if attempt.result else None,
                     "scorecard": (
-                        attempt.scorecard.model_dump(mode="json")
-                        if attempt.scorecard
-                        else None
+                        attempt.scorecard.model_dump(mode="json") if attempt.scorecard else None
                     ),
                 }
             )
@@ -471,9 +464,7 @@ def _compared_winner(
             verify_feedback.append(f"'{title}': candidate produced no patch to measure")
             continue
         if performance_compare is None:
-            verify_feedback.append(
-                f"'{title}': independent performance comparison unavailable"
-            )
+            verify_feedback.append(f"'{title}': independent performance comparison unavailable")
             continue
         try:
             returned = performance_compare(diff)
@@ -483,13 +474,9 @@ def _compared_winner(
                 else PerformanceComparison.model_validate(returned)
             )
             serialized = comparison.to_dict()
-            rejection = _comparison_rejection(
-                comparison, performance, candidate_diff=diff
-            )
+            rejection = _comparison_rejection(comparison, performance, candidate_diff=diff)
         except Exception as exc:  # noqa: BLE001 - measurement failure is typed feedback
-            verify_feedback.append(
-                f"'{title}': independent performance comparison failed: {exc}"
-            )
+            verify_feedback.append(f"'{title}': independent performance comparison failed: {exc}")
             continue
         candidate["performance_comparison"] = serialized
         if rejection is not None:

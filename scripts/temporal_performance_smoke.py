@@ -251,9 +251,7 @@ async def _run(address: str, namespace: str) -> dict[str, Any]:
         "measurementReplay": measurement_replay.record_id,
         "comparison": comparison.record_id,
         "experiment": experiment["experimentId"],
-        "artifactVerdict": experiment["comparison"]["candidate-1"]["primary"][
-            "verdict"
-        ],
+        "artifactVerdict": experiment["comparison"]["candidate-1"]["primary"]["verdict"],
     }
 
 

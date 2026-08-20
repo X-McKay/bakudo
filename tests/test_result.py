@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 from bakudo.runner.result import normalize_result
@@ -41,6 +40,7 @@ def test_result_always_validates_against_schema():
 
 # --- critic verdict folding (design §5: verdict rides the result envelope) ---
 
+
 def test_normalize_folds_bare_verdict_into_envelope():
     """A critic that answers with the pinned verdict object {score, passed,
     issues} gets folded into a schema-valid RunResult (metrics.score /
@@ -60,8 +60,12 @@ def test_normalize_folds_bare_verdict_into_envelope():
 def test_normalize_verdict_failed_review():
     from bakudo.runner.result import normalize_result
 
-    out = normalize_result({"score": 0.1, "passed": False, "issues": ["broken"]},
-                           run_id="run_C", agent="critic@1", objective_id="obj_C")
+    out = normalize_result(
+        {"score": 0.1, "passed": False, "issues": ["broken"]},
+        run_id="run_C",
+        agent="critic@1",
+        objective_id="obj_C",
+    )
     assert out.status.value == "success"  # the critic RUN succeeded; the verdict is negative
     assert out.metrics["passed"] == 0.0
 
@@ -70,12 +74,18 @@ def test_unknown_test_status_coerces_to_error():
     """Observed live: a scout recorded its denied test attempt as status
     'denied'; the schema enum rejected it and the run lost its result."""
     result = normalize_result(
-        {"status": "blocked", "summary": "s",
-         "tests_run": [{"command": "pytest -q", "status": "denied"},
-                       {"command": "pytest -q", "status": "passed"},
-                       "tests/test_x.py"],
-         },
-        run_id="run_1", agent="a@1", objective_id="obj_1",
+        {
+            "status": "blocked",
+            "summary": "s",
+            "tests_run": [
+                {"command": "pytest -q", "status": "denied"},
+                {"command": "pytest -q", "status": "passed"},
+                "tests/test_x.py",
+            ],
+        },
+        run_id="run_1",
+        agent="a@1",
+        objective_id="obj_1",
     )
     statuses = [t.status for t in result.tests_run]
     assert statuses == ["error", "passed", "error"]
@@ -95,9 +105,12 @@ def test_runner_writes_failed_result_when_normalization_raises(tmp_path, monkeyp
     monkeypatch.setattr(runner_main, "normalize_result", exploding)
     monkeypatch.setenv("BAKUDO_OFFLINE", "1")
     args = argparse.Namespace(
-        bundle=None, spec=str(AGENTS / "explore.yaml"),
-        objective=None, result=str(tmp_path / "result.json"),
-        workspace=str(tmp_path), run_id="run_NORM1",
+        bundle=None,
+        spec=str(AGENTS / "explore.yaml"),
+        objective=None,
+        result=str(tmp_path / "result.json"),
+        workspace=str(tmp_path),
+        run_id="run_NORM1",
     )
     import json as _json
 

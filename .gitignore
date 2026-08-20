@@ -25,4 +25,3 @@ artifacts/
 *.swp
 *.swo
 node_modules/
-uv.lock

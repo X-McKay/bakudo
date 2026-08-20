@@ -6,20 +6,23 @@ from bakudo.runner.result import RunResult
 
 
 def _result(**kw):
-    base = dict(run_id="run_X", agent="add-feature@1", objective_id="obj_X",
-                status="success", summary="ok")
+    base = dict(
+        run_id="run_X", agent="add-feature@1", objective_id="obj_X", status="success", summary="ok"
+    )
     base.update(kw)
     return RunResult.model_validate(base)
 
 
 def _objective():
-    return Objective(type="add-feature", repo="r", title="t",
-                     acceptanceCriteria=["does the thing"])
+    return Objective(type="add-feature", repo="r", title="t", acceptanceCriteria=["does the thing"])
 
 
 def test_safety_eval_flags_denied_commands():
-    ctx = EvalContext(result=_result(), objective=_objective(),
-                      denied_commands=[{"command": "sudo x", "reason": "sudo"}])
+    ctx = EvalContext(
+        result=_result(),
+        objective=_objective(),
+        denied_commands=[{"command": "sudo x", "reason": "sudo"}],
+    )
     res = safety_eval(ctx)
     assert res.passed is False
     assert res.details["safety_regressions"] == 1
@@ -27,8 +30,9 @@ def test_safety_eval_flags_denied_commands():
 
 def test_default_suite_scores_a_clean_run():
     ctx = EvalContext(
-        result=_result(tests_run=[{"command": "pytest", "status": "passed"}],
-                       changed_files=["a.py"]),
+        result=_result(
+            tests_run=[{"command": "pytest", "status": "passed"}], changed_files=["a.py"]
+        ),
         objective=_objective(),
     )
     results = run_default_suite(ctx)
@@ -38,14 +42,25 @@ def test_default_suite_scores_a_clean_run():
     assert card.overall_score > 0.5
 
 
-def _card(score, *, cases=30, safety=0, critical=0,
-          passed=("schema", "safety", "regression", "role-specific", "code"),
-          suites=None):
-    return Scorecard(subject_type="agent_spec_version", subject_id="v",
-                     overall_score=score, cases_total=cases,
-                     suites=suites if suites is not None else dict.fromkeys(passed, score),
-                     passed_suites=list(passed),
-                     safety_regressions=safety, critical_failures=critical)
+def _card(
+    score,
+    *,
+    cases=30,
+    safety=0,
+    critical=0,
+    passed=("schema", "safety", "regression", "role-specific", "code"),
+    suites=None,
+):
+    return Scorecard(
+        subject_type="agent_spec_version",
+        subject_id="v",
+        overall_score=score,
+        cases_total=cases,
+        suites=suites if suites is not None else dict.fromkeys(passed, score),
+        passed_suites=list(passed),
+        safety_regressions=safety,
+        critical_failures=critical,
+    )
 
 
 def test_promotion_rejects_on_safety_regression():
@@ -74,7 +89,10 @@ def test_default_required_suites_are_spec_15_3_plus_code():
     from bakudo.evals.promotion import PromotionPolicy
 
     assert PromotionPolicy().required_suites == (
-        "safety", "regression", "role-specific", "code",
+        "safety",
+        "regression",
+        "role-specific",
+        "code",
     )
 
 
@@ -82,8 +100,11 @@ def test_promotion_rejects_when_required_suite_failing():
     # A candidate whose required 'safety' suite ran but failed is ineligible.
     full = ("schema", "safety", "regression", "role-specific", "code")
     d = decide(
-        _card(0.9, passed=("schema", "regression", "role-specific", "code"),
-              suites=dict.fromkeys(full, 0.9)),
+        _card(
+            0.9,
+            passed=("schema", "regression", "role-specific", "code"),
+            suites=dict.fromkeys(full, 0.9),
+        ),
         _card(0.5),
     )
     assert d.decision is Decision.reject
@@ -95,8 +116,7 @@ def test_promotion_fails_loudly_when_required_suite_absent():
     """A policy naming a suite with no backing in the scorecard must fail the
     decision loudly ('missing required suite'), never silently pass."""
     d = decide(
-        _card(0.9, passed=("schema", "safety"),
-              suites={"schema": 0.9, "safety": 0.9}),
+        _card(0.9, passed=("schema", "safety"), suites={"schema": 0.9, "safety": 0.9}),
         _card(0.5),
     )
     assert d.decision is Decision.reject
@@ -116,7 +136,9 @@ def test_human_gate_for_privileged_mutation():
 
 def _optimize_objective():
     return Objective(
-        type="optimize", repo="r", title="t",
+        type="optimize",
+        repo="r",
+        title="t",
         acceptanceCriteria=["All existing tests pass"],
         performance={
             "workloadRef": {

@@ -60,9 +60,7 @@ class Ledger(Protocol):
     def finish_run(self, run_id: str, phase: RunPhase, result: dict | None) -> None: ...
     def append_event(self, event: RunEvent) -> None: ...
     def events(self, run_id: str) -> list[RunEvent]: ...
-    def completed_runs(
-        self, agent_ref: str, limit: int | None = None
-    ) -> list[RunRecord]: ...
+    def completed_runs(self, agent_ref: str, limit: int | None = None) -> list[RunRecord]: ...
 
     # Evals & promotions
     def record_eval(self, result: EvalResult) -> None: ...
@@ -101,9 +99,7 @@ class Ledger(Protocol):
         spec: dict,
         status: str,
     ) -> None: ...
-    def update_experiment_result(
-        self, experiment_id: str, status: str, result: dict
-    ) -> None: ...
+    def update_experiment_result(self, experiment_id: str, status: str, result: dict) -> None: ...
     def get_experiment(self, experiment_id: str) -> dict | None: ...
 
     # Performance evidence. All records are immutable and same-id writes are
@@ -118,9 +114,7 @@ class Ledger(Protocol):
     def record_performance_snapshot(self, snapshot: PerformanceSnapshot) -> None: ...
     def get_performance_snapshot(self, snapshot_id: str) -> PerformanceSnapshot | None: ...
     def record_performance_comparison(self, comparison: PerformanceComparison) -> None: ...
-    def get_performance_comparison(
-        self, comparison_id: str
-    ) -> PerformanceComparison | None: ...
+    def get_performance_comparison(self, comparison_id: str) -> PerformanceComparison | None: ...
     def list_performance_comparisons(
         self, repository: str | None = None, workload_ref: str | None = None
     ) -> list[PerformanceComparison]: ...
@@ -185,10 +179,7 @@ class InMemoryLedger:
         return record
 
     def _latest_with_status(self, name: str, status: str) -> AgentVersionRecord | None:
-        matches = [
-            v for v in self._versions.values()
-            if v.name == name and v.status == status
-        ]
+        matches = [v for v in self._versions.values() if v.name == name and v.status == status]
         return max(matches, key=lambda v: v.version, default=None)
 
     def active_version(self, name: str) -> AgentVersionRecord | None:
@@ -235,24 +226,22 @@ class InMemoryLedger:
                 run_id=f"agent:{key}",
                 event_type="version_status",
                 payload={
-                    "name": name, "version": version,
-                    "status": status, "reason": reason,
+                    "name": name,
+                    "version": version,
+                    "status": status,
+                    "reason": reason,
                 },
             )
         )
         return updated
 
     # --- runs ---
-    def create_run(
-        self, record: RunRecord, objective: dict[str, Any] | None = None
-    ) -> RunRecord:
+    def create_run(self, record: RunRecord, objective: dict[str, Any] | None = None) -> RunRecord:
         if objective is not None:
             self._objectives.setdefault(record.objective_id, objective)
         self._runs[record.id] = record
         self._events.setdefault(record.id, [])
-        self.append_event(
-            RunEvent(run_id=record.id, event_type="created", idem_key="created")
-        )
+        self.append_event(RunEvent(run_id=record.id, event_type="created", idem_key="created"))
         return record
 
     def objectives(self) -> dict[str, dict[str, Any]]:
@@ -268,8 +257,10 @@ class InMemoryLedger:
             run.started_at = datetime.now(UTC)
         self.append_event(
             RunEvent(
-                run_id=run_id, event_type="phase",
-                payload={"phase": phase.value}, idem_key=f"phase:{phase.value}",
+                run_id=run_id,
+                event_type="phase",
+                payload={"phase": phase.value},
+                idem_key=f"phase:{phase.value}",
             )
         )
 
@@ -280,30 +271,29 @@ class InMemoryLedger:
         run.completed_at = datetime.now(UTC)
         self.append_event(
             RunEvent(
-                run_id=run_id, event_type="finished",
-                payload={"phase": phase.value}, idem_key="finished",
+                run_id=run_id,
+                event_type="finished",
+                payload={"phase": phase.value},
+                idem_key="finished",
             )
         )
 
     def append_event(self, event: RunEvent) -> None:
         events = self._events.setdefault(event.run_id, [])
         # Idempotent under retry, matching the durable backend (TMP-8).
-        if event.idem_key is not None and any(
-            e.idem_key == event.idem_key for e in events
-        ):
+        if event.idem_key is not None and any(e.idem_key == event.idem_key for e in events):
             return
         events.append(event)
 
     def events(self, run_id: str) -> list[RunEvent]:
         return list(self._events.get(run_id, []))
 
-    def completed_runs(
-        self, agent_ref: str, limit: int | None = None
-    ) -> list[RunRecord]:
+    def completed_runs(self, agent_ref: str, limit: int | None = None) -> list[RunRecord]:
         """Completed runs of one agent version, most recent first (design §3)."""
         runs = sorted(
             (
-                r for r in self._runs.values()
+                r
+                for r in self._runs.values()
                 if r.agent_ref == agent_ref
                 and r.phase == RunPhase.completed
                 and r.completed_at is not None
@@ -341,9 +331,7 @@ class InMemoryLedger:
         the STORED ones — nothing from the caller is trusted beyond identity
         and commentary.
         """
-        decision = next(
-            (p for p in self._promotions if p.id == promotion_id), None
-        )
+        decision = next((p for p in self._promotions if p.id == promotion_id), None)
         if decision is None:
             raise KeyError(f"Unknown promotion: {promotion_id}")
         if decision.status != "pending":
@@ -358,9 +346,7 @@ class InMemoryLedger:
         self._transition_decision_subject(decision, approved)
         return decision
 
-    def _transition_decision_subject(
-        self, decision: PromotionDecision, approved: bool
-    ) -> None:
+    def _transition_decision_subject(self, decision: PromotionDecision, approved: bool) -> None:
         from ..evals.promotion import parse_subject_version
 
         card = decision.scorecard
@@ -372,7 +358,8 @@ class InMemoryLedger:
         verb = "approved" if approved else "rejected"
         try:
             self.set_version_status(
-                subject[0], subject[1],
+                subject[0],
+                subject[1],
                 "canary" if approved else "rejected",
                 reason=f"human {verb} by {decision.approved_by}",
             )
@@ -394,7 +381,8 @@ class InMemoryLedger:
 
     def list_trials(self, experiment_id: str | None = None) -> list[TrialRecord]:
         return [
-            t for t in self._trials.values()
+            t
+            for t in self._trials.values()
             if experiment_id is None or t.experiment_id == experiment_id
         ]
 
@@ -424,9 +412,7 @@ class InMemoryLedger:
             "updated_at": now,
         }
 
-    def update_experiment_result(
-        self, experiment_id: str, status: str, result: dict
-    ) -> None:
+    def update_experiment_result(self, experiment_id: str, status: str, result: dict) -> None:
         record = self._experiments[experiment_id]  # KeyError on unknown id
         record["status"] = status
         record["result"] = result
@@ -473,9 +459,7 @@ class InMemoryLedger:
     def record_performance_comparison(self, comparison: PerformanceComparison) -> None:
         self._performance_comparisons.setdefault(comparison.id, comparison)
 
-    def get_performance_comparison(
-        self, comparison_id: str
-    ) -> PerformanceComparison | None:
+    def get_performance_comparison(self, comparison_id: str) -> PerformanceComparison | None:
         return self._performance_comparisons.get(comparison_id)
 
     def list_performance_comparisons(
@@ -511,7 +495,8 @@ class InMemoryLedger:
                 )
             return  # idempotent: same name+path, nothing to do
         stamped = (
-            r if r.added_at is not None
+            r
+            if r.added_at is not None
             else r.model_copy(update={"added_at": datetime.now(UTC).isoformat()})
         )
         self._repos[r.name] = stamped

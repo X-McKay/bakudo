@@ -159,8 +159,12 @@ bakudo experiment compare debugger@17 debugger@18 --family debugging --count 20
 3. **Analyze.** One statistical recipe: average repetitions within each task,
    form per-task paired differences, report the mean delta with a 95%
    bootstrap confidence interval — always the interval, never a bare verdict.
+   The result persists a deterministic analysis seed (with separate derived
+   streams per candidate and metric), so the interval can be replayed exactly.
    Two honesty rules: deltas smaller than the declared tie zone are **ties**,
-   and ties resolve toward the *cheaper* agent. Any safety regression or
+   and ties resolve toward the *cheaper* agent. An agent candidate also needs
+   at least five distinct task pairs by default (`decision.minPairedObservations`);
+   repetitions do not inflate this evidence count. Any safety regression or
    integrity violation ⇒ ineligible, regardless of capability.
 4. **Report.** Win/loss/tie counts, per-family deltas ("clean debugging
    unchanged; misleading-hypothesis tasks +18pp" — the counterfactual view

@@ -147,9 +147,7 @@ def _policy(**changes: object) -> RegressionPolicy:
 
 
 def test_two_consecutive_regressions_emit_one_deterministic_signal() -> None:
-    first = evaluate_regression(
-        _comparison(1), _approval(), _policy(), observed_at=_START
-    )
+    first = evaluate_regression(_comparison(1), _approval(), _policy(), observed_at=_START)
     second = evaluate_regression(
         _comparison(2),
         _approval(),
@@ -258,9 +256,7 @@ def test_recovery_cooldown_and_inconclusive_hysteresis() -> None:
 def test_invalid_or_unapproved_evidence_never_emits(
     comparison: PerformanceComparison, reason: str
 ) -> None:
-    decision = evaluate_regression(
-        comparison, _approval(), _policy(), observed_at=_START
-    )
+    decision = evaluate_regression(comparison, _approval(), _policy(), observed_at=_START)
 
     assert decision.reason.value == reason
     assert decision.signal is None
@@ -377,9 +373,7 @@ def test_approved_input_maps_to_schema_valid_curriculum_objective() -> None:
     assert objective.performance.comparison_id == decision.signal.comparison_id
     assert objective.performance.regression_signal_id == decision.signal.id
     assert objective.constraints.target_paths == ["src/hot.py"]
-    assert objective.performance.decision_policy.protected_metrics == (
-        "peak_rss_bytes",
-    )
+    assert objective.performance.decision_policy.protected_metrics == ("peak_rss_bytes",)
     objective.validate_against_schema()
 
 

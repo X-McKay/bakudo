@@ -75,9 +75,7 @@ def test_run_sandbox_activity_options_pin_heartbeat_and_single_attempt():
     )
 
     worst_case = timedelta(
-        seconds=10_800
-        + IN_GUEST_SETUP_HEADROOM_SECONDS
-        + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
+        seconds=10_800 + IN_GUEST_SETUP_HEADROOM_SECONDS + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
     )
     assert _SANDBOX["start_to_close_timeout"] >= worst_case
 
@@ -202,6 +200,7 @@ def test_resolve_embedder_builds_real_openai_embedder(monkeypatch):
     emb = worker._resolve_embedder()
     assert isinstance(emb, embeddings.OpenAIEmbedder)
     assert emb._base_url == "https://embeddings.example/v1"
+
 
 # --- TMP-13: the worker announces its sandbox posture loudly at startup ---
 #

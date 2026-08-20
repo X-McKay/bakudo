@@ -38,9 +38,9 @@ class WorkloadVerificationPolicy:
     supported_metric_sources: tuple[MetricSource, ...] = tuple(MetricSource)
     supported_profilers: tuple[str, ...] | None = None
     allowed_environment_keys: tuple[str, ...] = DEFAULT_ALLOWED_ENVIRONMENT_KEYS
-    profiler_option_validators: Mapping[
-        str, Callable[[dict[str, ExtensionValue]], None]
-    ] | None = None
+    profiler_option_validators: Mapping[str, Callable[[dict[str, ExtensionValue]], None]] | None = (
+        None
+    )
 
 
 @dataclass(frozen=True)
@@ -124,9 +124,7 @@ def iter_workload_files(root: Path) -> tuple[Path, ...]:
             )
         files.append(path)
         if len(files) > MAX_WORKLOAD_FILES:
-            raise WorkloadVerificationError(
-                f"workload exceeds the {MAX_WORKLOAD_FILES} file limit"
-            )
+            raise WorkloadVerificationError(f"workload exceeds the {MAX_WORKLOAD_FILES} file limit")
     return tuple(files)
 
 

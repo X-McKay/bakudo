@@ -293,9 +293,7 @@ def test_mismatched_pins_and_profiled_measurements_fail_closed() -> None:
     definition = _definition()
     plan = _plan(definition, repetitions=3)
     baseline = _record("0", "a", plan, ([10.0] * 3,))
-    wrong_workload = _record(
-        "1", "b", plan, ([8.0] * 3,), workload=_workload_pin(suffix="2")
-    )
+    wrong_workload = _record("1", "b", plan, ([8.0] * 3,), workload=_workload_pin(suffix="2"))
     profiled_candidate = _record(
         "2",
         "b",
