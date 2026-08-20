@@ -981,9 +981,7 @@ class ExperimentWorkflow:
             return await self._run_artifact_subject(raw_spec, experiment_id)
         raise ValueError(f"unsupported experiment subject kind: {subject_kind!r}")
 
-    async def _run_agent_subject(
-        self, raw_spec: dict[str, Any], experiment_id: str
-    ) -> dict:
+    async def _run_agent_subject(self, raw_spec: dict[str, Any], experiment_id: str) -> dict:
 
         # Resolve tasks AND every arm ref (baseline + candidates) up
         # front, same as the sync path (resolve_arm_pipeline_fn runs before
@@ -1005,9 +1003,7 @@ class ExperimentWorkflow:
         raw_subject = raw_spec["subject"]
         subject = dict(raw_subject)
         subject["baseline"] = resolved_arms[raw_subject["baseline"]]
-        subject["candidates"] = [
-            resolved_arms[c] for c in raw_subject.get("candidates", [])
-        ]
+        subject["candidates"] = [resolved_arms[c] for c in raw_subject.get("candidates", [])]
         spec["subject"] = subject
 
         await workflow.execute_activity(
@@ -1091,9 +1087,7 @@ class ExperimentWorkflow:
         )
         return result
 
-    async def _run_artifact_subject(
-        self, spec: dict[str, Any], experiment_id: str
-    ) -> dict:
+    async def _run_artifact_subject(self, spec: dict[str, Any], experiment_id: str) -> dict:
         prepared = await workflow.execute_activity(
             prepare_artifact_experiment,
             spec,
@@ -1164,9 +1158,7 @@ class ExperimentWorkflow:
             if isinstance(outcome, asyncio.CancelledError):
                 raise outcome
             if isinstance(outcome, BaseException):
-                raise RuntimeError(
-                    f"artifact measurement {arm}/{repetition} failed"
-                ) from outcome
+                raise RuntimeError(f"artifact measurement {arm}/{repetition} failed") from outcome
             _, _, measurement_result = outcome
             if measurement_result.record_id is None:
                 raise RuntimeError(

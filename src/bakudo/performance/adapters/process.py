@@ -54,9 +54,7 @@ def _read_bounded(path: Path, max_bytes: int) -> bytes:
     finally:
         os.close(descriptor)
     if len(content) > max_bytes:
-        raise ProfileArtifactError(
-            f"profile exceeds the {max_bytes}-byte limit while being read"
-        )
+        raise ProfileArtifactError(f"profile exceeds the {max_bytes}-byte limit while being read")
     if len(content) != size or after.st_size != size:
         raise ProfileArtifactError("profile artifact changed while it was being read")
     return content
@@ -111,9 +109,7 @@ class ProcessProfilerAdapter:
             diagnostic_duration,
         )
 
-    def normalize(
-        self, artifact: CapturedProfile, symbols: SymbolMap
-    ) -> tuple[Hotspot, ...]:
+    def normalize(self, artifact: CapturedProfile, symbols: SymbolMap) -> tuple[Hotspot, ...]:
         del symbols
         if artifact.media_type != _MEDIA_TYPE:
             raise NormalizationError(f"unsupported process media type: {artifact.media_type}")

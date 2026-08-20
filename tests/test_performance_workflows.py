@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from bakudo.abox.capture import AboxProfileCaptureError
 from bakudo.performance.models import (
     InvocationOutcome,
     InvocationPhase,
@@ -180,6 +181,12 @@ class _TimeoutCapture(_Capture):
     def capture(self, *args: object, **kwargs: object) -> PerformanceSnapshot:
         del args, kwargs
         raise ProfileTimeoutError("profile deadline expired")
+
+
+class _BindingErrorCapture(_Capture):
+    def capture(self, *args: object, **kwargs: object) -> PerformanceSnapshot:
+        del args, kwargs
+        raise AboxProfileCaptureError("capture binding rejected the requested profiler")
 
 
 class _AmbiguousMeasurementLedger(InMemoryLedger):
@@ -405,6 +412,17 @@ def test_capture_activity_preserves_typed_profiler_timeout(
     result = _impl.run_performance_capture(_capture_input("op-profile-timeout"))
 
     assert result.status == RecordStatus.timed_out.value
+    assert result.record is None
+
+
+def test_capture_activity_types_capture_binding_errors(
+    performance_deps: _impl.Deps,
+) -> None:
+    performance_deps.performance_capture = _BindingErrorCapture()
+
+    result = _impl.run_performance_capture(_capture_input("op-binding-error"))
+
+    assert result.status == RecordStatus.failed.value
     assert result.record is None
 
 

@@ -77,6 +77,13 @@
           "minimum": 1,
           "maximum": 1000000,
           "default": 10000
+        },
+        "minPairedObservations": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1000000,
+          "default": 5,
+          "description": "Minimum distinct task pairs required for agent-promotion eligibility. Repetitions are averaged within each task."
         }
       }
     }

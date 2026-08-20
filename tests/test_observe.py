@@ -58,6 +58,7 @@ def test_dedupe_keeps_highest_value():
 def test_two_observe_cycles_over_unchanged_signals_yield_identical_ids():
     """MEM-6: the same TODO/issue/test must map to the SAME objective id every
     observer cycle, so dedupe-by-id in the meta workflow can hold."""
+
     def snapshot():
         return RepoSignals(
             repo="payments-api",

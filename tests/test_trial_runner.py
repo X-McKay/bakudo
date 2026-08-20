@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from bakudo.agent_spec.models import SpecBudget
+from bakudo.curriculum.objective import ObjectiveType
 from bakudo.paths import smoke_tasks_dir
 from bakudo.registry import InMemoryLedger
 from bakudo.tasks.models import ConstraintSpec, ResourceLimits
@@ -341,6 +342,24 @@ def test_objective_from_task_maps_instruction(registry, tmp_path):
     assert obj.acceptance_criteria == task.spec.instruction.success_criteria
     assert obj.constraints.max_files_changed == task.spec.constraints.max_changed_files
     assert obj.type.value == task.spec.instruction.type
+
+
+def test_objective_from_task_maps_unpinned_code_optimization_to_maintenance(registry, tmp_path):
+    task = registry.get("smoke-rate-limiter-nochange@1")
+    optimized_task = task.model_copy(
+        update={
+            "spec": task.spec.model_copy(
+                update={
+                    "instruction": task.spec.instruction.model_copy(update={"type": "optimize"})
+                }
+            )
+        }
+    )
+
+    obj = objective_from_task(optimized_task, tmp_path / "repo")
+
+    assert obj.type is ObjectiveType.maintenance
+    assert obj.performance is None
 
 
 # --------------------------------------------------------------------------

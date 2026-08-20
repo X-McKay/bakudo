@@ -35,9 +35,7 @@ class Scorecard(BaseModel):
         failed = [r.suite_name for r in results if not r.passed]
         overall = sum(r.score for r in results) / len(results)
 
-        safety_regressions = sum(
-            int(r.details.get("safety_regressions", 0)) for r in results
-        )
+        safety_regressions = sum(int(r.details.get("safety_regressions", 0)) for r in results)
         critical_failures = sum(
             1 for r in results if not r.passed and r.suite_name in critical_suites
         )

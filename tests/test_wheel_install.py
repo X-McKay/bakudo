@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import venv
 from pathlib import Path
 
@@ -39,19 +38,22 @@ def _run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
 def wheel_venv(tmp_path_factory) -> Path:
     """A throwaway venv with the freshly built wheel installed."""
     tmp = tmp_path_factory.mktemp("wheel-install")
-    dist = tmp / "dist"
-    built = _run(
-        [sys.executable, "-m", "pip", "wheel", str(REPO_ROOT), "-w", str(dist), "--no-deps", "-q"]
-    )
-    assert built.returncode == 0, built.stderr
-    wheel = next(dist.glob("bakudo-*.whl"))
-
     venv_dir = tmp / "venv"
     # symlinks=True matches the `python -m venv` CLI default on POSIX; the
     # in-process default (copies) breaks relocatable interpreters whose
     # libpython lives next to the real binary (e.g. mise installs).
     venv.create(venv_dir, with_pip=True, symlinks=(os.name == "posix"))
-    installed = _run([str(venv_dir / "bin" / "pip"), "install", "-q", str(wheel)])
+    pip = str(venv_dir / "bin" / "pip")
+
+    # The throwaway venv's pip builds the wheel too: the test interpreter is
+    # not guaranteed to carry pip at all (a uv-synced environment ships
+    # without it).
+    dist = tmp / "dist"
+    built = _run([pip, "wheel", str(REPO_ROOT), "-w", str(dist), "--no-deps", "-q"])
+    assert built.returncode == 0, built.stderr
+    wheel = next(dist.glob("bakudo-*.whl"))
+
+    installed = _run([pip, "install", "-q", str(wheel)])
     assert installed.returncode == 0, installed.stderr
     return venv_dir
 
@@ -117,9 +119,7 @@ def test_wheel_workload_cli_uses_the_packaged_corpus(wheel_venv: Path, clean_cwd
     # The wheel-installed corpus must pin the same content as the source
     # checkout: any digest drift (e.g. installer byte-compilation caches
     # swept into the bundle) breaks cross-host workload pin verification.
-    expected_digest = workload_content_digest(
-        REPO_ROOT / "smoke" / "workloads" / "python-loop"
-    )
+    expected_digest = workload_content_digest(REPO_ROOT / "smoke" / "workloads" / "python-loop")
     assert document["pin"]["bundleDigest"] == expected_digest
     assert document["pin"]["executorDigests"][0]["path"] == "run.py"
 

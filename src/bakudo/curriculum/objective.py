@@ -77,10 +77,10 @@ class Priority(BaseModel):
     def compute(self, weights: PriorityWeights = DEFAULT_WEIGHTS) -> float:
         """Compute the priority score per the spec formula.
 
-            priority =
-              0.35 * user_value + 0.20 * urgency + 0.15 * learning_value +
-              0.15 * confidence + 0.10 * dependency_unblocking_value -
-              0.25 * risk - 0.10 * estimated_cost
+        priority =
+          0.35 * user_value + 0.20 * urgency + 0.15 * learning_value +
+          0.15 * confidence + 0.10 * dependency_unblocking_value -
+          0.25 * risk - 0.10 * estimated_cost
         """
         return (
             weights.user_value * self.value
@@ -96,12 +96,8 @@ class Priority(BaseModel):
 class Constraints(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    max_files_changed: int | None = Field(
-        default=None, alias="maxFilesChanged", ge=0
-    )
-    avoid_public_api_changes: bool | None = Field(
-        default=None, alias="avoidPublicApiChanges"
-    )
+    max_files_changed: int | None = Field(default=None, alias="maxFilesChanged", ge=0)
+    avoid_public_api_changes: bool | None = Field(default=None, alias="avoidPublicApiChanges")
     target_paths: list[str] | None = Field(default=None, alias="targetPaths")
 
 
@@ -117,9 +113,7 @@ class PerformanceDecisionPolicy(BaseModel):
     protected_metrics: tuple[MetricName, ...] = Field(
         default_factory=tuple, alias="protectedMetrics", max_length=64
     )
-    bootstrap_resamples: int = Field(
-        default=10_000, alias="bootstrapResamples", ge=1, le=1_000_000
-    )
+    bootstrap_resamples: int = Field(default=10_000, alias="bootstrapResamples", ge=1, le=1_000_000)
 
     @model_validator(mode="after")
     def unique_protected_metrics(self) -> PerformanceDecisionPolicy:
@@ -139,12 +133,12 @@ class PerformanceContract(BaseModel):
     decision_policy: PerformanceDecisionPolicy = Field(
         default_factory=PerformanceDecisionPolicy, alias="decisionPolicy"
     )
-    comparison_id: Annotated[
-        str, StringConstraints(pattern=r"^comparison_[0-9A-HJKMNP-TV-Z]{26}$")
-    ] | None = Field(default=None, alias="comparisonId")
-    regression_signal_id: Annotated[
-        str, StringConstraints(pattern=r"^regression_[0-9A-HJKMNP-TV-Z]{26}$")
-    ] | None = Field(default=None, alias="regressionSignalId")
+    comparison_id: (
+        Annotated[str, StringConstraints(pattern=r"^comparison_[0-9A-HJKMNP-TV-Z]{26}$")] | None
+    ) = Field(default=None, alias="comparisonId")
+    regression_signal_id: (
+        Annotated[str, StringConstraints(pattern=r"^regression_[0-9A-HJKMNP-TV-Z]{26}$")] | None
+    ) = Field(default=None, alias="regressionSignalId")
 
     @model_validator(mode="after")
     def pin_matches_reference(self) -> PerformanceContract:
@@ -166,9 +160,7 @@ class Objective(BaseModel):
     repo: str
     title: str
     description: str = ""
-    acceptance_criteria: list[str] = Field(
-        default_factory=list, alias="acceptanceCriteria"
-    )
+    acceptance_criteria: list[str] = Field(default_factory=list, alias="acceptanceCriteria")
     constraints: Constraints = Field(default_factory=Constraints)
     performance: PerformanceContract | None = None
     suggested_agents: list[str] = Field(default_factory=list, alias="suggestedAgents")

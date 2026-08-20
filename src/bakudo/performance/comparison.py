@@ -87,9 +87,7 @@ def _metadata_reasons(
         reasons.append(f"{side} sample set is invalid")
         reasons.extend(f"{side}: {reason}" for reason in sample_set.invalid_reasons)
     if sample_set.invalid_sample_count:
-        reasons.append(
-            f"{side} has {sample_set.invalid_sample_count} invalid or missing samples"
-        )
+        reasons.append(f"{side} has {sample_set.invalid_sample_count} invalid or missing samples")
     if sample_set.invalid_reasons and sample_set.valid:
         reasons.append(f"{side} valid sample set contains invalid reasons")
     return reasons
@@ -315,12 +313,11 @@ def compare_measurements(
     incompatibilities, allowed_differences = _comparison_incompatibilities(
         baseline, candidate, plan, compatibility_policy
     )
-    required_names = {
-        definition.name for definition in plan.metrics if definition.required
-    } | {primary_metric, *protected_metrics}
-    required_evidence_invalid = any(
-        not comparisons_by_name[name].valid for name in required_names
-    )
+    required_names = {definition.name for definition in plan.metrics if definition.required} | {
+        primary_metric,
+        *protected_metrics,
+    }
+    required_evidence_invalid = any(not comparisons_by_name[name].valid for name in required_names)
     records_incomplete = (
         baseline.status is not RecordStatus.completed
         or candidate.status is not RecordStatus.completed

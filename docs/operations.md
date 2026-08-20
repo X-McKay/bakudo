@@ -158,6 +158,8 @@ export BAKUDO_PERFORMANCE_ENVIRONMENT=/etc/bakudo/environment-pin.json
 export BAKUDO_REPO_ROOT=/srv/bakudo/repos
 export BAKUDO_ARTIFACT_ROOT=/srv/bakudo/performance-artifacts
 export BAKUDO_SANDBOX=abox
+export BAKUDO_PERFORMANCE_RUNNER=trusted
+export BAKUDO_POSTGRES_DSN='postgresql://...'
 ```
 
 - `BAKUDO_WORKLOAD_SOURCE` selects a versioned workload corpus directory or a
@@ -174,6 +176,33 @@ export BAKUDO_SANDBOX=abox
   normalized before persistence.
 - `BAKUDO_POSTGRES_DSN` makes measurements, snapshots, comparisons, and
   regression signals durable across worker/API processes.
+- `BAKUDO_PERFORMANCE_RUNNER=trusted` is an explicit operator admission for
+  latency decisions. `bakudo performance preflight` verifies this value,
+  abox availability, an explicit non-smoke workload source, an environment
+  pin, and durable Postgres evidence before any guest is started. It is
+  read-only and fails closed; a generic GitHub-hosted runner is always
+  rejected, even if that variable is set.
+
+### Trusted GitHub Actions performance lane
+
+`.github/workflows/performance-suite.yml` is a manual, self-hosted-only
+invocation for one approved suite scenario. Its runner must carry the
+`bakudo-performance` label and be prepared as a stable performance lab (CPU
+isolation/governor policy, warmed abox profile, target checkouts, workload
+corpus, and the pinned environment file). Configure the `performance-lab`
+GitHub Environment with these variables, all as absolute paths on that runner:
+
+- `BAKUDO_PERFORMANCE_WORKLOAD_SOURCE`
+- `BAKUDO_PERFORMANCE_ENVIRONMENT`
+- `BAKUDO_REPO_ROOT`
+
+Store `BAKUDO_PERFORMANCE_POSTGRES_DSN` as an environment secret. The workflow
+is `workflow_dispatch` only, has read-only repository permissions, and runs
+`bakudo performance preflight` before resolving the supplied
+`PerformanceSuiteSpec` and measuring its selected scenario. Do not add a
+GitHub-hosted fallback: the preflight independently requires GitHub's
+`RUNNER_ENVIRONMENT=self-hosted` identity, so a hosted machine cannot create a
+latency decision.
 
 ### Authoring workloads
 
@@ -229,6 +258,15 @@ dispatcher, so the three `POST /performance/...` endpoints return `202` plus an
 fails create requests with `409` rather than running work on the API host.
 `bakudo performance show` and `regressions` require a durable Postgres ledger
 when the producing process has exited. See [cli.md](cli.md) for exact flags.
+
+Pre-register multi-scenario objectives in a versioned `PerformanceSuiteSpec`
+and run `bakudo workload validate-suite PATH --source CORPUS` before any
+measurement. Resolution pins the exact workload bundle for each scenario,
+checks its primary/protected metrics and paired-sample requirement, and checks
+the optional profiler to use after a regression. It does not execute workloads
+or create promotion evidence. When a compatible diagnostic capture is useful,
+`bakudo performance profile-diff` aligns normalized snapshot hotspots for
+explanation only; it cannot make a candidate eligible.
 
 Optimization consumes this evidence rather than candidate claims. Each
 candidate must first pass behavior, task, and code gates. The trusted plane
@@ -290,14 +328,27 @@ regression.
 
 ## CI and the local gate
 
-`make doctor` runs the offline readiness checks; `make check` runs the full
-local gate (generated-schema check + `ruff` + `mypy` + `pytest`). The CI
-workflow at `.github/workflows/ci.yml` installs the full `[all,dev]` extras so
-the API/Temporal/memory test surface runs in CI, and `make wheel-smoke` proves
-the built wheel is a complete install. Live-integration tests are opt-in:
-`pytest -m live` (needs live-service env vars) and
-`ABOX_LIVE=1 pytest tests/test_abox_live.py` (needs a trusted, warmed abox
-project).
+`make doctor` runs the offline readiness checks. `make check` is the hermetic
+local quality gate: generated-schema check, Ruff format/lint checks, mypy, and
+the unit/component test tier. `make ci` is the exact GitHub Actions gate; it
+also verifies `uv.lock`, exercises the offline CLI surface, and proves the
+built wheel is a complete install. CI uses `uv sync --all-extras --locked`, so
+dependency resolution cannot drift from the committed lockfile.
+
+Test tiers make infrastructure requirements explicit:
+
+- `make test-unit` runs all hermetic unit and in-memory component tests; it
+  excludes `live` and `live_abox` tests.
+- `make test-integration` runs the focused workload/measurement/profiler
+  composition suite without external services.
+- `make test-live` runs the service-marked tests, whose individual capability
+  checks skip unavailable services. `make test-performance-temporal-live`
+  requires a configured Temporal address, and `make test-performance-live`
+  adds the trusted abox/KVM suites.
+
+Live integrations are therefore opt-in: `make test-live` (requires the
+relevant live-service environment variables) and `ABOX_LIVE=1 pytest
+tests/test_abox_live.py` (requires a trusted, warmed abox project).
 
 Use a unique task queue to validate the performance workflows against a hosted
 cluster without running target code:

@@ -111,10 +111,15 @@ def run_loop(objective: Objective, sandbox: ScriptedSandbox, **kwargs):
 
 def test_loop_selects_best_attempt_in_one_round():
     sandbox = ScriptedSandbox(
-        [{"approaches": ["batch queries", "cache totals"], "effects": [
-            0.20,
-            IMPROVED,
-        ]}]
+        [
+            {
+                "approaches": ["batch queries", "cache totals"],
+                "effects": [
+                    0.20,
+                    IMPROVED,
+                ],
+            }
+        ]
     )
     outcome = run_loop(make_objective(), sandbox, max_rounds=2)
     assert outcome["status"] == "improved"
@@ -189,11 +194,15 @@ class FailingScoutSandbox(ScriptedSandbox):
             self.fail_times -= 1
             self.failed_scout_calls = getattr(self, "failed_scout_calls", 0) + 1
             return AboxOutcome(
-                run_id=bundle.run_id, abox_task_id=bundle.run_id, exit_code=1,
+                run_id=bundle.run_id,
+                abox_task_id=bundle.run_id,
+                exit_code=1,
                 git_branch=f"bakudo/{bundle.run_id}",
                 result={
-                    "run_id": bundle.run_id, "agent": f"{name}@1",
-                    "objective_id": bundle.objective_id, "status": "failed",
+                    "run_id": bundle.run_id,
+                    "agent": f"{name}@1",
+                    "objective_id": bundle.objective_id,
+                    "status": "failed",
                     "summary": "Runner error: MaxTokensReachedException: clipped",
                     "blocked_reasons": ["runner_exception"],
                 },
@@ -246,9 +255,7 @@ def test_blocked_scout_with_no_followups_is_scout_failed():
 
 def test_blocked_scout_with_followups_is_still_usable():
     """A halted scout that still delivered hypotheses feeds the attempts."""
-    sandbox = BlockedScoutSandbox(
-        [{"approaches": ["batch queries"], "effects": [IMPROVED]}]
-    )
+    sandbox = BlockedScoutSandbox([{"approaches": ["batch queries"], "effects": [IMPROVED]}])
     outcome = run_loop(make_objective(), sandbox)
     assert outcome["status"] == "improved"
     assert sandbox.attempt_calls == 1
@@ -282,9 +289,7 @@ def test_agent_claim_cannot_override_regressed_comparison():
 
 
 def test_rejected_winner_falls_through_to_next_eligible():
-    sandbox = ScriptedSandbox(
-        [{"approaches": ["a", "b"], "effects": [REGRESSED, IMPROVED]}]
-    )
+    sandbox = ScriptedSandbox([{"approaches": ["a", "b"], "effects": [REGRESSED, IMPROVED]}])
     outcome = run_loop(make_objective(), sandbox)
     assert outcome["status"] == "improved"
     assert outcome["result"]["summary"] == "optimize-attempt run"
@@ -292,12 +297,8 @@ def test_rejected_winner_falls_through_to_next_eligible():
 
 
 def test_missing_comparison_callback_fails_closed():
-    sandbox = ScriptedSandbox(
-        [{"approaches": ["simplify"], "effects": [IMPROVED]}]
-    )
-    outcome = run_optimize_loop(
-        make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=1
-    )
+    sandbox = ScriptedSandbox([{"approaches": ["simplify"], "effects": [IMPROVED]}])
+    outcome = run_optimize_loop(make_objective(), SCOUT, ATTEMPT, sandbox=sandbox, max_rounds=1)
     assert outcome["status"] == "no-change"
     assert any("comparison unavailable" in item for item in outcome["feedback"])
 
@@ -336,9 +337,7 @@ def test_protected_metric_regression_is_rejected():
     sandbox = ScriptedSandbox([{"approaches": ["simplify"], "effects": [IMPROVED]}])
 
     def compare(diff: str):
-        return _performance_comparison(
-            diff, effect=IMPROVED, protected_verdict=Verdict.regressed
-        )
+        return _performance_comparison(diff, effect=IMPROVED, protected_verdict=Verdict.regressed)
 
     outcome = run_optimize_loop(
         make_objective(),
@@ -367,9 +366,7 @@ class InfraFailingAttemptSandbox(ScriptedSandbox):
 def test_feedback_carries_sandbox_error_for_resultless_attempts():
     """Diagnosing live cycles required a hand-rolled teeing sandbox because
     'run failed' feedback discarded the abox error entirely."""
-    sandbox = InfraFailingAttemptSandbox(
-        [{"approaches": ["use a set"], "effects": [IMPROVED]}]
-    )
+    sandbox = InfraFailingAttemptSandbox([{"approaches": ["use a set"], "effects": [IMPROVED]}])
     outcome = run_loop(make_objective(), sandbox, max_rounds=1)
     assert outcome["status"] == "no-change"
     assert any("did not resolve a worktree" in fb for fb in outcome["feedback"])

@@ -59,9 +59,7 @@ class OpenAIEmbedder:
             headers["Authorization"] = f"Bearer {api_key}"
         self._base_url = base_url.rstrip("/")
         self._model = model
-        self._client = httpx.Client(
-            headers=headers, timeout=timeout, transport=transport
-        )
+        self._client = httpx.Client(headers=headers, timeout=timeout, transport=transport)
         self._dim: int | None = None
 
     @property
@@ -106,19 +104,13 @@ class OpenAIEmbedder:
         try:
             payload = response.json()
         except ValueError as exc:
-            raise EmbeddingError(
-                f"embeddings endpoint {url} returned non-JSON body"
-            ) from exc
+            raise EmbeddingError(f"embeddings endpoint {url} returned non-JSON body") from exc
         if not isinstance(payload, dict):
-            raise EmbeddingError(
-                f"unexpected response shape from {url}: expected an object"
-            )
+            raise EmbeddingError(f"unexpected response shape from {url}: expected an object")
         return payload
 
     @staticmethod
-    def _vectors_from(
-        payload: dict[str, Any], *, expected: int
-    ) -> list[list[float]]:
+    def _vectors_from(payload: dict[str, Any], *, expected: int) -> list[list[float]]:
         data = payload.get("data")
         if not isinstance(data, list):
             raise EmbeddingError(
@@ -127,9 +119,7 @@ class OpenAIEmbedder:
         by_index: dict[int, list[float]] = {}
         for entry in data:
             if not isinstance(entry, dict) or "embedding" not in entry:
-                raise EmbeddingError(
-                    "unexpected response shape: entry without 'embedding'"
-                )
+                raise EmbeddingError("unexpected response shape: entry without 'embedding'")
             vec = entry["embedding"]
             if not isinstance(vec, list) or not vec:
                 raise EmbeddingError(
@@ -138,8 +128,7 @@ class OpenAIEmbedder:
             by_index[int(entry.get("index", len(by_index)))] = [float(v) for v in vec]
         if len(by_index) != expected or set(by_index) != set(range(expected)):
             raise EmbeddingError(
-                f"embeddings response returned {len(by_index)} vectors for "
-                f"{expected} inputs"
+                f"embeddings response returned {len(by_index)} vectors for {expected} inputs"
             )
         return [by_index[i] for i in range(expected)]
 

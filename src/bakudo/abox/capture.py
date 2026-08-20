@@ -66,13 +66,16 @@ _POLL_SECONDS = 0.1
 _GUEST_OUTPUT_PATH = "/workspace/.bakudo/profile.raw"
 _SNAPSHOT_ID = re.compile(r"^snapshot_[0-9A-HJKMNP-TV-Z]{26}$")
 
-_GUEST_LAUNCHER = GUEST_RECONSTRUCT_SNIPPET + r"""
+_GUEST_LAUNCHER = (
+    GUEST_RECONSTRUCT_SNIPPET
+    + r"""
 os.makedirs("/workspace/.bakudo", mode=0o700, exist_ok=True)
 os.chdir(payload["cwd"])
 environment = os.environ.copy()
 environment.update(payload["env"])
 os.execvpe(payload["argv"][0], payload["argv"], environment)
 """
+)
 
 
 class AboxProfileCaptureError(ProfileCaptureError):
@@ -92,7 +95,7 @@ class AboxCommandExecutor(Protocol):
     ) -> ProfileProcessResult: ...
 
 
-ProfilerAdapterFactory = Callable[[ProfilerSpec], ProfilerAdapter]
+ProfilerAdapterFactory = Callable[[ProfilerSpec, EnvironmentPin], ProfilerAdapter]
 RepositoryResolver = Callable[[str], Path | str | None]
 
 
@@ -194,9 +197,7 @@ def bounded_abox_executor(
     process.stderr.close()
     return ProfileProcessResult(
         exit_code=(
-            124
-            if timed_out
-            else (_CANCELLED_EXIT_CODE if cancelled else process.returncode)
+            124 if timed_out else (_CANCELLED_EXIT_CODE if cancelled else process.returncode)
         ),
         stdout=b"".join(stdout).decode("utf-8", errors="replace"),
         stderr=b"".join(stderr).decode("utf-8", errors="replace"),
@@ -204,12 +205,30 @@ def bounded_abox_executor(
     )
 
 
-def _default_adapter_factory(spec: ProfilerSpec) -> ProfilerAdapter:
+# Pin authors record the guest interpreter under any of these runtime names.
+_PYTHON_RUNTIME_NAMES = frozenset({"python", "python3", "cpython"})
+
+
+def _default_adapter_factory(spec: ProfilerSpec, environment: EnvironmentPin) -> ProfilerAdapter:
     if spec.adapter == "python.sampling":
         # Host discovery says nothing about guest process-inspection rights.
         # The dependency-free fallback is the safe production default until a
         # guest capability probe explicitly supplies a py-spy adapter.
-        return PythonSamplingAdapter(discover_py_spy=False)
+        python_version = next(
+            (
+                item.version
+                for item in environment.runtime_versions
+                if item.name in _PYTHON_RUNTIME_NAMES
+            ),
+            None,
+        )
+        # A pin without a Python runtime entry keeps the adapter's own host
+        # fallback: the version only labels the descriptor, so it must not
+        # turn a previously valid pin into a capture failure.
+        return PythonSamplingAdapter(
+            discover_py_spy=False,
+            cprofile_version=python_version,
+        )
     if spec.adapter == "bakudo.process":
         return ProcessProfilerAdapter()
     raise AboxProfileCaptureError(
@@ -336,8 +355,26 @@ class _FreshAboxExecutor:
             "--network",
             self._network,
         ]
+        # Diagnostic snapshots must observe the same declared allocation as
+        # uninstrumented measurements; otherwise profile evidence could not
+        # explain a latency record from the pinned environment.
+        allocation = self._workload.spec.environment
+        if allocation.cpu_count is not None:
+            command += ["--cpus", str(allocation.cpu_count)]
+        if allocation.memory_mb is not None:
+            command += ["--memory", str(allocation.memory_mb)]
         command += staging_input_arguments(staged)
-        command += ["--", "python3", "-c", _GUEST_LAUNCHER, payload]
+        # The capture guest starts from the same bare profile as a measurement
+        # guest.  Prepare the checked-out revision before launching the
+        # profiler so diagnostic evidence observes its real dependencies. The
+        # static shell wrapper carries no workload-controlled interpolation;
+        # launcher and payload remain separate argv entries.
+        guest_script = (
+            "set -e; "
+            "[ ! -f /workspace/.abox/prepare.sh ] || sh /workspace/.abox/prepare.sh >&2; "
+            'exec python3 -c "$1" "$2"'
+        )
+        command += ["--", "sh", "-c", guest_script, "sh", _GUEST_LAUNCHER, payload]
         return command
 
     def _worktree(self) -> Path:
@@ -392,9 +429,7 @@ class _FreshAboxExecutor:
         result = self._command_executor(
             command,
             timeout=(
-                timeout
-                + IN_GUEST_SETUP_HEADROOM_SECONDS
-                + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
+                timeout + IN_GUEST_SETUP_HEADROOM_SECONDS + SUBPROCESS_TIMEOUT_HEADROOM_SECONDS
             ),
             max_output_chars=max_output_chars,
             cancel_event=self._cancel_event,
@@ -478,10 +513,7 @@ class AboxProfileCaptureService:
     def _validate_revision(repo: Path, revision: RevisionPin) -> None:
         if revision.dirty and revision.patch_digest is None:
             raise AboxProfileCaptureError("dirty persistent revisions cannot be profiled")
-        if (
-            revision.patch_digest is not None
-            and revision.base_commit_sha != revision.commit_sha
-        ):
+        if revision.patch_digest is not None and revision.base_commit_sha != revision.commit_sha:
             raise AboxProfileCaptureError("candidate base commit does not match RevisionPin")
         actual = pin_repository_revision(
             repo,
@@ -489,10 +521,7 @@ class AboxProfileCaptureService:
             repository=revision.repository,
             require_clean=not revision.dirty,
         )
-        if (
-            actual.commit_sha != revision.commit_sha
-            or actual.tree_digest != revision.tree_digest
-        ):
+        if actual.commit_sha != revision.commit_sha or actual.tree_digest != revision.tree_digest:
             raise AboxProfileCaptureError("repository revision does not match its immutable pin")
 
     def _verify_abox(self, environment: EnvironmentPin) -> None:
@@ -661,7 +690,7 @@ class AboxProfileCaptureService:
         repo = self._resolve_repo(revision)
         self._validate_revision(repo, revision)
         self._verify_abox(environment)
-        adapter = self._adapter_factory(profiler)
+        adapter = self._adapter_factory(profiler, environment)
         if self._scratch_root is not None:
             self._scratch_root.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix="bakudo-capture-", dir=self._scratch_root))
@@ -679,9 +708,7 @@ class AboxProfileCaptureService:
                 workload=workload,
                 workload_cwd=workload.spec.command.cwd,
                 network=(
-                    "scoped"
-                    if workload.spec.environment.network.value == "scoped"
-                    else "safe"
+                    "scoped" if workload.spec.environment.network.value == "scoped" else "safe"
                 ),
                 cancel_event=cancel_event,
                 max_artifact_bytes=self._limits.max_artifact_bytes,

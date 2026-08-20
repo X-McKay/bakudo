@@ -213,9 +213,7 @@ class PgSemanticMemoryStore:
             # graph ops from its earlier, committed attempt.
             self._flush_mirror_quietly(conn)
 
-            reasons = validate_memory_candidate(
-                item, self._same_content_items(conn, item)
-            )
+            reasons = validate_memory_candidate(item, self._same_content_items(conn, item))
             if reasons:
                 raise MemoryRejected("; ".join(reasons))
 
@@ -225,9 +223,7 @@ class PgSemanticMemoryStore:
                 near_item, similarity = near
                 if similarity >= self.dedup_threshold:
                     if near_item.confidence >= item.confidence:
-                        raise MemoryRejected(
-                            "near-duplicate of an equally/more confident memory"
-                        )
+                        raise MemoryRejected("near-duplicate of an equally/more confident memory")
                     self._supersede(conn, near_item.id, item, embedding)
                     self._flush_mirror_quietly(conn)
                     return item
@@ -272,11 +268,7 @@ class PgSemanticMemoryStore:
                 "order by e.embedding <=> %s::vector limit %s",
                 (q, *params, q, min_similarity, q, limit),
             )
-        return [
-            self._item_from_row(row)
-            for row in rows
-            if float(row[-1]) >= min_similarity
-        ]
+        return [self._item_from_row(row) for row in rows if float(row[-1]) >= min_similarity]
 
     def all(self) -> list[MemoryItem]:
         """Dump every stored row, including TTL-expired ones (debug/admin
@@ -337,16 +329,12 @@ class PgSemanticMemoryStore:
 
     def _flush_graph_mirror(self, conn: Any, limit: int) -> int:
         assert self._graph is not None
-        pending = self._one(
-            conn, "select 1 from graph_mirror_outbox where not dead limit 1", ()
-        )
+        pending = self._one(conn, "select 1 from graph_mirror_outbox where not dead limit 1", ())
         if pending is None:
             return 0
         delivered = 0
         with conn.transaction():
-            lock = self._one(
-                conn, "select pg_try_advisory_xact_lock(%s)", (_OUTBOX_DRAIN_LOCK,)
-            )
+            lock = self._one(conn, "select pg_try_advisory_xact_lock(%s)", (_OUTBOX_DRAIN_LOCK,))
             if lock is None or not lock[0]:
                 return 0  # another drainer is at it; strict order preserved
             rows = self._all(
@@ -356,9 +344,7 @@ class PgSemanticMemoryStore:
                 (limit,),
             )
             for row_id, op, memory_id, run_id, payload, attempts in rows:
-                data = (
-                    payload if isinstance(payload, dict) else json.loads(payload or "{}")
-                )
+                data = payload if isinstance(payload, dict) else json.loads(payload or "{}")
                 try:
                     if op == "delete":
                         self._graph.remove_memory(memory_id)
@@ -375,7 +361,11 @@ class PgSemanticMemoryStore:
                         logger.error(
                             "graph mirror op parked as dead after %d failed "
                             "attempts (outbox row %s, op=%s, memory_id=%s): %s",
-                            int(attempts) + 1, row_id, op, memory_id, exc,
+                            int(attempts) + 1,
+                            row_id,
+                            op,
+                            memory_id,
+                            exc,
                         )
                         self._do(
                             conn,
@@ -388,28 +378,27 @@ class PgSemanticMemoryStore:
                     logger.warning(
                         "graph mirror delivery failed (outbox row %s, op=%s, "
                         "memory_id=%s, attempt %d/%d); op stays queued: %s",
-                        row_id, op, memory_id, int(attempts) + 1,
-                        self.mirror_max_attempts, exc,
+                        row_id,
+                        op,
+                        memory_id,
+                        int(attempts) + 1,
+                        self.mirror_max_attempts,
+                        exc,
                     )
                     self._do(
                         conn,
-                        "update graph_mirror_outbox set attempts = attempts + 1 "
-                        "where id = %s",
+                        "update graph_mirror_outbox set attempts = attempts + 1 where id = %s",
                         (row_id,),
                     )
                     break
-                self._do(
-                    conn, "delete from graph_mirror_outbox where id = %s", (row_id,)
-                )
+                self._do(conn, "delete from graph_mirror_outbox where id = %s", (row_id,))
                 delivered += 1
         return delivered
 
     # --- internals ---
 
     def _require_pgvector(self, conn: Any) -> None:
-        row = self._one(
-            conn, "select 1 from pg_extension where extname = 'vector'", ()
-        )
+        row = self._one(conn, "select 1 from pg_extension where extname = 'vector'", ())
         if row is None:
             raise RuntimeError(
                 "the pgvector extension is not enabled in this database; run "
@@ -535,9 +524,7 @@ class PgSemanticMemoryStore:
             (item.id, vector_literal(embedding)),
         )
 
-    def _supersede(
-        self, conn: Any, old_id: str, item: MemoryItem, embedding: list[float]
-    ) -> None:
+    def _supersede(self, conn: Any, old_id: str, item: MemoryItem, embedding: list[float]) -> None:
         """Replace a less-confident near-duplicate in place (cascade cleans
         the old embedding row).
 
@@ -565,9 +552,7 @@ class PgSemanticMemoryStore:
             return None
         return next((e.run_id for e in item.evidence if e.run_id), None)
 
-    def _enqueue_mirror_upsert(
-        self, conn: Any, item: MemoryItem, embedding: list[float]
-    ) -> None:
+    def _enqueue_mirror_upsert(self, conn: Any, item: MemoryItem, embedding: list[float]) -> None:
         run_id = self._mirror_run_id(item)
         if run_id is None:
             return
@@ -603,8 +588,7 @@ class PgSemanticMemoryStore:
             self.flush_graph_mirror(conn=conn)
         except Exception:
             logger.warning(
-                "graph-mirror drain failed; pending ops stay queued in "
-                "graph_mirror_outbox",
+                "graph-mirror drain failed; pending ops stay queued in graph_mirror_outbox",
                 exc_info=True,
             )
 

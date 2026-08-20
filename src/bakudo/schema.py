@@ -79,5 +79,14 @@ def validate_workload_spec(document: Any) -> None:
     validate(document, "workload-spec.schema.json")
 
 
+def validate_performance_suite_spec(document: Any) -> None:
+    validate(document, "performance-suite-spec.schema.json")
+
+
 def validate_performance_record(document: Any) -> None:
     validate(document, "performance-record.schema.json")
+
+
+def validate_evaluation_exposure(document: Any) -> None:
+    """Validate the restricted-access audit record at its trust boundary."""
+    validate(document, "evaluation-exposure.schema.json")

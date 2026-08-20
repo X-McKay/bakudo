@@ -129,9 +129,7 @@ def _cmd_agent_list(args: argparse.Namespace) -> int:
         print("No agent specs found.")
     else:
         for record in records:
-            print(
-                f"{record['ref']}  role={record['role']}  status={record['status']}"
-            )
+            print(f"{record['ref']}  role={record['role']}  status={record['status']}")
     return 0
 
 
@@ -194,9 +192,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     output = {
         "run_id": pipeline.run_id,
         "phase": pipeline.phase.value,
-        "scorecard": (
-            pipeline.scorecard.model_dump(mode="json") if pipeline.scorecard else None
-        ),
+        "scorecard": (pipeline.scorecard.model_dump(mode="json") if pipeline.scorecard else None),
         "result": pipeline.result.model_dump(mode="json") if pipeline.result else None,
     }
     if args.json:
@@ -351,18 +347,22 @@ def _optimize_performance_context(args: argparse.Namespace):
             repo_resolver=lambda _name: repo_path,
             candidate_patches={candidate.patch_digest: diff},
         )
-        return PerformanceMeasurementService(invoker, ledger=ledger).compare(
-            workload,
-            baseline,
-            candidate,
-            environment,
-            environment,
-            seed=args.seed,
-            primary_metric=primary_metric,
-            protected_metrics=args.protected_metric,
-            confidence=args.confidence,
-            bootstrap_resamples=args.bootstrap_resamples,
-        ).comparison
+        return (
+            PerformanceMeasurementService(invoker, ledger=ledger)
+            .compare(
+                workload,
+                baseline,
+                candidate,
+                environment,
+                environment,
+                seed=args.seed,
+                primary_metric=primary_metric,
+                protected_metrics=args.protected_metric,
+                confidence=args.confidence,
+                bootstrap_resamples=args.bootstrap_resamples,
+            )
+            .comparison
+        )
 
     return performance, compare_candidate, ledger
 
@@ -493,9 +493,7 @@ def _cmd_workload_inspect(args: argparse.Namespace) -> int:
     record = {
         "spec": loaded.spec.model_dump(by_alias=True, mode="json", exclude_none=True),
         "pin": loaded.pin.model_dump(by_alias=True, mode="json", exclude_none=True),
-        "provenance": loaded.provenance.model_dump(
-            by_alias=True, mode="json", exclude_none=True
-        ),
+        "provenance": loaded.provenance.model_dump(by_alias=True, mode="json", exclude_none=True),
     }
     if args.json:
         print(json.dumps(record, indent=2))
@@ -506,6 +504,24 @@ def _cmd_workload_inspect(args: argparse.Namespace) -> int:
         print(f"bundle      : {loaded.pin.bundle_digest}")
         print(f"command     : {json.dumps(list(loaded.spec.command.argv))}")
         print(f"repetitions : {loaded.spec.measurement.repetitions}")
+    return 0
+
+
+def _cmd_workload_validate_suite(args: argparse.Namespace) -> int:
+    from .performance.suite import load_performance_suite, resolve_performance_suite
+
+    path = Path(args.path).expanduser().resolve()
+    try:
+        suite = load_performance_suite(path)
+        resolution = resolve_performance_suite(suite, _workload_source(args.source))
+    except Exception as exc:  # noqa: BLE001 - validation result is the command output
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    document = resolution.to_dict()
+    if args.json:
+        print(json.dumps(document, indent=2))
+    else:
+        print(f"OK: {resolution.suite_ref} ({len(resolution.scenarios)} scenarios)")
     return 0
 
 
@@ -551,6 +567,30 @@ def _performance_context(args: argparse.Namespace):
     return ledger, repository, repo_path, workload, environment, service
 
 
+def _cmd_performance_preflight(args: argparse.Namespace) -> int:
+    """Report whether this process may create trusted latency evidence."""
+
+    from .performance.readiness import inspect_performance_runner
+
+    readiness = inspect_performance_runner(
+        environment_path=args.environment,
+        workload_source=args.source,
+    )
+    if args.json:
+        print(json.dumps(readiness.to_dict(), indent=2))
+    elif readiness.ready:
+        assert readiness.environment is not None
+        print(
+            "trusted performance runner ready: "
+            f"environment={readiness.environment.environment_digest}"
+        )
+    else:
+        print("trusted performance runner is not ready:", file=sys.stderr)
+        for issue in readiness.issues:
+            print(f"- {issue}", file=sys.stderr)
+    return 0 if readiness.ready else 2
+
+
 def _print_performance_record(record, *, as_json: bool) -> None:
     if as_json:
         document = record.model_dump(by_alias=True, mode="json", exclude_none=True)
@@ -569,9 +609,7 @@ def _cmd_performance_measure(args: argparse.Namespace) -> int:
     from .performance.revisions import pin_repository_revision
 
     try:
-        _ledger, repository, repo_path, workload, environment, service = (
-            _performance_context(args)
-        )
+        _ledger, repository, repo_path, workload, environment, service = _performance_context(args)
         revision = pin_repository_revision(
             repo_path, args.ref, repository=repository, require_clean=True
         )
@@ -589,9 +627,7 @@ def _cmd_performance_capture(args: argparse.Namespace) -> int:
     from .performance.revisions import pin_repository_revision
 
     try:
-        ledger, repository, repo_path, workload, environment, _service = (
-            _performance_context(args)
-        )
+        ledger, repository, repo_path, workload, environment, _service = _performance_context(args)
         revision = pin_repository_revision(
             repo_path, args.ref, repository=repository, require_clean=True
         )
@@ -605,9 +641,7 @@ def _cmd_performance_capture(args: argparse.Namespace) -> int:
                 f"workload {workload.ref} does not declare profiler {args.profiler!r}; "
                 f"known profilers: {known}"
             )
-        capture = configured_profile_capture_service(
-            repo_resolver=lambda _name: repo_path
-        )
+        capture = configured_profile_capture_service(repo_resolver=lambda _name: repo_path)
         snapshot = capture.capture(
             workload,
             revision,
@@ -627,9 +661,7 @@ def _cmd_performance_compare(args: argparse.Namespace) -> int:
     from .performance.revisions import pin_repository_revision
 
     try:
-        _ledger, repository, repo_path, workload, environment, service = (
-            _performance_context(args)
-        )
+        _ledger, repository, repo_path, workload, environment, service = _performance_context(args)
         baseline = pin_repository_revision(
             repo_path, args.baseline_ref, repository=repository, require_clean=True
         )
@@ -687,6 +719,50 @@ def _cmd_performance_show(args: argparse.Namespace) -> int:
         return 1
     _print_performance_record(record, as_json=args.json)
     return 0
+
+
+def _cmd_performance_profile_diff(args: argparse.Namespace) -> int:
+    """Explain two persisted profiler captures without creating evidence."""
+
+    from .performance.profile_comparison import compare_profile_snapshots
+    from .registry.factory import ledger_from_env
+    from .registry.ledger import InMemoryLedger
+
+    try:
+        ledger = ledger_from_env()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if isinstance(ledger, InMemoryLedger):
+        print(
+            "warning: no DSN configured; records from other processes are not visible",
+            file=sys.stderr,
+        )
+    baseline = ledger.get_performance_snapshot(args.baseline_snapshot_id)
+    candidate = ledger.get_performance_snapshot(args.candidate_snapshot_id)
+    if baseline is None or candidate is None:
+        missing = "baseline" if baseline is None else "candidate"
+        print(f"error: unknown {missing} snapshot", file=sys.stderr)
+        return 1
+    try:
+        report = compare_profile_snapshots(baseline, candidate, max_hotspots=args.max_hotspots)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(report.model_dump(by_alias=True, mode="json"), indent=2))
+    elif not report.comparable:
+        print("Diagnostic snapshots are not comparable:")
+        for reason in report.incompatibilities:
+            print(f"- {reason}")
+    else:
+        print("Diagnostic-only profile delta (not performance evidence):")
+        for hotspot in report.hotspots:
+            print(
+                f"{hotspot.change.value:<9} {hotspot.inclusive_delta:+.6g}  "
+                f"{hotspot.label} ({hotspot.stable_key})"
+            )
+    return 0 if report.comparable else 1
 
 
 def _cmd_performance_regressions(args: argparse.Namespace) -> int:
@@ -1276,9 +1352,7 @@ Examples:
     p_doctor = sub.add_parser(
         "doctor",
         help="Check local developer and runtime readiness.",
-        description=(
-            "Run read-only local readiness checks without contacting external services."
-        ),
+        description=("Run read-only local readiness checks without contacting external services."),
     )
     p_doctor.add_argument("--json", action="store_true", help="Emit a JSON report.")
     p_doctor.add_argument(
@@ -1293,15 +1367,11 @@ Examples:
         help="Inspect and validate agent specifications.",
         description="Inspect and validate versioned AgentSpec resources.",
     )
-    agent_sub = p_agent.add_subparsers(
-        dest="agent_command", required=True, metavar="COMMAND"
-    )
+    agent_sub = p_agent.add_subparsers(dest="agent_command", required=True, metavar="COMMAND")
     p_agent_list = agent_sub.add_parser("list", help="List bundled agent specs.")
     p_agent_list.add_argument("--json", action="store_true", help="Emit JSON.")
     p_agent_list.set_defaults(func=_cmd_agent_list)
-    p_agent_validate = agent_sub.add_parser(
-        "validate", help="Validate an AgentSpec YAML file."
-    )
+    p_agent_validate = agent_sub.add_parser("validate", help="Validate an AgentSpec YAML file.")
     p_agent_validate.add_argument("path", help="Path to the AgentSpec YAML file.")
     p_agent_validate.add_argument("--json", action="store_true", help="Emit JSON.")
     p_agent_validate.set_defaults(func=_cmd_agent_validate)
@@ -1311,9 +1381,7 @@ Examples:
         help="Inspect runtime skill packages.",
         description="Inspect progressively disclosed runtime skill packages.",
     )
-    skill_sub = p_skill.add_subparsers(
-        dest="skill_command", required=True, metavar="COMMAND"
-    )
+    skill_sub = p_skill.add_subparsers(dest="skill_command", required=True, metavar="COMMAND")
     p_skill_list = skill_sub.add_parser("list", help="List discovered runtime skills.")
     p_skill_list.add_argument("--json", action="store_true", help="Emit JSON.")
     p_skill_list.set_defaults(func=_cmd_skill_list)
@@ -1348,9 +1416,7 @@ Examples:
         default=None,
         help="Pinned environment JSON/YAML (or BAKUDO_PERFORMANCE_ENVIRONMENT).",
     )
-    p_opt.add_argument(
-        "--baseline-ref", default="HEAD", help="Immutable baseline git revision."
-    )
+    p_opt.add_argument("--baseline-ref", default="HEAD", help="Immutable baseline git revision.")
     p_opt.add_argument(
         "--primary-metric", default=None, help="Primary metric (default: workload first)."
     )
@@ -1360,9 +1426,7 @@ Examples:
         default=[],
         help="Metric that must not regress (repeatable).",
     )
-    p_opt.add_argument(
-        "--confidence", type=float, default=0.95, help="Bootstrap confidence level."
-    )
+    p_opt.add_argument("--confidence", type=float, default=0.95, help="Bootstrap confidence level.")
     p_opt.add_argument(
         "--minimum-improvement",
         type=float,
@@ -1379,9 +1443,7 @@ Examples:
     p_opt.add_argument(
         "--max-files", type=_non_negative_int, default=None, help="Max files changed."
     )
-    p_opt.add_argument(
-        "--rounds", type=_positive_int, default=2, help="Max scout/attempt rounds."
-    )
+    p_opt.add_argument("--rounds", type=_positive_int, default=2, help="Max scout/attempt rounds.")
     p_opt.add_argument(
         "--approaches", type=_positive_int, default=3, help="Max attempts per round."
     )
@@ -1428,6 +1490,17 @@ Examples:
     p_workload_inspect.add_argument("--json", action="store_true", help="Emit JSON.")
     p_workload_inspect.set_defaults(func=_cmd_workload_inspect)
 
+    p_workload_validate_suite = workload_sub.add_parser(
+        "validate-suite",
+        help="Validate a scenario suite and resolve every pinned workload.",
+    )
+    p_workload_validate_suite.add_argument("path", help="PerformanceSuiteSpec YAML path.")
+    p_workload_validate_suite.add_argument(
+        "--source", default=None, help="Corpus directory or immutable bundle path."
+    )
+    p_workload_validate_suite.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_workload_validate_suite.set_defaults(func=_cmd_workload_validate_suite)
+
     p_performance = sub.add_parser(
         "performance",
         help="Measure, compare, and inspect trusted performance evidence.",
@@ -1440,6 +1513,21 @@ Examples:
         dest="performance_command", required=True, metavar="COMMAND"
     )
 
+    p_performance_preflight = performance_sub.add_parser(
+        "preflight",
+        help="Check fail-closed readiness for trusted latency decisions.",
+    )
+    p_performance_preflight.add_argument(
+        "--source", default=None, help="Corpus directory or immutable bundle path."
+    )
+    p_performance_preflight.add_argument(
+        "--environment",
+        default=None,
+        help="Pinned environment JSON/YAML (or set BAKUDO_PERFORMANCE_ENVIRONMENT).",
+    )
+    p_performance_preflight.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_performance_preflight.set_defaults(func=_cmd_performance_preflight)
+
     def add_execution_arguments(command_parser: argparse.ArgumentParser) -> None:
         command_parser.add_argument("--repo", required=True, help="Registered repo or checkout.")
         command_parser.add_argument("--workload", required=True, help="Workload NAME[@VERSION].")
@@ -1449,10 +1537,7 @@ Examples:
         command_parser.add_argument(
             "--environment",
             default=None,
-            help=(
-                "Pinned environment JSON/YAML (or set "
-                "BAKUDO_PERFORMANCE_ENVIRONMENT)."
-            ),
+            help=("Pinned environment JSON/YAML (or set BAKUDO_PERFORMANCE_ENVIRONMENT)."),
         )
         command_parser.add_argument(
             "--sync",
@@ -1514,6 +1599,21 @@ Examples:
     p_performance_show.add_argument("--json", action="store_true", help="Emit JSON.")
     p_performance_show.set_defaults(func=_cmd_performance_show)
 
+    p_performance_profile_diff = performance_sub.add_parser(
+        "profile-diff",
+        help="Explain aligned diagnostic profile snapshots; never promotion evidence.",
+    )
+    p_performance_profile_diff.add_argument("--baseline-snapshot-id", required=True)
+    p_performance_profile_diff.add_argument("--candidate-snapshot-id", required=True)
+    p_performance_profile_diff.add_argument(
+        "--max-hotspots",
+        type=_positive_int,
+        default=100,
+        help="Maximum absolute-cost deltas to emit (1-1000).",
+    )
+    p_performance_profile_diff.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_performance_profile_diff.set_defaults(func=_cmd_performance_profile_diff)
+
     p_performance_regressions = performance_sub.add_parser(
         "regressions", help="List approved performance regression signals."
     )
@@ -1526,9 +1626,7 @@ Examples:
         help="Inspect and verify benchmark tasks.",
         description="Inspect, verify, author, and publish benchmark task resources.",
     )
-    task_sub = p_task.add_subparsers(
-        dest="task_command", required=True, metavar="COMMAND"
-    )
+    task_sub = p_task.add_subparsers(dest="task_command", required=True, metavar="COMMAND")
 
     p_task_list = task_sub.add_parser("list", help="List discovered tasks.")
     p_task_list.add_argument(
@@ -1584,9 +1682,7 @@ Examples:
         help="Onboard and manage known repository checkouts.",
         description="Register and inspect repository checkouts without deleting their files.",
     )
-    repo_sub = p_repo.add_subparsers(
-        dest="repo_command", required=True, metavar="COMMAND"
-    )
+    repo_sub = p_repo.add_subparsers(dest="repo_command", required=True, metavar="COMMAND")
 
     p_repo_add = repo_sub.add_parser(
         "add", help="Clone (URL) or register in place (local path) a repo checkout."
@@ -1616,18 +1712,14 @@ Examples:
         help="Run and record task trials.",
         description="Evaluate one agent version on one pinned benchmark task.",
     )
-    trial_sub = p_trial.add_subparsers(
-        dest="trial_command", required=True, metavar="COMMAND"
-    )
+    trial_sub = p_trial.add_subparsers(dest="trial_command", required=True, metavar="COMMAND")
 
     p_trial_run = trial_sub.add_parser(
         "run", help="Run one task against one agent version and record a TrialRecord."
     )
     p_trial_run.add_argument("task", help="Task ref or bare name.")
     p_trial_run.add_argument("--agent", required=True, help="Agent ref, NAME[@VERSION].")
-    p_trial_run.add_argument(
-        "--seed", type=_non_negative_int, default=0, help="Trial seed."
-    )
+    p_trial_run.add_argument("--seed", type=_non_negative_int, default=0, help="Trial seed.")
     p_trial_run.add_argument("--json", action="store_true", help="Emit the TrialRecord as JSON.")
     p_trial_run.set_defaults(func=_cmd_trial_run)
 
@@ -1651,9 +1743,7 @@ Examples:
     p_exp_compare.add_argument("baseline", help="Baseline agent ref, NAME[@VERSION].")
     p_exp_compare.add_argument("candidate", help="Candidate agent ref, NAME[@VERSION].")
     p_exp_compare.add_argument("--family", default=None, help="Task family filter.")
-    p_exp_compare.add_argument(
-        "--count", type=_positive_int, default=None, help="Task count."
-    )
+    p_exp_compare.add_argument("--count", type=_positive_int, default=None, help="Task count.")
     p_exp_compare.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     p_exp_compare.set_defaults(func=_cmd_experiment_compare)
 
@@ -1662,9 +1752,7 @@ Examples:
     )
     p_exp_profile.add_argument("agent", help="Agent ref, NAME[@VERSION].")
     p_exp_profile.add_argument("--family", default=None, help="Task family filter.")
-    p_exp_profile.add_argument(
-        "--count", type=_positive_int, default=None, help="Task count."
-    )
+    p_exp_profile.add_argument("--count", type=_positive_int, default=None, help="Task count.")
     p_exp_profile.add_argument("--json", action="store_true", help="Emit the result as JSON.")
     p_exp_profile.set_defaults(func=_cmd_experiment_profile)
 

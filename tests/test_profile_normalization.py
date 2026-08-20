@@ -110,4 +110,3 @@ def test_normalization_fails_closed_on_excessive_or_invalid_rows() -> None:
         normalize_hotspots((row, row), max_hotspots=1)
     with pytest.raises(NormalizationError, match="non-negative"):
         RawHotspot(kind=HotspotKind.function, label="bad", inclusive_cost=-1)
-

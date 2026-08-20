@@ -9,7 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 Digest = Annotated[str, StringConstraints(pattern=r"^sha256:[0-9a-f]{64}$")]
 SemanticVersion = Annotated[
     str,
-    StringConstraints(pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$")
+    StringConstraints(
+        pattern=r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"
+    ),
 ]
 RelativePath = Annotated[
     str,
@@ -43,9 +45,7 @@ class WorkloadPin(_Pin):
     version: SemanticVersion
     manifest_digest: Digest = Field(alias="manifestDigest")
     dataset_digests: tuple[FileDigest, ...] = Field(default_factory=tuple, alias="datasetDigests")
-    executor_digests: tuple[FileDigest, ...] = Field(
-        default_factory=tuple, alias="executorDigests"
-    )
+    executor_digests: tuple[FileDigest, ...] = Field(default_factory=tuple, alias="executorDigests")
     bundle_digest: Digest = Field(alias="bundleDigest")
 
     @property
@@ -72,8 +72,8 @@ class RevisionPin(_Pin):
     )
     tree_digest: Digest = Field(alias="treeDigest")
     dirty: bool = False
-    base_commit_sha: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40,64}$")] | None = (
-        Field(default=None, alias="baseCommitSHA")
+    base_commit_sha: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{40,64}$")] | None = Field(
+        default=None, alias="baseCommitSHA"
     )
     patch_digest: Digest | None = Field(default=None, alias="patchDigest")
 

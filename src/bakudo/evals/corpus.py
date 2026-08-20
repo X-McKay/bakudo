@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ..curriculum.objective import Constraints, Objective, ObjectiveType
+from ..curriculum.objective import Objective
 from ..runner.result import RunResult, RunStatus
 from .checks import DEFAULT_SUITE, EvalContext, Grader
 from .result import EvalResult
@@ -190,6 +190,7 @@ def load_corpus_from_tasks(
     :func:`task_run_fn` resolves that identity through its explicit source.
     """
     from ..tasks.source import default_task_source
+    from ..trials.runner import objective_from_task
 
     resolved_source = source if source is not None else default_task_source()
     family_filters: list[str | None] = list(families) if families is not None else [None]
@@ -202,21 +203,11 @@ def load_corpus_from_tasks(
     cases: list[EvalCase] = []
     for ref in sorted(by_ref):
         task = by_ref[ref]
-        instruction = task.spec.instruction
         constraints = task.spec.constraints
         cases.append(
             EvalCase(
                 name=task.ref,
-                objective=Objective(
-                    type=ObjectiveType(instruction.type),
-                    repo=f"{_TASK_REF_PREFIX}{task.ref}",
-                    title=instruction.title,
-                    description=instruction.description,
-                    acceptance_criteria=list(instruction.success_criteria),
-                    constraints=Constraints(
-                        max_files_changed=constraints.max_changed_files
-                    ),
-                ),
+                objective=objective_from_task(task, f"{_TASK_REF_PREFIX}{task.ref}"),
                 constraints=OutcomeConstraints(
                     status=constraints.expected_status,
                     allowed_change_paths=list(constraints.allowed_change_paths),

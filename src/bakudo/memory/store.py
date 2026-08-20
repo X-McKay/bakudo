@@ -37,10 +37,7 @@ class InMemoryStore:
     def query(self, *, scope: dict | None = None, limit: int = 10) -> list[MemoryItem]:
         items = self._items
         if scope:
-            items = [
-                m for m in items
-                if all(m.scope.get(k) == v for k, v in scope.items())
-            ]
+            items = [m for m in items if all(m.scope.get(k) == v for k, v in scope.items())]
         # Highest-confidence first.
         return sorted(items, key=lambda m: m.confidence, reverse=True)[:limit]
 

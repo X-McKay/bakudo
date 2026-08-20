@@ -112,9 +112,7 @@ def test_add_repo_rolls_back_clone_on_register_conflict(tmp_path):
     ledger = InMemoryLedger()
     # name "dup" already registered at a different path -- register_repo
     # will reject the clone's record with a ValueError.
-    ledger.register_repo(
-        RepoRecord(name="dup", source="/other", path=str(tmp_path / "A"))
-    )
+    ledger.register_repo(RepoRecord(name="dup", source="/other", path=str(tmp_path / "A")))
 
     source = _init_git_repo(tmp_path / "source-repo")
     dest_root = tmp_path / "checkouts"

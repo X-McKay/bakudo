@@ -79,9 +79,7 @@ class SandboxConfig(_Strict):
     # run_sandbox activity's start_to_close_timeout (workflows._SANDBOX) — an
     # unbounded spec would let Temporal kill the activity mid-run with no
     # result while the microVM keeps executing.
-    timeout_seconds: int = Field(
-        default=3600, alias="timeoutSeconds", ge=1, le=10_800
-    )
+    timeout_seconds: int = Field(default=3600, alias="timeoutSeconds", ge=1, le=10_800)
     ephemeral: bool = False
     max_changed_files: int | None = Field(default=None, alias="maxChangedFiles", ge=0)
     max_diff_bytes: int | None = Field(default=None, alias="maxDiffBytes", ge=0)

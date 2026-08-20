@@ -1,3 +1,5 @@
+import copy
+
 import pytest
 from pydantic import ValidationError
 
@@ -81,3 +83,68 @@ def test_json_schema_accepts_minimal():
     from bakudo.schema import validate_task_spec
 
     validate_task_spec(MINIMAL)  # must not raise
+
+
+def _public_source() -> dict[str, object]:
+    digest = "sha256:" + "a" * 64
+    return {
+        "sourceName": "SWE-bench-Live",
+        "sourceURI": "https://huggingface.co/datasets/SWE-bench-Live/MultiLang",
+        "sourceRevision": "frozen-revision",
+        "instanceId": "example__example-1",
+        "repositoryURI": "https://github.com/example/example",
+        "baseCommit": "a" * 40,
+        "imageDigest": digest,
+        "repositoryLicense": "MIT",
+        "rightsReview": "approved",
+        "acquiredAt": "2026-08-18T00:00:00Z",
+        "transformDigest": digest,
+        "calibrationOnly": True,
+    }
+
+
+def test_public_source_provenance_is_schema_valid_and_calibration_only() -> None:
+    from bakudo.schema import validate_task_spec
+
+    document = copy.deepcopy(MINIMAL)
+    document["metadata"]["provenance"] = {
+        **document["metadata"]["provenance"],
+        "sourceType": "external-public",
+        "eligibleForPromotion": False,
+        "publicSource": _public_source(),
+    }
+
+    validate_task_spec(document)
+    assert TaskSpec.model_validate(document).metadata.provenance.public_source is not None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("metadata.partition", "validation", "dev partition"),
+        ("metadata.provenance.eligibleForPromotion", True, "cannot be eligible"),
+        ("metadata.provenance.sourceType", "synthetic", "sourceType external-public"),
+    ],
+)
+def test_public_source_provenance_rejects_promotion_or_non_dev_partition(
+    field, value, message
+) -> None:
+    document = copy.deepcopy(MINIMAL)
+    document["metadata"]["provenance"] = {
+        **document["metadata"]["provenance"],
+        "sourceType": "external-public",
+        "eligibleForPromotion": False,
+        "publicSource": _public_source(),
+    }
+    target = document
+    *path, name = field.split(".")
+    for part in path:
+        target = target[part]
+    target[name] = value
+
+    with pytest.raises(ValidationError, match=message):
+        TaskSpec.model_validate(document)
+    from bakudo.schema import SchemaValidationError, validate_task_spec
+
+    with pytest.raises(SchemaValidationError):
+        validate_task_spec(document)

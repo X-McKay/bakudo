@@ -139,6 +139,7 @@ def _trusted_performance_comparison(inp, cancel_event=None, *, effect=0.2):
         record=record,
     )
 
+
 # --- deterministic agent-name resolution (TMP-3) ---
 
 
@@ -234,8 +235,12 @@ async def test_agent_run_workflow_happy_path_writes_full_event_log(env, deps):
             AgentRunWorkflow.run,
             AgentRunInput(
                 run_id="run_HAPPY1",
-                objective={"id": "obj_HAPPY1", "type": "explore", "repo": "bakudo",
-                           "title": "happy path"},
+                objective={
+                    "id": "obj_HAPPY1",
+                    "type": "explore",
+                    "repo": "bakudo",
+                    "title": "happy path",
+                },
                 agent_spec=spec,
             ),
             id="run-run_HAPPY1",
@@ -261,8 +266,10 @@ async def test_agent_run_workflow_happy_path_writes_full_event_log(env, deps):
     # before the sandbox even booted, so the distinction was illusory. This now
     # matches the synchronous pipeline mirror, which records the same sequence.
     assert phases == [
-        "bundle_rendered", "agent_running",
-        "collecting_artifacts", "evaluating",
+        "bundle_rendered",
+        "agent_running",
+        "collecting_artifacts",
+        "evaluating",
     ]
     # Evals were recorded against the run.
     assert deps.eval_results("run_HAPPY1")
@@ -287,22 +294,26 @@ async def test_completed_canary_run_triggers_graduation(env, deps, monkeypatch):
     for version, status, doc in ((1, "active", spec), (2, "candidate", canary_spec)):
         deps.upsert_agent_version(
             AgentVersionRecord(
-                name="explore", version=version, status=status,
+                name="explore",
+                version=version,
+                status=status,
                 spec_yaml=yaml.safe_dump(doc),
             )
         )
     deps.set_version_status("explore", 2, "canary", reason="auto-pass")
-    monkeypatch.setattr(
-        _impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=1)
-    )
+    monkeypatch.setattr(_impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=1))
 
     async with make_worker(env, [AgentRunWorkflow, EvalWorkflow]):
         out = await env.client.execute_workflow(
             AgentRunWorkflow.run,
             AgentRunInput(
                 run_id="run_GRAD1",
-                objective={"id": "obj_GRAD1", "type": "explore", "repo": "bakudo",
-                           "title": "canary run"},
+                objective={
+                    "id": "obj_GRAD1",
+                    "type": "explore",
+                    "repo": "bakudo",
+                    "title": "canary run",
+                },
                 agent_spec=canary_spec,
             ),
             id="run-run_GRAD1",
@@ -497,8 +508,7 @@ async def test_activity_exhaustion_writes_terminal_failed_phase(env, deps, monke
                 AgentRunWorkflow.run,
                 AgentRunInput(
                     run_id="run_FAIL1",
-                    objective={"id": "obj_FAIL1", "type": "explore", "repo": "r",
-                               "title": "t"},
+                    objective={"id": "obj_FAIL1", "type": "explore", "repo": "r", "title": "t"},
                     agent_spec=spec,
                 ),
                 id="run-run_FAIL1",
@@ -546,8 +556,11 @@ async def test_crashed_optimize_attempt_becomes_feedback_not_failure(env, deps, 
             OptimizationWorkflow.run,
             OptimizeInput(
                 objective={
-                    "id": "obj_OPT1", "type": "optimize", "repo": "bakudo",
-                    "title": "opt", "constraints": {},
+                    "id": "obj_OPT1",
+                    "type": "optimize",
+                    "repo": "bakudo",
+                    "title": "opt",
+                    "constraints": {},
                     "performance": _performance_contract(),
                 },
                 scout_spec=scout_spec,
@@ -596,8 +609,11 @@ async def test_blocked_scout_without_followups_is_scout_failed(env, deps, monkey
             OptimizationWorkflow.run,
             OptimizeInput(
                 objective={
-                    "id": "obj_OPT2", "type": "optimize", "repo": "bakudo",
-                    "title": "opt", "constraints": {},
+                    "id": "obj_OPT2",
+                    "type": "optimize",
+                    "repo": "bakudo",
+                    "title": "opt",
+                    "constraints": {},
                     "performance": _performance_contract(),
                 },
                 scout_spec=scout_spec,
@@ -632,8 +648,11 @@ def _optimize_input(_impl_mod):
 
     return OptimizeInput(
         objective={
-            "id": "obj_OPT3", "type": "optimize", "repo": "bakudo",
-            "title": "opt", "acceptanceCriteria": ["All existing tests pass"],
+            "id": "obj_OPT3",
+            "type": "optimize",
+            "repo": "bakudo",
+            "title": "opt",
+            "acceptanceCriteria": ["All existing tests pass"],
             "constraints": {},
             "performance": _performance_contract(),
         },
@@ -666,8 +685,10 @@ async def test_optimize_workflow_requires_trusted_comparison(env, deps, monkeypa
         ],
     ):
         out = await env.client.execute_workflow(
-            OptimizationWorkflow.run, _optimize_input(_impl),
-            id="optimize-obj_OPT3", task_queue=TASK_QUEUE_CONTROL,
+            OptimizationWorkflow.run,
+            _optimize_input(_impl),
+            id="optimize-obj_OPT3",
+            task_queue=TASK_QUEUE_CONTROL,
         )
 
     assert out["status"] == "improved"
@@ -693,8 +714,10 @@ async def test_optimize_workflow_rejects_non_improving_comparison(env, deps, mon
         ],
     ):
         out = await env.client.execute_workflow(
-            OptimizationWorkflow.run, _optimize_input(_impl),
-            id="optimize-obj_OPT3b", task_queue=TASK_QUEUE_CONTROL,
+            OptimizationWorkflow.run,
+            _optimize_input(_impl),
+            id="optimize-obj_OPT3b",
+            task_queue=TASK_QUEUE_CONTROL,
         )
 
     assert out["status"] == "no-change"
@@ -799,8 +822,8 @@ def test_dispatch_candidate_respects_per_role_cap_without_head_of_line_block():
     wf._state.active_runs = ["r1"]
     wf._state.active_run_roles = {"r1": "add-feature"}
     wf._backlog = [
-        {"id": "blocked", "type": "add-feature"},   # role at cap
-        {"id": "ok", "type": "explore"},            # unrelated, has capacity
+        {"id": "blocked", "type": "add-feature"},  # role at cap
+        {"id": "ok", "type": "explore"},  # unrelated, has capacity
     ]
     assert wf._dispatch_candidate()["id"] == "ok"
 
@@ -872,10 +895,10 @@ def test_spec_name_version_extracts_or_raises_malformed():
     good = {"agent_spec": {"metadata": {"name": "explore", "version": 3}}}
     assert AgentRunWorkflow._spec_name_version(good) == ("explore", 3)
     for bad in (
-        {"agent_spec": {"metadata": {"version": 1}}},   # no name
-        {"agent_spec": {"metadata": {"name": "x"}}},     # no version
-        {"agent_spec": {}},                              # no metadata
-        {},                                              # no agent_spec
+        {"agent_spec": {"metadata": {"version": 1}}},  # no name
+        {"agent_spec": {"metadata": {"name": "x"}}},  # no version
+        {"agent_spec": {}},  # no metadata
+        {},  # no agent_spec
     ):
         with pytest.raises(_MalformedSpec):
             AgentRunWorkflow._spec_name_version(bad)
@@ -891,8 +914,13 @@ async def test_meta_budget_zero_blocks_dispatch(env, deps):
         await handle.execute_update(MetaAgentWorkflow.change_budget, 0.0)
         await handle.signal(
             MetaAgentWorkflow.new_objective,
-            {"id": "obj_B0", "type": "explore", "repo": "r", "title": "t",
-             "suggestedAgents": ["explore"]},
+            {
+                "id": "obj_B0",
+                "type": "explore",
+                "repo": "r",
+                "title": "t",
+                "suggestedAgents": ["explore"],
+            },
         )
         await asyncio.sleep(0.5)
         status = await handle.query(MetaAgentWorkflow.get_status)
@@ -910,9 +938,7 @@ async def test_meta_budget_zero_blocks_dispatch(env, deps):
         assert await _poll(dispatched), "dispatch must resume once budget is restored"
 
 
-async def test_meta_routes_optimize_objective_into_optimization_workflow(
-    env, deps, monkeypatch
-):
+async def test_meta_routes_optimize_objective_into_optimization_workflow(env, deps, monkeypatch):
     """An optimize objective must drive OptimizationWorkflow (scout->attempt->
     verify), not a single AgentRunWorkflow (TMP-19); and the loop notifies
     run_completed so the meta active_runs drains."""
@@ -934,7 +960,9 @@ async def test_meta_routes_optimize_objective_into_optimization_workflow(
         await handle.signal(
             MetaAgentWorkflow.new_objective,
             {
-                "id": "obj_OPTR", "type": "optimize", "repo": "bakudo",
+                "id": "obj_OPTR",
+                "type": "optimize",
+                "repo": "bakudo",
                 "title": "optimize the thing",
                 "acceptanceCriteria": ["All existing tests pass"],
                 "constraints": {},
@@ -984,7 +1012,8 @@ async def test_cancel_signal_during_sandbox_records_cancelled(env, monkeypatch):
                 objective={"id": "obj_C", "type": "explore", "repo": "r", "title": "t"},
                 agent_spec=_impl.load_agent_spec("explore"),
             ),
-            id="run-run_CANCEL1", task_queue=TASK_QUEUE_CONTROL,
+            id="run-run_CANCEL1",
+            task_queue=TASK_QUEUE_CONTROL,
         )
 
         async def in_sandbox():
@@ -1033,7 +1062,9 @@ async def test_meta_optimize_charges_accumulated_tokens_to_budget(env, deps, mon
         await handle.signal(
             MetaAgentWorkflow.new_objective,
             {
-                "id": "obj_OPTBUD", "type": "optimize", "repo": "bakudo",
+                "id": "obj_OPTBUD",
+                "type": "optimize",
+                "repo": "bakudo",
                 "title": "optimize with cost",
                 "acceptanceCriteria": ["All existing tests pass"],
                 "constraints": {},

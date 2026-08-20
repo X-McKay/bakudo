@@ -90,9 +90,7 @@ def test_configured_observer_is_independently_injectable_and_cell_idempotent() -
                 "kind": "software-artifact",
                 "repository": "bakudo-smoke",
                 "baseline": _revision("a").model_dump(by_alias=True, mode="json"),
-                "candidates": [
-                    _revision("b").model_dump(by_alias=True, mode="json")
-                ],
+                "candidates": [_revision("b").model_dump(by_alias=True, mode="json")],
                 "workloadRef": {
                     "name": "smoke-python-loop",
                     "version": "1.0.1",
@@ -165,9 +163,7 @@ def test_api_dispatches_artifact_subject_without_agent_sandbox(
                     by_alias=True, exclude_none=True, mode="json"
                 ),
                 "candidates": [
-                    _revision("b").model_dump(
-                        by_alias=True, exclude_none=True, mode="json"
-                    )
+                    _revision("b").model_dump(by_alias=True, exclude_none=True, mode="json")
                 ],
                 "workloadRef": {
                     "name": "smoke-python-loop",
@@ -186,9 +182,7 @@ def test_api_dispatches_artifact_subject_without_agent_sandbox(
     assert stored["subject_kind"] == "software-artifact"
 
 
-def test_cli_dispatches_artifact_subject_without_agent_verifier(
-    monkeypatch, capsys
-) -> None:
+def test_cli_dispatches_artifact_subject_without_agent_verifier(monkeypatch, capsys) -> None:
     root = Path(__file__).parents[1] / "smoke" / "workloads"
     source = DirectoryWorkloadSource(root)
     original = configured.configured_artifact_measurement_observer
@@ -199,9 +193,7 @@ def test_cli_dispatches_artifact_subject_without_agent_verifier(
                 "kind": "software-artifact",
                 "repository": "bakudo-smoke",
                 "baseline": _revision("a").model_dump(by_alias=True, mode="json"),
-                "candidates": [
-                    _revision("b").model_dump(by_alias=True, mode="json")
-                ],
+                "candidates": [_revision("b").model_dump(by_alias=True, mode="json")],
                 "workloadRef": {
                     "name": "smoke-python-loop",
                     "version": "1.0.1",

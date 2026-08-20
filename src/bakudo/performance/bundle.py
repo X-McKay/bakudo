@@ -131,9 +131,7 @@ def extract_workload_bundle(
                 raise WorkloadBundleError(f"could not read workload bundle member {member.name!r}")
             data = stream.read(MAX_WORKLOAD_FILE_BYTES + 1)
             if len(data) != member.size:
-                raise WorkloadBundleError(
-                    f"workload bundle member size mismatch: {member.name!r}"
-                )
+                raise WorkloadBundleError(f"workload bundle member size mismatch: {member.name!r}")
             if relative == PurePosixPath("bundle.json"):
                 if manifest is not None:
                     raise WorkloadBundleError("workload bundle contains multiple manifests")

@@ -100,13 +100,9 @@ def compare_measurement_pins(
     workload_mismatches = compare_workload_pins(baseline.workload, candidate.workload)
     environment = compare_environment_pins(baseline.environment, candidate.environment, policy)
     plan_mismatches = (
-        (
-            f"plan_digest: {baseline.plan_digest!r} != {candidate.plan_digest!r}",
-        )
+        (f"plan_digest: {baseline.plan_digest!r} != {candidate.plan_digest!r}",)
         if baseline.plan_digest != candidate.plan_digest
         else ()
     )
-    mismatches = tuple(
-        sorted((*workload_mismatches, *environment.mismatches, *plan_mismatches))
-    )
+    mismatches = tuple(sorted((*workload_mismatches, *environment.mismatches, *plan_mismatches)))
     return CompatibilityReport(not mismatches, mismatches, environment.allowed_differences)

@@ -14,12 +14,12 @@ from .models import MemoryItem
 
 # Minimal secret detectors — conservative, to keep secrets out of durable memory.
 _SECRET_PATTERNS = (
-    re.compile(r"AKIA[0-9A-Z]{16}"),                      # AWS access key id
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),                   # OpenAI-style key
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{36}"),             # GitHub tokens (PAT/OAuth/etc.)
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),          # Slack tokens
-    re.compile(r"AIza[0-9A-Za-z\-_]{35}"),                # Google API key
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),    # PEM private key
+    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI-style key
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{36}"),  # GitHub tokens (PAT/OAuth/etc.)
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),  # Slack tokens
+    re.compile(r"AIza[0-9A-Za-z\-_]{35}"),  # Google API key
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),  # PEM private key
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
     re.compile(r"(?i)\b(password|secret|api[_-]?key|token)\b\s*[:=]\s*\S+"),
 )
@@ -50,9 +50,7 @@ def validate_memory_candidate(
     if not candidate.scope:
         reasons.append("scoped incorrectly (no scope)")
     if candidate.confidence < MIN_CONFIDENCE:
-        reasons.append(
-            f"confidence {candidate.confidence:.2f} below threshold {MIN_CONFIDENCE}"
-        )
+        reasons.append(f"confidence {candidate.confidence:.2f} below threshold {MIN_CONFIDENCE}")
     if _contains_secret(candidate.content):
         reasons.append("contains a secret")
 

@@ -98,18 +98,14 @@ class MetaAgentTools:
             if record is None:
                 raise KeyError(f"Unknown agent spec: {agent}")
             if record.status not in ("active", "canary"):
-                raise KeyError(
-                    f"Agent spec {agent} is not spawnable (status={record.status})"
-                )
+                raise KeyError(f"Agent spec {agent} is not spawnable (status={record.status})")
             return self._spec_for(record)
 
         if agent not in self._specs and self.ledger.active_version(agent) is None:
             raise KeyError(f"Unknown agent: {agent}")
         if run_id is not None:
             canary = self.ledger.canary_version(agent)
-            if canary is not None and routes_to_canary(
-                run_id, PromotionPolicy().canary_percent
-            ):
+            if canary is not None and routes_to_canary(run_id, PromotionPolicy().canary_percent):
                 return self._spec_for(canary)
         active = self.ledger.active_version(agent)
         if active is None:

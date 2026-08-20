@@ -337,9 +337,10 @@ def test_select_winner_gates_are_hard():
     performance = performance_contract()
     assert select_winner([candidate(safety_regressions=1)], performance=performance) is None
     assert select_winner([candidate(critical_failures=1)], performance=performance) is None
-    assert select_winner(
-        [candidate(passed=("schema", "safety", "task"))], performance=performance
-    ) is None
+    assert (
+        select_winner([candidate(passed=("schema", "safety", "task"))], performance=performance)
+        is None
+    )
     assert select_winner([candidate(status="failed")], performance=performance) is None
     assert select_winner([candidate(effect=-0.10)], performance=performance) is None
     assert select_winner([candidate(simplicity=0.3)], performance=performance) is None

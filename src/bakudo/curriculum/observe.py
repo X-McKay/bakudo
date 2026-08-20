@@ -120,9 +120,7 @@ def _failing_test_objective(repo: str, test: FailingTest) -> Objective:
 
 def _todo_objective(repo: str, todo: Todo) -> Objective:
     return Objective(
-        id=_observer_id(
-            repo, ObjectiveType.maintenance, f"todo:{todo.path}:{todo.text}"
-        ),
+        id=_observer_id(repo, ObjectiveType.maintenance, f"todo:{todo.path}:{todo.text}"),
         type=ObjectiveType.maintenance,
         repo=repo,
         title=f"Resolve TODO in {todo.path}",
@@ -148,9 +146,7 @@ def _coverage_objective(repo: str, gap: CoverageGap) -> Objective:
 def _advisory_objective(repo: str, advisory: Advisory) -> Objective:
     risk = _SEVERITY_RISK.get(advisory.severity.lower(), 0.5)
     return Objective(
-        id=_observer_id(
-            repo, ObjectiveType.maintenance, f"advisory:{advisory.package}"
-        ),
+        id=_observer_id(repo, ObjectiveType.maintenance, f"advisory:{advisory.package}"),
         type=ObjectiveType.maintenance,
         repo=repo,
         title=f"Patch advisory in {advisory.package} ({advisory.severity})",

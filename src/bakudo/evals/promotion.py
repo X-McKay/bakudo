@@ -137,7 +137,8 @@ def apply_decision(ledger, decision: PromotionDecision) -> PromotionDecision:
         return decision
     try:
         set_status(
-            name, version,
+            name,
+            version,
             DECISION_TO_VERSION_STATUS[decision.decision],
             reason=decision.rationale,
         )
@@ -268,8 +269,6 @@ def _decide(
             f"regressions; routing to canary at {policy.canary_percent}%."
         )
     else:
-        rationale = (
-            "No baseline to compare against; routing to canary before activation."
-        )
+        rationale = "No baseline to compare against; routing to canary before activation."
 
     return PromotionDecision(Decision.canary, rationale, candidate)

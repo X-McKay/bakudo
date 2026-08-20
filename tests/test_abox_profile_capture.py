@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import marshal
+import platform
 import subprocess
 import sys
 import threading
@@ -13,6 +14,7 @@ import pytest
 from bakudo.abox.capture import (
     AboxProfileCaptureError,
     AboxProfileCaptureService,
+    _default_adapter_factory,
     bounded_abox_executor,
     configured_profile_capture_service,
 )
@@ -24,6 +26,7 @@ from bakudo.performance.models import (
     RevisionPin,
     WorkloadSpec,
 )
+from bakudo.performance.pins import RuntimeVersion
 from bakudo.performance.profiler import (
     CaptureLimits,
     ProfileExecutionError,
@@ -74,6 +77,30 @@ def _profiler() -> ProfilerSpec:
         adapter="python.sampling",
         signals=("function-calls",),
     )
+
+
+def test_default_adapter_factory_prefers_the_pinned_python_runtime() -> None:
+    adapter = _default_adapter_factory(_profiler(), _environment())
+
+    assert adapter.descriptor.version == "cProfile-3.11.2"
+
+
+def test_default_adapter_factory_matches_alternate_python_runtime_names() -> None:
+    environment = _environment().model_copy(
+        update={"runtime_versions": (RuntimeVersion(name="python3", version="3.12.1"),)}
+    )
+
+    adapter = _default_adapter_factory(_profiler(), environment)
+
+    assert adapter.descriptor.version == "cProfile-3.12.1"
+
+
+def test_default_adapter_factory_accepts_pins_without_a_python_runtime() -> None:
+    environment = _environment().model_copy(update={"runtime_versions": ()})
+
+    adapter = _default_adapter_factory(_profiler(), environment)
+
+    assert adapter.descriptor.version == f"cProfile-{platform.python_version()}"
 
 
 def _loaded(tmp_path: Path) -> LoadedWorkload:
@@ -141,6 +168,7 @@ def _environment(*, abox_version: str = "0.7.2") -> EnvironmentPin:
         memory_mb=512,
         os="linux",
         kernel="test",
+        runtime_versions=(RuntimeVersion(name="python", version="3.11.2"),),
         dependency_lock_digest=_DIGEST,
         environment_digest=_DIGEST,
     )
@@ -228,13 +256,16 @@ def test_fresh_abox_capture_preserves_pins_and_persists_artifact(tmp_path: Path)
     assert snapshot.workload == workload.pin
     assert snapshot.revision == revision
     assert snapshot.environment.profiler_adapter == "python.sampling"
+    assert snapshot.environment.profiler_version == "cProfile-3.11.2"
     assert snapshot.hotspots[0].label == "hot"
     assert snapshot.hotspots[0].source_path == "hot.py"
     assert len(snapshot.artifacts) == 1
     assert len(store) == 1
     run = next(call for call in fake.calls if call[1] == "run")
-    assert "sh" not in run
+    assert "prepare.sh" in run[run.index("-c") + 1]
     assert run[run.index("--base") + 1] == revision.commit_sha
+    assert run[run.index("--cpus") + 1] == "1"
+    assert run[run.index("--memory") + 1] == "512"
     assert "--input-file" in run
     assert fake.run_payload == {
         "argv": [

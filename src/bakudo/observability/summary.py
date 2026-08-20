@@ -83,9 +83,7 @@ def _exclusive_seconds(
     )
     exclusive_ns = max(
         0,
-        record.ended_monotonic_ns
-        - record.started_monotonic_ns
-        - _union_ns(child_intervals),
+        record.ended_monotonic_ns - record.started_monotonic_ns - _union_ns(child_intervals),
     )
     return exclusive_ns / 1_000_000_000
 
@@ -150,8 +148,7 @@ def summarize_spans(spans: Iterable[SpanRecord]) -> ObservabilitySummary:
         roots = [
             record
             for record in trace_records
-            if record.parent_span_id is None
-            or (trace_id, record.parent_span_id) not in known_spans
+            if record.parent_span_id is None or (trace_id, record.parent_span_id) not in known_spans
         ]
         trace_ns = _union_ns(
             (record.started_monotonic_ns, record.ended_monotonic_ns) for record in roots

@@ -32,7 +32,9 @@ def _sandbox(bundle):
 def test_run_objective_completes_and_scores():
     spec = load_spec_file(AGENTS / "add-feature.yaml")
     objective = Objective(
-        type="add-feature", repo="bakudo", title="Add a thing",
+        type="add-feature",
+        repo="bakudo",
+        title="Add a thing",
         acceptanceCriteria=["adds the thing"],
     )
     ledger = InMemoryLedger()
@@ -85,7 +87,9 @@ def test_ledger_records_lifecycle_events():
         return json.dumps({"status": "success", "summary": "mapped"})
 
     result = run_objective(
-        objective, spec, ledger=ledger,
+        objective,
+        spec,
+        ledger=ledger,
         sandbox=lambda b: local_sandbox(b, offline_driver=explore_driver),
     )
     events = [e.event_type for e in ledger.events(result.run_id)]

@@ -432,9 +432,7 @@ async def test_experiment_child_crash_recorded(env, deps, monkeypatch):
     assert "error" in failed[0].evaluation
 
 
-async def test_artifact_experiment_fans_out_persisted_measurements(
-    env, deps, monkeypatch
-):
+async def test_artifact_experiment_fans_out_persisted_measurements(env, deps, monkeypatch):
     digest = "sha256:" + "a" * 64
     workload_pin = WorkloadPin(
         source_uri="bundle://python-loop/1.0.0",

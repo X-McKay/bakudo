@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bakudo.ai/schemas/evaluation-exposure.schema.json",
+  "title": "EvaluationExposureRecord",
+  "description": "Append-only provenance for restricted validation or holdout benchmark exposure. It is not task-execution, verifier, reward, or promotion evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "schemaVersion",
+    "id",
+    "experimentId",
+    "partition",
+    "purpose",
+    "visibility",
+    "recordedBy",
+    "authorizationRef",
+    "baselineRef",
+    "candidateRefs",
+    "corpus",
+    "taskPins",
+    "recordedAt"
+  ],
+  "properties": {
+    "apiVersion": { "const": "bakudo.ai/v1alpha1" },
+    "kind": { "const": "EvaluationExposureRecord" },
+    "schemaVersion": { "const": "1" },
+    "id": { "type": "string", "pattern": "^exposure_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "experimentId": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "partition": { "enum": ["validation", "holdout"] },
+    "purpose": { "enum": ["validation-selection", "holdout-confirmation"] },
+    "visibility": { "const": "restricted" },
+    "recordedBy": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "authorizationRef": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "baselineRef": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "candidateRefs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "corpus": { "$ref": "#/$defs/corpusPin" },
+    "taskPins": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/taskPin" }
+    },
+    "recordedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "corpusPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceURI", "revision"],
+      "properties": {
+        "sourceURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "revision": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "taskPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceURI", "corpusRevision", "name", "version", "bundleDigest", "verifierDigest", "partition"],
+      "properties": {
+        "sourceURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "corpusRevision": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "version": { "type": "integer", "minimum": 1 },
+        "bundleDigest": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "verifierDigest": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "partition": { "enum": ["validation", "holdout"] }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "partition": { "const": "validation" } }, "required": ["partition"] },
+      "then": { "properties": { "purpose": { "const": "validation-selection" } } }
+    },
+    {
+      "if": { "properties": { "partition": { "const": "holdout" } }, "required": ["partition"] },
+      "then": {
+        "properties": {
+          "purpose": { "const": "holdout-confirmation" },
+          "candidateRefs": { "maxItems": 1 }
+        }
+      }
+    }
+  ]
+}

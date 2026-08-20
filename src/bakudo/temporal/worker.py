@@ -205,9 +205,7 @@ def _wire_dependencies() -> None:
     from . import _impl
 
     performance_capture = None
-    if _impl.resolve_sandbox_mode() == "abox" and os.environ.get(
-        "BAKUDO_ARTIFACT_ROOT"
-    ):
+    if _impl.resolve_sandbox_mode() == "abox" and os.environ.get("BAKUDO_ARTIFACT_ROOT"):
         from ..abox.capture import configured_profile_capture_service
 
         performance_capture = configured_profile_capture_service()

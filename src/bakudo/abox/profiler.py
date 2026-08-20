@@ -64,8 +64,7 @@ class CaptureExecutor(Protocol):
         env: Mapping[str, str],
         timeout: float,
         max_output_chars: int,
-    ) -> ProfileProcessResult:
-        ...
+    ) -> ProfileProcessResult: ...
 
 
 def _read_bounded_pipe(
@@ -167,9 +166,7 @@ def _safe_cwd(workspace: Path, relative_cwd: str) -> Path:
 
 
 def _capture_environment(declared: Mapping[str, str]) -> dict[str, str]:
-    environment = {
-        name: os.environ[name] for name in _BASE_ENVIRONMENT_NAMES if name in os.environ
-    }
+    environment = {name: os.environ[name] for name in _BASE_ENVIRONMENT_NAMES if name in os.environ}
     environment.update(declared)
     return environment
 
@@ -281,8 +278,7 @@ class AboxProfilerRunner:
             hotspots = self._adapter.normalize(
                 captured,
                 SymbolMap(
-                    repository_root=request.symbol_root
-                    or request.workspace.resolve().as_posix()
+                    repository_root=request.symbol_root or request.workspace.resolve().as_posix()
                 ),
             )
             expected_digest = f"sha256:{hashlib.sha256(captured.content).hexdigest()}"

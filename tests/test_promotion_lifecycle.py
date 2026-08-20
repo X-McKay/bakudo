@@ -18,20 +18,32 @@ from bakudo.registry.records import VERSION_STATUSES, AgentVersionRecord
 
 def _record(name="add-feature", version=1, status="candidate", **kw):
     return AgentVersionRecord(
-        name=name, version=version, status=status,
-        spec_yaml=f"metadata:\n  name: {name}\n  version: {version}\n", **kw,
+        name=name,
+        version=version,
+        status=status,
+        spec_yaml=f"metadata:\n  name: {name}\n  version: {version}\n",
+        **kw,
     )
 
 
 def _card(
-    score=0.9, *, subject_id="add-feature@2", cases=30, safety=0, critical=0,
+    score=0.9,
+    *,
+    subject_id="add-feature@2",
+    cases=30,
+    safety=0,
+    critical=0,
     passed=("schema", "safety", "regression", "role-specific", "code"),
 ):
     suites = dict.fromkeys(passed, score)
     return Scorecard(
-        subject_type="agent_spec_version", subject_id=subject_id,
-        overall_score=score, cases_total=cases, suites=suites,
-        passed_suites=list(passed), safety_regressions=safety,
+        subject_type="agent_spec_version",
+        subject_id=subject_id,
+        overall_score=score,
+        cases_total=cases,
+        suites=suites,
+        passed_suites=list(passed),
+        safety_regressions=safety,
         critical_failures=critical,
     )
 
@@ -41,7 +53,12 @@ def _card(
 
 def test_version_statuses_cover_the_design_state_machine():
     assert set(VERSION_STATUSES) == {
-        "candidate", "pending_human", "canary", "active", "rejected", "archived",
+        "candidate",
+        "pending_human",
+        "canary",
+        "active",
+        "rejected",
+        "archived",
     }
 
 
@@ -90,9 +107,7 @@ def test_set_version_status_updates_record_and_appends_event():
     ledger.upsert_agent_version(_record(version=1, status="active"))
     ledger.upsert_agent_version(_record(version=2, status="candidate"))
 
-    updated = ledger.set_version_status(
-        "add-feature", 2, "rejected", reason="safety regression"
-    )
+    updated = ledger.set_version_status("add-feature", 2, "rejected", reason="safety regression")
     assert updated.status == "rejected"
     assert updated.status_reason == "safety regression"
     assert updated.decided_at is not None
@@ -101,8 +116,10 @@ def test_set_version_status_updates_record_and_appends_event():
     events = ledger.events("agent:add-feature@2")
     assert [e.event_type for e in events] == ["version_status"]
     assert events[0].payload == {
-        "name": "add-feature", "version": 2,
-        "status": "rejected", "reason": "safety regression",
+        "name": "add-feature",
+        "version": 2,
+        "status": "rejected",
+        "reason": "safety regression",
     }
 
 
@@ -295,14 +312,16 @@ def test_completed_runs_filters_by_ref_and_orders_recent_first():
 
     ledger = InMemoryLedger()
     for i, (ref, finish) in enumerate(
-        [("explore@2", True), ("explore@1", True), ("explore@2", True),
-         ("explore@2", False)]
+        [("explore@2", True), ("explore@1", True), ("explore@2", True), ("explore@2", False)]
     ):
         run_id = f"run_CR{i}"
         ledger.create_run(
             RunRecord(
-                id=run_id, temporal_workflow_id=f"wf-{i}", abox_task_id=run_id,
-                objective_id="obj_CR", agent_ref=ref,
+                id=run_id,
+                temporal_workflow_id=f"wf-{i}",
+                abox_task_id=run_id,
+                objective_id="obj_CR",
+                agent_ref=ref,
             )
         )
         if finish:
@@ -373,17 +392,27 @@ def test_repeated_canary_graduation_promotes_once(monkeypatch):
     from bakudo.registry.records import RunPhase, RunRecord
 
     ledger.create_run(
-        RunRecord(id="run_C1", temporal_workflow_id="wf", abox_task_id="run_C1",
-                  objective_id="obj", agent_ref="explore@2")
+        RunRecord(
+            id="run_C1",
+            temporal_workflow_id="wf",
+            abox_task_id="run_C1",
+            objective_id="obj",
+            agent_ref="explore@2",
+        )
     )
     ledger.set_phase("run_C1", RunPhase.agent_running)
     ledger.finish_run("run_C1", RunPhase.completed, {"status": "success"})
     from bakudo.evals.result import EvalResult
 
-    ledger.record_eval(EvalResult(
-        subject_type="run", subject_id="run_C1", suite_name="task",
-        score=0.9, passed=True,
-    ))
+    ledger.record_eval(
+        EvalResult(
+            subject_type="run",
+            subject_id="run_C1",
+            suite_name="task",
+            score=0.9,
+            passed=True,
+        )
+    )
 
     monkeypatch.setattr(_impl.DEPS, "ledger", ledger)
     monkeypatch.setattr(_impl, "PROMOTION_POLICY", PromotionPolicy(canary_min_runs=1))

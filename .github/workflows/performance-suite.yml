@@ -1,0 +1,87 @@
+# Trusted latency-evidence lane. This workflow is intentionally manual and
+# self-hosted only: a generic GitHub-hosted runner is not a performance lab.
+name: Trusted performance suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Versioned PerformanceSuiteSpec path available on the lab runner
+        required: true
+        type: string
+      repository:
+        description: Registered target repository name below BAKUDO_REPO_ROOT
+        required: true
+        type: string
+      workload:
+        description: Pinned scenario workload NAME@VERSION from the approved suite
+        required: true
+        type: string
+      baseline_ref:
+        description: Immutable baseline git revision
+        required: true
+        type: string
+      candidate_ref:
+        description: Immutable candidate git revision
+        required: true
+        type: string
+      primary_metric:
+        description: Scenario primary metric
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    # The label is an operational admission control, not documentation. Do
+    # not add github-hosted labels or a hosted-runner fallback to this job.
+    runs-on: [self-hosted, linux, x64, bakudo-performance]
+    environment: performance-lab
+    timeout-minutes: 90
+    concurrency:
+      group: bakudo-performance-lab
+      cancel-in-progress: false
+    env:
+      # The preflight checks this explicit operator assertion in addition to
+      # GitHub's RUNNER_ENVIRONMENT=self-hosted identity.
+      BAKUDO_PERFORMANCE_RUNNER: trusted
+      BAKUDO_SANDBOX: abox
+      BAKUDO_WORKLOAD_SOURCE: ${{ vars.BAKUDO_PERFORMANCE_WORKLOAD_SOURCE }}
+      BAKUDO_PERFORMANCE_ENVIRONMENT: ${{ vars.BAKUDO_PERFORMANCE_ENVIRONMENT }}
+      BAKUDO_REPO_ROOT: ${{ vars.BAKUDO_REPO_ROOT }}
+      BAKUDO_POSTGRES_DSN: ${{ secrets.BAKUDO_PERFORMANCE_POSTGRES_DSN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install locked control plane
+        run: uv sync --all-extras --locked --python 3.11
+      - name: Fail-closed lab preflight
+        run: .venv/bin/bakudo performance preflight --json
+      - name: Resolve the approved scenario suite
+        env:
+          BAKUDO_PERFORMANCE_SUITE: ${{ inputs.suite }}
+        run: .venv/bin/bakudo workload validate-suite "$BAKUDO_PERFORMANCE_SUITE" --json
+      - name: Measure the requested suite scenario
+        env:
+          BAKUDO_PERFORMANCE_REPOSITORY: ${{ inputs.repository }}
+          BAKUDO_PERFORMANCE_WORKLOAD: ${{ inputs.workload }}
+          BAKUDO_PERFORMANCE_BASELINE_REF: ${{ inputs.baseline_ref }}
+          BAKUDO_PERFORMANCE_CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          BAKUDO_PERFORMANCE_PRIMARY_METRIC: ${{ inputs.primary_metric }}
+        run: >-
+          .venv/bin/bakudo performance compare --sync
+          --repo "$BAKUDO_PERFORMANCE_REPOSITORY"
+          --workload "$BAKUDO_PERFORMANCE_WORKLOAD"
+          --baseline-ref "$BAKUDO_PERFORMANCE_BASELINE_REF"
+          --candidate-ref "$BAKUDO_PERFORMANCE_CANDIDATE_REF"
+          --primary-metric "$BAKUDO_PERFORMANCE_PRIMARY_METRIC"
+          --json

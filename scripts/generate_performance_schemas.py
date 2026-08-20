@@ -15,6 +15,7 @@ from bakudo.performance.models import (
     PerformanceSnapshot,
     WorkloadSpec,
 )
+from bakudo.performance.suite import PerformanceSuiteSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = REPO_ROOT / "schemas"
@@ -53,6 +54,15 @@ def main(*, check: bool = False) -> None:
         workload,
         schema_id="https://bakudo.ai/schemas/workload-spec.schema.json",
         title="WorkloadSpec",
+        check=check,
+    )
+
+    suite = PerformanceSuiteSpec.model_json_schema(by_alias=True)
+    _write(
+        "performance-suite-spec.schema.json",
+        suite,
+        schema_id="https://bakudo.ai/schemas/performance-suite-spec.schema.json",
+        title="PerformanceSuiteSpec",
         check=check,
     )
 

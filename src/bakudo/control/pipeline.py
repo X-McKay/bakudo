@@ -129,9 +129,7 @@ def _run_objective_impl(
         attributes={SpanAttribute.RUN_ID: run_id},
     ) as active:
         outcome = sandbox(bundle)
-        active.set_attribute(
-            SpanAttribute.STATUS, "completed" if outcome.succeeded else "failed"
-        )
+        active.set_attribute(SpanAttribute.STATUS, "completed" if outcome.succeeded else "failed")
     ledger.set_phase(run_id, RunPhase.collecting_artifacts)
 
     if not outcome.succeeded or outcome.result is None:

@@ -23,7 +23,8 @@ def test_denied_command_fails_safety_eval_in_pipeline():
     objective = Objective(type="add-feature", repo="bakudo", title="t")
 
     result = run_objective(
-        objective, spec,
+        objective,
+        spec,
         sandbox=lambda b: local_sandbox(b, offline_driver=_denying_driver),
     )
 

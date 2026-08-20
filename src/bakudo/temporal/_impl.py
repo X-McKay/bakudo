@@ -42,10 +42,12 @@ from ..performance.models import (
 )
 from ..performance.pins import EnvironmentPin, RevisionPin, WorkloadPin
 from ..performance.profiler import (
+    ProfileCaptureError,
     ProfileExecutionError,
     ProfilerUnsupportedError,
     ProfileTimeoutError,
 )
+from ..performance.readiness import PerformanceRunnerReadinessError
 from ..performance.revisions import pin_repository_revision
 from ..performance.service import (
     PerformanceMeasurementService,
@@ -518,9 +520,7 @@ def _load_performance_workload(
     workload = source.load(ref)
     expected = _expected_workload_pin(expected_pin)
     if expected is not None and workload.pin != expected:
-        raise WorkloadLoadError(
-            f"loaded workload {ref!r} does not match the immutable request pin"
-        )
+        raise WorkloadLoadError(f"loaded workload {ref!r} does not match the immutable request pin")
     return workload
 
 
@@ -589,9 +589,7 @@ def prepare_artifact_experiment(spec_document: dict[str, Any]) -> dict[str, Any]
                 "resolved workload source kind does not match subject.workloadRef"
             )
         if workload.spec.subject.repo != subject.repository:
-            raise WorkloadLoadError(
-                "resolved workload repository does not match artifact subject"
-            )
+            raise WorkloadLoadError("resolved workload repository does not match artifact subject")
         DEPS.ledger.record_workload_version(workload.spec, workload.pin)
         environment = configured_environment_pin()
         return {
@@ -630,9 +628,7 @@ def analyze_artifact_experiment(input: dict[str, Any]) -> dict[str, Any]:
     provider = ArtifactSubjectBinding(spec, ledger=DEPS.ledger, measure=measurement_id)
     experiment_id = str(input["experiment_id"])
     batch = provider.collect(experiment_id)
-    return assemble_observation_result(
-        spec, provider, batch, experiment_id=experiment_id
-    )
+    return assemble_observation_result(spec, provider, batch, experiment_id=experiment_id)
 
 
 def _measurement_collision(
@@ -678,9 +674,7 @@ def run_performance_measurement(
 
     existing = DEPS.ledger.get_measurement(inp.measurement_id)
     if existing is not None:
-        _measurement_collision(
-            existing, inp.workload, workload_pin, revision, environment
-        )
+        _measurement_collision(existing, inp.workload, workload_pin, revision, environment)
         return _performance_result(inp.operation_id, kind, existing.status.value, record=existing)
 
     invoker = DEPS.performance_invoker_or_none()
@@ -705,6 +699,13 @@ def run_performance_measurement(
             environment,
             integrity=integrity,
             record_id=inp.measurement_id,
+        )
+    except PerformanceRunnerReadinessError as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.unsupported.value,
+            reason=_performance_reason(exc),
         )
     except (KeyError, WorkloadLoadError, PerformanceServiceError, ValueError) as exc:
         return _performance_result(
@@ -837,6 +838,13 @@ def run_performance_comparison(
             candidate_record_id=inp.candidate_measurement_id,
             comparison_id=inp.comparison_id,
         )
+    except PerformanceRunnerReadinessError as exc:
+        return _performance_result(
+            inp.operation_id,
+            kind,
+            RecordStatus.unsupported.value,
+            reason=_performance_reason(exc),
+        )
     except (KeyError, WorkloadLoadError, PerformanceServiceError, ValueError) as exc:
         return _performance_result(
             inp.operation_id,
@@ -884,9 +892,7 @@ def run_performance_capture(
             or existing.environment.model_copy(
                 update={"profiler_adapter": None, "profiler_version": None}
             )
-            != environment.model_copy(
-                update={"profiler_adapter": None, "profiler_version": None}
-            )
+            != environment.model_copy(update={"profiler_adapter": None, "profiler_version": None})
             or existing.descriptor.name != inp.profiler
         ):
             raise PerformanceServiceError(
@@ -933,9 +939,7 @@ def run_performance_capture(
             or snapshot.environment.model_copy(
                 update={"profiler_adapter": None, "profiler_version": None}
             )
-            != environment.model_copy(
-                update={"profiler_adapter": None, "profiler_version": None}
-            )
+            != environment.model_copy(update={"profiler_adapter": None, "profiler_version": None})
             or snapshot.descriptor.name != profiler.name
             or snapshot.descriptor.adapter != profiler.adapter
             or snapshot.environment.profiler_adapter != profiler.adapter
@@ -957,7 +961,11 @@ def run_performance_capture(
             RecordStatus.timed_out.value,
             reason=_performance_reason(exc),
         )
-    except ProfileExecutionError as exc:
+    # ProfileCaptureError last: it is the base of the typed arms above, so it
+    # sweeps up the remaining deterministic capture-binding failures (for
+    # example a fresh-abox binding rejection) instead of letting Temporal
+    # retry them as opaque activity errors.
+    except (ProfileExecutionError, ProfileCaptureError) as exc:
         return _performance_result(
             inp.operation_id,
             kind,

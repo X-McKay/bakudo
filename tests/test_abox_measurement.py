@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from bakudo.abox import measurement as measurement_module
 from bakudo.abox.measurement import AboxMeasurementError, AboxWorkloadInvoker
 from bakudo.abox.runner import ExecResult
 from bakudo.performance.models import (
@@ -16,6 +17,7 @@ from bakudo.performance.models import (
     canonical_digest,
 )
 from bakudo.performance.pins import EnvironmentPin, FileDigest, RevisionPin, WorkloadPin
+from bakudo.performance.readiness import PerformanceRunnerReadinessError
 from bakudo.performance.source import LoadedWorkload, WorkloadProvenance
 
 DIGEST = "sha256:" + "a" * 64
@@ -154,6 +156,88 @@ def test_invocation_uses_pinned_input_argv_and_returns_declared_metric(tmp_path:
     assert payload["files"] == {"w0-run.py": "run.py"}
 
 
+def test_invocation_forwards_declared_guest_cpu_and_memory_limits(tmp_path: Path) -> None:
+    executor = _Executor(ExecResult(0, stdout=_marker()))
+    loaded = _loaded(tmp_path)
+    document = loaded.spec.model_dump(by_alias=True, mode="json")
+    document["environment"].update({"cpuCount": 2, "memoryMb": 1024})
+    constrained = loaded.model_copy(update={"spec": type(loaded.spec).model_validate(document)})
+
+    outcome = AboxWorkloadInvoker(executor=executor).invoke(
+        constrained,
+        _revision(tmp_path),
+        _environment(),
+        phase=InvocationPhase.measured,
+        ordinal=0,
+    )
+
+    assert outcome.status is RecordStatus.completed
+    run_argv = next(argv for argv in executor.calls if argv[1] == "run")
+    assert run_argv[run_argv.index("--cpus") + 1] == "2"
+    assert run_argv[run_argv.index("--memory") + 1] == "1024"
+
+
+def test_invocation_runs_preflight_before_creating_a_guest(tmp_path: Path) -> None:
+    executor = _Executor(ExecResult(0, stdout=_marker()))
+    expected = _environment()
+    observed: list[tuple[EnvironmentPin, str]] = []
+
+    def preflight(environment: EnvironmentPin, source: str) -> None:
+        observed.append((environment, source))
+        raise RuntimeError("runner not admitted")
+
+    with pytest.raises(RuntimeError, match="runner not admitted"):
+        AboxWorkloadInvoker(executor=executor, preflight=preflight).invoke(
+            _loaded(tmp_path),
+            _revision(tmp_path),
+            expected,
+            phase=InvocationPhase.measured,
+            ordinal=0,
+        )
+
+    assert observed == [(expected, (tmp_path / "workload").as_uri())]
+    assert executor.calls == []
+
+
+def test_default_invocation_fails_closed_before_creating_a_guest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    for name in (
+        "BAKUDO_PERFORMANCE_RUNNER",
+        "BAKUDO_SANDBOX",
+        "BAKUDO_POSTGRES_DSN",
+        "BAKUDO_WORKLOAD_SOURCE",
+        "BAKUDO_PERFORMANCE_ENVIRONMENT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(PerformanceRunnerReadinessError, match="preflight failed"):
+        AboxWorkloadInvoker().invoke(
+            _loaded(tmp_path),
+            _revision(tmp_path),
+            _environment(),
+            phase=InvocationPhase.measured,
+            ordinal=0,
+        )
+
+
+def test_trusted_preflight_checks_the_configured_abox_binary(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def record(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return kwargs["environment"]
+
+    monkeypatch.setattr(measurement_module, "require_trusted_performance_runner", record)
+    invoker = AboxWorkloadInvoker(abox_bin="/opt/abox/bin/abox")
+
+    assert invoker.requires_trusted_readiness
+    assert invoker._preflight is not None
+    invoker._preflight(_environment(), "file:///srv/workloads")
+
+    assert captured["abox_bin"] == "/opt/abox/bin/abox"
+
+
 def test_nested_workload_layouts_are_staged_flat_and_reconstructed(tmp_path: Path) -> None:
     executor = _Executor(ExecResult(0, stdout=_marker()))
     loaded = _loaded(tmp_path)
@@ -234,9 +318,7 @@ def test_guest_argv_rewrites_only_safe_member_references(tmp_path: Path) -> None
     absolute = str((loaded.root / "run.py").resolve())
     document = loaded.spec.model_dump(by_alias=True, mode="json")
     document["command"]["argv"] = ["python", absolute, "../run.py", "run.py"]
-    with_unsafe = loaded.model_copy(
-        update={"spec": type(loaded.spec).model_validate(document)}
-    )
+    with_unsafe = loaded.model_copy(update={"spec": type(loaded.spec).model_validate(document)})
 
     argv = AboxWorkloadInvoker._guest_argv(with_unsafe)
 

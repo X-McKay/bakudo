@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from bakudo.experiments.design import analysis_seed
 from bakudo.experiments.models import (
     AgentSpecSubject,
     ExperimentMetadata,
@@ -136,9 +137,7 @@ def dev_env(monkeypatch):
 def _spec(**overrides) -> ExperimentSpec:
     baseline = overrides.pop("baseline", BASELINE)
     candidates = overrides.pop("candidates", [CANDIDATE])
-    task_selector = overrides.pop(
-        "task_selector", TaskSelector(families=["debugging"], count=1)
-    )
+    task_selector = overrides.pop("task_selector", TaskSelector(families=["debugging"], count=1))
     use_holdout = overrides.pop("use_holdout", False)
     fields: dict = dict(
         metadata=ExperimentMetadata(name="exp-test"),
@@ -181,7 +180,7 @@ def stub_by_arm(objective, agent_ref, budgets, network):
 # --------------------------------------------------------------------------
 
 
-def test_compare_end_to_end_offline(registry):
+def test_one_paired_observation_cannot_promote_by_default(registry):
     led = InMemoryLedger()
     spec_compare = _spec()
 
@@ -195,10 +194,71 @@ def test_compare_end_to_end_offline(registry):
 
     c = result["comparison"][CANDIDATE]
     assert c["primary"]["verdict"] == "candidate"
-    assert c["eligibleForPromotion"] is True
-    assert led.get_experiment(result["experimentId"])["status"] == "completed"
+    assert c["primary"]["pairedObservations"] == 1
+    assert c["promotionEvidence"] == {
+        "observedPairedObservations": 1,
+        "minimumPairedObservations": 5,
+        "sufficient": False,
+    }
+    assert c["eligibleForPromotion"] is False
+    assert result["analysisSeed"] == analysis_seed(result["experimentId"])
+    assert result["analysisVersion"] == "paired-bootstrap-v1"
+    stored = led.get_experiment(result["experimentId"])
+    assert stored["status"] == "completed"
+    assert stored["result"]["analysisSeed"] == result["analysisSeed"]
     expected_matrix_size = 2  # 1 task x 1 repetition x 2 arms
     assert len(led.list_trials(result["experimentId"])) == expected_matrix_size
+
+
+def test_agent_promotion_is_eligible_with_sufficient_distinct_task_pairs(registry):
+    for index in range(2, 6):
+        _write_task(
+            registry.root,
+            f"bug-fix-{index}",
+            "Fix the off-by-one bug",
+            app_py=_APP_PY,
+        )
+    source = DirectoryTaskSource(registry.root)
+    led = InMemoryLedger()
+    spec_compare = _spec(task_selector=TaskSelector(families=["debugging"], count=5))
+
+    result = run_experiment(
+        spec_compare,
+        task_source=source,
+        ledger=led,
+        pipeline_fn=stub_by_arm,
+        verifier_runner=local_verifier_runner,
+    )
+
+    candidate = result["comparison"][CANDIDATE]
+    assert candidate["primary"]["pairedObservations"] == 5
+    assert candidate["promotionEvidence"]["sufficient"] is True
+    assert candidate["eligibleForPromotion"] is True
+
+
+def test_bootstrap_analysis_uses_the_persisted_derived_seed(registry, monkeypatch):
+    from bakudo.experiments import runner as experiment_runner
+
+    observed_seeds: list[int] = []
+    actual_analyze = experiment_runner.analyze
+
+    def capture_seed(*args, **kwargs):
+        observed_seeds.append(kwargs["seed"])
+        return actual_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(experiment_runner, "analyze", capture_seed)
+    result = run_experiment(
+        _spec(),
+        task_source=registry,
+        ledger=InMemoryLedger(),
+        pipeline_fn=stub_by_arm,
+        verifier_runner=local_verifier_runner,
+    )
+
+    assert observed_seeds == [
+        experiment_runner._metric_analysis_seed(result["analysisSeed"], CANDIDATE, "task_success")
+    ]
+    assert observed_seeds[0] != 0
 
 
 def test_profile_mode_no_comparison(registry):

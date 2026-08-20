@@ -89,6 +89,45 @@ Runtime/model pins remain in `TrialRecord.runtime_pins`. Keeping them separate
 makes it possible to compare a fixed task under different runtime stacks while
 still proving exactly which evaluator was used.
 
+## Public-source calibration provenance
+
+An imported public task must carry `metadata.provenance.publicSource` with the
+source dataset URI/revision and instance ID, repository URI/license/base commit,
+OCI image digest, acquisition time, transform digest, and an approved rights
+review. The runtime validates this structured metadata, and makes a public
+source task **development-only** and `eligibleForPromotion: false`; it cannot
+be reclassified as validation or holdout evidence by editing corpus YAML.
+
+The source record contains digests, never a reference patch or privileged test
+patch. Keep those inputs in the restricted artifact store while validating the
+adapter. A public import may become a useful calibration task only after its
+image can be reproduced and the normal pristine/reference/negative-control
+checks pass. A public task never becomes a sealed holdout merely because its
+bundle was kept private.
+
+## Restricted-partition exposure provenance
+
+Validation and holdout task identities are not public calibration material.
+Before a restricted benchmark evaluation starts, the control plane records an
+append-only `EvaluationExposureRecord` in the exposure ledger. It identifies
+the experiment, corpus URI/revision, exact frozen task pins (including their
+restricted partition), baseline and candidate refs, requesting principal, and
+authorization reference—but never
+task content, verifier output, rewards, or a `TrialRecord`.
+
+The contract accepts only two stages:
+
+- `validation-selection` for the restricted validation partition, where more
+  than one candidate may be compared;
+- `holdout-confirmation` for the holdout partition, where exactly one
+  pre-registered candidate may be compared with its baseline.
+
+This is an access/provenance audit, not execution or promotion evidence. A
+`TrialRecord` and its independent verifier still establish episode outcomes;
+the promotion policy evaluates those outcomes separately. The exposure ledger
+exists to make tuning, confirmation, and holdout access reviewable without
+leaking restricted benchmark material into public calibration datasets.
+
 ## Corpus CI
 
 The benchmark repository's CI consumes Bakudo through public ports only. It:

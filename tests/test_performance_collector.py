@@ -160,9 +160,9 @@ def test_collector_orders_comparisons_and_emits_once_across_cycles() -> None:
     assert first.performance_regressions[0].comparison_id == _comparison(2).id
     assert first.performance_regressions[0].top_hotspot_key == f"hotspot:{_comparison(2).id}"
     assert second.performance_regressions == []
-    assert {
-        decision.reason for decision in collector.last_decisions
-    } == {RegressionDecisionReason.duplicate_observation}
+    assert {decision.reason for decision in collector.last_decisions} == {
+        RegressionDecisionReason.duplicate_observation
+    }
 
 
 def test_one_off_regression_is_pending_and_composite_preserves_signal_type() -> None:
@@ -185,9 +185,7 @@ def test_one_off_regression_is_pending_and_composite_preserves_signal_type() -> 
 
 def test_repository_active_signal_cap_suppresses_second_workload() -> None:
     other = _workload("throughput")
-    source = _Source(
-        [_comparison(1), _comparison(2), _comparison(3, other), _comparison(4, other)]
-    )
+    source = _Source([_comparison(1), _comparison(2), _comparison(3, other), _comparison(4, other)])
     collector = PerformanceRegressionCollector(
         source,
         [_approval(), _approval(other)],

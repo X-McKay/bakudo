@@ -82,8 +82,7 @@ class ApprovedWorkload:
         if len(self.baseline_commit_shas) != len(set(self.baseline_commit_shas)):
             raise ValueError("baseline_commit_shas cannot contain duplicates")
         if any(
-            re.fullmatch(r"[0-9a-f]{40,64}", commit) is None
-            for commit in self.baseline_commit_shas
+            re.fullmatch(r"[0-9a-f]{40,64}", commit) is None for commit in self.baseline_commit_shas
         ):
             raise ValueError("baseline_commit_shas must contain lowercase git object IDs")
 
@@ -485,9 +484,7 @@ def evaluate_regression(
     advanced = _advance(
         current,
         comparison,
-        phase=RegressionPhase.clear
-        if current.phase is RegressionPhase.pending
-        else current.phase,
+        phase=RegressionPhase.clear if current.phase is RegressionPhase.pending else current.phase,
         consecutive_regressions=0
         if current.phase is RegressionPhase.pending
         else current.consecutive_regressions,
@@ -508,9 +505,7 @@ class _StrictFrozen(BaseModel):
 
 class PerformanceDecisionPolicyInput(_StrictFrozen):
     confidence: float = Field(gt=0, lt=1)
-    minimum_relative_improvement: float = Field(
-        alias="minimumRelativeImprovement", gt=0
-    )
+    minimum_relative_improvement: float = Field(alias="minimumRelativeImprovement", gt=0)
     protected_metrics: tuple[MetricName, ...] = Field(
         default_factory=tuple, alias="protectedMetrics"
     )

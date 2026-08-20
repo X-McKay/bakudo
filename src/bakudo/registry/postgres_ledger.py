@@ -923,9 +923,7 @@ class PostgresLedger:
         )
 
     # --- experiments ---
-    _EXPERIMENT_COLUMNS = (
-        "id, name, subject_kind, spec, status, result, created_at, updated_at"
-    )
+    _EXPERIMENT_COLUMNS = "id, name, subject_kind, spec, status, result, created_at, updated_at"
 
     def _ensure_experiments_table(self, conn: Any) -> None:
         """Self-migrate the ``experiments`` table (idempotent), mirroring
@@ -1074,9 +1072,7 @@ class PostgresLedger:
             )
 
     def get_measurement(self, measurement_id: str) -> MeasurementRecord | None:
-        row = self._one(
-            "select record from measurement_records where id = %s", (measurement_id,)
-        )
+        row = self._one("select record from measurement_records where id = %s", (measurement_id,))
         return (
             MeasurementRecord.model_validate(self._performance_json(row[0]))
             if row is not None
@@ -1121,9 +1117,7 @@ class PostgresLedger:
             )
 
     def get_performance_snapshot(self, snapshot_id: str) -> PerformanceSnapshot | None:
-        row = self._one(
-            "select snapshot from performance_snapshots where id = %s", (snapshot_id,)
-        )
+        row = self._one("select snapshot from performance_snapshots where id = %s", (snapshot_id,))
         return (
             PerformanceSnapshot.model_validate(self._performance_json(row[0]))
             if row is not None
@@ -1153,9 +1147,7 @@ class PostgresLedger:
                 ),
             )
 
-    def get_performance_comparison(
-        self, comparison_id: str
-    ) -> PerformanceComparison | None:
+    def get_performance_comparison(self, comparison_id: str) -> PerformanceComparison | None:
         row = self._one(
             "select comparison from performance_comparisons where id = %s",
             (comparison_id,),
@@ -1184,8 +1176,7 @@ class PostgresLedger:
             tuple(params),
         )
         return [
-            PerformanceComparison.model_validate(self._performance_json(row[0]))
-            for row in rows
+            PerformanceComparison.model_validate(self._performance_json(row[0])) for row in rows
         ]
 
     def record_performance_regression(self, signal: PerformanceRegressionSignal) -> None:
@@ -1213,9 +1204,7 @@ class PostgresLedger:
         self, repository: str | None = None
     ) -> list[PerformanceRegressionSignal]:
         if repository is None:
-            rows = self._all(
-                "select signal from performance_regressions order by created_at"
-            )
+            rows = self._all("select signal from performance_regressions order by created_at")
         else:
             rows = self._all(
                 "select signal from performance_regressions where repository = %s "

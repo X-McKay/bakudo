@@ -263,9 +263,7 @@ def test_ensure_schema_soon_defers_connection_failures_to_the_next_op() -> None:
     assert fake.unique_constraints == []  # nothing applied yet
 
     fake.raise_on_constraint = None  # mirror is back
-    graph.upsert_memory(
-        run_id="run-1", memory_id="mem-1", memory_type="repo_fact", confidence=0.8
-    )
+    graph.upsert_memory(run_id="run-1", memory_id="mem-1", memory_type="repo_fact", confidence=0.8)
 
     assert len(fake.unique_constraints) == 8  # schema applied before the op
     assert fake.vector_indexes == [("Memory", ("embedding",), 256, "cosine")]
@@ -344,9 +342,7 @@ def test_upsert_memory_without_embedding_never_mentions_vecf32() -> None:
     the query is built without the embedding assignment instead."""
     graph, fake = make_graph()
 
-    graph.upsert_memory(
-        run_id="run-42", memory_id="mem-1", memory_type="repo_fact", confidence=0.8
-    )
+    graph.upsert_memory(run_id="run-42", memory_id="mem-1", memory_type="repo_fact", confidence=0.8)
 
     (cypher, params) = fake.queries[0]
     assert "vecf32" not in cypher

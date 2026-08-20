@@ -1,0 +1,182 @@
+{
+  "$defs": {
+    "PerformanceScenarioSpec": {
+      "additionalProperties": false,
+      "description": "Metric policy for one immutable workload reference.",
+      "properties": {
+        "minimumPairedSamples": {
+          "default": 20,
+          "maximum": 10000,
+          "minimum": 2,
+          "title": "Minimumpairedsamples",
+          "type": "integer"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "objective": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Objective",
+          "type": "string"
+        },
+        "primaryMetric": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Primarymetric",
+          "type": "string"
+        },
+        "profilerOnRegression": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profileronregression"
+        },
+        "protectedMetrics": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Protectedmetrics",
+          "type": "array"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "workload": {
+          "$ref": "#/$defs/WorkloadRef"
+        }
+      },
+      "required": [
+        "name",
+        "objective",
+        "workload",
+        "primaryMetric"
+      ],
+      "title": "PerformanceScenarioSpec",
+      "type": "object"
+    },
+    "PerformanceSuiteMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "PerformanceSuiteMetadata",
+      "type": "object"
+    },
+    "SourceKind": {
+      "enum": [
+        "directory",
+        "repository",
+        "bundle"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    },
+    "WorkloadRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9-]{0,62}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceKind"
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "source"
+      ],
+      "title": "WorkloadRef",
+      "type": "object"
+    }
+  },
+  "$id": "https://bakudo.ai/schemas/performance-suite-spec.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "bakudo.ai/v1alpha1",
+      "default": "bakudo.ai/v1alpha1",
+      "title": "Apiversion",
+      "type": "string"
+    },
+    "bootstrapResamples": {
+      "default": 10000,
+      "maximum": 1000000,
+      "minimum": 1,
+      "title": "Bootstrapresamples",
+      "type": "integer"
+    },
+    "confidence": {
+      "default": 0.95,
+      "exclusiveMaximum": 1,
+      "exclusiveMinimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "kind": {
+      "const": "PerformanceSuiteSpec",
+      "default": "PerformanceSuiteSpec",
+      "title": "Kind",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/PerformanceSuiteMetadata"
+    },
+    "scenarios": {
+      "items": {
+        "$ref": "#/$defs/PerformanceScenarioSpec"
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "title": "Scenarios",
+      "type": "array"
+    }
+  },
+  "required": [
+    "metadata",
+    "scenarios"
+  ],
+  "title": "PerformanceSuiteSpec",
+  "type": "object"
+}

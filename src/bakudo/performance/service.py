@@ -42,6 +42,7 @@ from .models import (
     canonical_digest,
 )
 from .pins import EnvironmentPin, RevisionPin
+from .readiness import require_trusted_performance_runner
 from .source import LoadedWorkload
 
 
@@ -134,8 +135,7 @@ def _terminal_state(
             (
                 outcome.failure_reason
                 for outcome in outcomes
-                if outcome.status is RecordStatus.failed
-                and outcome.failure_reason is not None
+                if outcome.status is RecordStatus.failed and outcome.failure_reason is not None
             ),
             FailureReason.infrastructure,
         )
@@ -168,9 +168,7 @@ class PerformanceMeasurementService:
     @staticmethod
     def _phase(value: MeasurementPhase) -> InvocationPhase:
         return (
-            InvocationPhase.warmup
-            if value is MeasurementPhase.warmup
-            else InvocationPhase.measured
+            InvocationPhase.warmup if value is MeasurementPhase.warmup else InvocationPhase.measured
         )
 
     def _invoke(
@@ -209,6 +207,25 @@ class PerformanceMeasurementService:
                 phase=phase,
                 status=RecordStatus.failed,
                 failure_reason=FailureReason.adapter,
+            )
+
+    def _require_trusted_runner(
+        self,
+        workload: LoadedWorkload,
+        environment: EnvironmentPin,
+    ) -> None:
+        """Admit the real abox adapter before it can create latency evidence.
+
+        In-memory and synthetic invokers are explicit test/integration ports,
+        not a claim that their samples are production evidence. Only the real
+        abox adapter advertises this admission requirement.
+        """
+
+        if getattr(self._invoker, "requires_trusted_readiness", False):
+            require_trusted_performance_runner(
+                environment=environment,
+                workload_source=workload.provenance.source_uri,
+                abox_bin=getattr(self._invoker, "abox_bin", "abox"),
             )
 
     def _record(
@@ -279,6 +296,7 @@ class PerformanceMeasurementService:
         """Measure one revision in fresh invocations and persist the record."""
 
         _validate_binding(workload, revision)
+        self._require_trusted_runner(workload, environment)
         mismatches = _environment_mismatches(workload, environment)
         started_at = self._clock()
         if mismatches:
@@ -365,15 +383,15 @@ class PerformanceMeasurementService:
 
         _validate_binding(workload, baseline_revision)
         _validate_binding(workload, candidate_revision)
+        self._require_trusted_runner(workload, baseline_environment)
+        self._require_trusted_runner(workload, candidate_environment)
         for environment in (baseline_environment, candidate_environment):
             mismatches = _environment_mismatches(workload, environment)
             if mismatches:
                 raise PerformanceServiceError("; ".join(mismatches))
 
         plan = workload.spec.measurement
-        outcomes: dict[
-            ComparisonSide, dict[InvocationPhase, list[InvocationOutcome]]
-        ] = {
+        outcomes: dict[ComparisonSide, dict[InvocationPhase, list[InvocationOutcome]]] = {
             side: {InvocationPhase.warmup: [], InvocationPhase.measured: []}
             for side in ComparisonSide
         }

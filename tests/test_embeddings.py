@@ -22,19 +22,14 @@ def make_transport(handler) -> httpx.MockTransport:
 
 
 def embedding_response(vectors: list[list[float]], *, shuffle: bool = False) -> httpx.Response:
-    data = [
-        {"object": "embedding", "index": i, "embedding": vec}
-        for i, vec in enumerate(vectors)
-    ]
+    data = [{"object": "embedding", "index": i, "embedding": vec} for i, vec in enumerate(vectors)]
     if shuffle:
         data = list(reversed(data))
     return httpx.Response(200, json={"object": "list", "data": data})
 
 
 def make_embedder(handler, **kwargs) -> OpenAIEmbedder:
-    return OpenAIEmbedder(
-        "http://embed.test/v1", transport=make_transport(handler), **kwargs
-    )
+    return OpenAIEmbedder("http://embed.test/v1", transport=make_transport(handler), **kwargs)
 
 
 def test_embed_posts_openai_format_and_returns_vector() -> None:

@@ -141,11 +141,10 @@ def test_artifact_experiment_uses_persisted_measurement_ids_and_normalizes_direc
     assert candidate["primary"]["meanDelta"] == pytest.approx(3.0)
     assert candidate["primary"]["verdict"] == "candidate"
     assert candidate["eligibleForPromotion"] is True
+    assert "promotionEvidence" not in candidate
     assert ledger.list_trials(result["experimentId"]) == []
     assert len(result["measurementRecords"]) == 6
-    assert {item["kind"] for item in result["observationRecords"]} == {
-        "measurement-record"
-    }
+    assert {item["kind"] for item in result["observationRecords"]} == {"measurement-record"}
     assert all(item["id"].startswith("measurement_") for item in result["observationRecords"])
     stored = ledger.get_experiment(result["experimentId"])
     assert stored is not None
@@ -182,9 +181,7 @@ def test_artifact_incompatible_environment_is_invalid() -> None:
         )
         return _record(request, 10.0 if request.arm == "baseline" else 7.0, environment=environment)
 
-    result = run_experiment(
-        _spec(repetitions=1), ledger=ledger, artifact_measure=measure
-    )
+    result = run_experiment(_spec(repetitions=1), ledger=ledger, artifact_measure=measure)
     primary = result["comparison"]["candidate-1"]["primary"]
 
     assert primary["valid"] is False
