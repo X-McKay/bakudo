@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .source import DirectoryTaskSource, LoadedTask, TaskLoadError
+from .source import DirectoryTaskSource, LoadedTask, TaskLoadError, iter_task_files
 
 
 class BundleManifest(BaseModel):
@@ -61,10 +61,7 @@ def publish_bundle(task: LoadedTask, output_dir: Path) -> Path:
 
     with tarfile.open(artifact, "w", format=tarfile.USTAR_FORMAT) as archive:
         archive.addfile(_tar_info("bundle.json", len(manifest_bytes)), io.BytesIO(manifest_bytes))
-        for path in sorted(
-            (item for item in task.path.rglob("*") if item.is_file()),
-            key=lambda item: item.relative_to(task.path).as_posix(),
-        ):
+        for path in iter_task_files(task.path):
             relative = path.relative_to(task.path).as_posix()
             data = path.read_bytes()
             archive.addfile(_tar_info(f"task/{relative}", len(data)), io.BytesIO(data))

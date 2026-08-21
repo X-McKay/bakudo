@@ -147,6 +147,47 @@ def _cmd_skill_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_product_agent_run(args: argparse.Namespace) -> int:
+    """Execute the versioned no-eval black-box product-agent contract."""
+
+    import signal
+    import threading
+
+    from .product_agent import ProductAgentInputError, run_product_agent
+
+    cancelled = threading.Event()
+    installed: dict[int, Any] = {}
+
+    def request_cancellation(_signum: int, _frame: Any) -> None:
+        cancelled.set()
+
+    # A Harbor deadline first sends SIGTERM. Convert it into AboxRunner's
+    # cooperative cancellation event so its ``stop --clean`` finally block can
+    # complete instead of leaving a stale VM/worktree behind.
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            installed[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_cancellation)
+        try:
+            run_product_agent(
+                protocol=args.protocol,
+                workspace=args.workspace,
+                instruction_file=args.instruction_file,
+                output_dir=args.output_dir,
+                cancel_event=cancelled,
+            )
+        except ProductAgentInputError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - protocol launch failure
+            print(f"error: product-agent protocol failed: {type(exc).__name__}", file=sys.stderr)
+            return 1
+    finally:
+        for restored_signum, previous in installed.items():
+            signal.signal(restored_signum, previous)
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from .doctor import build_doctor_report
 
@@ -1385,6 +1426,25 @@ Examples:
     p_skill_list = skill_sub.add_parser("list", help="List discovered runtime skills.")
     p_skill_list.add_argument("--json", action="store_true", help="Emit JSON.")
     p_skill_list.set_defaults(func=_cmd_skill_list)
+
+    p_product_agent = sub.add_parser(
+        "product-agent",
+        help="Run Bakudo through its versioned black-box no-eval process contract.",
+    )
+    product_agent_sub = p_product_agent.add_subparsers(
+        dest="product_agent_command",
+        required=True,
+        metavar="COMMAND",
+    )
+    p_product_agent_run = product_agent_sub.add_parser(
+        "run",
+        help="Run one self-hosted Bakudo workspace in abox and emit a patch artifact.",
+    )
+    p_product_agent_run.add_argument("--protocol", required=True, choices=["v1"])
+    p_product_agent_run.add_argument("--workspace", required=True)
+    p_product_agent_run.add_argument("--instruction-file", required=True)
+    p_product_agent_run.add_argument("--output-dir", required=True)
+    p_product_agent_run.set_defaults(func=_cmd_product_agent_run)
 
     p_demo = sub.add_parser("demo", help="Run a sample objective end-to-end (offline).")
     p_demo.add_argument("--json", action="store_true", help="Emit JSON.")

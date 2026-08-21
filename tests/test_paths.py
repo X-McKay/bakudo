@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import re
 
-from bakudo.paths import agents_dir, schemas_dir, skills_dir, smoke_tasks_dir, smoke_workloads_dir
+from bakudo.paths import (
+    abox_templates_dir,
+    agents_dir,
+    schemas_dir,
+    skills_dir,
+    smoke_tasks_dir,
+    smoke_workloads_dir,
+)
 
 # The seed roles every install must be able to resolve by name.
 SEED_AGENTS = {
@@ -69,6 +76,12 @@ def test_agents_dir_resolves_and_contains_seed_specs():
 def test_schemas_and_skills_dirs_still_resolve():
     assert (schemas_dir() / "result.schema.json").is_file()
     assert skills_dir().is_dir()
+
+
+def test_product_agent_abox_compatibility_templates_resolve():
+    directory = abox_templates_dir()
+    assert (directory / "project.toml").is_file()
+    assert (directory / "prepare.sh").is_file()
 
 
 def test_smoke_tasks_dir_resolves_and_contains_exemplars():

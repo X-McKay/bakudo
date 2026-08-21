@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bakudo.ai/schemas/product-agent-v1.schema.json",
+  "title": "BakudoProductAgentResultV1",
+  "description": "No-eval process result emitted by `bakudo product-agent run --protocol v1`.",
+  "type": "object",
+  "required": ["schema", "run_id", "status", "reason_code", "patch", "usage", "runtime"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "bakudo.product-agent/v1" },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "status": {
+      "enum": ["completed", "blocked", "failed", "timed_out", "cancelled"]
+    },
+    "reason_code": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "agent_blocked",
+        "agent_failed",
+        "sandbox_failed",
+        "sandbox_unavailable",
+        "sandbox_timeout",
+        "cancelled",
+        "output_policy_violation"
+      ]
+    },
+    "patch": {
+      "type": "object",
+      "required": ["path", "format", "digest", "size_bytes", "changed_files"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "const": "candidate.patch" },
+        "format": { "const": "git-diff-binary-v1" },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "changed_files": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\u0000-\\u001F\\u007F]+$"
+          }
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "required": [
+        "wall_time_ms",
+        "tokens",
+        "model_calls",
+        "tool_calls",
+        "denied_commands"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "wall_time_ms": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": "integer", "minimum": 0 },
+        "model_calls": { "type": "integer", "minimum": 0 },
+        "tool_calls": { "type": "integer", "minimum": 0 },
+        "denied_commands": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Runner-observed diagnostics only; never an independent attestation.",
+      "required": [
+        "bakudo_version",
+        "agent_ref",
+        "agent_spec_digest",
+        "skills_digest",
+        "abox_version",
+        "attested"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "bakudo_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "agent_ref": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "agent_spec_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "skills_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "abox_version": { "const": "0.7.2" },
+        "attested": { "const": false }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "completed" } } },
+      "then": { "properties": { "reason_code": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "blocked" } } },
+      "then": { "properties": { "reason_code": { "const": "agent_blocked" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "failed" } } },
+      "then": {
+        "properties": {
+          "reason_code": {
+            "enum": [
+              "agent_failed",
+              "sandbox_failed",
+              "sandbox_unavailable",
+              "output_policy_violation"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "timed_out" } } },
+      "then": { "properties": { "reason_code": { "const": "sandbox_timeout" } } }
+    },
+    {
+      "if": { "properties": { "status": { "const": "cancelled" } } },
+      "then": { "properties": { "reason_code": { "const": "cancelled" } } }
+    }
+  ]
+}

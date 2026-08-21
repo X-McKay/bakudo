@@ -88,9 +88,16 @@ def load_loaded_task(tmp_path, name="sample-bug"):
 def test_provision_bytes_identical(tmp_path):
     task = load_loaded_task(tmp_path)
     ws1 = provision(task, tmp_path / "a", seed=7)
+
+    cache = task.path / "fixture" / "__pycache__"
+    cache.mkdir()
+    (cache / "app.cpython-312.pyc").write_bytes(b"derived bytecode")
+    (task.path / "fixture" / "legacy.pyo").write_bytes(b"optimized bytecode")
     ws2 = provision(task, tmp_path / "b", seed=7)
     assert isinstance(ws1, ProvisionedWorkspace)
     assert ws1.base_ref == ws2.base_ref  # identical commit sha = identical bytes+metadata
+    assert not (ws2.repo_path / "__pycache__").exists()
+    assert not (ws2.repo_path / "legacy.pyo").exists()
 
 
 def test_verifier_and_reference_not_in_workspace(tmp_path):

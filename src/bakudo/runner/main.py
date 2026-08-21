@@ -139,12 +139,18 @@ def run(args: argparse.Namespace) -> int:
     # Backfill observed changes and denied-command safety signal.
     if not result.changed_files:
         result.changed_files = workspace.changed_files()
+    # ``denied:`` is a runner-owned safety namespace. The model may describe a
+    # denial in prose, but it cannot forge the host-visible denial count.
+    result.blocked_reasons = [
+        reason for reason in result.blocked_reasons if not reason.startswith("denied:")
+    ]
     if ctx.denied_commands:
         result.blocked_reasons.extend(f"denied:{d['reason']}" for d in ctx.denied_commands)
 
     # Self-report observability so the host/evals never grade empty signals
     # (ABOX-10). result.schema.json only allows numeric metrics, so the
-    # counters land there; the agent's own metrics keep precedence.
+    # counters land there. These names are runner-owned: model-authored values
+    # must never override product-evaluation usage.
     observability = ctx.observability()
     for key in (
         "tool_calls",
@@ -152,10 +158,10 @@ def run(args: argparse.Namespace) -> int:
         "tokens_used",
         "memories_retrieved",
     ):
-        result.metrics.setdefault(key, float(observability[key]))
-    result.metrics.setdefault("denied_commands", float(len(ctx.denied_commands)))
-    result.metrics.setdefault("skills_loaded", float(len(ctx.skills_loaded)))
-    result.metrics.setdefault("runtime_seconds", round(runtime_seconds, 3))
+        result.metrics[key] = float(observability[key])
+    result.metrics["denied_commands"] = float(len(ctx.denied_commands))
+    result.metrics["skills_loaded"] = float(len(ctx.skills_loaded))
+    result.metrics["runtime_seconds"] = round(runtime_seconds, 3)
 
     result_path = Path(args.result)
     result_path.parent.mkdir(parents=True, exist_ok=True)

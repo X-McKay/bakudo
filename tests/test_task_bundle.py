@@ -66,6 +66,10 @@ constraints:
 def test_published_bundle_is_deterministic_and_loadable(tmp_path: Path) -> None:
     task = _task_source(tmp_path / "corpus").get("unit-task")
     first = publish_bundle(task, tmp_path / "first")
+
+    cache = task.path / "fixture" / "__pycache__"
+    cache.mkdir()
+    (cache / "app.cpython-312.pyc").write_bytes(b"derived bytecode")
     second = publish_bundle(task, tmp_path / "second")
 
     assert first.name == second.name
@@ -79,6 +83,7 @@ def test_published_bundle_is_deterministic_and_loadable(tmp_path: Path) -> None:
     gc.collect()
     assert loaded.path.is_dir()
     assert (loaded.path / "task.yaml").is_file()
+    assert not (loaded.path / "fixture" / "__pycache__").exists()
 
 
 def test_bundle_loader_rejects_content_tampering(tmp_path: Path) -> None:

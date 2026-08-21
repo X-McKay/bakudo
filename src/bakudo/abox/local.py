@@ -128,13 +128,15 @@ def local_sandbox(
     if ctx.denied_commands:
         result.blocked_reasons.extend(f"denied:{d['reason']}" for d in ctx.denied_commands)
 
+    diff = workspace.git_diff()
     return AboxOutcome(
         run_id=bundle.run_id,
         abox_task_id=bundle.run_id,
         exit_code=0 if result.status.value != "failed" else 1,
         git_branch=ids.git_branch_for(bundle.run_id),
         result=result.to_dict(),
-        diff=workspace.git_diff(),
+        diff=diff,
+        patch_bytes=diff.encode("utf-8"),
         changed_files=result.changed_files,
         denied_commands=list(ctx.denied_commands),
         runtime_seconds=runtime_seconds,

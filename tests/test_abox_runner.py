@@ -18,6 +18,7 @@ Verified against ``abox 0.7.2`` (`abox run --help`, MicroSandbox runtime):
 """
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from bakudo.abox.runner import (
+    AboxError,
     AboxNotFoundError,
     AboxRunner,
     ExecResult,
@@ -341,7 +343,7 @@ def test_run_stages_bundle_and_collects_result_from_worktree(tmp_path, monkeypat
     # Result came from <worktree>/.agent/result.json via `abox path`.
     assert outcome.succeeded
     assert outcome.result["status"] == "success"
-    assert outcome.changed_files == ["notes.md"]
+    assert outcome.changed_files == []
     assert outcome.git_branch == "agent/run_TEST01"
     assert fake.subcommands() == ["run", "path", "stop"]
 
@@ -404,6 +406,19 @@ def test_timeout_exit_124_is_a_distinguishable_outcome(tmp_path, monkeypatch):
     assert outcome.exit_code == 124
 
 
+def test_cancelled_exit_skips_result_and_diff_collection_but_still_cleans(tmp_path, monkeypatch):
+    _clear_model_env(monkeypatch)
+    fake = FakeAbox(worktree=_make_worktree(tmp_path / "wt"), run_exit=130)
+
+    outcome = AboxRunner(executor=fake, repo_root=tmp_path).run(_bundle())
+
+    assert outcome.exit_code == 130
+    assert outcome.result is None
+    assert outcome.patch_bytes == b""
+    assert outcome.changed_files == []
+    assert fake.subcommands() == ["run", "stop"]
+
+
 def test_run_captures_stdout_stderr_tails(tmp_path, monkeypatch):
     _clear_model_env(monkeypatch)
     fake = FakeAbox(worktree=_make_worktree(tmp_path / "wt"), run_exit=2)
@@ -422,6 +437,27 @@ def test_schema_invalid_result_is_rejected(tmp_path, monkeypatch):
     assert outcome.result is None
     assert not outcome.succeeded
     assert "result.schema.json" in outcome.error
+
+
+def test_collect_result_rejects_symlink_and_non_finite_json(tmp_path):
+    wt = _make_worktree(tmp_path / "wt")
+    result_dir = wt / ".agent"
+    result_dir.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(VALID_RESULT))
+    result_path = result_dir / "result.json"
+    result_path.symlink_to(outside)
+    runner = AboxRunner(executor=lambda *_args, **_kwargs: ExecResult(0), repo_root=tmp_path)
+
+    document, error = runner._collect_result(wt)
+    assert document is None
+    assert "regular file" in error
+
+    result_path.unlink()
+    result_path.write_text('{"metric": NaN}')
+    document, error = runner._collect_result(wt)
+    assert document is None
+    assert "not valid JSON" in error
 
 
 def test_subprocess_executor_maps_timeout_to_exit_124():
@@ -446,6 +482,87 @@ def test_run_collects_diff_including_untracked_files(tmp_path, monkeypatch):
     assert "modified" in outcome.diff
     assert "brand_new.py" in outcome.diff
     assert outcome.runtime_seconds >= 0.0
+
+
+def test_collect_diff_exports_binary_patch_that_round_trips(tmp_path):
+    wt = _make_worktree(tmp_path / "wt")
+    tracked_content = b"\x00modified\xff\n"
+    untracked_content = b"\x00created\xfe\n"
+    (wt / "tracked.py").write_bytes(tracked_content)
+    (wt / "brand-new.bin").write_bytes(untracked_content)
+
+    patch, changed = AboxRunner._collect_diff(wt, "main")
+
+    assert changed == ["brand-new.bin", "tracked.py"]
+    assert b"GIT binary patch" in patch
+    target = tmp_path / "target"
+    subprocess.run(
+        ["git", "clone", "-q", "--branch", "main", str(wt), str(target)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "apply", "--binary", "-"],
+        cwd=target,
+        input=patch,
+        check=True,
+        capture_output=True,
+    )
+    assert (target / "tracked.py").read_bytes() == tracked_content
+    assert (target / "brand-new.bin").read_bytes() == untracked_content
+
+
+def test_collect_diff_enforces_patch_and_changed_file_limits(tmp_path):
+    wt = _make_worktree(tmp_path / "wt")
+    (wt / "tracked.py").write_text("a substantially larger replacement\n")
+    (wt / "one.py").write_text("one\n")
+
+    with pytest.raises(AboxError, match="maximum is 1"):
+        AboxRunner._collect_diff(wt, "main", max_changed_files=1)
+    with pytest.raises(AboxError, match="maximum is 8"):
+        AboxRunner._collect_diff(wt, "main", max_diff_bytes=8)
+
+
+def test_collect_diff_fails_closed_when_git_cannot_resolve_base(tmp_path):
+    wt = _make_worktree(tmp_path / "wt")
+
+    with pytest.raises(AboxError, match="git command failed"):
+        AboxRunner._collect_diff(wt, "missing-base")
+
+
+def test_collect_diff_rejects_untrusted_links(tmp_path):
+    wt = _make_worktree(tmp_path / "wt")
+    candidate = wt / "unsafe"
+    candidate.symlink_to("/etc/passwd")
+
+    with pytest.raises(AboxError, match="only regular files"):
+        AboxRunner._collect_diff(wt, "main")
+
+
+def test_collect_diff_does_not_read_untracked_fifo(tmp_path):
+    if not hasattr(os, "mkfifo"):  # pragma: no cover - Windows without mkfifo
+        pytest.skip("FIFO creation is unavailable")
+    wt = _make_worktree(tmp_path / "wt")
+    os.mkfifo(wt / "ignored-by-git")
+
+    patch, changed = AboxRunner._collect_diff(wt, "main")
+
+    assert patch == b""
+    assert changed == []
+
+
+def test_collect_diff_rejects_non_utf8_git_paths(tmp_path):
+    wt = _make_worktree(tmp_path / "wt")
+    raw_path = os.fsencode(wt) + b"/invalid-\xff"
+    try:
+        descriptor = os.open(raw_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    except (OSError, TypeError):  # pragma: no cover - filesystem dependent
+        pytest.skip("filesystem does not permit non-UTF-8 names")
+    else:
+        os.close(descriptor)
+
+    with pytest.raises(AboxError, match="valid UTF-8"):
+        AboxRunner._collect_diff(wt, "main")
 
 
 def test_run_passes_through_observability_metrics(tmp_path, monkeypatch):
@@ -493,6 +610,14 @@ def test_verify_binary_accepts_real_abox_version(tmp_path):
 
     version = AboxRunner(executor=fake, repo_root=tmp_path).verify_binary()
     assert version == "0.7.2"
+
+
+def test_verify_binary_preserves_prerelease_suffix(tmp_path):
+    def fake(argv, timeout=None):
+        return ExecResult(0, "abox 0.7.2-rc1\n", "")
+
+    version = AboxRunner(executor=fake, repo_root=tmp_path).verify_binary()
+    assert version == "0.7.2-rc1"
 
 
 def test_verify_binary_rejects_a_wrong_binary(tmp_path):
@@ -566,3 +691,19 @@ def test_subprocess_executor_kills_process_when_cancel_event_set():
     assert result.exit_code == _CANCELLED_EXIT_CODE
     assert result.timed_out is False
     assert elapsed < 10, "the process must be killed on cancel, not run to timeout"
+
+
+def test_subprocess_executor_does_not_start_process_when_already_cancelled():
+    import threading
+
+    cancel = threading.Event()
+    cancel.set()
+
+    result = _subprocess_executor(
+        ["this-binary-must-not-be-started"],
+        timeout=30,
+        cancel_event=cancel,
+    )
+
+    assert result.exit_code == 130
+    assert result.timed_out is False

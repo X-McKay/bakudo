@@ -76,6 +76,7 @@ packages = ["src/bakudo"]
 "schemas" = "bakudo/_data/schemas"
 "skills" = "bakudo/_data/skills"
 "agents" = "bakudo/_data/agents"
+".abox" = "bakudo/_data/abox"
 "smoke/tasks" = "bakudo/_data/smoke-tasks"
 "smoke/workloads" = "bakudo/_data/smoke-workloads"
 
