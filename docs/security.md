@@ -55,6 +55,47 @@ mis-pathed or wrong binary from a silent host-subprocess downgrade into a loud
 boot-time error. Set `BAKUDO_ABOX_SKIP_VERSION_CHECK=1` only if a specific abox
 build's `--version` output is unrecognised.
 
+The black-box `product-agent` protocol is stricter: v1 resolves the executable
+to an absolute path, rejects all `ABOX_*` ambient variables and Bakudo sandbox
+override variables, and requires the reported release to be exactly `0.7.2`.
+Its runtime metadata still sets `attested: false`: a version string is an
+identity diagnostic, not a signature or measurement of the executable.
+
+## Product-agent trust boundary
+
+`bakudo product-agent run --protocol v1` performs candidate generation only.
+It does not import or invoke Bakudo evaluation, experiment, comparison,
+promotion, Temporal orchestration, or the host-executing local sandbox. An
+external benchmark owns hidden inputs, patch application, functional checks,
+resource measurement, scoring, and acceptance.
+
+V1 is intentionally self-host-only. The staged checkout must be clean, consist
+of bounded regular tracked files with safe UTF-8 paths, identify itself as
+Bakudo, and carry only the two expected `.abox` files. Those files are compared
+with templates packaged by the same candidate. That proves compatibility only:
+it is not an independent policy pin, and a malicious candidate could modify
+both copies. The result's AgentSpec/skills digests and usage counters are also
+candidate-observed, never release evidence. A trusted CI evaluator must pin the
+candidate externally, independently observe resources, validate the artifact
+schema and digest, and grade the patch in a fresh harness-owned checkout.
+
+Critically, abox contains only the inner implementation agent. The outer
+`bakudo product-agent` interpreter is also candidate code and must itself run
+inside an evaluator-owned sandbox with no hidden corpus, evaluator secrets,
+control sockets, host filesystem, or unrestricted network. No value emitted by
+that same candidate can attest to its containment. The exported patch is
+untrusted: apply it only in a disposable task checkout, inject hidden tests
+afterward, and use a fixed secret-free evaluator command rather than
+candidate-owned CI workflows.
+
+Inputs, outputs, and instruction paths must be absolute, disjoint, and free of
+symlink/special-file ambiguity. Git inspection runs without ambient Git routing
+or executable fsmonitor/external-diff controls. Patch collection uses checked
+`--binary --full-index` commands, strict path/file-count/byte bounds, and
+exports only regular-file changes and deletions. Failed, blocked, timed-out, or
+cancelled runs publish an empty patch. See
+[the v1 protocol](product-agent-protocol.md) for the complete contract.
+
 ## Sandbox policy sources
 
 The AgentSpec's `sandbox.profile` is an opaque configuration and provenance

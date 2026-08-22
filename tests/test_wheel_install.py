@@ -101,6 +101,27 @@ def test_wheel_packages_the_smoke_workload(wheel_venv: Path, clean_cwd: Path):
     assert listed.stdout.strip() == "smoke-python-loop@1.0.1"
 
 
+def test_wheel_smoke_task_digests_match_the_source_checkout(wheel_venv: Path, clean_cwd: Path):
+    inspected = _run(
+        [
+            str(wheel_venv / "bin" / "python"),
+            "-c",
+            "import json; "
+            "from bakudo.paths import smoke_tasks_dir; "
+            "from bakudo.tasks.source import DirectoryTaskSource, check_immutability; "
+            "root = smoke_tasks_dir(); source = DirectoryTaskSource(root); "
+            "print(json.dumps({'digests': {task.ref: task.pin.bundle_digest "
+            "for task in source.list()}, 'violations': check_immutability(source, "
+            "root / 'digests.lock')}, sort_keys=True))",
+        ],
+        cwd=clean_cwd,
+    )
+    assert inspected.returncode == 0, inspected.stderr
+    document = json.loads(inspected.stdout)
+    expected = json.loads((REPO_ROOT / "smoke" / "tasks" / "digests.lock").read_text())
+    assert document == {"digests": expected, "violations": []}
+
+
 def test_wheel_workload_cli_uses_the_packaged_corpus(wheel_venv: Path, clean_cwd: Path):
     bakudo = str(wheel_venv / "bin" / "bakudo")
     listed = _run([bakudo, "workload", "list", "--json"], cwd=clean_cwd)

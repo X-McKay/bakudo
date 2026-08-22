@@ -60,6 +60,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -95,6 +96,12 @@ _HOUSEKEEPING_TIMEOUT_SECONDS = 120
 
 # How many characters of console output to keep for diagnostics (ABOX-11).
 _TAIL_CHARS = 20_000
+
+# Collection is a host-side trust boundary.  Even when an AgentSpec omits its
+# optional limits, never buffer or export an unbounded candidate patch.
+MAX_COLLECTED_DIFF_BYTES = 16 * 1024 * 1024
+MAX_COLLECTED_CHANGED_FILES = 10_000
+MAX_COLLECTED_RESULT_BYTES = 2 * 1024 * 1024
 
 # Spec networkMode -> abox 0.7.2 --network value (ABOX-6).
 NETWORK_MODE_MAP = {"none": "safe", "scoped": "scoped", "open": "open"}
@@ -166,6 +173,9 @@ class AboxOutcome:
     git_branch: str
     result: dict | None = None
     diff: str = ""
+    # Exact patch bytes. ``diff`` remains for existing JSON/Temporal callers;
+    # the product-agent file protocol uses this binary-safe representation.
+    patch_bytes: bytes = b""
     changed_files: list[str] = field(default_factory=list)
     denied_commands: list[dict[str, str]] = field(default_factory=list)
     runtime_seconds: float = 0.0
@@ -178,7 +188,12 @@ class AboxOutcome:
 
     @property
     def succeeded(self) -> bool:
-        return self.exit_code == 0 and self.result is not None and not self.timed_out
+        return (
+            self.exit_code == 0
+            and self.result is not None
+            and not self.timed_out
+            and not self.error
+        )
 
 
 def _tail(text: str) -> str:
@@ -220,6 +235,12 @@ def _subprocess_executor(
                 timed_out=True,
             )
         return ExecResult(proc.returncode, proc.stdout, proc.stderr)
+
+    if cancel_event.is_set():  # type: ignore[attr-defined]
+        # A deadline may fire during product-agent input/version preflight.
+        # Do not briefly start a new VM only to notice the cancellation on the
+        # first polling interval.
+        return ExecResult(_CANCELLED_EXIT_CODE)
 
     popen: subprocess.Popen[str] = subprocess.Popen(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
@@ -309,7 +330,10 @@ class AboxRunner:
                 "abox; refusing to run an unverified binary as the sandbox "
                 "boundary (set BAKUDO_ABOX_SKIP_VERSION_CHECK=1 to override)."
             )
-        match = re.search(r"\d+\.\d+(?:\.\d+)?", out)
+        # Preserve prerelease/build suffixes so a caller requiring an exact
+        # supported release cannot accidentally accept ``0.7.2-rc1`` as
+        # ``0.7.2``.
+        match = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?", out)
         return match.group(0) if match else out
 
     def _ensure_binary_verified(self) -> None:
@@ -483,15 +507,38 @@ class AboxRunner:
 
             result: dict | None = None
             diff = ""
+            patch_bytes = b""
             changed_files: list[str] = []
-            worktree = self._resolve_worktree(bundle.run_id, repo)
-            if worktree is None:
-                errors.append("abox path did not resolve a worktree for this task")
-            else:
-                result, collect_error = self._collect_result(worktree)
-                if collect_error:
-                    errors.append(collect_error)
-                diff, changed_files = self._collect_diff(worktree, self._base_ref(spec))
+            worktree: Path | None = None
+            if exec_result.exit_code != _CANCELLED_EXIT_CODE:
+                worktree = self._resolve_worktree(bundle.run_id, repo)
+                if worktree is None:
+                    errors.append("abox path did not resolve a worktree for this task")
+                else:
+                    result, collect_error = self._collect_result(worktree)
+                    if collect_error:
+                        errors.append(collect_error)
+                    try:
+                        patch_bytes, changed_files = self._collect_diff(
+                            worktree,
+                            self._base_ref(spec),
+                            max_diff_bytes=min(
+                                spec.sandbox.max_diff_bytes
+                                if spec.sandbox.max_diff_bytes is not None
+                                else MAX_COLLECTED_DIFF_BYTES,
+                                MAX_COLLECTED_DIFF_BYTES,
+                            ),
+                            max_changed_files=min(
+                                spec.sandbox.max_changed_files
+                                if spec.sandbox.max_changed_files is not None
+                                else MAX_COLLECTED_CHANGED_FILES,
+                                MAX_COLLECTED_CHANGED_FILES,
+                            ),
+                        )
+                        diff = patch_bytes.decode("utf-8", errors="replace")
+                    except AboxError as exc:
+                        patch_bytes = b""
+                        errors.append(str(exc))
 
             outcome = AboxOutcome(
                 run_id=bundle.run_id,
@@ -500,7 +547,11 @@ class AboxRunner:
                 git_branch=ids.git_branch_for(bundle.run_id),
                 result=result,
                 diff=diff,
-                changed_files=changed_files or (result or {}).get("changed_files", []),
+                patch_bytes=patch_bytes,
+                # Host-observed git state owns this field. A model-authored
+                # result.json must not be able to claim files absent from the
+                # exported patch (or hide a clean run behind invented paths).
+                changed_files=changed_files,
                 runtime_seconds=time.monotonic() - started,
                 stdout=_tail(exec_result.stdout),
                 stderr=_tail(exec_result.stderr),
@@ -545,11 +596,27 @@ class AboxRunner:
     def _collect_result(self, worktree: Path) -> tuple[dict | None, str]:
         """Read and schema-validate ``<worktree>/.agent/result.json``."""
         candidate = worktree / self._result_relpath
-        if not candidate.is_file():
-            return None, f"no result.json at {candidate}"
         try:
-            document = json.loads(candidate.read_text())
-        except json.JSONDecodeError as exc:
+            parent_metadata = candidate.parent.lstat()
+            candidate_metadata = candidate.lstat()
+        except FileNotFoundError:
+            return None, f"no result.json at {candidate}"
+        except OSError as exc:
+            return None, f"could not inspect result.json: {exc}"
+        if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(parent_metadata.st_mode):
+            return None, "result.json parent must be a real directory"
+        if not stat.S_ISREG(candidate_metadata.st_mode) or stat.S_ISLNK(candidate_metadata.st_mode):
+            return None, "result.json must be a regular file, not a link or special file"
+        if candidate_metadata.st_size > MAX_COLLECTED_RESULT_BYTES:
+            return None, "result.json exceeds the 2 MiB collection limit"
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"non-finite JSON number {value}")
+
+        try:
+            content = candidate.read_text(encoding="utf-8", errors="strict")
+            document = json.loads(content, parse_constant=reject_constant)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             return None, f"result.json is not valid JSON: {exc}"
         try:
             validate_result(document)
@@ -558,8 +625,14 @@ class AboxRunner:
         return document, ""
 
     @staticmethod
-    def _collect_diff(worktree: Path, base_ref: str) -> tuple[str, list[str]]:
-        """Diff the worktree against base, untracked files included (ABOX-9/10).
+    def _collect_diff(
+        worktree: Path,
+        base_ref: str,
+        *,
+        max_diff_bytes: int = MAX_COLLECTED_DIFF_BYTES,
+        max_changed_files: int = MAX_COLLECTED_CHANGED_FILES,
+    ) -> tuple[bytes, list[str]]:
+        """Collect an applyable binary git patch with strict host-side bounds.
 
         ``git diff <base>`` covers committed *and* uncommitted tracked changes
         (the guest agent does not necessarily commit); untracked files are
@@ -567,34 +640,191 @@ class AboxRunner:
         ``maxChangedFiles`` gates and diff-based evals.
         """
 
-        def git(*args: str) -> subprocess.CompletedProcess:
-            return subprocess.run(
-                ["git", "-C", str(worktree), *args],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+        if max_diff_bytes < 0 or max_changed_files < 0:
+            raise AboxError("patch collection limits must not be negative")
 
-        try:
-            parts = [git("diff", "--no-color", base_ref).stdout]
-            changed = [
-                line
-                for line in git("diff", "--name-only", base_ref).stdout.splitlines()
-                if line.strip()
-            ]
-            untracked_proc = git("ls-files", "--others", "--exclude-standard")
-            for name in untracked_proc.stdout.splitlines():
-                name = name.strip()
-                # The runner's own metadata (result.json et al.) is not a change.
-                if not name or name.startswith(".agent/"):
+        # Do not inherit GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_COUNT,
+        # GIT_EXTERNAL_DIFF, or similar host controls. They could redirect
+        # collection or execute an external helper. Repository-local config
+        # is still read, but every command below disables the executable
+        # fsmonitor/external-diff surfaces explicitly.
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "LC_ALL": "C",
+        }
+
+        def git(
+            *args: str,
+            allowed: tuple[int, ...] = (0,),
+            max_output_bytes: int,
+        ) -> bytes:
+            # File-backed capture prevents an oversized candidate from being
+            # buffered in the trusted host process before its gate is checked.
+            with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                try:
+                    process = subprocess.run(
+                        [
+                            "git",
+                            "-c",
+                            "diff.external=",
+                            "-c",
+                            "core.fsmonitor=false",
+                            "-c",
+                            f"core.hooksPath={os.devnull}",
+                            "-C",
+                            str(worktree),
+                            *args,
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                        timeout=120,
+                        env=environment,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise AboxError(f"could not collect candidate patch: {exc}") from exc
+                if process.returncode not in allowed:
+                    stderr.seek(max(0, stderr.tell() - 512))
+                    detail = stderr.read().decode("utf-8", errors="replace").strip()
+                    raise AboxError(
+                        "candidate patch git command failed "
+                        f"({detail or f'exit {process.returncode}'})"
+                    )
+                size = stdout.tell()
+                if size > max_output_bytes:
+                    raise AboxError(
+                        f"candidate patch output is {size} bytes; maximum is {max_output_bytes}"
+                    )
+                stdout.seek(0)
+                return stdout.read()
+
+        def names(output: bytes) -> list[str]:
+            resolved: list[str] = []
+            for raw in output.split(b"\0"):
+                if not raw:
                     continue
-                changed.append(name)
-                parts.append(
-                    git("diff", "--no-color", "--no-index", "--", "/dev/null", name).stdout
+                if len(raw) > 4096:
+                    raise AboxError("candidate patch paths must not exceed 4096 UTF-8 bytes")
+                name = os.fsdecode(raw)
+                try:
+                    name.encode("utf-8", errors="strict")
+                except UnicodeEncodeError as exc:
+                    raise AboxError("candidate patch paths must be valid UTF-8") from exc
+                if (
+                    name.startswith("/")
+                    or any(part in {"", ".", ".."} for part in Path(name).parts)
+                    or any(ord(character) < 32 or ord(character) == 127 for character in name)
+                ):
+                    raise AboxError("candidate patch contains an unsafe changed path")
+                resolved.append(name)
+            return resolved
+
+        def reject_special_files(paths: list[str]) -> None:
+            """Keep host-side diff collection away from links/devices/FIFOs.
+
+            Product-agent v1 stages only regular tracked files, so a link or
+            special file here was introduced by untrusted sandbox work. Git
+            may follow or block on those objects while producing a no-index
+            patch. Deleted regular files are intentionally allowed.
+            """
+
+            for name in paths:
+                cursor = worktree
+                parts = Path(name).parts
+                for index, part in enumerate(parts):
+                    cursor /= part
+                    try:
+                        metadata = cursor.lstat()
+                    except FileNotFoundError:
+                        # A deleted tracked file (or deleted parent) has no
+                        # worktree object to inspect; git reads it from the
+                        # already-pinned base object instead.
+                        break
+                    except OSError as exc:
+                        raise AboxError(
+                            f"could not inspect candidate patch path {name!r}: {exc}"
+                        ) from exc
+                    final = index == len(parts) - 1
+                    if not final and not stat.S_ISDIR(metadata.st_mode):
+                        raise AboxError(
+                            "candidate patch paths must not traverse links or special files"
+                        )
+                    if final and not stat.S_ISREG(metadata.st_mode):
+                        raise AboxError(
+                            "candidate patch may contain only regular files and deletions"
+                        )
+
+        name_output_limit = (max_changed_files + 1) * (4096 + 1)
+        tracked = names(
+            git(
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-z",
+                base_ref,
+                "--",
+                max_output_bytes=name_output_limit,
+            )
+        )
+        untracked = [
+            name
+            for name in names(
+                git(
+                    "ls-files",
+                    "-z",
+                    "--others",
+                    "--exclude-standard",
+                    max_output_bytes=name_output_limit,
                 )
-            return "".join(parts), sorted(set(changed))
-        except (OSError, subprocess.SubprocessError):
-            return "", []
+            )
+            if name != ".agent" and not name.startswith(".agent/")
+        ]
+        changed = sorted(set(tracked) | set(untracked))
+        if len(changed) > max_changed_files:
+            raise AboxError(
+                f"candidate patch changed {len(changed)} files; maximum is {max_changed_files}"
+            )
+        reject_special_files(changed)
+
+        parts = [
+            git(
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                base_ref,
+                "--",
+                max_output_bytes=max_diff_bytes,
+            )
+        ]
+        total = len(parts[0])
+        if total > max_diff_bytes:
+            raise AboxError(f"candidate patch is {total} bytes; maximum is {max_diff_bytes}")
+        for name in untracked:
+            part = git(
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                name,
+                allowed=(0, 1),
+                max_output_bytes=max_diff_bytes - total,
+            )
+            total += len(part)
+            if total > max_diff_bytes:
+                raise AboxError(f"candidate patch is {total} bytes; maximum is {max_diff_bytes}")
+            parts.append(part)
+        return b"".join(parts), changed
 
     @staticmethod
     def _apply_result_signals(outcome: AboxOutcome) -> None:

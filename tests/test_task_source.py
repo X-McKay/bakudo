@@ -92,6 +92,19 @@ def test_digest_stable_and_content_sensitive(tmp_path):
     assert a != task_bundle_digest(d)
 
 
+def test_digest_ignores_python_bytecode_caches(tmp_path):
+    d = make_task_dir(tmp_path)
+    expected = task_bundle_digest(d)
+
+    cache = d / "fixture" / "__pycache__"
+    cache.mkdir()
+    (cache / "app.cpython-312.pyc").write_bytes(b"derived bytecode")
+    (d / "verifier" / "test_bug.pyc").write_bytes(b"legacy bytecode")
+    (d / "verifier" / "test_bug.pyo").write_bytes(b"optimized bytecode")
+
+    assert task_bundle_digest(d) == expected
+
+
 def test_load_task_parses(tmp_path):
     d = make_task_dir(tmp_path)
     loaded = load_task(d)

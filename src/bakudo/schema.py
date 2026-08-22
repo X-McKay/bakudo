@@ -63,6 +63,12 @@ def validate_result(document: Any) -> None:
     validate(document, "result.schema.json")
 
 
+def validate_product_agent_result(document: Any) -> None:
+    """Validate the public no-eval product-agent process result."""
+
+    validate(document, "product-agent-v1.schema.json")
+
+
 def validate_eval_result(document: Any) -> None:
     validate(document, "eval-result.schema.json")
 

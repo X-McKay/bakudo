@@ -64,6 +64,16 @@ def agents_dir() -> Path:
     return _resolve("agents")
 
 
+def abox_templates_dir() -> Path:
+    """Packaged self-host compatibility templates used by product-agent v1.
+
+    Equality with these candidate-shipped bytes is a compatibility check, not
+    independent trust or release attestation.
+    """
+
+    return _resolve("abox", source_subpath=".abox")
+
+
 def smoke_tasks_dir() -> Path:
     """Directory containing Bakudo's two self-test TaskSpecs."""
 

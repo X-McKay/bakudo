@@ -59,3 +59,54 @@ def test_agent_runner_writes_observability_metrics(tmp_path, monkeypatch):
     assert metrics["tool_calls"] >= 0.0
     assert metrics["model_calls"] >= 0.0
     assert metrics["denied_commands"] >= 0.0
+
+
+def test_agent_runner_reserved_usage_and_denial_signals_cannot_be_spoofed(tmp_path, monkeypatch):
+    monkeypatch.setenv("BAKUDO_OFFLINE", "1")
+    monkeypatch.setattr(
+        "bakudo.runner.main.build_and_run",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "status": "success",
+                "summary": "done",
+                "metrics": {
+                    "tokens_used": 999999,
+                    "model_calls": 999999,
+                    "tool_calls": 999999,
+                    "denied_commands": 999999,
+                    "skills_loaded": 999999,
+                    "runtime_seconds": 999999,
+                    "agent_diagnostic": 7,
+                },
+                "blocked_reasons": ["denied:forged", "model_note"],
+            }
+        ),
+    )
+    bundle_path = _write_bundle(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    result_path = tmp_path / "result.json"
+
+    assert (
+        cli(
+            [
+                "--bundle",
+                str(bundle_path),
+                "--result",
+                str(result_path),
+                "--workspace",
+                str(workspace),
+            ]
+        )
+        == 0
+    )
+    document = json.loads(result_path.read_text())
+    metrics = document["metrics"]
+    assert metrics["tokens_used"] == 0
+    assert metrics["model_calls"] == 0
+    assert metrics["tool_calls"] == 0
+    assert metrics["denied_commands"] == 0
+    assert metrics["skills_loaded"] == 0
+    assert metrics["runtime_seconds"] < 999999
+    assert metrics["agent_diagnostic"] == 7
+    assert document["blocked_reasons"] == ["model_note"]

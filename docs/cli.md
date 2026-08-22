@@ -38,6 +38,7 @@ a model endpoint, or abox.
 | `bakudo agent list` | List packaged AgentSpecs | `--json` |
 | `bakudo agent validate PATH` | Validate one AgentSpec | `--json` |
 | `bakudo skill list` | List progressive-disclosure skill metadata | `--json` |
+| `bakudo product-agent run` | Run the versioned no-eval self-host product boundary | artifact directory |
 | `bakudo workload list` | List workloads from `BAKUDO_WORKLOAD_SOURCE` or packaged smoke fallback | `--json` |
 | `bakudo workload validate PATH` | Validate and pin one workload directory | `--json` |
 | `bakudo workload inspect REF` | Show a manifest, immutable pin, and provenance | `--json` |
@@ -62,6 +63,23 @@ a model endpoint, or abox.
 
 There are intentionally no compatibility aliases for retired command names;
 this active-development codebase favors one predictable spelling per action.
+
+## Black-box product-agent command
+
+`bakudo product-agent run --protocol v1` is the candidate-generation side of
+Bakudo's external evaluation boundary. It accepts an absolute staged Bakudo
+workspace, an absolute UTF-8 instruction file, and a new absolute output
+directory. It runs the packaged implementation agent directly through
+`AboxRunner`; it never enters the objective pipeline, Temporal workflow,
+evaluation, experiment, comparison, or promotion code.
+
+The output directory is published atomically and contains only
+`candidate.patch` plus the strict `result.json` status/patch/usage/runtime
+envelope. It never contains a score, verdict, pass flag, or agent summary.
+Version 1 deliberately rejects generic repositories and task-owned abox
+configuration. See [Product-agent process protocol v1](product-agent-protocol.md)
+for staging limits, status semantics, exact abox compatibility, cancellation,
+and the non-attestation boundary.
 
 ## Task and experiment workflow
 

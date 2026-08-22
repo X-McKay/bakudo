@@ -22,7 +22,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .source import LoadedTask
+from .source import LoadedTask, iter_task_files
 
 # Fixed identity + timestamp for every provisioned commit. Using constants
 # instead of "now"/the host user is what makes `base_ref` reproducible
@@ -57,14 +57,11 @@ def _copy_fixture(fixture_dir: Path, repo_path: Path) -> None:
     executed or imported.
     """
     repo_path.mkdir(parents=True, exist_ok=True)
-    for src in sorted(fixture_dir.rglob("*")):
+    for src in iter_task_files(fixture_dir):
         rel = src.relative_to(fixture_dir)
         dest = repo_path / rel
-        if src.is_dir():
-            dest.mkdir(parents=True, exist_ok=True)
-        else:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
 
 
 def _run_git(args: list[str], cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:

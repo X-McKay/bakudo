@@ -61,9 +61,11 @@ def test_smoke_tasks_are_force_included_in_the_wheel() -> None:
     assert force_include.get("smoke/tasks") == "bakudo/_data/smoke-tasks"
     assert force_include.get("smoke/workloads") == "bakudo/_data/smoke-workloads"
     assert set(force_include) == {
+        ".abox",
         "agents",
         "schemas",
         "skills",
         "smoke/tasks",
         "smoke/workloads",
     }
+    assert force_include[".abox"] == "bakudo/_data/abox"
