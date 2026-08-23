@@ -389,6 +389,21 @@ class PerformanceMeasurementService:
             mismatches = _environment_mismatches(workload, environment)
             if mismatches:
                 raise PerformanceServiceError("; ".join(mismatches))
+        # A typo'd metric name must fail here, before the first guest boots,
+        # not after the full interleaved measurement has been paid for.
+        declared = {metric.name for metric in workload.spec.measurement.metrics}
+        unknown = sorted(
+            {
+                name
+                for name in (primary_metric, *protected_metrics)
+                if name is not None and name not in declared
+            }
+        )
+        if unknown:
+            raise PerformanceServiceError(
+                f"unknown metric(s) {', '.join(unknown)}; the workload "
+                f"declares metrics: {', '.join(sorted(declared))}"
+            )
 
         plan = workload.spec.measurement
         outcomes: dict[ComparisonSide, dict[InvocationPhase, list[InvocationOutcome]]] = {

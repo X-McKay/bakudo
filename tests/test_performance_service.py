@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from bakudo.observability import FakeSpanSink, SpanName
 from bakudo.performance.measurement import ComparisonSide, build_comparison_schedule
 from bakudo.performance.models import (
@@ -13,7 +15,7 @@ from bakudo.performance.models import (
     Verdict,
 )
 from bakudo.performance.pins import EnvironmentPin, RevisionPin
-from bakudo.performance.service import PerformanceMeasurementService
+from bakudo.performance.service import PerformanceMeasurementService, PerformanceServiceError
 from bakudo.performance.source import DirectoryWorkloadSource, LoadedWorkload
 from bakudo.registry.ledger import InMemoryLedger
 
@@ -85,6 +87,28 @@ class _Invoker:
             exit_code=0,
             metrics=(MetricValue(name=metric.name, unit=metric.unit, value=value),),
         )
+
+
+def test_compare_rejects_undeclared_metric_names_before_any_invocation() -> None:
+    loaded = _loaded()
+    invoker = _Invoker({"a": (10.0,) * 6, "b": (5.0,) * 6})
+    service = PerformanceMeasurementService(invoker, ledger=InMemoryLedger())
+
+    for kwargs in (
+        {"primary_metric": "latency_second"},
+        {"protected_metrics": ("peak_rss_byte",)},
+    ):
+        with pytest.raises(PerformanceServiceError, match="declares metrics"):
+            service.compare(
+                loaded,
+                _revision("a"),
+                _revision("b"),
+                _environment(),
+                _environment(),
+                seed=17,
+                **kwargs,
+            )
+    assert invoker.calls == []
 
 
 def test_compare_interleaves_sides_and_persists_independent_evidence() -> None:
